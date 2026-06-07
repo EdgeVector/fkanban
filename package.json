@@ -1,0 +1,24 @@
+{
+  "name": "fkanban",
+  "version": "0.1.0",
+  "description": "fkanban — a kanban board over fold_db. Cards move through columns; everything persists in folddb.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fkanban": "src/cli.ts",
+    "fkanban-mcp": "src/mcp/main.ts"
+  },
+  "scripts": {
+    "fkanban": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  }
+}

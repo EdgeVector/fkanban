@@ -1,0 +1,112 @@
+// Persistent CLI config — `~/.fkanban/config.json` by default, or the path
+// in $FKANBAN_CONFIG. Holds the canonical schema hashes (NOT the descriptive
+// names) plus the node + schema-service URLs and the node user hash.
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
+import type { RecordType } from "./schemas.ts";
+
+export const CONFIG_VERSION = 1;
+
+export type Config = {
+  configVersion: number;
+  nodeUrl: string;
+  schemaServiceUrl: string;
+  userHash: string;
+  // canonical schema hash per record type: { card, board }
+  schemaHashes: Record<string, string>;
+};
+
+export function defaultConfigPath(): string {
+  const override = process.env.FKANBAN_CONFIG;
+  if (override && override.length > 0) return override;
+  return join(homedir(), ".fkanban", "config.json");
+}
+
+export class ConfigMissingError extends Error {
+  constructor(path: string) {
+    super(`Config not found at ${path}. Run \`fkanban init\` first.`);
+    this.name = "ConfigMissingError";
+  }
+}
+
+export class ConfigInvalidError extends Error {
+  constructor(path: string, reason: string) {
+    super(`Config at ${path} is invalid: ${reason}. Re-run \`fkanban init\`.`);
+    this.name = "ConfigInvalidError";
+  }
+}
+
+export function readConfig(path: string = defaultConfigPath()): Config {
+  if (!existsSync(path)) throw new ConfigMissingError(path);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new ConfigInvalidError(path, `not valid JSON (${msg})`);
+  }
+  return assertConfigShape(path, parsed);
+}
+
+export function tryReadConfig(path: string = defaultConfigPath()): Config | null {
+  if (!existsSync(path)) return null;
+  return readConfig(path);
+}
+
+export function writeConfig(
+  config: Config,
+  path: string = defaultConfigPath(),
+): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+}
+
+export function schemaHashFor(
+  type: RecordType,
+  cfg: { schemaHashes: Record<string, string> },
+): string {
+  const hash = cfg.schemaHashes[type];
+  if (!hash || hash.length === 0) {
+    throw new ConfigInvalidError(
+      defaultConfigPath(),
+      `no canonical hash registered for type "${type}"`,
+    );
+  }
+  return hash;
+}
+
+function assertConfigShape(path: string, raw: unknown): Config {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ConfigInvalidError(path, "not an object");
+  }
+  const r = raw as Record<string, unknown>;
+
+  for (const key of ["nodeUrl", "schemaServiceUrl", "userHash"] as const) {
+    if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
+      throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
+    }
+  }
+
+  const rawHashes = r.schemaHashes;
+  if (typeof rawHashes !== "object" || rawHashes === null || Array.isArray(rawHashes)) {
+    throw new ConfigInvalidError(path, `field "schemaHashes" must be an object`);
+  }
+  const schemaHashes: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawHashes as Record<string, unknown>)) {
+    if (typeof v !== "string" || v.length === 0) {
+      throw new ConfigInvalidError(path, `schemaHashes["${k}"] is not a non-empty string`);
+    }
+    schemaHashes[k] = v;
+  }
+
+  return {
+    configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
+    nodeUrl: r.nodeUrl as string,
+    schemaServiceUrl: r.schemaServiceUrl as string,
+    userHash: r.userHash as string,
+    schemaHashes,
+  };
+}
