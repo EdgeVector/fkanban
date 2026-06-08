@@ -3,8 +3,8 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { findBoard, listCards, sortCards, type Card } from "../record.ts";
-import { renderBoard } from "../board.ts";
+import { blockedSlugSet, findBoard, listCards, sortCards, type Card } from "../record.ts";
+import { renderBoard, type RenderOptions } from "../board.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
 export type ListOptions = {
@@ -35,7 +35,10 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     created_at: "",
     updated_at: "",
   };
-  return renderBoard(resolvedBoard, cards, opts.column ? { column: opts.column } : {});
+  // Resolve blocked status against ALL live cards so cross-board deps count.
+  const renderOpts: RenderOptions = { blocked: blockedSlugSet(cards, allCards) };
+  if (opts.column) renderOpts.column = opts.column;
+  return renderBoard(resolvedBoard, cards, renderOpts);
 }
 
 export function summarize(cards: Card[]): Record<string, number> {

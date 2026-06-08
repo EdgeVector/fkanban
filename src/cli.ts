@@ -16,6 +16,7 @@ import { listCmd } from "./commands/list.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd } from "./commands/board.ts";
+import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { doctor } from "./commands/doctor.ts";
 
 export const TOP_HELP = `fkanban — a kanban board over fold_db
@@ -25,10 +26,12 @@ Usage:
 
 Commands:
   init                 bootstrap a node + register schemas + seed default board
-  add <slug>           create/update a card (--title --board --column --assignee --tags --body)
-  move <slug> <col>    move a card to a column (--position N)
+  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --body)
+  move <slug> <col>    move a card to a column (--position N, --force past a block)
+  dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
+  dep rm <slug> <dep>  remove a dependency edge
   list                 render a board as columns of cards (--board --column --json)
-  show <slug>          print one card in detail (--json)
+  show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
   board list           list boards (--json)
@@ -40,6 +43,9 @@ Global flags:
   --verbose            echo HTTP requests + responses
   --help, -h           print this help
   --version, -V        print the fkanban version and exit
+
+Dependencies: a card with deps is 🔒 blocked until each dep card reaches
+\`done\`. \`move\` into doing/review/done refuses a blocked card unless --force.
 
 Columns (default board): backlog → todo → doing → review → done`;
 
@@ -70,6 +76,8 @@ async function main(argv: string[]): Promise<number> {
       column: { type: "string" },
       assignee: { type: "string" },
       tags: { type: "string" },
+      deps: { type: "string" },
+      force: { type: "boolean" },
       body: { type: "string" },
       columns: { type: "string" },
       position: { type: "string" },
@@ -129,6 +137,7 @@ async function main(argv: string[]): Promise<number> {
         column: values.column as string | undefined,
         assignee: values.assignee as string | undefined,
         tags: parseTags(values.tags as string | undefined),
+        deps: parseTags(values.deps as string | undefined),
         body,
       });
       console.log(`${res.action} card ${res.slug} → ${res.board}/${res.column}`);
@@ -140,9 +149,35 @@ async function main(argv: string[]): Promise<number> {
       const column = requirePositional(positionals[2], "move <slug> <column>");
       const ctx = loadCtx({ verbose });
       const position = values.position !== undefined ? parseInt(values.position as string, 10) : undefined;
-      const res = await moveCmd({ cfg: ctx.cfg, node: ctx.node, slug, column, position });
+      const res = await moveCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        slug,
+        column,
+        position,
+        force: values.force as boolean | undefined,
+      });
       console.log(`moved ${res.slug}: ${res.from} → ${res.to}`);
       return 0;
+    }
+
+    case "dep": {
+      const sub = positionals[1];
+      const slug = requirePositional(positionals[2], "dep <add|rm> <slug> <dep>");
+      const dep = requirePositional(positionals[3], "dep <add|rm> <slug> <dep>");
+      const ctx = loadCtx({ verbose });
+      if (sub === "add") {
+        const res = await depAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
+        console.log(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
+        return 0;
+      }
+      if (sub === "rm" || sub === "remove") {
+        const res = await depRmCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
+        console.log(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
+        return 0;
+      }
+      console.error(`Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
+      return 2;
     }
 
     case "list": {

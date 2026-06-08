@@ -15,6 +15,7 @@ import { listCmd } from "../commands/list.ts";
 import { showCmd } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListCmd } from "../commands/board.ts";
+import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
@@ -77,6 +78,12 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         column: z.string().optional().describe("Column to place the card in."),
         assignee: z.string().optional().describe("Who owns the card."),
         tags: z.array(z.string()).optional().describe("Freeform labels."),
+        deps: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Slugs this card depends on (replaces the existing dep list). It is blocked until each reaches `done`.",
+          ),
       },
     },
     async (args) => {
@@ -88,6 +95,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         if (args.column !== undefined) o.column = args.column;
         if (args.assignee !== undefined) o.assignee = args.assignee;
         if (args.tags !== undefined) o.tags = args.tags;
+        if (args.deps !== undefined) o.deps = args.deps;
         const res = await addCmd(o);
         return textResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`);
       } catch (err) {
@@ -100,19 +108,63 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     "fkanban_move",
     {
       title: "Move a card",
-      description: "Move a card to a different column on its board.",
+      description:
+        "Move a card to a different column on its board. A card blocked by an unfinished dependency cannot move into doing/review/done unless `force` is set.",
       inputSchema: {
         slug: z.string().min(1).describe("Card slug."),
         column: z.string().min(1).describe("Target column."),
         position: z.number().int().optional().describe("Explicit ordering within the column."),
+        force: z.boolean().optional().describe("Move even if the card is blocked by an unfinished dependency."),
       },
     },
     async (args) => {
       try {
         const o: Parameters<typeof moveCmd>[0] = { cfg, node, slug: args.slug, column: args.column };
         if (args.position !== undefined) o.position = args.position;
+        if (args.force !== undefined) o.force = args.force;
         const res = await moveCmd(o);
         return textResult(`moved ${res.slug}: ${res.from} → ${res.to}`);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_dep_add",
+    {
+      title: "Add a dependency",
+      description:
+        "Make `slug` depend on `dep`. `slug` is then blocked (cannot enter doing/review/done) until `dep` reaches the `done` column.",
+      inputSchema: {
+        slug: z.string().min(1).describe("The dependent card."),
+        dep: z.string().min(1).describe("The card it depends on (must reach `done` first)."),
+      },
+    },
+    async (args) => {
+      try {
+        const res = await depAddCmd({ cfg, node, slug: args.slug, dep: args.dep });
+        return textResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_dep_rm",
+    {
+      title: "Remove a dependency",
+      description: "Remove the dependency edge from `slug` to `dep`.",
+      inputSchema: {
+        slug: z.string().min(1).describe("The dependent card."),
+        dep: z.string().min(1).describe("The dependency to remove."),
+      },
+    },
+    async (args) => {
+      try {
+        const res = await depRmCmd({ cfg, node, slug: args.slug, dep: args.dep });
+        return textResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
       } catch (err) {
         return errorResult(err);
       }
@@ -123,7 +175,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     "fkanban_show",
     {
       title: "Show a card",
-      description: "Print one card in detail by slug.",
+      description: "Print one card in detail by slug, including its dependencies and blocked state.",
       inputSchema: { slug: z.string().min(1).describe("Card slug.") },
     },
     async (args) => {

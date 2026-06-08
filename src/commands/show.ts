@@ -2,7 +2,7 @@
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { findCard } from "../record.ts";
+import { depStatus, findCard, listCards } from "../record.ts";
 import { renderCardDetail } from "../board.ts";
 
 export async function showCmd(opts: {
@@ -15,5 +15,10 @@ export async function showCmd(opts: {
   if (!card) {
     throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
   }
-  return opts.json ? JSON.stringify(card, null, 2) : renderCardDetail(card);
+  if (opts.json) {
+    const status = depStatus(card, await listCards(opts.node, opts.cfg));
+    return JSON.stringify({ ...card, blocked: status.blocked, blockedBy: status.blockedBy, missingDeps: status.missing }, null, 2);
+  }
+  const status = depStatus(card, await listCards(opts.node, opts.cfg));
+  return renderCardDetail(card, undefined, status);
 }
