@@ -20,6 +20,10 @@ export type Card = {
   position: string;
   assignee: string;
   tags: string[];
+  // Slugs of cards this card depends on (it is "blocked" until each is in the
+  // `done` column). Stored on the wire as `dep:<slug>` entries in `tags` — see
+  // DEP_TAG_PREFIX — so dependencies needed no schema change / republish.
+  deps: string[];
   created_at: string;
   updated_at: string;
 };
@@ -39,6 +43,76 @@ export const TOMBSTONE_TAG = "__fkanban_deleted__";
 
 export function isTombstoned(tags: string[]): boolean {
   return tags.includes(TOMBSTONE_TAG);
+}
+
+// Dependency edges piggyback on the existing `tags` array: a card that depends
+// on `foo` carries the reserved tag `dep:foo`. rowToCard splits these out into
+// `deps`, and cardToFields folds them back in, so dep tags never surface as
+// user-facing labels (same trick as TOMBSTONE_TAG).
+export const DEP_TAG_PREFIX = "dep:";
+
+export function isDepTag(tag: string): boolean {
+  return tag.startsWith(DEP_TAG_PREFIX);
+}
+
+export function depTag(slug: string): string {
+  return `${DEP_TAG_PREFIX}${slug}`;
+}
+
+// Clean a dep list: trim, drop blanks, drop self-references, dedupe (order-stable).
+export function normalizeDeps(deps: string[], selfSlug: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const d of deps) {
+    const s = d.trim();
+    if (s.length === 0 || s === selfSlug || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+// The columns at which dependencies actually gate work. A dependency is
+// satisfied only once its card reaches `done`; entering one of these "started"
+// columns while still blocked is what `move` refuses (unless --force).
+export const WORKING_COLUMNS = ["doing", "review", "done"] as const;
+
+export function isWorkingColumn(column: string): boolean {
+  return (WORKING_COLUMNS as readonly string[]).includes(column);
+}
+
+export type DepStatus = {
+  // Existing dep cards not yet in `done` — these block this card.
+  blockedBy: string[];
+  // Dep slugs with no live card (deleted or forward-referenced) — surfaced as a
+  // warning, but they do NOT block (a dangling dep can never reach `done`).
+  missing: string[];
+  blocked: boolean;
+};
+
+// Resolve a card's deps against the full set of live cards.
+export function depStatus(card: Card, allCards: Card[]): DepStatus {
+  const bySlug = new Map(allCards.map((c) => [c.slug, c]));
+  const blockedBy: string[] = [];
+  const missing: string[] = [];
+  for (const dep of card.deps) {
+    const d = bySlug.get(dep);
+    if (!d) {
+      missing.push(dep);
+    } else if (d.column !== "done") {
+      blockedBy.push(dep);
+    }
+  }
+  return { blockedBy, missing, blocked: blockedBy.length > 0 };
+}
+
+// Map of slug → blocked? across a set of cards, resolved against `allCards`.
+export function blockedSlugSet(cards: Card[], allCards: Card[]): Set<string> {
+  const blocked = new Set<string>();
+  for (const c of cards) {
+    if (depStatus(c, allCards).blocked) blocked.add(c.slug);
+  }
+  return blocked;
 }
 
 export function nowIso(): string {
@@ -63,6 +137,11 @@ function arrayStringField(f: Record<string, unknown>, key: string): string[] {
 
 export function rowToCard(row: QueryRow): Card {
   const f = (row.fields ?? {}) as Record<string, unknown>;
+  const allTags = arrayStringField(f, "tags");
+  const deps = allTags
+    .filter(isDepTag)
+    .map((t) => t.slice(DEP_TAG_PREFIX.length))
+    .filter((s) => s.length > 0);
   return {
     slug: stringField(f, "slug"),
     title: stringField(f, "title"),
@@ -71,7 +150,9 @@ export function rowToCard(row: QueryRow): Card {
     column: stringField(f, "column"),
     position: stringField(f, "position"),
     assignee: stringField(f, "assignee"),
-    tags: arrayStringField(f, "tags"),
+    // dep tags are split into `deps`; everything else (incl. the tombstone) stays.
+    tags: allTags.filter((t) => !isDepTag(t)),
+    deps,
     created_at: stringField(f, "created_at"),
     updated_at: stringField(f, "updated_at"),
   };
@@ -120,7 +201,8 @@ export function cardToFields(c: Card): Record<string, unknown> {
     column: c.column,
     position: c.position,
     assignee: c.assignee,
-    tags: c.tags,
+    // Persist deps back as reserved `dep:<slug>` tags alongside the user tags.
+    tags: [...c.tags.filter((t) => !isDepTag(t)), ...c.deps.map(depTag)],
     created_at: c.created_at,
     updated_at: c.updated_at,
   };

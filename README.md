@@ -91,10 +91,12 @@ DONE  (0)
 | Command | What it does |
 |---|---|
 | `fkanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
-| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --body`, or pipe body on stdin) |
-| `fkanban move <slug> <column>` | move a card to a column (`--position N`) |
-| `fkanban list` | render a board as columns (`--board --column --json`) |
-| `fkanban show <slug>` | print one card in detail (`--json`) |
+| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --body`, or pipe body on stdin) |
+| `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` past a dependency block) |
+| `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
+| `fkanban dep rm <slug> <dep>` | remove a dependency edge |
+| `fkanban list` | render a board as columns (`--board --column --json`); blocked cards show 🔒 |
+| `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
 | `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
 | `fkanban board list` | list boards (`--json`) |
@@ -103,11 +105,33 @@ DONE  (0)
 
 Global: `--verbose` (echo HTTP), `--version`, `--help`.
 
+## Dependencies
+
+A card can depend on other cards. It stays **🔒 blocked** until every
+dependency reaches the `done` column, and `move` refuses to advance a blocked
+card into a working column (`doing` / `review` / `done`) unless you pass
+`--force`. Backlog/todo moves are always allowed.
+
+```bash
+fkanban add api --title "Build API"
+fkanban add ui  --title "Build UI" --deps api   # ui depends on api
+fkanban move ui doing        # ✗ refused: blocked by "api" (not yet done)
+fkanban move api done
+fkanban move ui doing        # ✓ unblocked
+fkanban dep add ui docs      # add another edge incrementally
+fkanban dep rm  ui docs      # …or drop one
+```
+
+Edges are stored as reserved `dep:<slug>` entries in the card's `tags`
+array, so dependencies needed **no schema change / republish** — the same
+trick used for the soft-delete tombstone. A dep pointing at a non-existent
+card is surfaced as a warning but never blocks (it could never reach `done`).
+
 ## MCP server
 
 Exposes the board as tools (`fkanban_list`, `fkanban_add`, `fkanban_move`,
-`fkanban_show`, `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`)
-so agents can drive the board:
+`fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_show`, `fkanban_rm`,
+`fkanban_board_create`, `fkanban_board_list`) so agents can drive the board:
 
 ```bash
 claude mcp add fkanban bun "$PWD/src/mcp/main.ts"

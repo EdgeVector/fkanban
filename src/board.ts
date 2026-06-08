@@ -2,13 +2,16 @@
 // listed under their column in position order.
 
 import { DEFAULT_COLUMNS } from "./schemas.ts";
-import { sortCards, type Board, type Card } from "./record.ts";
+import { sortCards, type Board, type Card, type DepStatus } from "./record.ts";
 
 export type RenderOptions = {
   // Restrict to a single column.
   column?: string;
   // ANSI colour. Defaults to on when stdout is a TTY.
   color?: boolean;
+  // Slugs of cards currently blocked by an unfinished dependency — rendered
+  // with a 🔒 marker.
+  blocked?: Set<string>;
 };
 
 const COLORS: Record<string, string> = {
@@ -59,7 +62,7 @@ export function renderBoard(
       lines.push(paint(color, "dim", "  —"));
     } else {
       for (const c of inCol) {
-        lines.push(renderCardLine(c, color));
+        lines.push(renderCardLine(c, color, opts.blocked?.has(c.slug) ?? false));
       }
     }
     lines.push("");
@@ -67,25 +70,47 @@ export function renderBoard(
   return lines.join("\n").replace(/\n+$/, "\n");
 }
 
-function renderCardLine(c: Card, color: boolean): string {
+function renderCardLine(c: Card, color: boolean, blocked: boolean): string {
   const meta: string[] = [];
   if (c.assignee) meta.push(`@${c.assignee}`);
+  if (c.deps.length > 0) meta.push(`deps:${c.deps.length}`);
   if (c.tags.length > 0) meta.push(c.tags.map((t) => `#${t}`).join(" "));
   const suffix = meta.length > 0 ? "  " + paint(color, "dim", meta.join("  ")) : "";
   const slug = paint(color, "cyan", c.slug);
-  return `  • ${c.title || c.slug}  ${slug}${suffix}`;
+  const marker = blocked ? paint(color, "yellow", "🔒 ") : "";
+  return `  • ${marker}${c.title || c.slug}  ${slug}${suffix}`;
 }
 
-export function renderCardDetail(c: Card, color = Boolean(process.stdout.isTTY)): string {
+export function renderCardDetail(
+  c: Card,
+  color = Boolean(process.stdout.isTTY),
+  status?: DepStatus,
+): string {
   const lines: string[] = [];
-  lines.push(paint(color, "bold", c.title || c.slug));
+  const blocked = status?.blocked ? paint(color, "yellow", " 🔒 blocked") : "";
+  lines.push(paint(color, "bold", c.title || c.slug) + blocked);
   lines.push(paint(color, "dim", `${c.slug} · ${c.board}/${c.column}`));
   if (c.assignee) lines.push(`assignee: @${c.assignee}`);
   if (c.tags.length > 0) lines.push(`tags: ${c.tags.map((t) => `#${t}`).join(" ")}`);
+  if (c.deps.length > 0) {
+    lines.push(`deps: ${c.deps.map((d) => renderDep(d, color, status)).join("  ")}`);
+    if (status && status.missing.length > 0) {
+      lines.push(paint(color, "dim", `  (no card found for: ${status.missing.join(", ")})`));
+    }
+  }
   lines.push(paint(color, "dim", `created ${c.created_at} · updated ${c.updated_at}`));
   if (c.body.trim().length > 0) {
     lines.push("");
     lines.push(c.body);
   }
   return lines.join("\n");
+}
+
+// One dependency slug, painted by its resolved state: green=done (satisfied),
+// yellow=still blocking, dim=unknown (no status passed) or missing.
+function renderDep(dep: string, color: boolean, status?: DepStatus): string {
+  if (!status) return dep;
+  if (status.missing.includes(dep)) return paint(color, "dim", `${dep}?`);
+  if (status.blockedBy.includes(dep)) return paint(color, "yellow", dep);
+  return paint(color, "green", `${dep}✓`);
 }

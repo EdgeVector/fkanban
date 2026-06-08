@@ -10,6 +10,7 @@ import {
   findBoard,
   findCard,
   listCards,
+  normalizeDeps,
   nowIso,
   validateSlug,
   type Card,
@@ -24,8 +25,18 @@ export type AddOptions = {
   column?: string;
   assignee?: string;
   tags?: string[];
+  // Replace the card's dependency list with these slugs (validated, deduped,
+  // self-references dropped). Omit to leave existing deps untouched on update.
+  deps?: string[];
   body?: string;
 };
+
+// Validate + clean a user-supplied dep list for `slug`.
+function prepareDeps(deps: string[], slug: string): string[] {
+  const cleaned = normalizeDeps(deps, slug);
+  for (const d of cleaned) validateSlug(d);
+  return cleaned;
+}
 
 export type AddResult = { slug: string; action: "created" | "updated"; board: string; column: string };
 
@@ -57,6 +68,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       column: opts.column ?? existing.column,
       assignee: opts.assignee ?? existing.assignee,
       tags: opts.tags ?? existing.tags,
+      deps: opts.deps ? prepareDeps(opts.deps, opts.slug) : existing.deps,
       updated_at: now,
     };
     if (opts.column) ensureColumn(updated.column, columns);
@@ -74,6 +86,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     position: String(position),
     assignee: opts.assignee ?? "",
     tags: opts.tags ?? [],
+    deps: opts.deps ? prepareDeps(opts.deps, opts.slug) : [],
     created_at: now,
     updated_at: now,
   };
