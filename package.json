@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "fkanban — a kanban board over fold_db. Cards move through columns; everything persists in folddb.",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "fkanban": "src/cli.ts",
