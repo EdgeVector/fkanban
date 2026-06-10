@@ -1,15 +1,16 @@
 // `fkanban add <slug>` — create or update a card. Body can come from --body
 // or stdin. Column defaults to the board's first column; position appends to
-// the end of that column.
+// the end of that column. The whole command is two point reads (board, card)
+// plus one write — it never scans the board.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
+  appendPosition,
   cardToFields,
   ensureColumn,
   findBoard,
   findCard,
-  listCards,
   normalizeDeps,
   nowIso,
   validateSlug,
@@ -76,14 +77,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
 
-  const position = await nextPosition(opts.node, opts.cfg, boardSlug, column);
   const card: Card = {
     slug: opts.slug,
     title: opts.title ?? opts.slug,
     body: opts.body ?? "",
     board: boardSlug,
     column,
-    position: String(position),
+    position: appendPosition(),
     assignee: opts.assignee ?? "",
     tags: opts.tags ?? [],
     deps: opts.deps ? prepareDeps(opts.deps, opts.slug) : [],
@@ -92,22 +92,4 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   };
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column };
-}
-
-// Append: 10 past the current max position among live cards in that column,
-// leaving gaps so a card can be inserted between two others later.
-export async function nextPosition(
-  node: NodeClient,
-  cfg: Config,
-  board: string,
-  column: string,
-): Promise<number> {
-  const cards = await listCards(node, cfg);
-  const inCol = cards.filter((c) => c.board === board && c.column === column);
-  let max = 0;
-  for (const c of inCol) {
-    const n = parseInt(c.position, 10);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max + 10;
 }

@@ -182,14 +182,44 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
   return res.results.map(rowToBoard).filter((b) => !isTombstoned(b.columns) && b.slug.length > 0);
 }
 
+// Fields sufficient to resolve dependency status / card existence — everything
+// except the heavy spec `body` (and other display-only fields). Used by the
+// read paths that fan out over the whole board so they don't re-download every
+// card's multi-paragraph body.
+export const CARD_STATUS_FIELDS = ["slug", "board", "column", "position", "tags", "created_at"];
+
+// Like listCards but fetches only CARD_STATUS_FIELDS; absent fields come back
+// as "" on the Card. Enough for depStatus / blockedSlugSet / existence checks.
+export async function listCardStatuses(node: NodeClient, cfg: Config): Promise<Card[]> {
+  const hash = schemaHashFor("card", cfg);
+  const res = await node.queryAll({ schemaHash: hash, fields: CARD_STATUS_FIELDS });
+  return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
+}
+
+// Point read by slug — the node resolves a HashKey filter as an indexed key
+// lookup, so this never scans the board.
 export async function findCard(node: NodeClient, cfg: Config, slug: string): Promise<Card | null> {
-  const cards = await listCards(node, cfg);
-  return cards.find((c) => c.slug === slug) ?? null;
+  const hash = schemaHashFor("card", cfg);
+  const res = await node.queryAll({
+    schemaHash: hash,
+    fields: fieldsFor("card"),
+    filter: { HashKey: slug },
+  });
+  const card = res.results.map(rowToCard).find((c) => c.slug === slug);
+  return card !== undefined && !isTombstoned(card.tags) ? card : null;
 }
 
 export async function findBoard(node: NodeClient, cfg: Config, slug: string): Promise<Board | null> {
-  const boards = await listBoards(node, cfg);
-  return boards.find((b) => b.slug === slug) ?? null;
+  const hash = schemaHashFor("board", cfg);
+  const res = await node.queryAll({
+    schemaHash: hash,
+    fields: fieldsFor("board"),
+    filter: { HashKey: slug },
+  });
+  const board = res.results.map(rowToBoard).find((b) => b.slug === slug);
+  return board !== undefined && !isTombstoned(board.columns) && board.slug.length > 0
+    ? board
+    : null;
 }
 
 export function cardToFields(c: Card): Record<string, unknown> {
@@ -247,6 +277,15 @@ export function ensureColumn(column: string, boardColumns: string[]): void {
 
 export function isColumn(s: string): s is Column {
   return isDefaultColumn(s);
+}
+
+// Position for a card appended to a column: current epoch millis. Positions
+// only need to sort ascending, so a timestamp appends after everything already
+// there (legacy hand-numbered positions are tiny by comparison) without ever
+// reading the rest of the board. Same-millisecond appends fall back to the
+// created_at tiebreak in sortCards.
+export function appendPosition(): string {
+  return String(Date.now());
 }
 
 // Order cards within a column: explicit integer `position` ascending, then
