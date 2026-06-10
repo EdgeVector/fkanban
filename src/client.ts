@@ -48,6 +48,20 @@ export type RawResponse = {
 export const QUERY_PAGE_SIZE = 1000;
 const QUERY_PAGE_LIMIT = 1000;
 
+// fold's /api/query `filter` — fkanban only ever needs the exact-key form,
+// which the node resolves as an indexed point read (no scan).
+export type QueryFilter = { HashKey: string };
+
+// Every request gets a deadline so a contended node can never hang the CLI
+// (an unbounded `add` is what used to orphan backgrounded processes).
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+function defaultTimeoutMs(): number {
+  const raw = process.env.FKANBAN_HTTP_TIMEOUT_MS;
+  const n = raw === undefined ? NaN : parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
+}
+
 export type RegisteredSchema = {
   name: string;
   descriptive_name: string;
@@ -89,7 +103,7 @@ export type NodeClient = {
   createRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string }): Promise<void>;
   updateRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
-  queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryResponse>;
+  queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
 
@@ -147,10 +161,16 @@ export function newSchemaServiceClient(
   };
 }
 
-export function newNodeClient(opts: { baseUrl: string; userHash: string; verbose?: Verbose }): NodeClient {
+export function newNodeClient(opts: {
+  baseUrl: string;
+  userHash: string;
+  verbose?: Verbose;
+  timeoutMs?: number;
+}): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
+  const timeoutMs = opts.timeoutMs;
 
   const callJson = async (
     path: string,
@@ -165,6 +185,7 @@ export function newNodeClient(opts: { baseUrl: string; userHash: string; verbose
       verbose,
       service: "node",
       headers: { "X-User-Hash": userHash },
+      timeoutMs,
     });
     const parsed = await readJson(res);
     return { status: res.status, body: parsed };
@@ -245,7 +266,7 @@ export function newNodeClient(opts: { baseUrl: string; userHash: string; verbose
     async deleteRecord({ schemaHash, keyHash }) {
       await mutate("delete", schemaHash, {}, keyHash);
     },
-    async queryAll({ schemaHash, fields }) {
+    async queryAll({ schemaHash, fields, filter }) {
       // Paginate up to QUERY_PAGE_SIZE rows per request, deduping by record
       // key across pages (fold_db_node's offset pagination is unstable above
       // one page — dedupe keeps us correct if a board ever exceeds the page).
@@ -256,6 +277,7 @@ export function newNodeClient(opts: { baseUrl: string; userHash: string; verbose
         const { status, body } = await callJson("/api/query", "POST", {
           schema_name: schemaHash,
           fields,
+          ...(filter !== undefined ? { filter } : {}),
           limit: QUERY_PAGE_SIZE,
           offset,
         });
@@ -285,6 +307,7 @@ export function newNodeClient(opts: { baseUrl: string; userHash: string; verbose
         verbose,
         service: "node",
         headers: { "X-User-Hash": userHash },
+        timeoutMs,
       });
       const text = await res.text();
       return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
@@ -331,6 +354,7 @@ async function verboseFetch(opts: {
   verbose: Verbose;
   service: "node" | "schema";
   headers: Record<string, string>;
+  timeoutMs?: number;
 }): Promise<Response> {
   const url = `${opts.baseUrl}${opts.path}`;
   const tag = opts.service === "node" ? "NODE" : "SCHEMA";
@@ -342,14 +366,47 @@ async function verboseFetch(opts: {
       : typeof opts.body === "string"
         ? opts.body
         : JSON.stringify(opts.body);
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   opts.verbose(`→ ${tag} ${opts.method} ${url}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""));
   try {
-    const res = await fetch(url, { method: opts.method, headers, body: bodyStr });
+    const res = await fetch(url, {
+      method: opts.method,
+      headers,
+      body: bodyStr,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     opts.verbose(`← ${tag} ${opts.method} ${url} status=${res.status}`);
     return res;
   } catch (err) {
+    if (isTimeoutError(err)) {
+      throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
+    }
     throw connectionError(opts.baseUrl, opts.service, err);
   }
+}
+
+function isTimeoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "TimeoutError" || err.name === "AbortError") return true;
+  const cause = (err as { cause?: unknown }).cause;
+  return cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError");
+}
+
+function timeoutError(
+  path: string,
+  method: string,
+  service: "node" | "schema",
+  timeoutMs: number,
+  cause: unknown,
+): FkanbanError {
+  const which = service === "node" ? "node" : "schema service";
+  return new FkanbanError({
+    code: "service_timeout",
+    message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}).`,
+    hint:
+      "The node may be under heavy load. Writes are upserts keyed by slug, so re-running the command is safe. Raise the deadline with FKANBAN_HTTP_TIMEOUT_MS if the node is just slow.",
+    cause,
+  });
 }
 
 function parseJsonSafe(text: string): unknown {

@@ -4,17 +4,17 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
+  appendPosition,
   cardToFields,
   depStatus,
   ensureColumn,
   findBoard,
   findCard,
   isWorkingColumn,
-  listCards,
+  listCardStatuses,
   nowIso,
   type Card,
 } from "../record.ts";
-import { nextPosition } from "./add.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -40,7 +40,7 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   // Soft-block: refuse to start a card (move into doing/review/done) while any
   // dependency is unfinished, unless --force. Backlog/todo moves are always ok.
   if (!opts.force && isWorkingColumn(opts.column)) {
-    const status = depStatus(card, await listCards(opts.node, opts.cfg));
+    const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg));
     if (status.blocked) {
       throw new FkanbanError({
         code: "card_blocked",
@@ -53,15 +53,12 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   }
 
   const from = card.column;
-  const position =
-    opts.position !== undefined
-      ? opts.position
-      : await nextPosition(opts.node, opts.cfg, card.board, opts.column);
+  const position = opts.position !== undefined ? String(opts.position) : appendPosition();
 
   const updated: Card = {
     ...card,
     column: opts.column,
-    position: String(position),
+    position,
     updated_at: nowIso(),
   };
   const hash = schemaHashFor("card", opts.cfg);

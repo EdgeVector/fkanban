@@ -11,6 +11,7 @@ import {
   namespacedSchemaName,
 } from "../src/schemas.ts";
 import {
+  appendPosition,
   ensureColumn,
   isTombstoned,
   sortCards,
@@ -104,6 +105,14 @@ describe("ordering + tombstones", () => {
   test("tombstone tag is detected", () => {
     expect(isTombstoned([TOMBSTONE_TAG])).toBe(true);
     expect(isTombstoned(["auth"])).toBe(false);
+  });
+  test("appendPosition sorts after legacy hand-numbered positions", () => {
+    const cards = [
+      card({ slug: "new", position: appendPosition() }),
+      card({ slug: "old-a", position: "10" }),
+      card({ slug: "old-b", position: "20" }),
+    ];
+    expect(sortCards(cards).map((c) => c.slug)).toEqual(["old-a", "old-b", "new"]);
   });
 });
 

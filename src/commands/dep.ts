@@ -7,7 +7,7 @@ import { schemaHashFor, type Config } from "../config.ts";
 import {
   cardToFields,
   findCard,
-  listCards,
+  listCardStatuses,
   normalizeDeps,
   nowIso,
   validateSlug,
@@ -41,7 +41,7 @@ export async function depAddCmd(opts: {
     throw new FkanbanError({ code: "invalid_dep", message: "A card cannot depend on itself." });
   }
   // Warn (don't fail) on a forward/dangling dep — it just never resolves.
-  const all = await listCards(opts.node, opts.cfg);
+  const all = await listCardStatuses(opts.node, opts.cfg);
   if (!all.some((c) => c.slug === opts.dep)) {
     console.error(`fkanban: warning — no card "${opts.dep}" yet; adding it as a forward dependency.`);
   }
