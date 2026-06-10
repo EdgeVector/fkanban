@@ -1,65 +1,58 @@
 ---
 name: fkanban
 description: |
-  Manage the fkanban board (the active EdgeVector task board, a kanban over
-  fold_db). File, list, show, move, groom, and soft-delete cards via the
-  fkanban CLI. Use when the user wants to "file an fkanban task/card", "add to
-  the fkanban board", "what's on the fkanban board", "fkanban backlog", "list
-  fkanban tasks", "move a card", "show card <slug>", "groom the board", or just
-  says "fkanban" / "add a task" in an EdgeVector context. This is the board-CRUD
-  counterpart to the fkanban-agent skill (which drives one card to a merged PR);
-  use fkanban-agent — not this — to actually implement a card. Do NOT use the
-  deprecated Cline `kanban` skill / :3484 board for EdgeVector work.
+  Manage an fkanban board — a kanban stored in your fold_db node. File, list,
+  show, move, groom, and soft-delete cards via the fkanban CLI. Use when the
+  user wants to "file an fkanban card", "add to the fkanban board", "what's on
+  the board", "fkanban backlog", "list cards", "move a card", "show card
+  <slug>", or "groom the board". This is the board-CRUD counterpart to the
+  fkanban-agent skill (which drives one card to a merged PR); use fkanban-agent
+  — not this — to actually implement a card.
 ---
 
 # fkanban — board management
 
-fkanban is the **active** EdgeVector task board: a kanban stored in fold_db.
-It superseded the Cline `kanban` board (`:3484`) — don't file EdgeVector work
-there anymore.
+fkanban is a kanban board stored in [fold_db](https://folddb.com). The board
+records live on your fold_db **node**; the CLI just talks to it over HTTP (so
+it's fast and doesn't touch the node's on-disk identity lock).
 
-- **Location / how to run:** `~/code/edgevector/fkanban`, invoked as
-  `bun run src/cli.ts <command>`. There is no global `fkanban` binary on PATH
-  and the repo isn't git-init'd yet, so run it from inside that directory.
-  (If a global `fkanban` shim appears later, prefer it.)
-- **Where the data lives:** the board records live on the **port-9001 brain**
-  (node `http://127.0.0.1:9001`, schema_service prod us-east-1). The CLI talks
-  to the node over **HTTP**, so it's fast and does *not* hit the Sled
-  identity-lock stall that the `folddb` CLI has.
+- **How to run:** from your `fkanban` checkout, `bun src/cli.ts <command>`. If
+  you ran `bun link`, a global `fkanban` is on PATH — prefer it (`fkanban
+  <command>`). This handbook shows the global form; substitute `bun src/cli.ts`
+  if you didn't link.
+- **Setup:** if the CLI can't find a node or config, run the **fkanban-setup**
+  skill first (`fkanban init` + `fkanban doctor`).
 - **Columns:** `backlog → todo → doing → review → done`.
 
-Before doing anything non-trivial, sanity-check the setup:
+Before anything non-trivial, sanity-check the setup:
 
 ```bash
-cd ~/code/edgevector/fkanban
-bun run src/cli.ts doctor      # config present, node reachable, schemas loaded
+fkanban doctor      # config present, node reachable, schemas loaded
 ```
 
 ## Commands
 
-Run all of these from `~/code/edgevector/fkanban`:
-
 ```bash
-bun run src/cli.ts list --json                 # whole default board
-bun run src/cli.ts list --board <b> --column todo   # filter
-bun run src/cli.ts show <slug> --json          # one card in detail
-bun run src/cli.ts add <slug> [flags]          # create OR update a card
-bun run src/cli.ts move <slug> <column> [--position N]
-bun run src/cli.ts rm <slug>                   # soft-delete
-bun run src/cli.ts board create <slug> --title ... --columns a,b,c
-bun run src/cli.ts board list
+fkanban list --json                      # whole default board
+fkanban list --board <b> --column todo   # filter
+fkanban show <slug> --json               # one card in detail
+fkanban add <slug> [flags]               # create OR update a card
+fkanban move <slug> <column> [--position N]
+fkanban rm <slug>                        # soft-delete (tombstone)
+fkanban board create <slug> --title ... --columns a,b,c
+fkanban board list
 ```
 
-`add` flags: `--title --board --column --assignee --tags --body`. Re-running
-`add` with the same slug **updates** the card (upsert), so it's safe to edit a
-card by re-adding it. Default column for a fresh card is `backlog`; for a task
-you want worked soon, pass `--column todo`.
+`add` flags: `--title --board --column --assignee --tags --deps --body`.
+Re-running `add` with the same slug **updates** the card (upsert), so it's safe
+to edit a card by re-adding it. A fresh card defaults to `backlog`; for work you
+want picked up soon, pass `--column todo`.
 
 ### ⚠️ Filing a card with a real body — write the body to a file first
 
 The card body is usually a multi-paragraph spec. **Do not** inline it with a
-nested heredoc (`--body "$(cat <<'EOF' ... EOF)"`) — that mangles and can
-silently produce an empty card, especially if the command is backgrounded.
+nested heredoc (`--body "$(cat <<'EOF' ... EOF)"`) — that mangles the text and
+can silently produce an empty card, especially if the command is backgrounded.
 Instead write the body to a temp file and read it back, in the **foreground**:
 
 ```bash
@@ -68,67 +61,59 @@ cat > /tmp/card-body.md <<'EOF'
 ...full markdown body...
 EOF
 # 2. file the card (foreground, so you SEE the confirmation/error)
-cd ~/code/edgevector/fkanban
-bun run src/cli.ts add my-slug \
+fkanban add my-slug \
   --title "Short imperative title" \
-  --column todo --tags "fold,cli,perf" \
+  --column todo --tags "area,priority" \
   --body "$(cat /tmp/card-body.md)"
 # 3. verify it landed
-bun run src/cli.ts show my-slug | head -8
+fkanban show my-slug | head -8
 ```
 
 `add` also reads the body from **stdin**, which sidesteps quoting entirely:
 
 ```bash
-bun run src/cli.ts add my-slug --title "..." --column todo < /tmp/card-body.md
+fkanban add my-slug --title "..." --column todo < /tmp/card-body.md
 ```
 
-Always confirm with `show <slug>` after writing — the `add` is only successful
-if the card actually reads back.
+Always confirm with `show <slug>` after writing — the `add` only succeeded if
+the card reads back.
 
-## The card brief is the spec — and must trigger the agent
+## Filing a card meant to be implemented
 
-A card that's meant to be implemented should carry, in its `--body`:
+If a card should be driven to a merged PR by an agent, put a work header at the
+top of its `--body` (there's no `repo` field on the schema, so it goes in the
+body), followed by the spec:
 
-1. **A header so the agent picks it up and drives it to merge** (fkanban does
-   not auto-spawn agents and finished cards don't reach `done` on their own):
+```
+Repo: owner/name          # GitHub owner/name, or an absolute local path
+Base: main                # base branch
+Branch: fkanban/<slug>    # optional; defaults to fkanban/<slug>
 
-   > **Follow the fkanban-agent skill — drive this through to a MERGED PR.
-   > A card is only `done` when its code is actually in the repo.**
+GOAL: ...
+CONTEXT: ...
+STEPS: ...
+VERIFY: <exact commands that must pass>
+DONE WHEN: PR merged into <base>
+OUT OF SCOPE: ...
+```
 
-2. **A work header telling the agent where to work** (there is no `repo` field
-   on the schema, so it goes in the body):
-
-   ```
-   Repo: EdgeVector/fold      # owner/name or absolute local path
-   Base: main                 # base branch
-   Branch: fkanban/<slug>     # optional; defaults to fkanban/<slug>
-   ```
-
-3. **The spec itself:** GOAL / CONTEXT / STEPS / VERIFY (exact commands that
-   must pass) / DONE WHEN (PR merged into <base>) / OUT OF SCOPE.
-
-Verify the facts you put in a brief against `origin/main` before filing —
-local checkouts lag, so `git fetch` and read `origin/<base>:<file>` rather
-than describing stale "current state".
+fkanban does not auto-spawn agents and finished cards don't reach `done` on
+their own — implementing a card is the **fkanban-agent** skill's job. Verify the
+facts in a brief against `origin/<base>` before filing (local checkouts lag —
+`git fetch` and read `origin/<base>:<file>` rather than describing stale state).
 
 ## Grooming / triage
 
 - "What's on the board" → `list --json`, then summarize by column.
-- "What's stuck" → look for cards long in `review` (PR open, not merged) or
-  `doing` (claimed, no PR). Surface them; don't silently re-drive — that's the
+- "What's stuck" → cards long in `review` (PR open, not merged) or `doing`
+  (claimed, no PR). Surface them; don't silently re-drive — that's the
   fkanban-agent reconcile pass's job.
 - Superseded / wrong card → `rm <slug>` (soft delete), or re-`add` to fix it.
-- A card in `done` means its PR **merged** — that's the normal terminal state,
-  not a kill.
+- A card in `done` means its PR **merged** — the normal terminal state, not a kill.
 
-## Guardrails (EdgeVector standing rules)
+## Guardrails
 
-- **Never kill the port-9001 brain** or any folddb_server you didn't start —
-  the board lives on it. If `doctor` says the node is unreachable, surface it;
-  don't restart things blindly.
-- **Dev, not prod** for any work a card describes that touches a prod surface
-  or an in-flight design — note that in the brief.
-- This skill only **manages** the board. To actually implement a card, hand off
-  to the **fkanban-agent** skill (or tell the user it's ready to be worked).
-```
+- This skill only **manages** the board. To implement a card, hand off to the
+  **fkanban-agent** skill (or tell the user it's ready to be worked).
+- Don't reset/wipe the node to "start clean" — `add`/`init` are additive and
+  idempotent, and the board is the only copy of its data.
