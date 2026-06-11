@@ -10,7 +10,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { readConfig, ConfigMissingError } from "../config.ts";
+import { readConfig, resolveSocketPath, ConfigMissingError } from "../config.ts";
 import { newNodeClient } from "../client.ts";
 import { createFkanbanMcpServer } from "./server.ts";
 
@@ -26,7 +26,7 @@ export async function runMcp(): Promise<number> {
     throw err;
   }
 
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash });
+  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
   const server = createFkanbanMcpServer({ cfg, node });
   const transport = new StdioServerTransport();
   await server.connect(transport);

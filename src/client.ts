@@ -4,6 +4,17 @@
 // Writes go in as NodeOwner (no capability token) — fine for a local /
 // ephemeral node with app_identity enforcement off. All errors flow through
 // a single mapper so each failure mode maps to one actionable message.
+//
+// Owner-session attestation (app-isolation default-on, fold#739): when the
+// node enforces app-isolation, owner-authority verbs (schema load, control
+// plane) demand an *attested transport* and reject bare loopback TCP with
+// `403 transport_not_attested`. fkanban attests exactly like the CLI's
+// `attest_owner_session`: mint a one-time pairing code over the node's
+// Unix-domain control socket, exchange it over TCP for a session token, and
+// present that token as `X-Folddb-Session` on every request. Against a node
+// with no control socket (the device-trust :9001 brain today) the mint fails,
+// no token is obtained, and fkanban works exactly as before — the change is
+// fully backward-compatible.
 
 import type { AddSchemaRequest } from "./schemas.ts";
 
@@ -161,34 +172,149 @@ export function newSchemaServiceClient(
   };
 }
 
+// Mint a one-time pairing code over the node's Unix-domain control socket and
+// exchange it over TCP for an owner-session token — the TypeScript twin of the
+// CLI's `attest_owner_session` (fold_db_node/src/bin/folddb/commands/ui.rs).
+//
+// Returns the session token, or `null` on ANY failure (socket missing, mint or
+// exchange non-2xx, parse error). `null` means "proceed unattested": on a
+// device-trust node nothing is governed, so an unattested transport works
+// fully — exactly fkanban's behavior before app-isolation existed.
+export async function attestOwnerSession(
+  nodeUrl: string,
+  socketPath: string,
+  verbose: Verbose = noopVerbose,
+): Promise<string | null> {
+  // Mint over the UDS control socket. Bun speaks unix-socket fetch directly;
+  // the `/control/*` verbs exist ONLY on this owner-attested channel.
+  let pairingCode: string;
+  try {
+    const mintRes = await fetch("http://localhost/control/browser-pairing-code", {
+      method: "POST",
+      unix: socketPath,
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!mintRes.ok) {
+      verbose(`attest: mint refused (HTTP ${mintRes.status}) — proceeding unattested`);
+      return null;
+    }
+    const minted = (await mintRes.json()) as Record<string, unknown>;
+    const code = minted.pairing_code;
+    if (typeof code !== "string" || code.length === 0) {
+      verbose("attest: mint response missing pairing_code — proceeding unattested");
+      return null;
+    }
+    pairingCode = code;
+  } catch (err) {
+    // Socket missing / connect refused / timeout → not an app-isolation node.
+    verbose(`attest: mint over socket ${socketPath} failed (${err instanceof Error ? err.message : String(err)}) — proceeding unattested`);
+    return null;
+  }
+
+  // Exchange the code over TCP for a session token.
+  try {
+    const exchangeRes = await fetch(`${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: pairingCode }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!exchangeRes.ok) {
+      verbose(`attest: exchange refused (HTTP ${exchangeRes.status}) — proceeding unattested`);
+      return null;
+    }
+    const exchanged = (await exchangeRes.json()) as Record<string, unknown>;
+    const token = exchanged.session_token;
+    if (typeof token !== "string" || token.length === 0) {
+      verbose("attest: exchange response missing session_token — proceeding unattested");
+      return null;
+    }
+    verbose("attest: owner session established");
+    return token;
+  } catch (err) {
+    verbose(`attest: exchange failed (${err instanceof Error ? err.message : String(err)}) — proceeding unattested`);
+    return null;
+  }
+}
+
 export function newNodeClient(opts: {
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
   timeoutMs?: number;
+  // When set, the node's Unix-domain control socket. fkanban attests an owner
+  // session over it once (lazily, on the first request) and re-attests once if
+  // a request later 403s with `transport_not_attested` (a restarted node drops
+  // the in-memory session). Omit to talk to the node unattested.
+  socketPath?: string;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
   const timeoutMs = opts.timeoutMs;
+  const socketPath = opts.socketPath;
+
+  // Owner-session token, established lazily on the first request and shared
+  // across every subsequent call. `attesting` dedupes concurrent first-hits so
+  // we mint exactly one pairing code. `null` token = unattested (fine on a
+  // device-trust node).
+  let sessionToken: string | null = null;
+  let attesting: Promise<void> | null = null;
+
+  const ensureAttested = async (force = false): Promise<void> => {
+    if (!socketPath) return;
+    if (sessionToken !== null && !force) return;
+    if (force) {
+      sessionToken = null;
+      attesting = null;
+    }
+    if (attesting === null) {
+      attesting = (async () => {
+        sessionToken = await attestOwnerSession(url, socketPath, verbose);
+      })();
+    }
+    await attesting;
+  };
+
+  const nodeHeaders = (): Record<string, string> => {
+    const h: Record<string, string> = { "X-User-Hash": userHash };
+    if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
+    return h;
+  };
+
+  // True when a node response is the app-isolation "your transport isn't
+  // attested" rejection — the signal to (re-)pair and retry once.
+  const isNotAttested = (status: number, body: unknown): boolean =>
+    status === 403 && bodyError(body) === "transport_not_attested";
 
   const callJson = async (
     path: string,
     method: "GET" | "POST",
     body?: unknown,
   ): Promise<{ status: number; body: unknown }> => {
-    const res = await verboseFetch({
-      baseUrl: url,
-      path,
-      method,
-      body,
-      verbose,
-      service: "node",
-      headers: { "X-User-Hash": userHash },
-      timeoutMs,
-    });
-    const parsed = await readJson(res);
-    return { status: res.status, body: parsed };
+    await ensureAttested();
+    const doFetch = async () => {
+      const res = await verboseFetch({
+        baseUrl: url,
+        path,
+        method,
+        body,
+        verbose,
+        service: "node",
+        headers: nodeHeaders(),
+        timeoutMs,
+      });
+      const parsed = await readJson(res);
+      return { status: res.status, body: parsed };
+    };
+    let result = await doFetch();
+    if (isNotAttested(result.status, result.body) && socketPath) {
+      // Stale in-memory session (node restarted) — re-pair once and retry.
+      verbose("node: transport_not_attested — re-pairing owner session and retrying");
+      await ensureAttested(true);
+      result = await doFetch();
+    }
+    return result;
   };
 
   const mutate = async (
@@ -299,17 +425,26 @@ export function newNodeClient(opts: {
       return { ok: true, results: allResults, returned_count: allResults.length, total_count: allResults.length };
     },
     async rawCall(method, path, body) {
-      const res = await verboseFetch({
-        baseUrl: url,
-        path,
-        method,
-        body,
-        verbose,
-        service: "node",
-        headers: { "X-User-Hash": userHash },
-        timeoutMs,
-      });
-      const text = await res.text();
+      await ensureAttested();
+      const doFetch = async () =>
+        verboseFetch({
+          baseUrl: url,
+          path,
+          method,
+          body,
+          verbose,
+          service: "node",
+          headers: nodeHeaders(),
+          timeoutMs,
+        });
+      let res = await doFetch();
+      let text = await res.text();
+      if (res.status === 403 && bodyError(parseJsonSafe(text)) === "transport_not_attested" && socketPath) {
+        verbose("node: transport_not_attested — re-pairing owner session and retrying");
+        await ensureAttested(true);
+        res = await doFetch();
+        text = await res.text();
+      }
       return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
     },
   };

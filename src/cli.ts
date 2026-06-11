@@ -26,6 +26,7 @@ Usage:
 
 Commands:
   init                 bootstrap a node + register schemas + seed default board
+                       (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --tags --deps --body)
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
@@ -83,6 +84,7 @@ async function main(argv: string[]): Promise<number> {
       position: { type: "string" },
       "node-url": { type: "string" },
       "schema-service-url": { type: "string" },
+      "node-socket-path": { type: "string" },
       name: { type: "string" },
     },
   });
@@ -105,6 +107,7 @@ async function main(argv: string[]): Promise<number> {
       await runInit({
         nodeUrl: values["node-url"] as string | undefined,
         schemaServiceUrl: values["schema-service-url"] as string | undefined,
+        nodeSocketPath: values["node-socket-path"] as string | undefined,
         bootstrapName: values.name as string | undefined,
         verbose,
       });
