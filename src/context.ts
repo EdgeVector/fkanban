@@ -1,7 +1,7 @@
 // Shared command context: read config + build a node client.
 
 import { newNodeClient, type NodeClient, type Verbose } from "./client.ts";
-import { readConfig, type Config } from "./config.ts";
+import { readConfig, resolveSocketPath, type Config } from "./config.ts";
 
 export type Ctx = {
   cfg: Config;
@@ -14,6 +14,7 @@ export function loadCtx(opts: { configPath?: string; verbose?: Verbose } = {}): 
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
     verbose: opts.verbose,
+    socketPath: resolveSocketPath(cfg),
   });
   return { cfg, node };
 }

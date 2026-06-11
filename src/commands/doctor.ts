@@ -3,7 +3,7 @@
 // round-trips.
 
 import { newNodeClient, type Verbose } from "../client.ts";
-import { tryReadConfig } from "../config.ts";
+import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { listBoards, listCards } from "../record.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../schemas.ts";
 
@@ -24,7 +24,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   print(`  node:   ${cfg.nodeUrl}`);
   print(`  schema: ${cfg.schemaServiceUrl}`);
 
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose });
+  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
   try {
     const id = await node.autoIdentity();
     check(id.provisioned, "node reachable + provisioned", id.provisioned ? undefined : id.reason);

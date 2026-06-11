@@ -25,6 +25,7 @@ import {
 import {
   CONFIG_VERSION,
   defaultConfigPath,
+  resolveSocketPath,
   tryReadConfig,
   writeConfig,
   schemaHashFor,
@@ -42,6 +43,10 @@ export const DEFAULT_SCHEMA_SERVICE_URL =
 export type InitOptions = {
   nodeUrl?: string;
   schemaServiceUrl?: string;
+  // Override the node's Unix-domain control socket for owner-session
+  // attestation. Persisted to config when given so later CLI/MCP invocations
+  // reuse it. Omit to derive from FOLDDB_HOME / FOLDDB_SOCKET_PATH.
+  nodeSocketPath?: string;
   configPath?: string;
   bootstrapName?: string;
   verbose?: Verbose;
@@ -62,10 +67,17 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const nodeUrl = opts.nodeUrl ?? existing?.nodeUrl ?? DEFAULT_NODE_URL;
   const schemaServiceUrl =
     opts.schemaServiceUrl ?? existing?.schemaServiceUrl ?? DEFAULT_SCHEMA_SERVICE_URL;
+  // Persist the socket path to config only when explicitly given; otherwise
+  // leave it unset so it keeps resolving from FOLDDB_HOME / FOLDDB_SOCKET_PATH.
+  const nodeSocketPath = opts.nodeSocketPath ?? existing?.nodeSocketPath;
+  const socketPath = resolveSocketPath({ nodeSocketPath });
 
-  // Step 1: probe identity, bootstrap if needed.
+  // Step 1: probe identity, bootstrap if needed. The schema-load path below is
+  // an owner verb that 403s `transport_not_attested` on an app-isolation node,
+  // so every node client here attests an owner session over the control socket
+  // (no-op fallback when the node serves no socket — see attestOwnerSession).
   print(`[1/${STEPS}] probing node identity at ${nodeUrl}`);
-  const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe", verbose });
+  const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe", verbose, socketPath });
   const identity = await probe.autoIdentity();
 
   let userHash: string;
@@ -81,7 +93,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`        bootstrap ok (user_hash=${userHash.slice(0, 8)}…)`);
   }
 
-  const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose });
+  const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath });
 
   // Step 2: load schemas into the node (it pulls everything published in the
   // schema_service, including the `fkanban/*` schemas).
@@ -131,6 +143,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     schemaServiceUrl,
     userHash,
     schemaHashes,
+    ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
   };
   writeConfig(config, configPath);
 

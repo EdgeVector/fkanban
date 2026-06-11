@@ -17,7 +17,23 @@ export type Config = {
   userHash: string;
   // canonical schema hash per record type: { card, board }
   schemaHashes: Record<string, string>;
+  // Optional override for the node's Unix-domain control socket, used for
+  // owner-session attestation against an app-isolation node. When absent the
+  // path is derived from FOLDDB_HOME (see `resolveSocketPath`).
+  nodeSocketPath?: string;
 };
+
+// The node's app-isolation control socket lives under its data dir. The :9001
+// brain uses ~/.folddb/data; an ephemeral dev node sets FOLDDB_HOME to a temp
+// dir. `FOLDDB_SOCKET_PATH` overrides everything; then the config field; then
+// the FOLDDB_HOME-derived default.
+export function resolveSocketPath(cfg?: { nodeSocketPath?: string }): string {
+  const envOverride = process.env.FOLDDB_SOCKET_PATH;
+  if (envOverride && envOverride.length > 0) return envOverride;
+  if (cfg?.nodeSocketPath && cfg.nodeSocketPath.length > 0) return cfg.nodeSocketPath;
+  const home = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
+  return join(home, "data", "folddb.sock");
+}
 
 export function defaultConfigPath(): string {
   const override = process.env.FKANBAN_CONFIG;
@@ -102,11 +118,17 @@ function assertConfigShape(path: string, raw: unknown): Config {
     schemaHashes[k] = v;
   }
 
+  const nodeSocketPath =
+    typeof r.nodeSocketPath === "string" && r.nodeSocketPath.length > 0
+      ? (r.nodeSocketPath as string)
+      : undefined;
+
   return {
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
     schemaServiceUrl: r.schemaServiceUrl as string,
     userHash: r.userHash as string,
     schemaHashes,
+    ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
   };
 }

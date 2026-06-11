@@ -8,7 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { FkanbanError, newNodeClient, type NodeClient, type Verbose } from "../client.ts";
-import { readConfig, type Config } from "../config.ts";
+import { readConfig, resolveSocketPath, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listCmd } from "../commands/list.ts";
@@ -38,7 +38,7 @@ function errorResult(err: unknown): ToolResult {
 
 export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient }): McpServer {
   const { cfg } = opts;
-  const node = opts.node ?? newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash });
+  const node = opts.node ?? newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
   const server = new McpServer({ name: FKANBAN_MCP_NAME, version: FKANBAN_MCP_VERSION });
 
   server.registerTool(
@@ -252,7 +252,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
 // Used by `fkanban mcp` (the CLI subcommand). Reads the same config as the CLI.
 export async function startMcpServer(opts: { verbose?: Verbose } = {}): Promise<void> {
   const cfg = readConfig();
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose });
+  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
   const server = createFkanbanMcpServer({ cfg, node });
   const transport = new StdioServerTransport();
   await server.connect(transport);
