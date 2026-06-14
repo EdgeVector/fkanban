@@ -31,7 +31,7 @@ Commands:
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
-  list                 render a board as columns of cards (--board --column --json)
+  list                 render a board as columns of cards (--board --column --json --limit N --all)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
@@ -82,6 +82,8 @@ async function main(argv: string[]): Promise<number> {
       body: { type: "string" },
       columns: { type: "string" },
       position: { type: "string" },
+      limit: { type: "string" },
+      all: { type: "boolean" },
       "node-url": { type: "string" },
       "schema-service-url": { type: "string" },
       "node-socket-path": { type: "string" },
@@ -185,12 +187,15 @@ async function main(argv: string[]): Promise<number> {
 
     case "list": {
       const ctx = loadCtx({ verbose });
+      const limitRaw = values.limit !== undefined ? parseInt(values.limit as string, 10) : undefined;
       const out = await listCmd({
         cfg: ctx.cfg,
         node: ctx.node,
         board: values.board as string | undefined,
         column: values.column as string | undefined,
         json: values.json as boolean | undefined,
+        limit: limitRaw !== undefined && Number.isFinite(limitRaw) ? limitRaw : undefined,
+        all: values.all as boolean | undefined,
       });
       console.log(out);
       return 0;
