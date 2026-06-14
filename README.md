@@ -95,7 +95,7 @@ DONE  (0)
 | `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` past a dependency block) |
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
-| `fkanban list` | render a board as columns (`--board --column --json`); blocked cards show 🔒 |
+| `fkanban list` | render a board as columns (`--board --column --json --limit N --all`); blocked cards show 🔒 |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
 | `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
@@ -104,6 +104,11 @@ DONE  (0)
 | `fkanban mcp` | start an MCP server over stdio |
 
 Global: `--verbose` (echo HTTP), `--version`, `--help`.
+
+`list` caps each column at **12** cards by default so a long `done` column
+can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
+line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
+everything, `--limit N` sets a custom cap, and `--json` is always unabridged.
 
 ## Dependencies
 

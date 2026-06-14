@@ -7,12 +7,19 @@ import { blockedSlugSet, findBoard, listCards, sortCards, type Card } from "../r
 import { renderBoard, type RenderOptions } from "../board.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
+// Cards shown per column before the rest collapse to a "… N more" line.
+// Comfortably above a healthy active column; trims an unbounded `done`.
+export const DEFAULT_COLUMN_LIMIT = 12;
+
 export type ListOptions = {
   cfg: Config;
   node: NodeClient;
   board?: string;
   column?: string;
   json?: boolean;
+  // Per-column cap (defaults to DEFAULT_COLUMN_LIMIT). `all` removes the cap.
+  limit?: number;
+  all?: boolean;
 };
 
 export async function listCmd(opts: ListOptions): Promise<string> {
@@ -36,7 +43,12 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     updated_at: "",
   };
   // Resolve blocked status against ALL live cards so cross-board deps count.
-  const renderOpts: RenderOptions = { blocked: blockedSlugSet(cards, allCards) };
+  const limit = opts.all
+    ? 0
+    : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
+      ? (opts.limit as number)
+      : DEFAULT_COLUMN_LIMIT;
+  const renderOpts: RenderOptions = { blocked: blockedSlugSet(cards, allCards), limit };
   if (opts.column) renderOpts.column = opts.column;
   return renderBoard(resolvedBoard, cards, renderOpts);
 }

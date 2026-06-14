@@ -212,4 +212,64 @@ describe("render", () => {
     expect(out).toContain("#auth");
     expect(out).toContain("BACKLOG  (0)");
   });
+
+  test("limit caps a column and shows the overflow count", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const todo = Array.from({ length: 5 }, (_, i) =>
+      card({ slug: `t${i}`, title: `Todo ${i}`, column: "todo", position: String((i + 1) * 10) }),
+    );
+    const out = renderBoard(board, todo, { color: false, limit: 2 });
+    // Header still reports the true total.
+    expect(out).toContain("TODO  (5)");
+    // First 2 (top-of-column) shown; the rest collapse.
+    expect(out).toContain("Todo 0");
+    expect(out).toContain("Todo 1");
+    expect(out).not.toContain("Todo 2");
+    expect(out).toContain("… 3 more (--all)");
+  });
+
+  test("terminal column shows the most recent N (tail), not the first", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const done = Array.from({ length: 5 }, (_, i) =>
+      card({ slug: `d${i}`, title: `Done ${i}`, column: "done", position: String((i + 1) * 10) }),
+    );
+    const out = renderBoard(board, done, { color: false, limit: 2 });
+    expect(out).toContain("DONE  (5)");
+    // Tail (highest position = most recent) is kept; oldest are hidden.
+    expect(out).toContain("Done 3");
+    expect(out).toContain("Done 4");
+    expect(out).not.toContain("Done 0");
+    expect(out).toContain("… 3 earlier (--all)");
+  });
+
+  test("no limit (0) renders every card", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const done = Array.from({ length: 4 }, (_, i) =>
+      card({ slug: `d${i}`, title: `Done ${i}`, column: "done", position: String((i + 1) * 10) }),
+    );
+    const out = renderBoard(board, done, { color: false, limit: 0 });
+    for (let i = 0; i < 4; i++) expect(out).toContain(`Done ${i}`);
+    expect(out).not.toContain("(--all)");
+  });
 });

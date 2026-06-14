@@ -12,6 +12,11 @@ export type RenderOptions = {
   // Slugs of cards currently blocked by an unfinished dependency — rendered
   // with a 🔒 marker.
   blocked?: Set<string>;
+  // Max cards rendered per column; overflow collapses to a dim "… N more"
+  // line so a long column (typically `done`) can't flood the terminal.
+  // 0 or undefined → no cap. The terminal (last) column shows the most
+  // RECENT N (tail); other columns show the first N (top of the column).
+  limit?: number;
 };
 
 const COLORS: Record<string, string> = {
@@ -44,9 +49,13 @@ export function renderBoard(
   opts: RenderOptions = {},
 ): string {
   const color = opts.color ?? Boolean(process.stdout.isTTY);
-  const columns = (board.columns.length > 0 ? board.columns : [...DEFAULT_COLUMNS]).filter(
-    (c) => !opts.column || c === opts.column,
-  );
+  const allColumns = board.columns.length > 0 ? board.columns : [...DEFAULT_COLUMNS];
+  // The terminal column (conventionally `done`) grows without bound, so it
+  // gets tail-truncation; identify it from the full column order before any
+  // single-column filter narrows the view.
+  const terminalCol = allColumns[allColumns.length - 1];
+  const columns = allColumns.filter((c) => !opts.column || c === opts.column);
+  const cap = opts.limit && opts.limit > 0 ? opts.limit : 0;
 
   const lines: string[] = [];
   const heading = `${board.title || board.slug}  ${paint(color, "dim", `(${board.slug})`)}`;
@@ -61,8 +70,20 @@ export function renderBoard(
     if (inCol.length === 0) {
       lines.push(paint(color, "dim", "  —"));
     } else {
-      for (const c of inCol) {
+      const hidden = cap > 0 && inCol.length > cap ? inCol.length - cap : 0;
+      // Show the most recent N for the terminal column (tail), the first N
+      // otherwise (top-of-column is what you act on next).
+      const visible = hidden === 0
+        ? inCol
+        : col === terminalCol
+          ? inCol.slice(inCol.length - cap)
+          : inCol.slice(0, cap);
+      for (const c of visible) {
         lines.push(renderCardLine(c, color, opts.blocked?.has(c.slug) ?? false));
+      }
+      if (hidden > 0) {
+        const word = col === terminalCol ? "earlier" : "more";
+        lines.push(paint(color, "dim", `  … ${hidden} ${word} (--all)`));
       }
     }
     lines.push("");
