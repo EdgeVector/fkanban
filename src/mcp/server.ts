@@ -17,6 +17,7 @@ import { showCmd } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
+import { doctor } from "../commands/doctor.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
@@ -265,6 +266,26 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     async () => {
       try {
         return textResult(await boardListCmd({ cfg, node }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_doctor",
+    {
+      title: "Health-check fkanban",
+      description:
+        "Diagnose the fkanban setup the same way the `fkanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const lines: string[] = [];
+        const ok = await doctor({ print: (l) => lines.push(l) });
+        const report = lines.join("\n");
+        return { content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }], isError: !ok };
       } catch (err) {
         return errorResult(err);
       }
