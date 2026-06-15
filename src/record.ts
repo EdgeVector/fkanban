@@ -115,6 +115,24 @@ export function blockedSlugSet(cards: Card[], allCards: Card[]): Set<string> {
   return blocked;
 }
 
+// Case-insensitive substring search over a card's user-facing content (slug,
+// title, body, assignee, and visible tags — dep/tombstone tags never reach
+// here). Multi-word queries are AND-matched: every whitespace-separated term
+// must appear somewhere in the card, so `auth p1` finds cards mentioning both.
+export function cardMatchesQuery(card: Card, query: string): boolean {
+  const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  if (terms.length === 0) return true;
+  const hay = [card.slug, card.title, card.body, card.assignee, ...card.tags]
+    .join("\n")
+    .toLowerCase();
+  return terms.every((t) => hay.includes(t));
+}
+
+// Filter a card list to those matching `query` (see cardMatchesQuery).
+export function searchCards(cards: Card[], query: string): Card[] {
+  return cards.filter((c) => cardMatchesQuery(c, query));
+}
+
 export function nowIso(): string {
   return new Date().toISOString();
 }

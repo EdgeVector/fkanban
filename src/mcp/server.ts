@@ -12,6 +12,7 @@ import { readConfig, resolveSocketPath, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listCmd } from "../commands/list.ts";
+import { searchCmd } from "../commands/search.ts";
 import { showCmd } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListCmd } from "../commands/board.ts";
@@ -58,6 +59,30 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
         return textResult(await listCmd(o));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_search",
+    {
+      title: "Search cards",
+      description:
+        "Find cards by a case-insensitive substring match across slug, title, body, assignee, and tags. Multi-word queries are AND-matched (every term must appear). Results span columns/boards; each is annotated with its `[board/column]`.",
+      inputSchema: {
+        query: z.string().min(1).describe("Search text. Space-separated terms are all required (AND)."),
+        board: z.string().optional().describe("Restrict to one board."),
+        column: z.string().optional().describe("Restrict to one column."),
+      },
+    },
+    async (args) => {
+      try {
+        const o: Parameters<typeof searchCmd>[0] = { cfg, node, query: args.query };
+        if (args.board) o.board = args.board;
+        if (args.column) o.column = args.column;
+        return textResult(await searchCmd(o));
       } catch (err) {
         return errorResult(err);
       }

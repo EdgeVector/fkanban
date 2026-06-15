@@ -91,15 +91,41 @@ export function renderBoard(
   return lines.join("\n").replace(/\n+$/, "\n");
 }
 
-function renderCardLine(c: Card, color: boolean, blocked: boolean): string {
+function cardMetaSuffix(c: Card, color: boolean): string {
   const meta: string[] = [];
   if (c.assignee) meta.push(`@${c.assignee}`);
   if (c.deps.length > 0) meta.push(`deps:${c.deps.length}`);
   if (c.tags.length > 0) meta.push(c.tags.map((t) => `#${t}`).join(" "));
-  const suffix = meta.length > 0 ? "  " + paint(color, "dim", meta.join("  ")) : "";
+  return meta.length > 0 ? "  " + paint(color, "dim", meta.join("  ")) : "";
+}
+
+function renderCardLine(c: Card, color: boolean, blocked: boolean): string {
   const slug = paint(color, "cyan", c.slug);
   const marker = blocked ? paint(color, "yellow", "🔒 ") : "";
-  return `  • ${marker}${c.title || c.slug}  ${slug}${suffix}`;
+  return `  • ${marker}${c.title || c.slug}  ${slug}${cardMetaSuffix(c, color)}`;
+}
+
+// Render search hits as a flat list. Unlike the board view, matches can span
+// columns and boards, so each line is annotated with its `[board/column]`.
+export function renderSearchResults(
+  cards: Card[],
+  query: string,
+  opts: { color?: boolean; blocked?: Set<string> } = {},
+): string {
+  const color = opts.color ?? Boolean(process.stdout.isTTY);
+  if (cards.length === 0) return paint(color, "dim", `No cards match "${query}".`);
+
+  const lines: string[] = [];
+  const count = `${cards.length} match${cards.length === 1 ? "" : "es"}`;
+  lines.push(paint(color, "bold", `${count} for "${query}"`));
+  lines.push("");
+  for (const c of sortCards(cards)) {
+    const loc = paint(color, "dim", `[${c.board}/${c.column}]`);
+    const slug = paint(color, "cyan", c.slug);
+    const marker = opts.blocked?.has(c.slug) ? paint(color, "yellow", "🔒 ") : "";
+    lines.push(`  • ${marker}${loc} ${c.title || c.slug}  ${slug}${cardMetaSuffix(c, color)}`);
+  }
+  return lines.join("\n");
 }
 
 export function renderCardDetail(

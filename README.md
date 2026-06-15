@@ -96,6 +96,7 @@ DONE  (0)
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban list` | render a board as columns (`--board --column --json --limit N --all`); blocked cards show 🔒 |
+| `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
 | `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
@@ -109,6 +110,12 @@ Global: `--verbose` (echo HTTP), `--version`, `--help`.
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
 everything, `--limit N` sets a custom cap, and `--json` is always unabridged.
+
+`search <query>` finds cards by a case-insensitive substring across slug,
+title, body, assignee, and tags — handy once a board has more cards than fit on
+screen. Space-separated terms are AND-matched (`fkanban search auth p1` needs
+both), results span columns/boards and are annotated with `[board/column]`,
+and `--board` / `--column` scope the search.
 
 ## Dependencies
 
@@ -134,9 +141,10 @@ card is surfaced as a warning but never blocks (it could never reach `done`).
 
 ## MCP server
 
-Exposes the board as tools (`fkanban_list`, `fkanban_add`, `fkanban_move`,
-`fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_show`, `fkanban_rm`,
-`fkanban_board_create`, `fkanban_board_list`) so agents can drive the board:
+Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
+`fkanban_move`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_show`,
+`fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`) so agents can drive
+the board:
 
 ```bash
 claude mcp add fkanban bun "$PWD/src/mcp/main.ts"

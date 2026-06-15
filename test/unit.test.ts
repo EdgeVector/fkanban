@@ -21,6 +21,8 @@ import {
   normalizeDeps,
   depStatus,
   blockedSlugSet,
+  cardMatchesQuery,
+  searchCards,
   depTag,
   isWorkingColumn,
   TOMBSTONE_TAG,
@@ -28,7 +30,7 @@ import {
   type Card,
 } from "../src/record.ts";
 import { FkanbanError } from "../src/client.ts";
-import { renderBoard } from "../src/board.ts";
+import { renderBoard, renderSearchResults } from "../src/board.ts";
 
 function card(partial: Partial<Card>): Card {
   return {
@@ -191,6 +193,45 @@ describe("dependencies", () => {
     expect(isWorkingColumn("doing")).toBe(true);
     expect(isWorkingColumn("review")).toBe(true);
     expect(isWorkingColumn("done")).toBe(true);
+  });
+});
+
+describe("search", () => {
+  const corpus = [
+    card({ slug: "ship-login", title: "Ship the login flow", tags: ["auth", "p1"] }),
+    card({ slug: "fix-typo", title: "Fix a typo", body: "in the README", tags: ["docs"] }),
+    card({ slug: "oauth", title: "OAuth support", assignee: "tom", body: "needs auth review" }),
+  ];
+
+  test("matches across slug, title, body, assignee, and tags (case-insensitive)", () => {
+    expect(cardMatchesQuery(corpus[0]!, "LOGIN")).toBe(true); // title
+    expect(cardMatchesQuery(corpus[0]!, "p1")).toBe(true); // tag
+    expect(cardMatchesQuery(corpus[1]!, "readme")).toBe(true); // body
+    expect(cardMatchesQuery(corpus[2]!, "tom")).toBe(true); // assignee
+    expect(cardMatchesQuery(corpus[2]!, "oauth")).toBe(true); // slug
+  });
+
+  test("multi-word queries are AND-matched (every term must appear)", () => {
+    expect(cardMatchesQuery(corpus[2]!, "oauth auth")).toBe(true); // slug + body
+    expect(cardMatchesQuery(corpus[2]!, "oauth missing")).toBe(false);
+  });
+
+  test("an empty query matches everything", () => {
+    expect(cardMatchesQuery(corpus[0]!, "   ")).toBe(true);
+  });
+
+  test("searchCards returns the AND-matching subset", () => {
+    expect(searchCards(corpus, "auth").map((c) => c.slug)).toEqual(["ship-login", "oauth"]);
+    expect(searchCards(corpus, "nope")).toEqual([]);
+  });
+
+  test("renderSearchResults shows a count, location, and a no-match message", () => {
+    const hits = searchCards(corpus, "auth");
+    const out = renderSearchResults(hits, "auth", { color: false });
+    expect(out).toContain('2 matches for "auth"');
+    expect(out).toContain("[default/todo]");
+    expect(out).toContain("ship-login");
+    expect(renderSearchResults([], "ghost", { color: false })).toBe('No cards match "ghost".');
   });
 });
 
