@@ -22,10 +22,22 @@ import { doctor } from "../commands/doctor.ts";
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
 
-type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
 
 function textResult(text: string): ToolResult {
   return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }] };
+}
+
+// Write tools return BOTH a machine-readable result object (structuredContent,
+// matching the tool's declared outputSchema — the same shape the CLI emits
+// under `--json`) AND a human-readable text block, so MCP clients that don't
+// read structuredContent still get a useful rendering.
+function writeResult(text: string, structured: Record<string, unknown>): ToolResult {
+  return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }], structuredContent: structured };
 }
 
 function errorResult(err: unknown): ToolResult {
@@ -111,6 +123,12 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
             "Slugs this card depends on (replaces the existing dep list). It is blocked until each reaches `done`.",
           ),
       },
+      outputSchema: {
+        slug: z.string(),
+        action: z.enum(["created", "updated"]),
+        board: z.string(),
+        column: z.string(),
+      },
     },
     async (args) => {
       try {
@@ -123,7 +141,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
         const res = await addCmd(o);
-        return textResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`);
+        return writeResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -142,6 +160,11 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         position: z.number().int().optional().describe("Explicit ordering within the column."),
         force: z.boolean().optional().describe("Move even if the card is blocked by an unfinished dependency."),
       },
+      outputSchema: {
+        slug: z.string(),
+        from: z.string(),
+        to: z.string(),
+      },
     },
     async (args) => {
       try {
@@ -149,7 +172,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         if (args.position !== undefined) o.position = args.position;
         if (args.force !== undefined) o.force = args.force;
         const res = await moveCmd(o);
-        return textResult(`moved ${res.slug}: ${res.from} → ${res.to}`);
+        return writeResult(`moved ${res.slug}: ${res.from} → ${res.to}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -166,11 +189,17 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         slug: z.string().min(1).describe("The dependent card."),
         dep: z.string().min(1).describe("The card it depends on (must reach `done` first)."),
       },
+      outputSchema: {
+        slug: z.string(),
+        dep: z.string(),
+        action: z.enum(["added", "removed"]),
+        deps: z.array(z.string()),
+      },
     },
     async (args) => {
       try {
         const res = await depAddCmd({ cfg, node, slug: args.slug, dep: args.dep });
-        return textResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
+        return writeResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -186,11 +215,17 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         slug: z.string().min(1).describe("The dependent card."),
         dep: z.string().min(1).describe("The dependency to remove."),
       },
+      outputSchema: {
+        slug: z.string(),
+        dep: z.string(),
+        action: z.enum(["added", "removed"]),
+        deps: z.array(z.string()),
+      },
     },
     async (args) => {
       try {
         const res = await depRmCmd({ cfg, node, slug: args.slug, dep: args.dep });
-        return textResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
+        return writeResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -219,11 +254,12 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Delete a card",
       description: "Soft-delete a card (fold_db is append-only; the card is tombstoned and hidden).",
       inputSchema: { slug: z.string().min(1).describe("Card slug.") },
+      outputSchema: { slug: z.string() },
     },
     async (args) => {
       try {
         const res = await rmCmd({ cfg, node, slug: args.slug });
-        return textResult(`removed card ${res.slug}`);
+        return writeResult(`removed card ${res.slug}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -241,6 +277,10 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         columns: z.array(z.string()).optional().describe("Ordered column names."),
         body: z.string().optional().describe("Markdown description."),
       },
+      outputSchema: {
+        slug: z.string(),
+        action: z.enum(["created", "updated"]),
+      },
     },
     async (args) => {
       try {
@@ -249,7 +289,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         if (args.columns !== undefined) o.columns = args.columns;
         if (args.body !== undefined) o.body = args.body;
         const res = await boardCreateCmd(o);
-        return textResult(`${res.action} board ${res.slug}`);
+        return writeResult(`${res.action} board ${res.slug}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -296,10 +336,18 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
 }
 
 // Used by `fkanban mcp` (the CLI subcommand). Reads the same config as the CLI.
+// `server.connect` resolves as soon as the transport is wired up, so we must
+// not let the caller return (and `process.exit`) before the server has served
+// anything — keep the call pending until the stdio transport closes (client
+// disconnects / stdin EOF).
 export async function startMcpServer(opts: { verbose?: Verbose } = {}): Promise<void> {
   const cfg = readConfig();
   const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
   const server = createFkanbanMcpServer({ cfg, node });
   const transport = new StdioServerTransport();
+  const closed = new Promise<void>((resolve) => {
+    transport.onclose = () => resolve();
+  });
   await server.connect(transport);
+  await closed;
 }
