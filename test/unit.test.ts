@@ -31,6 +31,7 @@ import {
 } from "../src/record.ts";
 import { FkanbanError } from "../src/client.ts";
 import { renderBoard, renderSearchResults } from "../src/board.ts";
+import { doctor } from "../src/commands/doctor.ts";
 
 function card(partial: Partial<Card>): Card {
   return {
@@ -312,5 +313,19 @@ describe("render", () => {
     const out = renderBoard(board, done, { color: false, limit: 0 });
     for (let i = 0; i < 4; i++) expect(out).toContain(`Done ${i}`);
     expect(out).not.toContain("(--all)");
+  });
+});
+
+describe("doctor", () => {
+  // Backs the fkanban_doctor MCP tool: it accumulates check lines through the
+  // injected `print` callback and returns ok=false when a check fails. A
+  // missing config short-circuits before any node call, so this stays pure.
+  test("missing config → ok=false, prints the failed check + init hint", async () => {
+    const lines: string[] = [];
+    const ok = await doctor({ configPath: "/tmp/fkanban-doctor-nonexistent-config.json", print: (l) => lines.push(l) });
+    expect(ok).toBe(false);
+    const report = lines.join("\n");
+    expect(report).toContain("✗ config present");
+    expect(report).toContain("fkanban init");
   });
 });

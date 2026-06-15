@@ -143,8 +143,8 @@ card is surfaced as a warning but never blocks (it could never reach `done`).
 
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_move`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_show`,
-`fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`) so agents can drive
-the board:
+`fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_doctor`)
+so agents can drive — and self-diagnose — the board:
 
 ```bash
 claude mcp add fkanban bun "$PWD/src/mcp/main.ts"
