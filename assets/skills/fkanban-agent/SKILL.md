@@ -105,8 +105,11 @@ unmerged work): leave the branch clean, move the card to `review`, append a shor
 
 Run once per wake, then exit. Sweep **every card not already in `done`** — not
 just `doing`/`review` (a card can be merged while still sitting in `todo` if a
-human did the work, so don't restrict by column). Skip a card only if it has no
-`Repo:` header. For each candidate:
+human did the work, so don't restrict by column). **But widening the sweep is
+ONLY to catch cards whose PR already merged — NOT a licence to resolve
+un-started cards. The DEFAULT action for any swept card is LEAVE IT ALONE; act
+only on concrete PR/branch evidence (step 2). When in doubt, do nothing.** Skip
+a card only if it has no `Repo:` header. For each candidate:
 
 1. **Find its PR.** Prefer an explicit `PR:` line / URL in the body (work landed
    outside WORK mode won't use the `fkanban/<slug>` branch). Fall back to the
@@ -119,9 +122,22 @@ human did the work, so don't restrict by column). Skip a card only if it has no
    ```
 2. **Decide from PR state:**
    - **Merged** (`state=MERGED` / `mergedAt` set) → `fkanban move <slug> done`.
-   - **No PR found** and card is in `doing` → the worker hasn't opened one yet
-     (or died mid-work). If a `fkanban/<slug>` branch exists with commits, finish
-     WORK MODE step 5 for it; else leave it for a worker. Don't thrash.
+     This is the ONLY path to `done` — a verified MERGED PR. If you can't point
+     at a merged PR for the card, it does NOT go to `done`, however it reads.
+   - **No PR found AND no `fkanban/<slug>` branch with commits** → the card is
+     **un-started** (a fresh `todo`/`backlog` item nobody has picked up).
+     **LEAVE IT WHERE IT IS — never move it, never mark it `done`.** The
+     reconciler advances *in-flight* work (cards with a PR or a branch); it
+     does not start, complete, or retire fresh cards. A `todo`/`backlog` card
+     with no PR is the normal resting state — the widened sweep is for
+     already-merged-but-stuck cards, not for closing un-started work. Marking
+     an un-started card `done` silently buries real work (it hit
+     `node-upload-storage-runtime-cloud-upgrade` +
+     `schema-descriptive-name-ambiguity-dedup` on 2026-06-14 — the bug this
+     guard prevents).
+   - **No PR found** but a `fkanban/<slug>` branch with commits exists and the
+     card is in `doing` → a worker opened a branch but didn't finish landing
+     (or died mid-work). Finish WORK MODE step 5 for it. Don't thrash.
    - **CI red** (`statusCheckRollup` failing) → enter the worktree, read the
      failing job logs (`gh run view --log-failed`), fix, re-run VERIFY, push.
    - **Behind base / conflicts** (`mergeStateStatus` = BEHIND/DIRTY) →
