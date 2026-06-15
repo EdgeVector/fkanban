@@ -570,7 +570,7 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
     message: `${which} not reachable at ${baseUrl} — run \`fkanban doctor\` for a diagnosis.`,
     hint:
       service === "node"
-        ? "Start a fold node, e.g. `cd fold/fold_db_node && ./run.sh --local --dev`, then re-run `fkanban init`."
+        ? "Is a folddb node running? Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `fkanban init`."
         : "Check the schema-service URL in ~/.fkanban/config.json.",
     cause,
   });

@@ -46,6 +46,34 @@ folddb-dev schema publish --schema Board --app fkanban --schema-service-url <url
 appear in the registry. `folddb-dev app list` / `curl .../v1/schema/<hash>`
 confirm.)
 
+## Prerequisites
+
+fkanban is a thin client — it needs a running **folddb node** to talk to
+(`init` defaults to `http://127.0.0.1:9001`). Start one before `init` in one
+of two ways:
+
+- **Homebrew (recommended for just using fkanban):** install folddb from the
+  [EdgeVector/homebrew-folddb](https://github.com/EdgeVector/homebrew-folddb)
+  tap and start the daemon. It listens on **:9001** by default — exactly
+  `init`'s default `--node-url`.
+
+  ```bash
+  brew install edgevector/folddb/folddb
+  brew services start folddb          # background daemon, restarts at login
+  ```
+
+  (`folddb daemon start` works too if you'd rather not run it as a service.)
+  First time on a machine, run `folddb setup` to create your identity.
+
+- **From the fold monorepo (for fold devs):**
+
+  ```bash
+  cd fold/fold_db_node && ./run.sh --local --dev
+  ```
+
+Once a node is up, run `bun src/cli.ts doctor` to confirm it's reachable, then
+`bun src/cli.ts init` to bootstrap the board.
+
 ## Quick start
 
 ```bash
