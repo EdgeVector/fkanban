@@ -30,6 +30,13 @@ import {
   type Card,
 } from "../src/record.ts";
 import { FkanbanError } from "../src/client.ts";
+import {
+  formatAdd,
+  formatMove,
+  formatDep,
+  formatRm,
+  formatBoardCreate,
+} from "../src/format.ts";
 import { renderBoard, renderSearchResults } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
 
@@ -327,5 +334,38 @@ describe("doctor", () => {
     const report = lines.join("\n");
     expect(report).toContain("✗ config present");
     expect(report).toContain("fkanban init");
+  });
+});
+
+describe("mutation result formatting (--json)", () => {
+  test("human strings match the legacy one-liners", () => {
+    expect(formatAdd({ slug: "ship", action: "created", board: "default", column: "todo" })).toBe(
+      "created card ship → default/todo",
+    );
+    expect(formatMove({ slug: "ship", from: "todo", to: "doing" })).toBe("moved ship: todo → doing");
+    expect(formatDep({ slug: "ui", dep: "api", action: "added", deps: ["api", "docs"] })).toBe(
+      "ui now depends on api (deps: api, docs)",
+    );
+    expect(formatDep({ slug: "ui", dep: "api", action: "removed", deps: [] })).toBe(
+      "ui no longer depends on api (deps: none)",
+    );
+    expect(formatRm({ slug: "ship" })).toBe("removed card ship");
+    expect(formatBoardCreate({ slug: "sprint", action: "updated" })).toBe("updated board sprint");
+  });
+
+  test("--json emits the raw result object, parseable back to the same shape", () => {
+    const add = { slug: "ship", action: "created" as const, board: "default", column: "todo" };
+    expect(JSON.parse(formatAdd(add, true))).toEqual(add);
+
+    const move = { slug: "ship", from: "todo", to: "doing" };
+    expect(JSON.parse(formatMove(move, true))).toEqual(move);
+
+    const dep = { slug: "ui", dep: "api", action: "added" as const, deps: ["api"] };
+    expect(JSON.parse(formatDep(dep, true))).toEqual(dep);
+
+    expect(JSON.parse(formatRm({ slug: "ship" }, true))).toEqual({ slug: "ship" });
+
+    const board = { slug: "sprint", action: "created" as const };
+    expect(JSON.parse(formatBoardCreate(board, true))).toEqual(board);
   });
 });

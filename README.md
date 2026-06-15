@@ -106,6 +106,11 @@ DONE  (0)
 
 Global: `--verbose` (echo HTTP), `--version`, `--help`.
 
+`--json` works on the write commands too — `add`, `move`, `dep add/rm`, `rm`,
+and `board create` echo the write result as a JSON object instead of a prose
+line, so scripts and agents can confirm the outcome machine-readably (e.g.
+`fkanban move ship-login doing --json` → `{"slug":"ship-login","from":"todo","to":"doing"}`).
+
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows

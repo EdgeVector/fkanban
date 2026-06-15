@@ -19,6 +19,13 @@ import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { doctor } from "./commands/doctor.ts";
+import {
+  formatAdd,
+  formatMove,
+  formatDep,
+  formatRm,
+  formatBoardCreate,
+} from "./format.ts";
 
 export const TOP_HELP = `fkanban — a kanban board over fold_db
 
@@ -44,6 +51,8 @@ Commands:
 
 Global flags:
   --verbose            echo HTTP requests + responses
+  --json               machine-readable output (add/move/dep/rm/board create
+                       echo the write result as JSON; read commands too)
   --help, -h           print this help
   --version, -V        print the fkanban version and exit
 
@@ -147,7 +156,7 @@ async function main(argv: string[]): Promise<number> {
         deps: parseTags(values.deps as string | undefined),
         body,
       });
-      console.log(`${res.action} card ${res.slug} → ${res.board}/${res.column}`);
+      console.log(formatAdd(res, values.json as boolean | undefined));
       return 0;
     }
 
@@ -164,7 +173,7 @@ async function main(argv: string[]): Promise<number> {
         position,
         force: values.force as boolean | undefined,
       });
-      console.log(`moved ${res.slug}: ${res.from} → ${res.to}`);
+      console.log(formatMove(res, values.json as boolean | undefined));
       return 0;
     }
 
@@ -175,12 +184,12 @@ async function main(argv: string[]): Promise<number> {
       const ctx = loadCtx({ verbose });
       if (sub === "add") {
         const res = await depAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
-        console.log(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
+        console.log(formatDep(res, values.json as boolean | undefined));
         return 0;
       }
       if (sub === "rm" || sub === "remove") {
         const res = await depRmCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
-        console.log(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`);
+        console.log(formatDep(res, values.json as boolean | undefined));
         return 0;
       }
       console.error(`Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
@@ -230,7 +239,7 @@ async function main(argv: string[]): Promise<number> {
       const slug = requirePositional(positionals[1], "rm <slug>");
       const ctx = loadCtx({ verbose });
       const res = await rmCmd({ cfg: ctx.cfg, node: ctx.node, slug });
-      console.log(`removed card ${res.slug}`);
+      console.log(formatRm(res, values.json as boolean | undefined));
       return 0;
     }
 
@@ -247,7 +256,7 @@ async function main(argv: string[]): Promise<number> {
           columns: parseTags(values.columns as string | undefined),
           body: values.body as string | undefined,
         });
-        console.log(`${res.action} board ${res.slug}`);
+        console.log(formatBoardCreate(res, values.json as boolean | undefined));
         return 0;
       }
       if (sub === "list" || sub === undefined) {
