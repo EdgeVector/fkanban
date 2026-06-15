@@ -13,6 +13,7 @@ import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
 import { moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
+import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd } from "./commands/board.ts";
@@ -32,6 +33,7 @@ Commands:
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
   list                 render a board as columns of cards (--board --column --json --limit N --all)
+  search <query>       find cards by text across slug/title/body/tags (--board --column --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
@@ -196,6 +198,21 @@ async function main(argv: string[]): Promise<number> {
         json: values.json as boolean | undefined,
         limit: limitRaw !== undefined && Number.isFinite(limitRaw) ? limitRaw : undefined,
         all: values.all as boolean | undefined,
+      });
+      console.log(out);
+      return 0;
+    }
+
+    case "search": {
+      const query = requirePositional(positionals[1], "search <query>");
+      const ctx = loadCtx({ verbose });
+      const out = await searchCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        query,
+        board: values.board as string | undefined,
+        column: values.column as string | undefined,
+        json: values.json as boolean | undefined,
       });
       console.log(out);
       return 0;
