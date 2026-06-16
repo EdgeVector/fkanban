@@ -240,6 +240,21 @@ export async function findBoard(node: NodeClient, cfg: Config, slug: string): Pr
     : null;
 }
 
+// Resolve a board by slug, throwing the canonical `board_not_found` error
+// when it doesn't exist. Shared by `add`, `list`, and `search` so the message
+// + hint stay identical in one place.
+export async function requireBoard(node: NodeClient, cfg: Config, slug: string): Promise<Board> {
+  const board = await findBoard(node, cfg, slug);
+  if (!board) {
+    throw new FkanbanError({
+      code: "board_not_found",
+      message: `Board "${slug}" does not exist.`,
+      hint: `Create it first: \`fkanban board create ${slug}\` (or use the default board).`,
+    });
+  }
+  return board;
+}
+
 export function cardToFields(c: Card): Record<string, unknown> {
   return {
     slug: c.slug,
