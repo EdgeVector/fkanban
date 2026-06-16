@@ -16,38 +16,11 @@ Default columns: `backlog → todo → doing → review → done`.
 > Contributing to fkanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/test/run/dogfood + PR workflow and the non-obvious gotchas.
 
-## App creation (one-time)
-
-Under app_identity v3.1 a schema claim under the `fkanban/*` namespace must be
-signed by an enrolled developer's DevCert, so the schemas are published to the
-schema_service **once**, out of band, via the exemem app-creation flow. After
-that, `fkanban init` just loads + resolves them — it never self-publishes.
-
-```bash
-# 0. Enroll a developer once (see the app-identity-dev-enroll skill / runbook):
-#    `folddb-dev developer init` + a row in ExememDevelopers-<env> with
-#    developer_access=true + an EXEMEM_DEV_API_KEY (em_<48 hex>).
-
-# 1. Register the fkanban app namespace.
-folddb-dev app new --id fkanban --metadata-file fkanban.app.json --out app.json
-folddb-dev app publish --app-file app.json \
-  --schema-service-url <schema-service-url> --dev-api-key "$EXEMEM_DEV_API_KEY"
-
-# 2. Emit the schema definitions from the single source of truth, then
-#    register + publish each under the app (start a dev session first):
-bun -e 'import{cardSchema,boardSchema}from"./src/schemas.ts";import{writeFileSync}from"node:fs";
-  writeFileSync("card.schema.json",JSON.stringify(cardSchema.schema,null,2));
-  writeFileSync("board.schema.json",JSON.stringify(boardSchema.schema,null,2));'
-folddb-dev start --name fkanban-pub --schema-service-url <schema-service-url>
-folddb-dev schema register --file card.schema.json  --session fkanban-pub
-folddb-dev schema register --file board.schema.json --session fkanban-pub
-folddb-dev schema publish --schema Card  --app fkanban --schema-service-url <url> --session fkanban-pub
-folddb-dev schema publish --schema Board --app fkanban --schema-service-url <url> --session fkanban-pub
-```
-
-(Schema publishes are async — the app row / schemas take a few seconds to
-appear in the registry. `folddb-dev app list` / `curl .../v1/schema/<hash>`
-confirm.)
+> **Just want to use fkanban?** The `fkanban/*` schemas are already published —
+> skip straight to [Prerequisites](#prerequisites) + [Quick start](#quick-start);
+> `fkanban init` only loads them. (Re-publishing those schemas to a *new*
+> schema_service is a one-time maintainer task — see
+> [Republishing the schemas](#republishing-the-schemas-maintainers--one-time).)
 
 ## Prerequisites
 
@@ -123,8 +96,9 @@ fkanban list
 (Haven't installed the shim? Every `fkanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
-If `init` reports `schemas_not_published`, the one-time **App creation** step
-above hasn't run against that schema service yet.
+If `init` reports `schemas_not_published`, the one-time
+[Republishing the schemas](#republishing-the-schemas-maintainers--one-time)
+maintainer step hasn't run against that schema service yet.
 
 ```
 Default board  (default)
@@ -225,6 +199,43 @@ claude mcp add fkanban -- bun "$PWD/src/mcp/main.ts"
 `fkanban doctor` prints whichever of these applies to your setup. It reads the
 same `~/.fkanban/config.json` the CLI writes (override the path with
 `$FKANBAN_CONFIG`).
+
+## Republishing the schemas (maintainers / one-time)
+
+> You do **not** need this to use fkanban — the `fkanban/*` schemas are already
+> published, and `fkanban init` just loads + resolves them. This section is for
+> a maintainer standing the schemas up against a *new* schema_service.
+
+Under app_identity v3.1 a schema claim under the `fkanban/*` namespace must be
+signed by an enrolled developer's DevCert, so the schemas are published to the
+schema_service **once**, out of band, via the exemem app-creation flow. After
+that, `fkanban init` just loads + resolves them — it never self-publishes.
+
+```bash
+# 0. Enroll a developer once (see the app-identity-dev-enroll skill / runbook):
+#    `folddb-dev developer init` + a row in ExememDevelopers-<env> with
+#    developer_access=true + an EXEMEM_DEV_API_KEY (em_<48 hex>).
+
+# 1. Register the fkanban app namespace.
+folddb-dev app new --id fkanban --metadata-file fkanban.app.json --out app.json
+folddb-dev app publish --app-file app.json \
+  --schema-service-url <schema-service-url> --dev-api-key "$EXEMEM_DEV_API_KEY"
+
+# 2. Emit the schema definitions from the single source of truth, then
+#    register + publish each under the app (start a dev session first):
+bun -e 'import{cardSchema,boardSchema}from"./src/schemas.ts";import{writeFileSync}from"node:fs";
+  writeFileSync("card.schema.json",JSON.stringify(cardSchema.schema,null,2));
+  writeFileSync("board.schema.json",JSON.stringify(boardSchema.schema,null,2));'
+folddb-dev start --name fkanban-pub --schema-service-url <schema-service-url>
+folddb-dev schema register --file card.schema.json  --session fkanban-pub
+folddb-dev schema register --file board.schema.json --session fkanban-pub
+folddb-dev schema publish --schema Card  --app fkanban --schema-service-url <url> --session fkanban-pub
+folddb-dev schema publish --schema Board --app fkanban --schema-service-url <url> --session fkanban-pub
+```
+
+(Schema publishes are async — the app row / schemas take a few seconds to
+appear in the registry. `folddb-dev app list` / `curl .../v1/schema/<hash>`
+confirm.)
 
 ## Design notes
 
