@@ -43,14 +43,18 @@ export type AddResult = { slug: string; action: "created" | "updated"; board: st
 
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
-  const boardSlug = opts.board ?? "default";
+
+  const hash = schemaHashFor("card", opts.cfg);
+  // Resolve the card BEFORE the board context: on update we must honor the
+  // card's existing board when no explicit `--board` is given. An explicit
+  // `--board` still moves the card; only the implicit default would be wrong.
+  const existing = await findCard(opts.node, opts.cfg, opts.slug);
+  const boardSlug = opts.board ?? existing?.board ?? "default";
   const board = await requireBoard(opts.node, opts.cfg, boardSlug);
   const columns = board.columns;
   const column = opts.column ?? columns[0] ?? "backlog";
   ensureColumn(column, columns);
 
-  const hash = schemaHashFor("card", opts.cfg);
-  const existing = await findCard(opts.node, opts.cfg, opts.slug);
   const now = nowIso();
 
   if (existing) {
