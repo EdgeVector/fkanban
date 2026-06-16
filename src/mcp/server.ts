@@ -98,6 +98,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Show kanban board",
       description:
         "Render a kanban board as columns of cards. Cards are grouped under their column (backlog → todo → doing → review → done) in position order.",
+      annotations: { title: "Show kanban board", readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         board: z.string().optional().describe("Board slug (default: `default`)."),
         column: z.string().optional().describe("Restrict to one column."),
@@ -123,6 +124,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Search cards",
       description:
         "Find cards by a case-insensitive substring match across slug, title, body, assignee, and tags. Multi-word queries are AND-matched (every term must appear). Results span columns/boards; each is annotated with its `[board/column]`.",
+      annotations: { title: "Search cards", readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         query: z.string().min(1).describe("Search text. Space-separated terms are all required (AND)."),
         board: z.string().optional().describe("Restrict to one board."),
@@ -149,6 +151,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Add or update a card",
       description:
         "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column.",
+      annotations: { title: "Add or update a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().min(1).describe("Stable card id (lowercase [a-z0-9-_])."),
         title: z.string().optional().describe("Card title."),
@@ -195,6 +198,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Move a card",
       description:
         "Move a card to a different column on its board. A card blocked by an unfinished dependency cannot move into doing/review/done unless `force` is set.",
+      annotations: { title: "Move a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().min(1).describe("Card slug."),
         column: z.string().min(1).describe("Target column."),
@@ -226,6 +230,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Add a dependency",
       description:
         "Make `slug` depend on `dep`. `slug` is then blocked (cannot enter doing/review/done) until `dep` reaches the `done` column.",
+      annotations: { title: "Add a dependency", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().min(1).describe("The dependent card."),
         dep: z.string().min(1).describe("The card it depends on (must reach `done` first)."),
@@ -252,6 +257,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     {
       title: "Remove a dependency",
       description: "Remove the dependency edge from `slug` to `dep`.",
+      annotations: { title: "Remove a dependency", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().min(1).describe("The dependent card."),
         dep: z.string().min(1).describe("The dependency to remove."),
@@ -278,6 +284,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     {
       title: "Show a card",
       description: "Print one card in detail by slug, including its dependencies and blocked state.",
+      annotations: { title: "Show a card", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().min(1).describe("Card slug.") },
       outputSchema: cardDetailSchema.shape,
     },
@@ -296,6 +303,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     {
       title: "Delete a card",
       description: "Soft-delete a card (fold_db is append-only; the card is tombstoned and hidden).",
+      annotations: { title: "Delete a card", destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().min(1).describe("Card slug.") },
       outputSchema: { slug: z.string() },
     },
@@ -314,6 +322,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     {
       title: "Create or update a board",
       description: "Create a board (or update it). Columns default to backlog → todo → doing → review → done.",
+      annotations: { title: "Create or update a board", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().min(1).describe("Board slug."),
         title: z.string().optional().describe("Board title."),
@@ -344,6 +353,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     {
       title: "List boards",
       description: "List every board with its columns.",
+      annotations: { title: "List boards", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
       outputSchema: { boards: z.array(boardSchema).describe("Every live board with its columns.") },
     },
@@ -364,6 +374,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       description:
         "Soft-delete a board (fold_db is append-only; the board is tombstoned and hidden). " +
         "Refuses the default board, and refuses a board with live cards unless force is set.",
+      annotations: { title: "Delete a board", destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().min(1).describe("Board slug."),
         force: z.boolean().optional().describe("Remove even if the board still has live cards."),
@@ -386,6 +397,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Health-check fkanban",
       description:
         "Diagnose the fkanban setup the same way the `fkanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring.",
+      annotations: { title: "Health-check fkanban", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
     },
     async () => {
