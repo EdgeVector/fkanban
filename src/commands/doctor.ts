@@ -97,20 +97,27 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   return ok;
 }
 
+// Resolve the global `fkanban` shim on PATH, or `null` if bare `fkanban`
+// doesn't resolve. Shared by `doctor` (advisory check) and `init` (to print
+// the `claude mcp add` form that will actually work for this dev).
+export function resolveFkanbanShim(): string | null {
+  try {
+    const which = Bun.spawnSync(["sh", "-c", "command -v fkanban"]);
+    const out = which.stdout.toString().trim();
+    if (which.exitCode === 0 && out) return out;
+  } catch {
+    // `command -v` unavailable — treat as not found.
+  }
+  return null;
+}
+
 // Is bare `fkanban` resolvable on PATH? Purely informational — prints a ✓ if a
 // `fkanban` shim is found, or a · hint with the one-line install if not.
 async function reportShim(
   print: (line: string) => void,
   onCheck?: (check: DoctorCheck) => void,
 ): Promise<void> {
-  let resolved: string | null = null;
-  try {
-    const which = Bun.spawnSync(["sh", "-c", "command -v fkanban"]);
-    const out = which.stdout.toString().trim();
-    if (which.exitCode === 0 && out) resolved = out;
-  } catch {
-    // `command -v` unavailable — treat as not found.
-  }
+  const resolved = resolveFkanbanShim();
 
   if (resolved) {
     print(`✓ global \`fkanban\` shim on PATH — ${resolved}`);
