@@ -238,34 +238,71 @@ function parseTags(raw: string | undefined): string[] | undefined {
   return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
+// Node's parseArgs error codes for malformed flags. With `strict: true`,
+// an unknown `--flag`, a value handed to a boolean flag, or a missing value
+// for a string flag all throw a TypeError carrying one of these codes. We
+// turn them into the same clean error + exit-2 contract as an unknown command,
+// instead of silently swallowing the typo (which produced wrong data).
+const PARSE_ARGS_ERROR_CODES = new Set([
+  "ERR_PARSE_ARGS_UNKNOWN_OPTION",
+  "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
+  "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL",
+]);
+
+function isParseArgsError(err: unknown): err is Error & { code: string } {
+  return (
+    err instanceof Error &&
+    typeof (err as { code?: unknown }).code === "string" &&
+    PARSE_ARGS_ERROR_CODES.has((err as unknown as { code: string }).code)
+  );
+}
+
 async function main(argv: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    strict: false,
-    options: {
-      help: { type: "boolean", short: "h" },
-      version: { type: "boolean", short: "V" },
-      verbose: { type: "boolean" },
-      json: { type: "boolean" },
-      title: { type: "string" },
-      board: { type: "string" },
-      column: { type: "string" },
-      assignee: { type: "string" },
-      tags: { type: "string" },
-      deps: { type: "string" },
-      force: { type: "boolean" },
-      body: { type: "string" },
-      columns: { type: "string" },
-      position: { type: "string" },
-      limit: { type: "string" },
-      all: { type: "boolean" },
-      "node-url": { type: "string" },
-      "schema-service-url": { type: "string" },
-      "node-socket-path": { type: "string" },
-      name: { type: "string" },
-    },
-  });
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      strict: true,
+      options: {
+        help: { type: "boolean", short: "h" },
+        version: { type: "boolean", short: "V" },
+        verbose: { type: "boolean" },
+        json: { type: "boolean" },
+        title: { type: "string" },
+        board: { type: "string" },
+        column: { type: "string" },
+        assignee: { type: "string" },
+        tags: { type: "string" },
+        deps: { type: "string" },
+        force: { type: "boolean" },
+        body: { type: "string" },
+        columns: { type: "string" },
+        position: { type: "string" },
+        limit: { type: "string" },
+        all: { type: "boolean" },
+        "node-url": { type: "string" },
+        "schema-service-url": { type: "string" },
+        "node-socket-path": { type: "string" },
+        name: { type: "string" },
+      },
+    });
+  } catch (err) {
+    if (isParseArgsError(err)) {
+      // Mirror the unknown-command contract: clean one-liner on stderr + exit 2.
+      // parseArgs runs before we know the command, but the first arg that isn't
+      // a flag is the command name — surface it in the hint when we have it.
+      const cmd = argv.find((a) => !a.startsWith("-"));
+      const helpCmd = cmd && cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+      // Node's default message tacks on verbose `--` advice; keep just the
+      // first clause (the actual problem) and our own hint.
+      const reason = err.message.split(". To specify")[0] ?? err.message;
+      console.error(`${reason}. Run \`fkanban ${helpCmd}\` to see this command's flags.`);
+      return 2;
+    }
+    throw err;
+  }
+  const { values, positionals } = parsed;
 
   if (values.version) {
     console.log(pkg.version);
