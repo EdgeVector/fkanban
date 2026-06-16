@@ -23,6 +23,21 @@ const server = Bun.serve({
       await new Promise((r) => setTimeout(r, 5_000));
       return Response.json({ ok: true, results: [] });
     }
+    // Flush response headers immediately, then stall forever mid-body. This is
+    // the cold-schema-init failure mode: the node accepts the request and
+    // returns headers fast, then hangs while streaming the body. A fetch-only
+    // timeout does NOT cover this — the deadline must also bound the body read.
+    if (url.pathname === "/headers-then-stall/api/query") {
+      const stream = new ReadableStream({
+        start(ctrl) {
+          ctrl.enqueue(new TextEncoder().encode('{"ok":true,'));
+          // never enqueue the rest, never close → body read hangs
+        },
+      });
+      return new Response(stream, {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     if (url.pathname === "/api/query") {
       const filter = (body as Record<string, unknown>).filter as { HashKey?: string } | undefined;
       const results =
@@ -109,6 +124,24 @@ describe("request deadline", () => {
       .queryAll({ schemaHash: "cardhash", fields: ["slug"] })
       .then(() => null)
       .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("service_timeout");
+    expect((err as FkanbanError).hint).toContain("re-running the command is safe");
+  });
+
+  test("a node that returns headers then stalls mid-body still times out (not just the fetch)", async () => {
+    const node = newNodeClient({
+      baseUrl: `${baseUrl}/headers-then-stall`,
+      userHash: "test-user",
+      timeoutMs: 100,
+    });
+    const start = Date.now();
+    const err = await node
+      .queryAll({ schemaHash: "cardhash", fields: ["slug"] })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    // It must abort at the deadline, not hang on the unbounded body read.
+    expect(Date.now() - start).toBeLessThan(3_000);
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("service_timeout");
     expect((err as FkanbanError).hint).toContain("re-running the command is safe");
