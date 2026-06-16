@@ -104,7 +104,9 @@ ln -sf "$PWD/bin/fkanban" /usr/local/bin/fkanban   # one-time: put fkanban on PA
 
 # Bootstrap the node, LOAD + RESOLVE the published fkanban schemas, seed the
 # default board. Defaults: node http://127.0.0.1:9001, schema service = prod
-# Lambda.
+# Lambda. On a fresh bootstrap, `init` ends by printing a "Next steps" block —
+# including the `claude mcp add fkanban …` command to register the MCP server
+# (the form is picked for you based on whether the `fkanban` shim is on PATH).
 fkanban init
 
 # …or point at an ephemeral dev node + the dev schema service:

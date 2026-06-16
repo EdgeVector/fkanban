@@ -15,7 +15,9 @@
 // publish --app fkanban`; see README "App creation"). After that, every
 // `fkanban init` just loads + resolves the already-published schemas.
 
+import { fileURLToPath } from "node:url";
 import { newNodeClient, FkanbanError, type Verbose } from "../client.ts";
+import { resolveFkanbanShim } from "./doctor.ts";
 import {
   UNIQUE_SCHEMAS,
   OWNER_APP_ID,
@@ -168,5 +170,39 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
 
   print(`[init] ok`);
+  printNextSteps(print, bootstrapped);
+
   return { config, bootstrapped };
+}
+
+// Guide the next action. On a fresh bootstrap, emit a copy-pasteable Next steps
+// block (list the board, add a card, register the MCP server) — this is the
+// natural moment to surface the `claude mcp add` command, which is otherwise
+// discoverable only by reading the README. On an idempotent re-init, collapse
+// to a single quiet line so re-runs stay calm. Threaded through the same
+// `print` callback as the rest of `init` so test/`--json` callers stay
+// deterministic. Exported for unit testing.
+export function printNextSteps(print: (line: string) => void, bootstrapped: boolean): void {
+  if (bootstrapped) {
+    print("");
+    print("Next steps:");
+    print("  fkanban list                              # see your board");
+    print('  fkanban add my-first-card --title "..."   # add a card');
+    print(`  ${mcpAddCommand()}   # register the MCP server`);
+  } else {
+    print("");
+    print("Already initialized — run `fkanban list` to see your board.");
+  }
+}
+
+// The `claude mcp add` line that will actually work for THIS dev: with the
+// global `fkanban` shim on PATH use the short form, otherwise point bun at this
+// repo's MCP entrypoint (mirrors the two forms in src/mcp/main.ts + README).
+function mcpAddCommand(): string {
+  if (resolveFkanbanShim()) {
+    return "claude mcp add fkanban -- fkanban mcp";
+  }
+  const initPath = fileURLToPath(import.meta.url); // .../src/commands/init.ts
+  const repoRoot = initPath.replace(/\/src\/commands\/init\.ts$/, "");
+  return `claude mcp add fkanban -- bun ${repoRoot}/src/mcp/main.ts`;
 }
