@@ -5,9 +5,14 @@
 // or, after install, via the `fkanban-mcp` bin:
 //   claude mcp add fkanban fkanban-mcp
 //
-// Reads ~/.fkanban/config.json (same as the CLI). On a missing or invalid
-// config it prints a single clean `fkanban mcp: <message>` line and exits
-// non-zero so the error surfaces in the MCP client logs without a stack trace.
+// Reads ~/.fkanban/config.json (same as the CLI). The server starts
+// UNCONDITIONALLY: even on a missing or invalid config it completes the MCP
+// handshake and lists its tools, so the client connects instead of seeing an
+// opaque "failed to connect". When config is unavailable, each config-dependent
+// tool short-circuits to a clean `isError` result with the actionable
+// "Run `fkanban init` first." hint, and `fkanban_doctor` still runs so an agent
+// can self-diagnose. This matches the install→use order in the README, where a
+// new dev may `claude mcp add fkanban …` BEFORE `fkanban init`.
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
@@ -21,8 +26,13 @@ export async function runMcp(): Promise<number> {
     cfg = readConfig();
   } catch (err) {
     if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
-      console.error(`fkanban mcp: ${err.message}`);
-      return 1;
+      // Start in the not-yet-configured state instead of bailing out: the
+      // handshake + listTools must succeed so the client connects, then tools
+      // degrade gracefully to a "Run `fkanban init` first." error per call.
+      const server = createFkanbanMcpServer({ configError: err });
+      const transport = new StdioServerTransport();
+      await server.connect(transport);
+      return 0;
     }
     throw err;
   }

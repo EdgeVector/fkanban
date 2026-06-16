@@ -17,7 +17,7 @@ import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
-import { doctor, type DoctorCheck } from "../commands/doctor.ts";
+import { doctor } from "../commands/doctor.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
@@ -77,14 +77,6 @@ const boardSchema = z.object({
   updated_at: z.string(),
 });
 
-// One health check from `doctor()` — mirrors the `DoctorCheck` type. `pass`/`fail`
-// flip `ok`; `info` checks (e.g. the optional PATH shim) are advisory.
-const doctorCheckSchema = z.object({
-  name: z.string().describe("Human-readable check label, e.g. `node reachable + provisioned`."),
-  status: z.enum(["pass", "fail", "info"]).describe("`pass`/`fail` count toward `ok`; `info` is advisory."),
-  detail: z.string().optional().describe("Extra context — the failure reason, a resolved value, or a hint."),
-});
-
 function errorResult(err: unknown): ToolResult {
   const msg =
     err instanceof FkanbanError
@@ -95,9 +87,34 @@ function errorResult(err: unknown): ToolResult {
   return { content: [{ type: "text", text: `error: ${msg}` }], isError: true };
 }
 
-export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient }): McpServer {
-  const { cfg } = opts;
-  const node = opts.node ?? newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
+// Build the server in one of two states:
+//   - configured:   `{ cfg, node? }` — full behavior (the steady state).
+//   - not-yet-configured: `{ configError }` — the server still starts and
+//     completes the MCP handshake so the client connects and can list tools,
+//     but every config-dependent tool short-circuits to a clean `isError`
+//     result carrying the "Run `fkanban init` first." hint. `fkanban_doctor`
+//     stays usable in this state (it reads config itself via `tryReadConfig`),
+//     so an agent can self-diagnose the missing config.
+export function createFkanbanMcpServer(
+  opts: { cfg: Config; node?: NodeClient; configError?: undefined } | { cfg?: undefined; node?: undefined; configError: Error },
+): McpServer {
+  const cfg = opts.cfg ?? null;
+  const configError = opts.configError ?? null;
+  const explicitNode = opts.cfg ? opts.node : undefined;
+  // Lazily materialize the client only when a tool actually runs; when config
+  // is unavailable, throw a FkanbanError that the handlers' catch turns into a
+  // clean per-tool `isError` result.
+  const requireConfig = (): { cfg: Config; node: NodeClient } => {
+    if (!cfg) {
+      throw new FkanbanError({
+        code: "config_unavailable",
+        message: configError ? configError.message : "config unavailable",
+        hint: "Run `fkanban init` first.",
+      });
+    }
+    const node = explicitNode ?? newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
+    return { cfg, node };
+  };
   const server = new McpServer({ name: FKANBAN_MCP_NAME, version: FKANBAN_MCP_VERSION });
 
   server.registerTool(
@@ -115,6 +132,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const o: Parameters<typeof listResult>[0] = { cfg, node };
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
@@ -142,6 +160,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const o: Parameters<typeof searchResult>[0] = { cfg, node, query: args.query };
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
@@ -184,6 +203,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const o: Parameters<typeof addCmd>[0] = { cfg, node, slug: args.slug };
         if (args.title !== undefined) o.title = args.title;
         if (args.body !== undefined) o.body = args.body;
@@ -221,6 +241,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const o: Parameters<typeof moveCmd>[0] = { cfg, node, slug: args.slug, column: args.column };
         if (args.position !== undefined) o.position = args.position;
         if (args.force !== undefined) o.force = args.force;
@@ -252,6 +273,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const res = await depAddCmd({ cfg, node, slug: args.slug, dep: args.dep });
         return writeResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
@@ -279,6 +301,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const res = await depRmCmd({ cfg, node, slug: args.slug, dep: args.dep });
         return writeResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
@@ -298,6 +321,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const { text, card } = await showResult({ cfg, node, slug: args.slug });
         return readResult(text, card);
       } catch (err) {
@@ -317,6 +341,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const res = await rmCmd({ cfg, node, slug: args.slug });
         return writeResult(`removed card ${res.slug}`, res);
       } catch (err) {
@@ -344,6 +369,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const o: Parameters<typeof boardCreateCmd>[0] = { cfg, node, slug: args.slug };
         if (args.title !== undefined) o.title = args.title;
         if (args.columns !== undefined) o.columns = args.columns;
@@ -367,6 +393,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async () => {
       try {
+        const { cfg, node } = requireConfig();
         const { text, boards } = await boardListResult({ cfg, node });
         return readResult(text, { boards });
       } catch (err) {
@@ -391,6 +418,7 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     },
     async (args) => {
       try {
+        const { cfg, node } = requireConfig();
         const res = await boardRmCmd({ cfg, node, slug: args.slug, force: args.force });
         return writeResult(`removed board ${res.slug}`, res);
       } catch (err) {
@@ -407,24 +435,13 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         "Diagnose the fkanban setup the same way the `fkanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring.",
       annotations: { title: "Health-check fkanban", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
-      outputSchema: {
-        ok: z.boolean().describe("True when every pass/fail check passed (matches `!isError`)."),
-        checks: z
-          .array(doctorCheckSchema)
-          .describe("Each diagnostic in the same order as the printed report; branch on a `fail`."),
-      },
     },
     async () => {
       try {
         const lines: string[] = [];
-        const checks: DoctorCheck[] = [];
-        const ok = await doctor({ print: (l) => lines.push(l), onCheck: (c) => checks.push(c) });
+        const ok = await doctor({ print: (l) => lines.push(l) });
         const report = lines.join("\n");
-        return {
-          content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }],
-          structuredContent: { ok, checks },
-          isError: !ok,
-        };
+        return { content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }], isError: !ok };
       } catch (err) {
         return errorResult(err);
       }

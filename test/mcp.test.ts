@@ -10,15 +10,12 @@
 // against each tool's declared outputSchema, a schema/result mismatch fails
 // the test here, not just at runtime.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { runMcp } from "../src/mcp/main.ts";
+import { ConfigMissingError } from "../src/config.ts";
 
 import { createFkanbanMcpServer } from "../src/mcp/server.ts";
 import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
@@ -100,77 +97,69 @@ function seedDefaultBoard(node: NodeClient) {
   });
 }
 
-async function connectedClient(node: NodeClient): Promise<Client> {
-  const server = createFkanbanMcpServer({ cfg, node });
+async function connectServer(server: ReturnType<typeof createFkanbanMcpServer>): Promise<Client> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0.0.0" });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   return client;
 }
 
-// runMcp() reads the config before touching the node, so its config-error
-// paths are unit-testable by pointing FKANBAN_CONFIG at a temp file. A missing
-// OR invalid config must surface as one clean `fkanban mcp: <message>` line on
-// stderr + a return code of 1 — never a raw ConfigInvalidError stack trace.
-describe("runMcp startup config errors are clean (no stack trace)", () => {
-  let dir: string;
-  let prevConfig: string | undefined;
-  let errs: string[];
-  let restoreErr: () => void;
+async function connectedClient(node: NodeClient): Promise<Client> {
+  return connectServer(createFkanbanMcpServer({ cfg, node }));
+}
 
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "fk-mcp-cfg-"));
-    prevConfig = process.env.FKANBAN_CONFIG;
-    errs = [];
-    const orig = console.error;
-    console.error = (...args: unknown[]) => {
-      errs.push(args.map((a) => (typeof a === "string" ? a : String(a))).join(" "));
-    };
-    restoreErr = () => {
-      console.error = orig;
-    };
+// The server must START even when config is missing/invalid: a new dev who
+// runs `claude mcp add fkanban …` BEFORE `fkanban init` should connect and get
+// an actionable per-tool hint, not an opaque "failed to connect" (the handshake
+// used to never run because runMcp bailed out before server.connect). When
+// built in the not-yet-configured state, connect + listTools succeed, every
+// config-dependent tool short-circuits to a clean `isError` "Run `fkanban init`
+// first." result, and `fkanban_doctor` still runs to self-diagnose.
+describe("MCP server starts (degrades, not crashes) when config is unavailable", () => {
+  let client: Client;
+  const configError = new ConfigMissingError("/nope/config.json");
+
+  beforeEach(async () => {
+    client = await connectServer(createFkanbanMcpServer({ configError }));
   });
 
-  afterEach(() => {
-    restoreErr();
-    if (prevConfig === undefined) delete process.env.FKANBAN_CONFIG;
-    else process.env.FKANBAN_CONFIG = prevConfig;
-    rmSync(dir, { recursive: true, force: true });
+  test("connect succeeds and listTools returns all 12 tools", async () => {
+    const { tools } = await client.listTools();
+    expect(tools).toHaveLength(12);
   });
 
-  test("invalid (non-JSON) config → return 1 + single clean line", async () => {
-    const path = join(dir, "config.json");
-    writeFileSync(path, "{ this is not json", "utf8");
-    process.env.FKANBAN_CONFIG = path;
-
-    const code = await runMcp();
-
-    expect(code).toBe(1);
-    expect(errs).toHaveLength(1);
-    expect(errs[0]).toMatch(/^fkanban mcp: Config at .* is invalid: .* Re-run `fkanban init`\.$/);
-    expect(errs[0]).not.toContain("\n"); // single line, no stack trace
+  test("fkanban_list returns isError with the actionable 'run init' hint", async () => {
+    const res = await client.callTool({ name: "fkanban_list", arguments: {} });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toBeUndefined();
+    const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
+    expect(text).toContain("Run `fkanban init` first.");
   });
 
-  test("invalid (bad shape) config → return 1 + single clean line", async () => {
-    const path = join(dir, "config.json");
-    writeFileSync(path, JSON.stringify({ nodeUrl: "http://x" }), "utf8");
-    process.env.FKANBAN_CONFIG = path;
-
-    const code = await runMcp();
-
-    expect(code).toBe(1);
-    expect(errs).toHaveLength(1);
-    expect(errs[0]).toMatch(/^fkanban mcp: Config at .* is invalid: /);
+  test("a write tool also short-circuits to the same actionable hint", async () => {
+    const res = await client.callTool({ name: "fkanban_add", arguments: { slug: "x" } });
+    expect(res.isError).toBe(true);
+    expect((res.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
+      "Run `fkanban init` first.",
+    );
   });
 
-  test("missing config still returns 1 + clean line (no regression)", async () => {
-    process.env.FKANBAN_CONFIG = join(dir, "does-not-exist.json");
-
-    const code = await runMcp();
-
-    expect(code).toBe(1);
-    expect(errs).toHaveLength(1);
-    expect(errs[0]).toMatch(/^fkanban mcp: Config not found at .* Run `fkanban init` first\.$/);
+  test("fkanban_doctor still runs and flags the missing config (does not crash)", async () => {
+    // Doctor reads config itself (via FKANBAN_CONFIG / the default path), not the
+    // server's state. Point it at a non-existent file so the check is deterministic
+    // regardless of any real ~/.fkanban/config.json on the test machine.
+    const prev = process.env.FKANBAN_CONFIG;
+    process.env.FKANBAN_CONFIG = "/nonexistent/fkanban-doctor-test/config.json";
+    try {
+      const res = await client.callTool({ name: "fkanban_doctor", arguments: {} });
+      // With no config it reports a failing check list (isError true) rather than throwing.
+      expect(res.isError).toBe(true);
+      const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
+      expect(text).toContain("config present");
+    } finally {
+      if (prev === undefined) delete process.env.FKANBAN_CONFIG;
+      else process.env.FKANBAN_CONFIG = prev;
+    }
   });
 });
 
