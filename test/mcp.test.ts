@@ -20,6 +20,10 @@ import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { boardToFields, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
+import { listCmd } from "../src/commands/list.ts";
+import { searchCmd } from "../src/commands/search.ts";
+import { showCmd } from "../src/commands/show.ts";
+import { boardListCmd } from "../src/commands/board.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -170,5 +174,70 @@ describe("MCP write tools return structuredContent", () => {
     ]) {
       expect(byName.get(name)?.outputSchema, `${name} should declare an outputSchema`).toBeDefined();
     }
+  });
+});
+
+describe("MCP read tools return structuredContent matching the CLI --json shape", () => {
+  let node: NodeClient;
+  let client: Client;
+
+  // Seed a small board: two cards on `default` (one depends on the other and
+  // on a dangling slug, exercising blocked/missingDeps), plus a second board.
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedDefaultBoard(node);
+    client = await connectedClient(node);
+    await client.callTool({ name: "fkanban_board_create", arguments: { slug: "sprint", title: "Sprint" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", title: "API", column: "todo" } });
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api", "ghost"] },
+    });
+  });
+
+  test("fkanban_list returns { cards } deep-equal to `list --json`", async () => {
+    const res = await client.callTool({ name: "fkanban_list", arguments: {} });
+    const cliCards = JSON.parse(await listCmd({ cfg, node, json: true }));
+    expect(res.structuredContent).toBeDefined();
+    expect(res.structuredContent).toEqual({ cards: cliCards });
+    // Human text block is preserved for non-structured clients.
+    expect((res.content as Array<{ type: string; text: string }>)[0]?.text.length).toBeGreaterThan(0);
+  });
+
+  test("fkanban_search returns { cards } deep-equal to `search --json`", async () => {
+    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "search me" } });
+    const cliCards = JSON.parse(await searchCmd({ cfg, node, query: "search me", json: true }));
+    expect(res.structuredContent).toEqual({ cards: cliCards });
+    expect((cliCards as Array<{ slug: string }>).map((c) => c.slug)).toEqual(["ui"]);
+  });
+
+  test("fkanban_show returns the card detail deep-equal to `show --json` (blocked/missingDeps surfaced)", async () => {
+    const res = await client.callTool({ name: "fkanban_show", arguments: { slug: "ui" } });
+    const cliCard = JSON.parse(await showCmd({ cfg, node, slug: "ui", json: true }));
+    expect(res.structuredContent).toEqual(cliCard);
+    // A dangling dep is reported but does NOT block; an unfinished real dep does.
+    expect(res.structuredContent).toMatchObject({ blocked: true, blockedBy: ["api"], missingDeps: ["ghost"] });
+  });
+
+  test("fkanban_board_list returns { boards } deep-equal to `board list --json`", async () => {
+    const res = await client.callTool({ name: "fkanban_board_list", arguments: {} });
+    const cliBoards = JSON.parse(await boardListCmd({ cfg, node, json: true }));
+    expect(res.structuredContent).toEqual({ boards: cliBoards });
+    expect((cliBoards as Array<{ slug: string }>).map((b) => b.slug).sort()).toEqual(["default", "sprint"]);
+  });
+
+  test("each read tool advertises an outputSchema", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    for (const name of ["fkanban_list", "fkanban_search", "fkanban_show", "fkanban_board_list"]) {
+      expect(byName.get(name)?.outputSchema, `${name} should declare an outputSchema`).toBeDefined();
+    }
+  });
+
+  test("a read-tool error is still an isError text result (unchanged)", async () => {
+    const res = await client.callTool({ name: "fkanban_show", arguments: { slug: "does-not-exist" } });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toBeUndefined();
+    expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toContain("error:");
   });
 });

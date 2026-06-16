@@ -43,17 +43,29 @@ export async function boardCreateCmd(opts: {
   return { slug: board.slug, action: "created" };
 }
 
+// Both the human text and the structured board list, from a single read.
+// `boardListCmd` (CLI) returns one; the MCP tool returns both.
+export async function boardListResult(opts: {
+  cfg: Config;
+  node: NodeClient;
+}): Promise<{ text: string; boards: Board[] }> {
+  const boards = await listBoards(opts.node, opts.cfg);
+  const text =
+    boards.length === 0
+      ? "No boards. Run `fkanban init` to seed the default board."
+      : boards
+          .map((b) => `${b.slug.padEnd(20)} ${b.title}\n  columns: ${b.columns.join(" → ")}`)
+          .join("\n");
+  return { text, boards };
+}
+
 export async function boardListCmd(opts: {
   cfg: Config;
   node: NodeClient;
   json?: boolean;
 }): Promise<string> {
-  const boards = await listBoards(opts.node, opts.cfg);
-  if (opts.json) return JSON.stringify(boards, null, 2);
-  if (boards.length === 0) return "No boards. Run `fkanban init` to seed the default board.";
-  return boards
-    .map((b) => `${b.slug.padEnd(20)} ${b.title}\n  columns: ${b.columns.join(" → ")}`)
-    .join("\n");
+  const { text, boards } = await boardListResult(opts);
+  return opts.json ? JSON.stringify(boards, null, 2) : text;
 }
 
 // `fkanban board rm <slug>` — soft-delete a board. fold_db is append-only, so
