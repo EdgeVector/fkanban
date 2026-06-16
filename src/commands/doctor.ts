@@ -2,6 +2,7 @@
 // reachable + provisioned, both schemas resolved on the node, a query
 // round-trips.
 
+import { fileURLToPath } from "node:url";
 import { newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { listBoards, listCards } from "../record.ts";
@@ -16,6 +17,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     if (!pass) ok = false;
     print(`${pass ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}`);
   };
+
+  // Informational only — the global shim is optional, so this never flips `ok`.
+  // It just tells the user whether bare `fkanban` resolves on PATH.
+  await reportShim(print);
 
   const cfg = tryReadConfig(opts.configPath);
   check(cfg !== null, "config present", cfg ? undefined : "run `fkanban init`");
@@ -64,4 +69,30 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   }
 
   return ok;
+}
+
+// Is bare `fkanban` resolvable on PATH? Purely informational — prints a ✓ if a
+// `fkanban` shim is found, or a · hint with the one-line install if not.
+async function reportShim(print: (line: string) => void): Promise<void> {
+  let resolved: string | null = null;
+  try {
+    const which = Bun.spawnSync(["sh", "-c", "command -v fkanban"]);
+    const out = which.stdout.toString().trim();
+    if (which.exitCode === 0 && out) resolved = out;
+  } catch {
+    // `command -v` unavailable — treat as not found.
+  }
+
+  if (resolved) {
+    print(`✓ global \`fkanban\` shim on PATH — ${resolved}`);
+    return;
+  }
+
+  // Point at this repo's bundled wrapper so the hint is copy-pasteable.
+  const cliPath = fileURLToPath(import.meta.url); // .../src/commands/doctor.ts
+  const repoRoot = cliPath.replace(/\/src\/commands\/doctor\.ts$/, "");
+  print(
+    `· no global \`fkanban\` shim on PATH (optional) — install with: ` +
+      `ln -sf "${repoRoot}/bin/fkanban" /usr/local/bin/fkanban`,
+  );
 }

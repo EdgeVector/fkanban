@@ -74,27 +74,49 @@ of two ways:
 Once a node is up, run `bun src/cli.ts doctor` to confirm it's reachable, then
 `bun src/cli.ts init` to bootstrap the board.
 
+## Install the global `fkanban` shim
+
+The commands below are written as `fkanban <cmd>`. To make a bare `fkanban`
+resolve from any directory, symlink the bundled `bin/fkanban` wrapper (a tiny
+`bun run src/cli.ts "$@"` script) into a directory on your `PATH`:
+
+```bash
+cd fkanban
+ln -sf "$PWD/bin/fkanban" /usr/local/bin/fkanban   # or ~/bin, anywhere on PATH
+fkanban doctor                                     # confirms the shim is on PATH
+```
+
+This is fully local and reversible — nothing is published to a registry, and
+`rm /usr/local/bin/fkanban` removes it. (`bun link` works too — it picks up the
+`bin` entry already declared in `package.json` — but the wrapper symlink needs
+no global Bun state.) Without the shim, run the CLI as `bun run src/cli.ts <cmd>`
+from inside the repo; the two are equivalent.
+
 ## Quick start
 
 ```bash
 cd fkanban
 bun install
+ln -sf "$PWD/bin/fkanban" /usr/local/bin/fkanban   # one-time: put fkanban on PATH
 
 # Bootstrap the node, LOAD + RESOLVE the published fkanban schemas, seed the
 # default board. Defaults: node http://127.0.0.1:9001, schema service = prod
 # Lambda.
-bun src/cli.ts init
+fkanban init
 
 # …or point at an ephemeral dev node + the dev schema service:
-bun src/cli.ts init \
+fkanban init \
   --node-url http://127.0.0.1:9105 \
   --schema-service-url https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com
 
-bun src/cli.ts add ship-login --title "Ship login flow" --tags auth,p1
-bun src/cli.ts move ship-login doing
-bun src/cli.ts add fix-typo --column todo
-bun src/cli.ts list
+fkanban add ship-login --title "Ship login flow" --tags auth,p1
+fkanban move ship-login doing
+fkanban add fix-typo --column todo
+fkanban list
 ```
+
+(Haven't installed the shim? Every `fkanban <cmd>` below works as
+`bun run src/cli.ts <cmd>` run from the repo directory.)
 
 If `init` reports `schemas_not_published`, the one-time **App creation** step
 above hasn't run against that schema service yet.
