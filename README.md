@@ -13,6 +13,9 @@ collide with `fbrain/*` or any other app on a shared daemon):
 
 Default columns: `backlog → todo → doing → review → done`.
 
+> Contributing to fkanban itself? See [AGENTS.md](AGENTS.md) for the
+> build/test/run/dogfood + PR workflow and the non-obvious gotchas.
+
 ## App creation (one-time)
 
 Under app_identity v3.1 a schema claim under the `fkanban/*` namespace must be
