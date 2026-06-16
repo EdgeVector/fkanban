@@ -127,8 +127,8 @@ export function newSchemaServiceClient(
     baseUrl: url,
     async registerSchema(req) {
       const path = "/v1/schemas";
-      const res = await verboseFetch({ baseUrl: url, path, method: "POST", body: req, verbose, service: "schema", headers: {} });
-      const body = await readJson(res);
+      const { res, readBody } = await verboseFetch({ baseUrl: url, path, method: "POST", body: req, verbose, service: "schema", headers: {} });
+      const body = await readBody();
       if (res.status !== 200 && res.status !== 201) {
         throw mapSchemaServiceError(res.status, body, path);
       }
@@ -149,12 +149,12 @@ export function newSchemaServiceClient(
     },
     async getSchemaByHash(hash) {
       const path = `/v1/schema/${encodeURIComponent(hash)}`;
-      const res = await verboseFetch({ baseUrl: url, path, method: "GET", body: undefined, verbose, service: "schema", headers: {} });
+      const { res, readBody } = await verboseFetch({ baseUrl: url, path, method: "GET", body: undefined, verbose, service: "schema", headers: {} });
       if (res.status === 404) {
-        await res.text();
+        await readBody();
         return null;
       }
-      const body = await readJson(res);
+      const body = await readBody();
       if (res.status !== 200) throw mapSchemaServiceError(res.status, body, path);
       const obj = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
       if (!obj) return null;
@@ -294,7 +294,7 @@ export function newNodeClient(opts: {
   ): Promise<{ status: number; body: unknown }> => {
     await ensureAttested();
     const doFetch = async () => {
-      const res = await verboseFetch({
+      const { res, readBody } = await verboseFetch({
         baseUrl: url,
         path,
         method,
@@ -304,7 +304,7 @@ export function newNodeClient(opts: {
         headers: nodeHeaders(),
         timeoutMs,
       });
-      const parsed = await readJson(res);
+      const parsed = await readBody();
       return { status: res.status, body: parsed };
     };
     let result = await doFetch();
@@ -437,13 +437,13 @@ export function newNodeClient(opts: {
           headers: nodeHeaders(),
           timeoutMs,
         });
-      let res = await doFetch();
-      let text = await res.text();
+      let { res, readBody } = await doFetch();
+      let text = await readBody({ asText: true });
       if (res.status === 403 && bodyError(parseJsonSafe(text)) === "transport_not_attested" && socketPath) {
         verbose("node: transport_not_attested — re-pairing owner session and retrying");
         await ensureAttested(true);
-        res = await doFetch();
-        text = await res.text();
+        ({ res, readBody } = await doFetch());
+        text = await readBody({ asText: true });
       }
       return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
     },
@@ -481,6 +481,24 @@ function stripTrailingSlash(url: string): string {
   return url.endsWith("/") ? url.slice(0, -1) : url;
 }
 
+// The result of a bounded request: the response headers, plus a `readBody`
+// closure that drains the response body UNDER THE SAME DEADLINE as the fetch.
+// The body read must be deadline-bounded too: the node returns headers as soon
+// as it accepts the request, then can stall for the whole cold-schema-init
+// window while streaming the body. A plain `await res.text()` after the fetch
+// is NOT covered by the fetch's own abort, so that stall used to hang the CLI
+// unbounded. Here a single AbortController governs both halves, and the timer
+// is cleared the instant the body is fully read.
+type ReadBody = {
+  (opts: { asText: true }): Promise<string>;
+  (opts?: { asText?: false }): Promise<unknown>;
+};
+
+type BoundedResponse = {
+  res: Response;
+  readBody: ReadBody;
+};
+
 async function verboseFetch(opts: {
   baseUrl: string;
   path: string;
@@ -490,7 +508,7 @@ async function verboseFetch(opts: {
   service: "node" | "schema";
   headers: Record<string, string>;
   timeoutMs?: number;
-}): Promise<Response> {
+}): Promise<BoundedResponse> {
   const url = `${opts.baseUrl}${opts.path}`;
   const tag = opts.service === "node" ? "NODE" : "SCHEMA";
   const headers = { ...opts.headers };
@@ -503,21 +521,54 @@ async function verboseFetch(opts: {
         : JSON.stringify(opts.body);
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   opts.verbose(`→ ${tag} ${opts.method} ${url}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""));
+
+  // One controller for the whole request lifecycle (headers + body). The timer
+  // keeps running after the fetch resolves, so if the body read stalls past the
+  // deadline the abort fires mid-`text()` and we map it to the same timeout
+  // error. `done` is set once the body is fully read so the timer is cleared
+  // and a slow *consumer* can never trip it after the I/O is already complete.
+  const controller = new AbortController();
+  let done = false;
+  const timer = setTimeout(() => {
+    if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
+  }, timeoutMs);
+
+  let res: Response;
   try {
-    const res = await fetch(url, {
+    res = await fetch(url, {
       method: opts.method,
       headers,
       body: bodyStr,
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: controller.signal,
     });
     opts.verbose(`← ${tag} ${opts.method} ${url} status=${res.status}`);
-    return res;
   } catch (err) {
+    done = true;
+    clearTimeout(timer);
     if (isTimeoutError(err)) {
       throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
     }
     throw connectionError(opts.baseUrl, opts.service, err);
   }
+
+  const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
+    try {
+      const text = await res.text();
+      done = true;
+      clearTimeout(timer);
+      if (readOpts?.asText) return text;
+      return parseBody(text);
+    } catch (err) {
+      done = true;
+      clearTimeout(timer);
+      if (isTimeoutError(err)) {
+        throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
+      }
+      throw connectionError(opts.baseUrl, opts.service, err);
+    }
+  }) as ReadBody;
+
+  return { res, readBody };
 }
 
 function isTimeoutError(err: unknown): boolean {
@@ -553,8 +604,10 @@ function parseJsonSafe(text: string): unknown {
   }
 }
 
-async function readJson(res: Response): Promise<unknown> {
-  const text = await res.text();
+// Parse an already-read response body: JSON when it parses, the raw text
+// otherwise, null when empty. (The body read itself is deadline-bounded in
+// `verboseFetch`; this is the pure parse step.)
+function parseBody(text: string): unknown {
   if (text.length === 0) return null;
   try {
     return JSON.parse(text);
