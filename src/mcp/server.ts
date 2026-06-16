@@ -17,7 +17,7 @@ import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
-import { doctor } from "../commands/doctor.ts";
+import { doctor, type DoctorCheck } from "../commands/doctor.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
@@ -75,6 +75,14 @@ const boardSchema = z.object({
   columns: z.array(z.string()),
   created_at: z.string(),
   updated_at: z.string(),
+});
+
+// One health check from `doctor()` — mirrors the `DoctorCheck` type. `pass`/`fail`
+// flip `ok`; `info` checks (e.g. the optional PATH shim) are advisory.
+const doctorCheckSchema = z.object({
+  name: z.string().describe("Human-readable check label, e.g. `node reachable + provisioned`."),
+  status: z.enum(["pass", "fail", "info"]).describe("`pass`/`fail` count toward `ok`; `info` is advisory."),
+  detail: z.string().optional().describe("Extra context — the failure reason, a resolved value, or a hint."),
 });
 
 function errorResult(err: unknown): ToolResult {
@@ -399,13 +407,24 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         "Diagnose the fkanban setup the same way the `fkanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring.",
       annotations: { title: "Health-check fkanban", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
+      outputSchema: {
+        ok: z.boolean().describe("True when every pass/fail check passed (matches `!isError`)."),
+        checks: z
+          .array(doctorCheckSchema)
+          .describe("Each diagnostic in the same order as the printed report; branch on a `fail`."),
+      },
     },
     async () => {
       try {
         const lines: string[] = [];
-        const ok = await doctor({ print: (l) => lines.push(l) });
+        const checks: DoctorCheck[] = [];
+        const ok = await doctor({ print: (l) => lines.push(l), onCheck: (c) => checks.push(c) });
         const report = lines.join("\n");
-        return { content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }], isError: !ok };
+        return {
+          content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }],
+          structuredContent: { ok, checks },
+          isError: !ok,
+        };
       } catch (err) {
         return errorResult(err);
       }
