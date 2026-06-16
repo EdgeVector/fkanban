@@ -17,7 +17,7 @@ import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
-import { doctor, type DoctorCheck } from "../commands/doctor.ts";
+import { runDoctorStructured } from "../commands/doctor.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
@@ -452,9 +452,7 @@ export function createFkanbanMcpServer(
     },
     async () => {
       try {
-        const lines: string[] = [];
-        const checks: DoctorCheck[] = [];
-        const ok = await doctor({ print: (l) => lines.push(l), onCheck: (c) => checks.push(c) });
+        const { ok, checks, lines } = await runDoctorStructured();
         const report = lines.join("\n");
         return {
           content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }],

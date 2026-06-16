@@ -25,6 +25,24 @@ export type DoctorOptions = {
   onCheck?: (check: DoctorCheck) => void;
 };
 
+// The machine-readable doctor report — the single shape shared by the CLI
+// `doctor --json` path and the MCP `fkanban_doctor` tool's `structuredContent`,
+// so the two can't diverge. `lines` is the human report (joined ✓/✗ output) for
+// callers that also want the text (the MCP tool surfaces it as `content`).
+export type DoctorReport = { ok: boolean; checks: DoctorCheck[]; lines: string[] };
+
+// Run doctor while collecting the structured `{ ok, checks }` report and the
+// human lines, without printing anything. Both the CLI `--json` flag and the
+// MCP handler build their output from this so the shape stays identical.
+export async function runDoctorStructured(
+  opts: Omit<DoctorOptions, "print" | "onCheck"> = {},
+): Promise<DoctorReport> {
+  const lines: string[] = [];
+  const checks: DoctorCheck[] = [];
+  const ok = await doctor({ ...opts, print: (l) => lines.push(l), onCheck: (c) => checks.push(c) });
+  return { ok, checks, lines };
+}
+
 export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   const print = opts.print ?? ((l: string) => console.log(l));
   const onCheck = opts.onCheck;

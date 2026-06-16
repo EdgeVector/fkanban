@@ -18,7 +18,7 @@ import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
-import { doctor } from "./commands/doctor.ts";
+import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import {
   formatAdd,
   formatMove,
@@ -48,7 +48,7 @@ Commands:
   board list           list boards (--json)
   board rm <slug>      soft-delete a board (refuses the default board or a
                        board with live cards unless --force)
-  doctor               health-check the local setup
+  doctor               health-check the local setup (--json)
   mcp                  start an MCP server over stdio
   help                 print this help
 
@@ -201,10 +201,13 @@ Example:
   doctor: withFooter(`fkanban doctor — health-check the local setup
 
 Usage:
-  fkanban doctor
+  fkanban doctor [--json]
 
 Verifies config, node reachability, and resolved schemas. Exits non-zero on
-any failed check.`),
+any failed check.
+
+Flags:
+  --json               machine-readable { ok, checks } report`),
 
   mcp: withFooter(`fkanban mcp — start an MCP server over stdio
 
@@ -403,6 +406,14 @@ async function dispatch(
     }
 
     case "doctor": {
+      if (values.json) {
+        // Machine-readable: collect the structured report (no human ✓/✗ lines
+        // leak to stdout) and emit the SAME { ok, checks } shape the
+        // `fkanban_doctor` MCP tool returns as structuredContent.
+        const { ok, checks } = await runDoctorStructured({ verbose });
+        console.log(JSON.stringify({ ok, checks }));
+        return ok ? 0 : 1;
+      }
       const ok = await doctor({ verbose });
       return ok ? 0 : 1;
     }
