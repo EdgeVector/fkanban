@@ -238,6 +238,55 @@ function parseTags(raw: string | undefined): string[] | undefined {
   return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
+// Thrown when a numeric flag (`--limit`, `--position`) is given a value that
+// isn't a clean integer at or above its minimum. The message is already
+// printed to stderr by parseIntFlag; the dispatch catches this to return the
+// exit-2 contract (matching the unknown-flag / list-validate-column handling).
+class FlagValidationError extends Error {
+  // Discriminant read by key, not by prototype identity. `instanceof` on an
+  // Error subclass is unreliable across bun runtimes — it holds on macOS but
+  // fails on the Linux CI runner, where the thrown error escaped the dispatch
+  // `instanceof` check and hit the top-level catch (exit 1) instead of the
+  // exit-2 contract. A tagged property is platform-stable.
+  readonly isFlagValidationError = true;
+}
+
+function isFlagValidationError(err: unknown): err is FlagValidationError {
+  return (
+    err instanceof FlagValidationError ||
+    (typeof err === "object" &&
+      err !== null &&
+      (err as { isFlagValidationError?: boolean }).isFlagValidationError === true)
+  );
+}
+
+// Coerce a numeric flag's raw value to an integer, rejecting non-numeric or
+// out-of-range input LOUDLY (stderr + exit 2) instead of silently swallowing
+// it into a default. `parseInt` would happily accept "12abc" (→ 12) and turn a
+// pure typo into NaN, so we require the whole string to be a clean integer.
+// Mirrors the unknown-flag contract: one-line reason + a per-command help hint.
+function parseIntFlag(
+  raw: string,
+  flag: string,
+  cmd: string,
+  { min }: { min: number },
+): number {
+  const trimmed = raw.trim();
+  const n = Number(trimmed);
+  const want = min === 1 ? "a positive integer" : `an integer >= ${min}`;
+  const help = cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+  if (trimmed.length === 0 || !Number.isInteger(n) || n < min) {
+    let msg = `error: --${flag} must be ${want}, got "${raw}".`;
+    // --limit 0 used to mean silent-unbounded; point at the documented flag.
+    if (flag === "limit" && Number.isInteger(n) && n < 1) {
+      msg = `error: --${flag} must be ${want}, got "${raw}". Use --all to show everything.`;
+    }
+    console.error(`${msg} Run \`fkanban ${help}\` to see this command's flags.`);
+    throw new FlagValidationError(msg);
+  }
+  return n;
+}
+
 // Node's parseArgs error codes for malformed flags. With `strict: true`,
 // an unknown `--flag`, a value handed to a boolean flag, or a missing value
 // for a string flag all throw a TypeError carrying one of these codes. We
@@ -318,6 +367,22 @@ async function main(argv: string[]): Promise<number> {
 
   const verbose: Verbose | undefined = values.verbose ? (m) => console.error(m) : undefined;
 
+  try {
+    return await dispatch(cmd, values, positionals, verbose);
+  } catch (err) {
+    // A rejected numeric flag has already printed its reason to stderr;
+    // surface the exit-2 contract here (matching the unknown-flag handling).
+    if (isFlagValidationError(err)) return 2;
+    throw err;
+  }
+}
+
+async function dispatch(
+  cmd: string | undefined,
+  values: Record<string, unknown>,
+  positionals: string[],
+  verbose: Verbose | undefined,
+): Promise<number> {
   switch (cmd) {
     case "init": {
       await runInit({
@@ -366,8 +431,13 @@ async function main(argv: string[]): Promise<number> {
     case "move": {
       const slug = requirePositional(positionals[1], "move <slug> <column>");
       const column = requirePositional(positionals[2], "move <slug> <column>");
+      // Validate the numeric flag before touching config/node, so a bad
+      // `--position` reports the exit-2 flag error rather than a config error.
+      const position =
+        values.position !== undefined
+          ? parseIntFlag(values.position as string, "position", "move", { min: 0 })
+          : undefined;
       const ctx = loadCtx({ verbose });
-      const position = values.position !== undefined ? parseInt(values.position as string, 10) : undefined;
       const res = await moveCmd({
         cfg: ctx.cfg,
         node: ctx.node,
@@ -400,15 +470,20 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "list": {
+      // Validate the numeric flag before touching config/node, so a bad
+      // `--limit` reports the exit-2 flag error rather than a config error.
+      const limit =
+        values.limit !== undefined
+          ? parseIntFlag(values.limit as string, "limit", "list", { min: 1 })
+          : undefined;
       const ctx = loadCtx({ verbose });
-      const limitRaw = values.limit !== undefined ? parseInt(values.limit as string, 10) : undefined;
       const out = await listCmd({
         cfg: ctx.cfg,
         node: ctx.node,
         board: values.board as string | undefined,
         column: values.column as string | undefined,
         json: values.json as boolean | undefined,
-        limit: limitRaw !== undefined && Number.isFinite(limitRaw) ? limitRaw : undefined,
+        limit,
         all: values.all as boolean | undefined,
       });
       console.log(out);
