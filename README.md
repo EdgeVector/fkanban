@@ -24,9 +24,26 @@ Default columns: `backlog → todo → doing → review → done`.
 
 ## Prerequisites
 
-fkanban is a thin client — it needs a running **folddb node** to talk to
-(`init` defaults to `http://127.0.0.1:9001`). Start one before `init` in one
-of two ways:
+You need three things before the Quick start, in this order:
+
+**1. Bun.** fkanban is a Bun/TypeScript app, so you need the Bun runtime.
+
+```bash
+curl -fsSL https://bun.sh/install | bash   # or: brew install oven-sh/bun/bun
+```
+
+**2. The fkanban repo.** Clone it and install its dependencies — this is where
+the Quick start's `cd fkanban` comes from.
+
+```bash
+git clone https://github.com/EdgeVector/fkanban.git
+cd fkanban
+bun install
+```
+
+**3. A running folddb node.** fkanban is a thin client — it needs a running
+**folddb node** to talk to (`init` defaults to `http://127.0.0.1:9001`). Start
+one before `init` in one of two ways:
 
 - **Homebrew (recommended for just using fkanban):** install folddb from the
   [EdgeVector/homebrew-folddb](https://github.com/EdgeVector/homebrew-folddb)
@@ -70,9 +87,10 @@ from inside the repo; the two are equivalent.
 
 ## Quick start
 
+With the prerequisites in place (Bun installed, repo cloned, `bun install` run,
+a folddb node up), from inside the `fkanban` repo:
+
 ```bash
-cd fkanban
-bun install
 ln -sf "$PWD/bin/fkanban" /usr/local/bin/fkanban   # one-time: put fkanban on PATH
 
 # Bootstrap the node, LOAD + RESOLVE the published fkanban schemas, seed the
