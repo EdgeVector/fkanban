@@ -10,10 +10,15 @@
 // against each tool's declared outputSchema, a schema/result mismatch fails
 // the test here, not just at runtime.
 
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+
+import { runMcp } from "../src/mcp/main.ts";
 
 import { createFkanbanMcpServer } from "../src/mcp/server.ts";
 import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
@@ -102,6 +107,72 @@ async function connectedClient(node: NodeClient): Promise<Client> {
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   return client;
 }
+
+// runMcp() reads the config before touching the node, so its config-error
+// paths are unit-testable by pointing FKANBAN_CONFIG at a temp file. A missing
+// OR invalid config must surface as one clean `fkanban mcp: <message>` line on
+// stderr + a return code of 1 — never a raw ConfigInvalidError stack trace.
+describe("runMcp startup config errors are clean (no stack trace)", () => {
+  let dir: string;
+  let prevConfig: string | undefined;
+  let errs: string[];
+  let restoreErr: () => void;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "fk-mcp-cfg-"));
+    prevConfig = process.env.FKANBAN_CONFIG;
+    errs = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      errs.push(args.map((a) => (typeof a === "string" ? a : String(a))).join(" "));
+    };
+    restoreErr = () => {
+      console.error = orig;
+    };
+  });
+
+  afterEach(() => {
+    restoreErr();
+    if (prevConfig === undefined) delete process.env.FKANBAN_CONFIG;
+    else process.env.FKANBAN_CONFIG = prevConfig;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("invalid (non-JSON) config → return 1 + single clean line", async () => {
+    const path = join(dir, "config.json");
+    writeFileSync(path, "{ this is not json", "utf8");
+    process.env.FKANBAN_CONFIG = path;
+
+    const code = await runMcp();
+
+    expect(code).toBe(1);
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/^fkanban mcp: Config at .* is invalid: .* Re-run `fkanban init`\.$/);
+    expect(errs[0]).not.toContain("\n"); // single line, no stack trace
+  });
+
+  test("invalid (bad shape) config → return 1 + single clean line", async () => {
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ nodeUrl: "http://x" }), "utf8");
+    process.env.FKANBAN_CONFIG = path;
+
+    const code = await runMcp();
+
+    expect(code).toBe(1);
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/^fkanban mcp: Config at .* is invalid: /);
+  });
+
+  test("missing config still returns 1 + clean line (no regression)", async () => {
+    process.env.FKANBAN_CONFIG = join(dir, "does-not-exist.json");
+
+    const code = await runMcp();
+
+    expect(code).toBe(1);
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/^fkanban mcp: Config not found at .* Run `fkanban init` first\.$/);
+  });
+});
 
 describe("MCP write tools return structuredContent", () => {
   let node: NodeClient;
