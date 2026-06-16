@@ -61,6 +61,168 @@ Dependencies: a card with deps is 🔒 blocked until each dep card reaches
 
 Columns (default board): backlog → todo → doing → review → done`;
 
+const HELP_FOOTER = "Run `fkanban help` for all commands.";
+
+function withFooter(body: string): string {
+  return `${body}\n\n${HELP_FOOTER}`;
+}
+
+// Per-command usage. `fkanban <cmd> --help` (or `-h`) prints the matching
+// entry instead of the global TOP_HELP firehose. Every command listed in
+// TOP_HELP must have an entry here (a unit test enforces they can't drift).
+export const COMMAND_HELP: Record<string, string> = {
+  init: withFooter(`fkanban init — bootstrap a node + register schemas + seed the default board
+
+Usage:
+  fkanban init [options]
+
+Options:
+  --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1:9001)
+  --schema-service-url <url>  schema service to resolve fkanban schemas from
+  --node-socket-path <path>   unix socket of the node, instead of --node-url
+  --name <name>               display name to seed the default board with
+
+Example:
+  fkanban init --node-url http://127.0.0.1:9001 --name "Tom's board"`),
+
+  add: withFooter(`fkanban add — create or update a card (idempotent by slug)
+
+Usage:
+  fkanban add <slug> [options]            # --body also reads stdin if piped
+
+Options:
+  --title <text>        card title
+  --board <slug>        board to place the card on (default: default)
+  --column <col>        column to place the card in (default: first column)
+  --assignee <name>     who owns the card
+  --tags a,b,c          comma-separated tags
+  --deps a,b            comma-separated slugs this card depends on
+  --body <text>         card body (Markdown); replaces the whole body
+  --json                echo the write result as JSON
+
+Example:
+  fkanban add ship-login --title "Ship login" --column todo --tags auth,p1`),
+
+  move: withFooter(`fkanban move — move a card to another column
+
+Usage:
+  fkanban move <slug> <column> [options]
+
+Options:
+  --position <N>        insert at position N within the column
+  --force               move past a 🔒 dependency block
+  --json                echo the write result as JSON
+
+Example:
+  fkanban move ship-login doing`),
+
+  dep: withFooter(`fkanban dep — manage dependency edges between cards
+
+Usage:
+  fkanban dep add <slug> <dep>     # card <slug> depends on <dep>
+  fkanban dep rm  <slug> <dep>     # remove the edge
+
+Options:
+  --json                echo the write result as JSON
+
+A card with deps is 🔒 blocked until each dep card reaches \`done\`.
+
+Example:
+  fkanban dep add ui api`),
+
+  list: withFooter(`fkanban list — render a board as columns of cards
+
+Usage:
+  fkanban list [options]
+
+Options:
+  --board <slug>        board to render (default: default)
+  --column <col>        only show one column
+  --limit <N>           cap cards shown per column
+  --all                 show every card (no per-column cap)
+  --json                machine-readable output
+
+Example:
+  fkanban list --board default --limit 10`),
+
+  search: withFooter(`fkanban search — find cards by text across slug/title/body/tags/assignee
+
+Usage:
+  fkanban search <query> [options]        # multi-word queries are AND-matched
+
+Options:
+  --board <slug>        restrict to one board
+  --column <col>        restrict to one column
+  --json                machine-readable output
+
+Example:
+  fkanban search "auth p1"`),
+
+  show: withFooter(`fkanban show — print one card in detail (deps + blocked state)
+
+Usage:
+  fkanban show <slug> [options]
+
+Options:
+  --json                machine-readable output
+
+Example:
+  fkanban show ship-login`),
+
+  rm: withFooter(`fkanban rm — soft-delete a card (tombstone; recoverable)
+
+Usage:
+  fkanban rm <slug> [options]
+
+Options:
+  --json                echo the write result as JSON
+
+Example:
+  fkanban rm ship-login`),
+
+  board: withFooter(`fkanban board — create/update boards or list them
+
+Usage:
+  fkanban board create <slug> [options]
+  fkanban board list [options]
+
+Options:
+  --title <text>        board title (create)
+  --columns a,b,c       comma-separated column names (create)
+  --body <text>         board body (create)
+  --json                machine-readable output
+
+Example:
+  fkanban board create sprint --title "Sprint 1" --columns todo,doing,done`),
+
+  doctor: withFooter(`fkanban doctor — health-check the local setup
+
+Usage:
+  fkanban doctor
+
+Verifies config, node reachability, and resolved schemas. Exits non-zero on
+any failed check.`),
+
+  mcp: withFooter(`fkanban mcp — start an MCP server over stdio
+
+Usage:
+  fkanban mcp
+
+Exposes the board to MCP clients (e.g. Claude). Speaks JSON-RPC on
+stdin/stdout; not meant to be run interactively.`),
+};
+
+// Resolve which help text to print for the parsed argv. `cmd` is positionals[0].
+// Per-command help only when --help/-h is set AND cmd names a known command;
+// otherwise the global help (covers `--help`, `help`, no command, unknown cmd).
+export function resolveHelp(cmd: string | undefined, help: boolean): string | undefined {
+  if (!cmd || cmd === "help") return TOP_HELP;
+  if (help) {
+    return cmd in COMMAND_HELP ? COMMAND_HELP[cmd] : TOP_HELP;
+  }
+  return undefined;
+}
+
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return "";
   const chunks: Uint8Array[] = [];
@@ -108,8 +270,9 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const cmd = positionals[0];
-  if (!cmd || cmd === "help" || values.help) {
-    console.log(TOP_HELP);
+  const helpText = resolveHelp(cmd, values.help as boolean | undefined ?? false);
+  if (helpText !== undefined) {
+    console.log(helpText);
     return 0;
   }
 
@@ -282,16 +445,18 @@ function requirePositional(value: string | undefined, usage: string): string {
   return value;
 }
 
-main(process.argv.slice(2))
-  .then((code) => process.exit(code))
-  .catch((err) => {
-    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
-      console.error(`fkanban: ${err.message}`);
-    } else if (err instanceof FkanbanError) {
-      console.error(`fkanban: ${err.message}`);
-      if (err.hint) console.error(`  hint: ${err.hint}`);
-    } else {
-      console.error(`fkanban: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    process.exit(1);
-  });
+if (import.meta.main) {
+  main(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
+        console.error(`fkanban: ${err.message}`);
+      } else if (err instanceof FkanbanError) {
+        console.error(`fkanban: ${err.message}`);
+        if (err.hint) console.error(`  hint: ${err.hint}`);
+      } else {
+        console.error(`fkanban: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      process.exit(1);
+    });
+}

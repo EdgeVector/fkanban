@@ -39,6 +39,7 @@ import {
 } from "../src/format.ts";
 import { renderBoard, renderSearchResults } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
+import { TOP_HELP, COMMAND_HELP, resolveHelp } from "../src/cli.ts";
 
 function card(partial: Partial<Card>): Card {
   return {
@@ -334,6 +335,60 @@ describe("doctor", () => {
     const report = lines.join("\n");
     expect(report).toContain("✗ config present");
     expect(report).toContain("fkanban init");
+  });
+});
+
+describe("per-command help", () => {
+  // Pull the command names out of TOP_HELP's "Commands:" section so the two
+  // sources can't drift: every documented command must have a COMMAND_HELP entry.
+  function commandsInTopHelp(): string[] {
+    const lines = TOP_HELP.split("\n");
+    const start = lines.findIndex((l) => l.trim() === "Commands:");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const cmds: string[] = [];
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim() === "") break; // section ends at the blank line
+      const name = line.match(/^\s{2}([a-z]+)\b/)?.[1];
+      if (name && name !== "help") cmds.push(name); // `help` is the global, not a per-command entry
+    }
+    return cmds;
+  }
+
+  test("every command in TOP_HELP has a COMMAND_HELP entry", () => {
+    for (const cmd of commandsInTopHelp()) {
+      expect(COMMAND_HELP[cmd], `missing COMMAND_HELP for "${cmd}"`).toBeDefined();
+    }
+  });
+
+  test("COMMAND_HELP has no entries beyond TOP_HELP's commands", () => {
+    const documented = new Set(commandsInTopHelp());
+    for (const cmd of Object.keys(COMMAND_HELP)) {
+      expect(documented.has(cmd), `COMMAND_HELP has stale entry "${cmd}"`).toBe(true);
+    }
+  });
+
+  test("each entry names its command, shows a Usage line + an example, and the footer", () => {
+    for (const [cmd, text] of Object.entries(COMMAND_HELP)) {
+      expect(text).toContain(`fkanban ${cmd}`);
+      expect(text).toContain("Usage:");
+      expect(text).toContain("Run `fkanban help` for all commands.");
+    }
+  });
+
+  test("resolveHelp returns command help for a known cmd with --help", () => {
+    expect(resolveHelp("add", true)).toBe(COMMAND_HELP.add!);
+    expect(resolveHelp("init", true)).toBe(COMMAND_HELP.init!);
+  });
+
+  test("resolveHelp returns global help for help/no-command/unknown", () => {
+    expect(resolveHelp(undefined, true)).toBe(TOP_HELP); // `fkanban --help`
+    expect(resolveHelp("help", false)).toBe(TOP_HELP); // `fkanban help`
+    expect(resolveHelp("bogus", true)).toBe(TOP_HELP); // unknown cmd + --help
+  });
+
+  test("resolveHelp returns undefined when no help flag and a real command runs", () => {
+    expect(resolveHelp("add", false)).toBeUndefined();
+    expect(resolveHelp("list", false)).toBeUndefined();
   });
 });
 
