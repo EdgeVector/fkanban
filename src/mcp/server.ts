@@ -11,11 +11,11 @@ import { FkanbanError, newNodeClient, type NodeClient, type Verbose } from "../c
 import { readConfig, resolveSocketPath, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
-import { listCmd } from "../commands/list.ts";
-import { searchCmd } from "../commands/search.ts";
-import { showCmd } from "../commands/show.ts";
+import { listResult } from "../commands/list.ts";
+import { searchResult } from "../commands/search.ts";
+import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
-import { boardCreateCmd, boardListCmd, boardRmCmd } from "../commands/board.ts";
+import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { doctor } from "../commands/doctor.ts";
 
@@ -28,10 +28,6 @@ type ToolResult = {
   isError?: boolean;
 };
 
-function textResult(text: string): ToolResult {
-  return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }] };
-}
-
 // Write tools return BOTH a machine-readable result object (structuredContent,
 // matching the tool's declared outputSchema — the same shape the CLI emits
 // under `--json`) AND a human-readable text block, so MCP clients that don't
@@ -39,6 +35,47 @@ function textResult(text: string): ToolResult {
 function writeResult(text: string, structured: Record<string, unknown>): ToolResult {
   return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }], structuredContent: structured };
 }
+
+// Read tools mirror the write-tool precedent: alongside the unchanged
+// human-readable text block, return `structuredContent` (the same shape the CLI
+// emits under `--json`, validated against the tool's declared outputSchema).
+// MCP requires structuredContent to be an object, so list/search/board_list
+// wrap their arrays as `{ cards }` / `{ boards }`; show returns the card object.
+function readResult(text: string, structured: Record<string, unknown>): ToolResult {
+  return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }], structuredContent: structured };
+}
+
+// Card shape the CLI `--json` emits (mirrors the `Card` type in record.ts).
+const cardShape = {
+  slug: z.string(),
+  title: z.string(),
+  body: z.string(),
+  board: z.string(),
+  column: z.string(),
+  position: z.string(),
+  assignee: z.string(),
+  tags: z.array(z.string()),
+  deps: z.array(z.string()),
+  created_at: z.string(),
+  updated_at: z.string(),
+} as const;
+const cardSchema = z.object(cardShape);
+
+// `show --json` adds resolved dependency status to the card.
+const cardDetailSchema = cardSchema.extend({
+  blocked: z.boolean(),
+  blockedBy: z.array(z.string()),
+  missingDeps: z.array(z.string()),
+});
+
+const boardSchema = z.object({
+  slug: z.string(),
+  title: z.string(),
+  body: z.string(),
+  columns: z.array(z.string()),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
 
 function errorResult(err: unknown): ToolResult {
   const msg =
@@ -65,13 +102,15 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         board: z.string().optional().describe("Board slug (default: `default`)."),
         column: z.string().optional().describe("Restrict to one column."),
       },
+      outputSchema: { cards: z.array(cardSchema).describe("Matching cards, in column + position order.") },
     },
     async (args) => {
       try {
-        const o: Parameters<typeof listCmd>[0] = { cfg, node };
+        const o: Parameters<typeof listResult>[0] = { cfg, node };
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
-        return textResult(await listCmd(o));
+        const { text, cards } = await listResult(o);
+        return readResult(text, { cards });
       } catch (err) {
         return errorResult(err);
       }
@@ -89,13 +128,15 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
         board: z.string().optional().describe("Restrict to one board."),
         column: z.string().optional().describe("Restrict to one column."),
       },
+      outputSchema: { cards: z.array(cardSchema).describe("Matching cards across boards/columns.") },
     },
     async (args) => {
       try {
-        const o: Parameters<typeof searchCmd>[0] = { cfg, node, query: args.query };
+        const o: Parameters<typeof searchResult>[0] = { cfg, node, query: args.query };
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
-        return textResult(await searchCmd(o));
+        const { text, cards } = await searchResult(o);
+        return readResult(text, { cards });
       } catch (err) {
         return errorResult(err);
       }
@@ -238,10 +279,12 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "Show a card",
       description: "Print one card in detail by slug, including its dependencies and blocked state.",
       inputSchema: { slug: z.string().min(1).describe("Card slug.") },
+      outputSchema: cardDetailSchema.shape,
     },
     async (args) => {
       try {
-        return textResult(await showCmd({ cfg, node, slug: args.slug }));
+        const { text, card } = await showResult({ cfg, node, slug: args.slug });
+        return readResult(text, card);
       } catch (err) {
         return errorResult(err);
       }
@@ -302,10 +345,12 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
       title: "List boards",
       description: "List every board with its columns.",
       inputSchema: {},
+      outputSchema: { boards: z.array(boardSchema).describe("Every live board with its columns.") },
     },
     async () => {
       try {
-        return textResult(await boardListCmd({ cfg, node }));
+        const { text, boards } = await boardListResult({ cfg, node });
+        return readResult(text, { boards });
       } catch (err) {
         return errorResult(err);
       }

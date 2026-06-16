@@ -22,7 +22,11 @@ export type ListOptions = {
   all?: boolean;
 };
 
-export async function listCmd(opts: ListOptions): Promise<string> {
+// Both the human text and the structured (`--json`) payload, built from a
+// single board+cards read. `listCmd` (CLI) returns one or the other; the MCP
+// tool returns both, so it computes the data once and hands the structured
+// `cards` array straight to `structuredContent`.
+export async function listResult(opts: ListOptions): Promise<{ text: string; cards: Card[] }> {
   const boardSlug = opts.board ?? "default";
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently render an empty default-column board. The
@@ -33,13 +37,9 @@ export async function listCmd(opts: ListOptions): Promise<string> {
       ? await requireBoard(opts.node, opts.cfg, boardSlug)
       : await findBoard(opts.node, opts.cfg, boardSlug);
   const allCards = await listCards(opts.node, opts.cfg);
-  const cards = allCards.filter(
-    (c) => c.board === boardSlug && (!opts.column || c.column === opts.column),
+  const cards = sortCards(
+    allCards.filter((c) => c.board === boardSlug && (!opts.column || c.column === opts.column)),
   );
-
-  if (opts.json) {
-    return JSON.stringify(sortCards(cards), null, 2);
-  }
 
   const resolvedBoard = board ?? {
     slug: boardSlug,
@@ -57,7 +57,12 @@ export async function listCmd(opts: ListOptions): Promise<string> {
       : DEFAULT_COLUMN_LIMIT;
   const renderOpts: RenderOptions = { blocked: blockedSlugSet(cards, allCards), limit };
   if (opts.column) renderOpts.column = opts.column;
-  return renderBoard(resolvedBoard, cards, renderOpts);
+  return { text: renderBoard(resolvedBoard, cards, renderOpts), cards };
+}
+
+export async function listCmd(opts: ListOptions): Promise<string> {
+  const { text, cards } = await listResult(opts);
+  return opts.json ? JSON.stringify(cards, null, 2) : text;
 }
 
 export function summarize(cards: Card[]): Record<string, number> {
