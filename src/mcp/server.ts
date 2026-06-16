@@ -8,7 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { FkanbanError, newNodeClient, type NodeClient, type Verbose } from "../client.ts";
-import { readConfig, resolveSocketPath, type Config } from "../config.ts";
+import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
@@ -451,15 +451,33 @@ export function createFkanbanMcpServer(
   return server;
 }
 
-// Used by `fkanban mcp` (the CLI subcommand). Reads the same config as the CLI.
+// The single MCP-server entrypoint for BOTH `fkanban mcp` (the CLI subcommand)
+// and the `fkanban-mcp` bin (`runMcp` in main.ts delegates here), so the two
+// can never diverge. Reads the same config as the CLI; on a missing/invalid
+// config it starts in the not-yet-configured state — the handshake + listTools
+// still succeed so the client connects, and each config-dependent tool degrades
+// to a clean `isError` "Run `fkanban init` first." per call (see
+// `createFkanbanMcpServer`), matching the bin's behavior.
+//
 // `server.connect` resolves as soon as the transport is wired up, so we must
 // not let the caller return (and `process.exit`) before the server has served
 // anything — keep the call pending until the stdio transport closes (client
 // disconnects / stdin EOF).
 export async function startMcpServer(opts: { verbose?: Verbose } = {}): Promise<void> {
-  const cfg = readConfig();
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
-  const server = createFkanbanMcpServer({ cfg, node });
+  let server: McpServer;
+  try {
+    const cfg = readConfig();
+    const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
+    server = createFkanbanMcpServer({ cfg, node });
+  } catch (err) {
+    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
+      // Start anyway so the handshake succeeds and the client connects; tools
+      // degrade per call to the "Run `fkanban init` first." hint.
+      server = createFkanbanMcpServer({ configError: err });
+    } else {
+      throw err;
+    }
+  }
   const transport = new StdioServerTransport();
   const closed = new Promise<void>((resolve) => {
     transport.onclose = () => resolve();

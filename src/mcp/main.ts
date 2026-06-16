@@ -14,33 +14,15 @@
 // can self-diagnose. This matches the install→use order in the README, where a
 // new dev may `claude mcp add fkanban …` BEFORE `fkanban init`.
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { startMcpServer } from "./server.ts";
 
-import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError } from "../config.ts";
-import { newNodeClient } from "../client.ts";
-import { createFkanbanMcpServer } from "./server.ts";
-
+// The `fkanban-mcp` bin delegates to the single `startMcpServer` implementation
+// shared with the `fkanban mcp` CLI subcommand, so the two entrypoints can never
+// diverge. `startMcpServer` reads config, starts gracefully on a missing/invalid
+// config (handshake succeeds, tools degrade per call), and stays alive until the
+// stdio transport closes.
 export async function runMcp(): Promise<number> {
-  let cfg;
-  try {
-    cfg = readConfig();
-  } catch (err) {
-    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
-      // Start in the not-yet-configured state instead of bailing out: the
-      // handshake + listTools must succeed so the client connects, then tools
-      // degrade gracefully to a "Run `fkanban init` first." error per call.
-      const server = createFkanbanMcpServer({ configError: err });
-      const transport = new StdioServerTransport();
-      await server.connect(transport);
-      return 0;
-    }
-    throw err;
-  }
-
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
-  const server = createFkanbanMcpServer({ cfg, node });
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await startMcpServer();
   return 0;
 }
 
