@@ -29,7 +29,9 @@ import {
   DEP_TAG_PREFIX,
   type Card,
 } from "../src/record.ts";
-import { FkanbanError } from "../src/client.ts";
+import { FkanbanError, type NodeClient, type QueryResponse } from "../src/client.ts";
+import { listCmd } from "../src/commands/list.ts";
+import { type Config } from "../src/config.ts";
 import {
   formatAdd,
   formatMove,
@@ -322,6 +324,73 @@ describe("render", () => {
     for (let i = 0; i < 4; i++) expect(out).toContain(`Done ${i}`);
     expect(out).not.toContain("(--all)");
   });
+
+  test("empty board renders the getting-started hint, not the — skeleton", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [], { color: false });
+    // Keeps the board heading.
+    expect(out).toContain("Default board");
+    // Friendly nudge with a copy-pasteable example.
+    expect(out).toContain("No cards yet. Create your first:");
+    expect(out).toContain(`fkanban add my-first-card --title "My first card"`);
+    // No bare column skeleton.
+    expect(out).not.toContain("  —");
+    expect(out).not.toContain("BACKLOG  (0)");
+  });
+
+  test("a non-default empty board is equally welcoming", () => {
+    const board = {
+      slug: "sprint",
+      title: "Sprint board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [], { color: false });
+    expect(out).toContain("Sprint board");
+    expect(out).toContain("No cards yet. Create your first:");
+    expect(out).not.toContain("  —");
+  });
+
+  test("a board with ≥1 card renders the columns, not the hint", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [card({ slug: "ship", title: "Ship it", column: "doing" })], {
+      color: false,
+    });
+    expect(out).not.toContain("No cards yet");
+    expect(out).toContain("DOING  (1)");
+    expect(out).toContain("Ship it");
+  });
+
+  test("--column on an empty board keeps the single-column — (no global hint)", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [], { color: false, column: "todo" });
+    expect(out).not.toContain("No cards yet");
+    expect(out).toContain("TODO  (0)");
+    expect(out).toContain("  —");
+  });
 });
 
 describe("doctor", () => {
@@ -422,5 +491,54 @@ describe("mutation result formatting (--json)", () => {
 
     const board = { slug: "sprint", action: "created" as const };
     expect(JSON.parse(formatBoardCreate(board, true))).toEqual(board);
+  });
+});
+
+describe("listCmd empty board", () => {
+  // Stub node that returns an empty result set for every query — models a
+  // brand-new board with no cards (and no board record, so the default-board
+  // synthesis path is exercised).
+  function emptyNode(): NodeClient {
+    const empty: QueryResponse = { ok: true, results: [] };
+    return {
+      baseUrl: "http://stub",
+      userHash: "stub",
+      autoIdentity: async () => ({ provisioned: true, userHash: "stub" }),
+      bootstrap: async () => ({ userHash: "stub" }),
+      loadSchemas: async () => ({ available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] }),
+      listSchemas: async () => [],
+      createRecord: async () => {},
+      updateRecord: async () => {},
+      deleteRecord: async () => {},
+      queryAll: async () => empty,
+      rawCall: async () => ({ status: 200, body: "" }),
+    } as unknown as NodeClient;
+  }
+
+  const cfg: Config = {
+    configVersion: 1,
+    nodeUrl: "http://stub",
+    schemaServiceUrl: "http://stub",
+    userHash: "stub",
+    schemaHashes: { card: "cardhash", board: "boardhash" },
+  };
+
+  test("default empty board (text) shows the getting-started hint", async () => {
+    const out = await listCmd({ cfg, node: emptyNode() });
+    expect(out).toContain("No cards yet. Create your first:");
+    expect(out).not.toContain("  —");
+  });
+
+  test("--json on an empty board still returns []", async () => {
+    const out = await listCmd({ cfg, node: emptyNode(), json: true });
+    expect(JSON.parse(out)).toEqual([]);
+    expect(out).not.toContain("No cards yet");
+  });
+
+  test("--column todo on an empty board shows the single-column — (no hint)", async () => {
+    const out = await listCmd({ cfg, node: emptyNode(), column: "todo" });
+    expect(out).not.toContain("No cards yet");
+    expect(out).toContain("TODO  (0)");
+    expect(out).toContain("  —");
   });
 });
