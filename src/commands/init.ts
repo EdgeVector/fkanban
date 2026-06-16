@@ -15,9 +15,8 @@
 // publish --app fkanban`; see README "App creation"). After that, every
 // `fkanban init` just loads + resolves the already-published schemas.
 
-import { fileURLToPath } from "node:url";
 import { newNodeClient, FkanbanError, type Verbose } from "../client.ts";
-import { resolveFkanbanShim } from "./doctor.ts";
+import { mcpAddCommand } from "../mcp/register.ts";
 import {
   UNIQUE_SCHEMAS,
   OWNER_APP_ID,
@@ -193,16 +192,4 @@ export function printNextSteps(print: (line: string) => void, bootstrapped: bool
     print("");
     print("Already initialized — run `fkanban list` to see your board.");
   }
-}
-
-// The `claude mcp add` line that will actually work for THIS dev: with the
-// global `fkanban` shim on PATH use the short form, otherwise point bun at this
-// repo's MCP entrypoint (mirrors the two forms in src/mcp/main.ts + README).
-function mcpAddCommand(): string {
-  if (resolveFkanbanShim()) {
-    return "claude mcp add fkanban -- fkanban mcp";
-  }
-  const initPath = fileURLToPath(import.meta.url); // .../src/commands/init.ts
-  const repoRoot = initPath.replace(/\/src\/commands\/init\.ts$/, "");
-  return `claude mcp add fkanban -- bun ${repoRoot}/src/mcp/main.ts`;
 }

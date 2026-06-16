@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 // fkanban MCP server entrypoint — speaks the Model Context Protocol over
-// stdio. Register with Claude Code:
-//   claude mcp add fkanban bun /path/to/fkanban/src/mcp/main.ts
-// or, after install, via the `fkanban-mcp` bin:
-//   claude mcp add fkanban fkanban-mcp
+// stdio. Register with Claude Code (the `--` separates the `claude mcp add`
+// flags from the command it should run):
+//   claude mcp add fkanban -- bun /path/to/fkanban/src/mcp/main.ts
+// or, with the global `fkanban` shim on PATH, via the `fkanban mcp` subcommand:
+//   claude mcp add fkanban -- fkanban mcp
 //
 // Reads ~/.fkanban/config.json (same as the CLI). The server starts
 // UNCONDITIONALLY: even on a missing or invalid config it completes the MCP

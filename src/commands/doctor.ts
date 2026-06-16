@@ -2,9 +2,11 @@
 // reachable + provisioned, both schemas resolved on the node, a query
 // round-trips.
 
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { FkanbanError, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
+import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
 import { listBoards, listCards } from "../record.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../schemas.ts";
 
@@ -94,7 +96,40 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     check(false, "query round-trip", err instanceof Error ? err.message : String(err));
   }
 
+  // Informational only — surface the MCP entrypoint + the exact, shim-aware
+  // `claude mcp add` command so a dev who just set up the CLI knows how to wire
+  // up the MCP half too. Never flips `ok` (matches the shim precedent): a
+  // missing/odd entrypoint is advisory, not a failure.
+  reportMcpEntrypoint(print, onCheck);
+
   return ok;
+}
+
+// Resolve the MCP entrypoint `claude mcp add` would target and print it plus
+// the canonical register command (reusing init's single source of truth in
+// src/mcp/register.ts). Purely informational.
+function reportMcpEntrypoint(
+  print: (line: string) => void,
+  onCheck?: (check: DoctorCheck) => void,
+): void {
+  const name = "MCP entrypoint resolves";
+  const entrypoint = mcpEntrypointPath();
+  const addCmd = mcpAddCommand();
+
+  // The bun+path form points at src/mcp/main.ts on disk; confirm it exists. The
+  // shim form resolves to an installed bin, which `command -v` already verified.
+  if (entrypoint && existsSync(entrypoint)) {
+    print(`✓ MCP entrypoint resolves — ${entrypoint}`);
+    print(`  register with: ${addCmd}`);
+    onCheck?.({ name, status: "info", detail: `${entrypoint} — register with: ${addCmd}` });
+    return;
+  }
+
+  const detail = entrypoint
+    ? `resolved to ${entrypoint} but it does not exist`
+    : "could not resolve the MCP entrypoint";
+  print(`· MCP entrypoint could not be confirmed (optional) — ${detail}`);
+  onCheck?.({ name, status: "info", detail });
 }
 
 // Resolve the global `fkanban` shim on PATH, or `null` if bare `fkanban`
