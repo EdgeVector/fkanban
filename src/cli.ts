@@ -26,6 +26,7 @@ import {
   formatRm,
   formatBoardCreate,
   formatBoardRm,
+  formatError,
 } from "./format.ts";
 
 export const TOP_HELP = `fkanban — a kanban board over fold_db
@@ -129,6 +130,7 @@ Options:
   --json                echo the write result as JSON
 
 A card with deps is 🔒 blocked until each dep card reaches \`done\`.
+Edges that would form a cycle (direct or transitive) are rejected (exit 2).
 
 Example:
   fkanban dep add ui api`),
@@ -467,9 +469,25 @@ async function dispatch(
       const dep = requirePositional(positionals[3], "dep <add|rm> <slug> <dep>");
       const ctx = loadCtx({ verbose });
       if (sub === "add") {
-        const res = await depAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
-        console.log(formatDep(res, values.json as boolean | undefined));
-        return 0;
+        try {
+          const res = await depAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
+          console.log(formatDep(res, values.json as boolean | undefined));
+          return 0;
+        } catch (err) {
+          // A rejected cycle is a bad-input error, not a node failure: report it
+          // LOUDLY with the exit-2 contract (like an unknown flag), and as a
+          // clean machine-readable envelope under --json — never a half write.
+          if (err instanceof FkanbanError && err.code === "dep_cycle") {
+            if (values.json) {
+              console.log(formatError(err));
+            } else {
+              console.error(`fkanban: ${err.message}`);
+              if (err.hint) console.error(`  hint: ${err.hint}`);
+            }
+            return 2;
+          }
+          throw err;
+        }
       }
       if (sub === "rm" || sub === "remove") {
         const res = await depRmCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });

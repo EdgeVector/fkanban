@@ -44,6 +44,15 @@ function emit(res: unknown, human: string, json: boolean | undefined): string {
   return json ? JSON.stringify(res) : human;
 }
 
+// A machine-readable failure envelope for `--json` callers — so a rejected
+// write (e.g. a dependency cycle) is a clean `{ error: { code, message, hint } }`
+// object on stdout, not half-written success or a prose line they must parse.
+export function formatError(err: { code: string; message: string; hint?: string }): string {
+  return JSON.stringify({
+    error: { code: err.code, message: err.message, ...(err.hint ? { hint: err.hint } : {}) },
+  });
+}
+
 export function formatAdd(res: AddResult, json?: boolean): string {
   return emit(res, `${res.action} card ${res.slug} → ${res.board}/${res.column}`, json);
 }
