@@ -206,14 +206,25 @@ Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_move`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_show`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
 `fkanban_doctor`)
-so agents can drive — and self-diagnose — the board:
+so agents can drive — and self-diagnose — the board.
+
+Register it with Claude Code (the `--` separates the `claude mcp add` flags from
+the command it runs). With the global `fkanban` shim on PATH, use the short
+form:
 
 ```bash
-claude mcp add fkanban bun "$PWD/src/mcp/main.ts"
+claude mcp add fkanban -- fkanban mcp
 ```
 
-It reads the same `~/.fkanban/config.json` the CLI writes (override the path
-with `$FKANBAN_CONFIG`).
+Otherwise point bun at this repo's entrypoint:
+
+```bash
+claude mcp add fkanban -- bun "$PWD/src/mcp/main.ts"
+```
+
+`fkanban doctor` prints whichever of these applies to your setup. It reads the
+same `~/.fkanban/config.json` the CLI writes (override the path with
+`$FKANBAN_CONFIG`).
 
 ## Design notes
 

@@ -41,6 +41,7 @@ import {
 } from "../src/format.ts";
 import { renderBoard, renderSearchResults } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
+import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
 import { TOP_HELP, COMMAND_HELP, resolveHelp } from "../src/cli.ts";
 
 function card(partial: Partial<Card>): Card {
@@ -404,6 +405,32 @@ describe("doctor", () => {
     const report = lines.join("\n");
     expect(report).toContain("✗ config present");
     expect(report).toContain("fkanban init");
+  });
+});
+
+describe("mcp register helper (single source of truth)", () => {
+  // doctor's "register with:" line and init's Next-steps register line MUST be
+  // byte-identical — both come from mcpAddCommand(). The entrypoint that
+  // mcpEntrypointPath() resolves to must be the same file mcpAddCommand() names
+  // (in the bun+path form). See card `doctor-verify-mcp-entrypoint-fkanban`.
+  test("mcpAddCommand uses the canonical `--` form", () => {
+    expect(mcpAddCommand()).toMatch(
+      /^claude mcp add fkanban -- (fkanban mcp|bun .+\/src\/mcp\/main\.ts)$/,
+    );
+  });
+
+  test("entrypoint resolves and is consistent with the add command", () => {
+    const entry = mcpEntrypointPath();
+    expect(entry).not.toBeNull();
+    const cmd = mcpAddCommand();
+    if (cmd.endsWith(" mcp")) {
+      // shim form — entrypoint is an installed bin, just assert it resolved.
+      expect(entry!.length).toBeGreaterThan(0);
+    } else {
+      // bun+path form — the command must name the very file the entrypoint is.
+      expect(cmd).toContain(entry!);
+      expect(entry!.endsWith("/src/mcp/main.ts")).toBe(true);
+    }
   });
 });
 
