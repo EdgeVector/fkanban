@@ -5,12 +5,13 @@
 // or, after install, via the `fkanban-mcp` bin:
 //   claude mcp add fkanban fkanban-mcp
 //
-// Reads ~/.fkanban/config.json (same as the CLI). Exits non-zero if the
-// config is missing so the error surfaces in the MCP client logs.
+// Reads ~/.fkanban/config.json (same as the CLI). On a missing or invalid
+// config it prints a single clean `fkanban mcp: <message>` line and exits
+// non-zero so the error surfaces in the MCP client logs without a stack trace.
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { readConfig, resolveSocketPath, ConfigMissingError } from "../config.ts";
+import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError } from "../config.ts";
 import { newNodeClient } from "../client.ts";
 import { createFkanbanMcpServer } from "./server.ts";
 
@@ -19,7 +20,7 @@ export async function runMcp(): Promise<number> {
   try {
     cfg = readConfig();
   } catch (err) {
-    if (err instanceof ConfigMissingError) {
+    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
       console.error(`fkanban mcp: ${err.message}`);
       return 1;
     }
