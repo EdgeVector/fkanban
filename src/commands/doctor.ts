@@ -3,7 +3,7 @@
 // round-trips.
 
 import { fileURLToPath } from "node:url";
-import { newNodeClient, type Verbose } from "../client.ts";
+import { FkanbanError, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { listBoards, listCards } from "../record.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../schemas.ts";
@@ -49,7 +49,18 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     const id = await node.autoIdentity();
     check(id.provisioned, "node reachable + provisioned", id.provisioned ? undefined : id.reason);
   } catch (err) {
-    check(false, "node reachable", err instanceof Error ? err.message : String(err));
+    // We ARE doctor, so strip the shared error's circular "run `fkanban doctor`
+    // for a diagnosis." suffix and surface its `hint` (the start-folddb
+    // guidance) instead — for both the printed line and the structured
+    // `detail` the MCP `fkanban_doctor` tool consumes.
+    let detail: string;
+    if (err instanceof FkanbanError) {
+      detail = err.message.replace(/ — run `fkanban doctor` for a diagnosis\.$/, "");
+      if (err.hint) detail += ` — ${err.hint}`;
+    } else {
+      detail = err instanceof Error ? err.message : String(err);
+    }
+    check(false, "node reachable", detail);
     return false;
   }
 
