@@ -11,6 +11,7 @@ import {
   normalizeDeps,
   nowIso,
   validateSlug,
+  wouldCreateCycle,
   type Card,
 } from "../record.ts";
 
@@ -44,6 +45,17 @@ export async function depAddCmd(opts: {
   const all = await listCardStatuses(opts.node, opts.cfg);
   if (!all.some((c) => c.slug === opts.dep)) {
     console.error(`fkanban: warning — no card "${opts.dep}" yet; adding it as a forward dependency.`);
+  }
+  // Refuse to close a dependency cycle: if `opts.dep` already (transitively)
+  // depends on `opts.slug`, adding `opts.slug → opts.dep` would deadlock every
+  // card on the loop (each blocked on the next, none can ever reach `done`).
+  const cycle = wouldCreateCycle(all, opts.slug, opts.dep);
+  if (cycle) {
+    throw new FkanbanError({
+      code: "dep_cycle",
+      message: `Adding "${opts.slug}" → "${opts.dep}" would create a dependency cycle.`,
+      hint: `Cycle: ${cycle.join(" → ")} (no edge written).`,
+    });
   }
   const deps = normalizeDeps([...card.deps, opts.dep], opts.slug);
   await writeDeps(opts, card, deps);

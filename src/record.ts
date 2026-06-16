@@ -106,6 +106,42 @@ export function depStatus(card: Card, allCards: Card[]): DepStatus {
   return { blockedBy, missing, blocked: blockedBy.length > 0 };
 }
 
+// Would adding the edge `fromSlug → toSlug` (fromSlug depends on toSlug) close a
+// dependency cycle? It does iff `toSlug` can already reach `fromSlug` by walking
+// existing `deps` edges (so the new edge would loop back). Returns the offending
+// cycle path `toSlug → … → fromSlug → toSlug` (slugs in order) when it would, or
+// null when the edge is safe. A dangling dep (no card) has no outgoing edges, so
+// it can never be on a cycle. Direct mutual (a→b, b→a) and longer transitive
+// (a→b→c→a) cycles are both caught.
+export function wouldCreateCycle(
+  allCards: Card[],
+  fromSlug: string,
+  toSlug: string,
+): string[] | null {
+  const depsBySlug = new Map(allCards.map((c) => [c.slug, c.deps]));
+  // DFS from toSlug along deps edges, looking for fromSlug. Track the path so we
+  // can report the cycle. visited guards against pre-existing cycles in the data.
+  const visited = new Set<string>();
+  const path: string[] = [];
+  const walk = (node: string): boolean => {
+    if (node === fromSlug) {
+      path.push(node);
+      return true;
+    }
+    if (visited.has(node)) return false;
+    visited.add(node);
+    path.push(node);
+    for (const next of depsBySlug.get(node) ?? []) {
+      if (walk(next)) return true;
+    }
+    path.pop();
+    return false;
+  };
+  if (!walk(toSlug)) return null;
+  // path is toSlug → … → fromSlug; the new edge fromSlug → toSlug closes it.
+  return [...path, toSlug];
+}
+
 // Map of slug → blocked? across a set of cards, resolved against `allCards`.
 export function blockedSlugSet(cards: Card[], allCards: Card[]): Set<string> {
   const blocked = new Set<string>();

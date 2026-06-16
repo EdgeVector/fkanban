@@ -21,6 +21,7 @@ import {
   normalizeDeps,
   depStatus,
   blockedSlugSet,
+  wouldCreateCycle,
   cardMatchesQuery,
   searchCards,
   depTag,
@@ -38,6 +39,7 @@ import {
   formatDep,
   formatRm,
   formatBoardCreate,
+  formatError,
 } from "../src/format.ts";
 import { renderBoard, renderSearchResults } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
@@ -205,6 +207,48 @@ describe("dependencies", () => {
     expect(isWorkingColumn("doing")).toBe(true);
     expect(isWorkingColumn("review")).toBe(true);
     expect(isWorkingColumn("done")).toBe(true);
+  });
+
+  test("wouldCreateCycle rejects a direct mutual edge (a→b then b→a)", () => {
+    // a already depends on b; adding b→a would close a 2-cycle.
+    const all = [card({ slug: "a", deps: ["b"] }), card({ slug: "b" })];
+    expect(wouldCreateCycle(all, "b", "a")).toEqual(["a", "b", "a"]);
+  });
+
+  test("wouldCreateCycle rejects a transitive cycle (a→b→c, then c→a)", () => {
+    const all = [
+      card({ slug: "a", deps: ["b"] }),
+      card({ slug: "b", deps: ["c"] }),
+      card({ slug: "c" }),
+    ];
+    // adding c→a: a reaches c (a→b→c), so the new edge closes a→b→c→a.
+    expect(wouldCreateCycle(all, "c", "a")).toEqual(["a", "b", "c", "a"]);
+  });
+
+  test("wouldCreateCycle allows a valid DAG edge", () => {
+    const all = [
+      card({ slug: "a" }),
+      card({ slug: "b", deps: ["a"] }),
+      card({ slug: "c", deps: ["a"] }),
+    ];
+    // c→b is fine: b does not (transitively) depend on c.
+    expect(wouldCreateCycle(all, "c", "b")).toBeNull();
+  });
+
+  test("wouldCreateCycle allows a forward/dangling dep (no such card)", () => {
+    const all = [card({ slug: "a" })];
+    // a→ghost: ghost has no outgoing edges, so it can never loop back to a.
+    expect(wouldCreateCycle(all, "a", "ghost")).toBeNull();
+  });
+
+  test("wouldCreateCycle tolerates a pre-existing cycle in the data", () => {
+    // x↔y already cycle (shouldn't happen, but don't hang): adding z→x is safe.
+    const all = [
+      card({ slug: "x", deps: ["y"] }),
+      card({ slug: "y", deps: ["x"] }),
+      card({ slug: "z" }),
+    ];
+    expect(wouldCreateCycle(all, "z", "x")).toBeNull();
   });
 });
 
@@ -518,6 +562,19 @@ describe("mutation result formatting (--json)", () => {
 
     const board = { slug: "sprint", action: "created" as const };
     expect(JSON.parse(formatBoardCreate(board, true))).toEqual(board);
+  });
+
+  test("formatError emits a { error: { code, message, hint } } envelope", () => {
+    const out = formatError({ code: "dep_cycle", message: "would cycle", hint: "a → b → a" });
+    expect(JSON.parse(out)).toEqual({
+      error: { code: "dep_cycle", message: "would cycle", hint: "a → b → a" },
+    });
+  });
+
+  test("formatError omits hint when absent", () => {
+    expect(JSON.parse(formatError({ code: "x", message: "m" }))).toEqual({
+      error: { code: "x", message: "m" },
+    });
   });
 });
 
