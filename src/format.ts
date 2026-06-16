@@ -36,6 +36,10 @@ export interface BoardCreateResult {
   action: "created" | "updated";
 }
 
+export interface BoardRmResult {
+  slug: string;
+}
+
 function emit(res: unknown, human: string, json: boolean | undefined): string {
   return json ? JSON.stringify(res) : human;
 }
@@ -60,4 +64,8 @@ export function formatRm(res: RmResult, json?: boolean): string {
 
 export function formatBoardCreate(res: BoardCreateResult, json?: boolean): string {
   return emit(res, `${res.action} board ${res.slug}`, json);
+}
+
+export function formatBoardRm(res: BoardRmResult, json?: boolean): string {
+  return emit(res, `removed board ${res.slug}`, json);
 }

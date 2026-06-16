@@ -15,7 +15,7 @@ import { listCmd } from "../commands/list.ts";
 import { searchCmd } from "../commands/search.ts";
 import { showCmd } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
-import { boardCreateCmd, boardListCmd } from "../commands/board.ts";
+import { boardCreateCmd, boardListCmd, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { doctor } from "../commands/doctor.ts";
 
@@ -306,6 +306,29 @@ export function createFkanbanMcpServer(opts: { cfg: Config; node?: NodeClient })
     async () => {
       try {
         return textResult(await boardListCmd({ cfg, node }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_board_rm",
+    {
+      title: "Delete a board",
+      description:
+        "Soft-delete a board (fold_db is append-only; the board is tombstoned and hidden). " +
+        "Refuses the default board, and refuses a board with live cards unless force is set.",
+      inputSchema: {
+        slug: z.string().min(1).describe("Board slug."),
+        force: z.boolean().optional().describe("Remove even if the board still has live cards."),
+      },
+      outputSchema: { slug: z.string() },
+    },
+    async (args) => {
+      try {
+        const res = await boardRmCmd({ cfg, node, slug: args.slug, force: args.force });
+        return writeResult(`removed board ${res.slug}`, res);
       } catch (err) {
         return errorResult(err);
       }

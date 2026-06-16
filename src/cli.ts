@@ -16,7 +16,7 @@ import { listCmd } from "./commands/list.ts";
 import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
-import { boardCreateCmd, boardListCmd } from "./commands/board.ts";
+import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { doctor } from "./commands/doctor.ts";
 import {
@@ -25,6 +25,7 @@ import {
   formatDep,
   formatRm,
   formatBoardCreate,
+  formatBoardRm,
 } from "./format.ts";
 
 export const TOP_HELP = `fkanban — a kanban board over fold_db
@@ -45,14 +46,16 @@ Commands:
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
   board list           list boards (--json)
+  board rm <slug>      soft-delete a board (refuses the default board or a
+                       board with live cards unless --force)
   doctor               health-check the local setup
   mcp                  start an MCP server over stdio
   help                 print this help
 
 Global flags:
   --verbose            echo HTTP requests + responses
-  --json               machine-readable output (add/move/dep/rm/board create
-                       echo the write result as JSON; read commands too)
+  --json               machine-readable output (add/move/dep/rm/board create/
+                       board rm echo the write result as JSON; read commands too)
   --help, -h           print this help
   --version, -V        print the fkanban version and exit
 
@@ -427,7 +430,18 @@ async function main(argv: string[]): Promise<number> {
         console.log(out);
         return 0;
       }
-      console.error(`Unknown board subcommand "${sub}". Try: board create | board list`);
+      if (sub === "rm") {
+        const slug = requirePositional(positionals[2], "board rm <slug>");
+        const res = await boardRmCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug,
+          force: values.force as boolean | undefined,
+        });
+        console.log(formatBoardRm(res, values.json as boolean | undefined));
+        return 0;
+      }
+      console.error(`Unknown board subcommand "${sub}". Try: board create | board list | board rm`);
       return 2;
     }
 

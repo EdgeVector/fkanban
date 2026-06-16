@@ -151,13 +151,14 @@ DONE  (0)
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
 | `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
 | `fkanban board list` | list boards (`--json`) |
+| `fkanban board rm <slug>` | soft-delete a board (tombstone); refuses the `default` board or a board with live cards unless `--force` |
 | `fkanban doctor` | health-check config + node + schemas + a query round-trip |
 | `fkanban mcp` | start an MCP server over stdio |
 
 Global: `--verbose` (echo HTTP), `--version`, `--help`.
 
 `--json` works on the write commands too — `add`, `move`, `dep add/rm`, `rm`,
-and `board create` echo the write result as a JSON object instead of a prose
+`board create`, and `board rm` echo the write result as a JSON object instead of a prose
 line, so scripts and agents can confirm the outcome machine-readably (e.g.
 `fkanban move ship-login doing --json` → `{"slug":"ship-login","from":"todo","to":"doing"}`).
 
@@ -198,7 +199,8 @@ card is surfaced as a warning but never blocks (it could never reach `done`).
 
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_move`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_show`,
-`fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_doctor`)
+`fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
+`fkanban_doctor`)
 so agents can drive — and self-diagnose — the board:
 
 ```bash
