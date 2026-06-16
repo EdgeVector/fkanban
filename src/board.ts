@@ -62,6 +62,26 @@ export function renderBoard(
   lines.push(paint(color, "bold", heading));
   lines.push("");
 
+  // Whole-board-empty first-run nudge: a brand-new board (0 cards) viewed
+  // without a `--column` filter gets a copy-pasteable getting-started hint
+  // instead of the bare five-`—` column skeleton, which is a dead-end first
+  // screen right after `init`. A single-column view (opts.column) is a
+  // deliberate narrow look and keeps its `—`; a board with any card renders
+  // normally.
+  if (!opts.column && cards.length === 0) {
+    lines.push("No cards yet. Create your first:");
+    lines.push(paint(color, "cyan", `  fkanban add my-first-card --title "My first card"`));
+    lines.push("");
+    lines.push(
+      paint(
+        color,
+        "dim",
+        "(then `fkanban list` to see it, or `fkanban mcp` to drive the board from an agent)",
+      ),
+    );
+    return lines.join("\n").replace(/\n+$/, "\n");
+  }
+
   for (const col of columns) {
     const inCol = sortCards(cards.filter((c) => c.column === col));
     const colCode = COLUMN_COLOR[col] ?? "cyan";
