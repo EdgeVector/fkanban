@@ -3,16 +3,16 @@
 // the end of that column. The whole command is two point reads (board, card)
 // plus one write — it never scans the board.
 
-import { FkanbanError, type NodeClient } from "../client.ts";
+import { type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
   cardToFields,
   ensureColumn,
-  findBoard,
   findCard,
   normalizeDeps,
   nowIso,
+  requireBoard,
   validateSlug,
   type Card,
 } from "../record.ts";
@@ -44,14 +44,7 @@ export type AddResult = { slug: string; action: "created" | "updated"; board: st
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   const boardSlug = opts.board ?? "default";
-  const board = await findBoard(opts.node, opts.cfg, boardSlug);
-  if (!board) {
-    throw new FkanbanError({
-      code: "board_not_found",
-      message: `Board "${boardSlug}" does not exist.`,
-      hint: `Create it first: \`fkanban board create ${boardSlug}\` (or use the default board).`,
-    });
-  }
+  const board = await requireBoard(opts.node, opts.cfg, boardSlug);
   const columns = board.columns;
   const column = opts.column ?? columns[0] ?? "backlog";
   ensureColumn(column, columns);

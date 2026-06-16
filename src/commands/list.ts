@@ -3,7 +3,7 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, findBoard, listCards, sortCards, type Card } from "../record.ts";
+import { blockedSlugSet, findBoard, listCards, requireBoard, sortCards, type Card } from "../record.ts";
 import { renderBoard, type RenderOptions } from "../board.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
@@ -24,7 +24,14 @@ export type ListOptions = {
 
 export async function listCmd(opts: ListOptions): Promise<string> {
   const boardSlug = opts.board ?? "default";
-  const board = await findBoard(opts.node, opts.cfg, boardSlug);
+  // An explicitly-passed board must exist — a typo'd name should error loudly
+  // (matching `add`), not silently render an empty default-column board. The
+  // no-`--board` path defaults to `default`, which always exists, so it stays
+  // on the cheap `findBoard` lookup with no extra read on the hot path.
+  const board =
+    opts.board !== undefined
+      ? await requireBoard(opts.node, opts.cfg, boardSlug)
+      : await findBoard(opts.node, opts.cfg, boardSlug);
   const allCards = await listCards(opts.node, opts.cfg);
   const cards = allCards.filter(
     (c) => c.board === boardSlug && (!opts.column || c.column === opts.column),

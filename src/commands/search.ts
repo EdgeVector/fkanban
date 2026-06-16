@@ -4,7 +4,7 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, listCards, searchCards, sortCards } from "../record.ts";
+import { blockedSlugSet, listCards, requireBoard, searchCards, sortCards } from "../record.ts";
 import { renderSearchResults } from "../board.ts";
 
 export type SearchOptions = {
@@ -17,6 +17,12 @@ export type SearchOptions = {
 };
 
 export async function searchCmd(opts: SearchOptions): Promise<string> {
+  // An explicitly-passed board must exist — a typo'd name should error loudly
+  // (matching `add`), not silently report "No cards match". Without `--board`
+  // the search spans all boards, so there's nothing to validate.
+  if (opts.board !== undefined) {
+    await requireBoard(opts.node, opts.cfg, opts.board);
+  }
   const allCards = await listCards(opts.node, opts.cfg);
   const scoped = allCards.filter(
     (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
