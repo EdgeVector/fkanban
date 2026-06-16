@@ -3,7 +3,7 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, findBoard, listCards, requireBoard, sortCards, type Card } from "../record.ts";
+import { blockedSlugSet, ensureColumn, findBoard, listCards, requireBoard, sortCards, type Card } from "../record.ts";
 import { renderBoard, type RenderOptions } from "../board.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
@@ -36,10 +36,6 @@ export async function listResult(opts: ListOptions): Promise<{ text: string; car
     opts.board !== undefined
       ? await requireBoard(opts.node, opts.cfg, boardSlug)
       : await findBoard(opts.node, opts.cfg, boardSlug);
-  const allCards = await listCards(opts.node, opts.cfg);
-  const cards = sortCards(
-    allCards.filter((c) => c.board === boardSlug && (!opts.column || c.column === opts.column)),
-  );
 
   const resolvedBoard = board ?? {
     slug: boardSlug,
@@ -49,6 +45,18 @@ export async function listResult(opts: ListOptions): Promise<{ text: string; car
     created_at: "",
     updated_at: "",
   };
+  // An explicitly-passed `--column` must be a real column on the resolved
+  // board — a typo'd name should error loudly (matching `move`/`add` via the
+  // shared `ensureColumn`), not silently filter every card out and render an
+  // empty board. Only checked when `--column` is set, so the no-`--column` hot
+  // path is unchanged.
+  if (opts.column !== undefined) ensureColumn(opts.column, resolvedBoard.columns);
+
+  const allCards = await listCards(opts.node, opts.cfg);
+  const cards = sortCards(
+    allCards.filter((c) => c.board === boardSlug && (!opts.column || c.column === opts.column)),
+  );
+
   // Resolve blocked status against ALL live cards so cross-board deps count.
   const limit = opts.all
     ? 0

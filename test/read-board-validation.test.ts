@@ -153,3 +153,49 @@ describe("list/search validate an explicit --board", () => {
     expect(out).toContain("card-a");
   });
 });
+
+// `list --column <col>` must validate the column the same way `move`/`add` do
+// (the shared `ensureColumn`): a typo'd column should throw the canonical
+// `invalid_column` FkanbanError (message + hint, non-zero exit), not silently
+// filter every card out and render an empty board on either the text or
+// `--json` path. The no-`--column` path must stay unchanged.
+describe("list validates an explicit --column", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedDefaultBoard(node);
+    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo" });
+  });
+
+  test("list --column <bogus> throws invalid_column (message + hint)", async () => {
+    expect(listCmd({ cfg, node, column: "notacolumn" })).rejects.toMatchObject({
+      code: "invalid_column",
+      message: `"notacolumn" is not a column on this board.`,
+      hint: `Valid columns: ${[...DEFAULT_COLUMNS].join(" | ")}`,
+    });
+  });
+
+  test("list --column <bogus> is a FkanbanError (non-zero exit via top-level handler)", async () => {
+    expect(listCmd({ cfg, node, column: "notacolumn" })).rejects.toBeInstanceOf(FkanbanError);
+  });
+
+  test("list --column <bogus> --json also throws (no `[]` render)", async () => {
+    expect(listCmd({ cfg, node, column: "notacolumn", json: true })).rejects.toBeInstanceOf(FkanbanError);
+  });
+
+  test("list --column <valid> still succeeds", async () => {
+    const out = await listCmd({ cfg, node, column: "todo" });
+    expect(out).toContain("card-a");
+  });
+
+  test("list --column <valid> --json returns the filtered cards", async () => {
+    const out = await listCmd({ cfg, node, column: "todo", json: true });
+    expect(JSON.parse(out)).toHaveLength(1);
+  });
+
+  test("list with no --column still succeeds (unchanged hot path)", async () => {
+    const out = await listCmd({ cfg, node });
+    expect(out).toContain("card-a");
+  });
+});
