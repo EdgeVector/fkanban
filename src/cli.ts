@@ -433,9 +433,26 @@ async function main(argv: string[]): Promise<number> {
       // a flag is the command name — surface it in the hint when we have it.
       const cmd = argv.find((a) => !a.startsWith("-"));
       const helpCmd = cmd && cmd in COMMAND_HELP ? `${cmd} --help` : "help";
-      // Node's default message tacks on verbose `--` advice; keep just the
-      // first clause (the actual problem) and our own hint.
-      const reason = err.message.split(". To specify")[0] ?? err.message;
+      // Node's default message leaks library internals: a multi-line "argument
+      // is ambiguous … use '--flag=-XYZ'" advice for a missing/dash-leading
+      // value, or a verbose `. To specify a positional …` clause for an unknown
+      // option. Strip both so we emit one clean fkanban-styled line.
+      let reason: string;
+      // Missing value: parseArgs throws "Option '--x' argument is ambiguous"
+      // when the next token is itself a flag (or a dash-leading value). Node's
+      // own wording is jargon; write a purpose-built one-liner instead.
+      const ambiguous = err.code === "ERR_PARSE_ARGS_INVALID_OPTION_VALUE"
+        && err.message.includes("is ambiguous");
+      if (ambiguous) {
+        const flag = err.message.match(/Option '([^']+)'/)?.[1] ?? "the option";
+        reason = `Option '${flag}' is missing its value (the next token is another flag). `
+          + `If the value must start with a dash, pass it as ${flag}=<value>`;
+      } else {
+        // Keep just the first line and first clause; drop Node's verbose advice.
+        reason = (err.message.split("\n")[0] ?? err.message).split(". To specify")[0] ?? err.message;
+      }
+      // Never emit a double-period: strip any trailing `.` before our `. Run …`.
+      reason = reason.replace(/\.+$/, "");
       console.error(`${reason}. Run \`fkanban ${helpCmd}\` to see this command's flags.`);
       return 2;
     }
