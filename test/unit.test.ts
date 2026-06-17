@@ -544,6 +544,31 @@ describe("per-command help", () => {
     expect(resolveHelp("add", false)).toBeUndefined();
     expect(resolveHelp("list", false)).toBeUndefined();
   });
+
+  test("resolveHelp routes `help <command>` to that command's help", () => {
+    // `fkanban help add` is byte-identical to `fkanban add --help`.
+    expect(resolveHelp("help", false, "add")).toBe(COMMAND_HELP.add!);
+    expect(resolveHelp("help", false, "mcp")).toBe(COMMAND_HELP.mcp!);
+    expect(resolveHelp("help", false, "move")).toBe(COMMAND_HELP.move!);
+    expect(resolveHelp("help", false, "board")).toBe(COMMAND_HELP.board!);
+  });
+
+  test("`help <command>` matches `<command> --help` for every documented command", () => {
+    for (const cmd of commandsInTopHelp()) {
+      expect(resolveHelp("help", false, cmd)).toBe(resolveHelp(cmd, true));
+    }
+  });
+
+  test("resolveHelp falls back to global help for `help <unknown-topic>` and bare `help`", () => {
+    expect(resolveHelp("help", false, "bogus")).toBe(TOP_HELP); // unknown topic
+    expect(resolveHelp("help", false, undefined)).toBe(TOP_HELP); // bare `help`
+    expect(resolveHelp("help", false, "help")).toBe(TOP_HELP); // `help help` — no such per-command entry
+  });
+
+  test("TOP_HELP advertises per-command help discovery", () => {
+    expect(TOP_HELP).toContain("fkanban help <command>");
+    expect(TOP_HELP).toContain("fkanban <command> --help");
+  });
 });
 
 describe("mutation result formatting (--json)", () => {
