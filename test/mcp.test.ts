@@ -273,11 +273,26 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     });
   });
 
-  test("fkanban_list returns { cards } deep-equal to `list --json`", async () => {
+  test("fkanban_list returns { cards } deep-equal to `list --json` (with blocked status, validated against outputSchema)", async () => {
     const res = await client.callTool({ name: "fkanban_list", arguments: {} });
     const cliCards = JSON.parse(await listCmd({ cfg, node, json: true }));
     expect(res.structuredContent).toBeDefined();
+    // The client validates structuredContent against the widened outputSchema —
+    // an enriched-card-shape mismatch would fail this callTool, not just assert.
     expect(res.structuredContent).toEqual({ cards: cliCards });
+    // Each list card now carries the same resolved dep status `show` returns:
+    // `ui` is blocked by the unfinished `api` and reports the dangling `ghost`
+    // as a missing (non-blocking) dep; `api` itself is unblocked.
+    const cards = (res.structuredContent as { cards: Array<Record<string, unknown>> }).cards;
+    for (const c of cards) {
+      expect(c).toHaveProperty("blocked");
+      expect(c).toHaveProperty("blockedBy");
+      expect(c).toHaveProperty("missingDeps");
+    }
+    const ui = cards.find((c) => c.slug === "ui");
+    expect(ui).toMatchObject({ blocked: true, blockedBy: ["api"], missingDeps: ["ghost"] });
+    const api = cards.find((c) => c.slug === "api");
+    expect(api).toMatchObject({ blocked: false, blockedBy: [], missingDeps: [] });
     // Human text block is preserved for non-structured clients.
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text.length).toBeGreaterThan(0);
   });
