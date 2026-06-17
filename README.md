@@ -1,6 +1,6 @@
 # fkanban
 
-A kanban board over [fold_db](../fold). Cards move through columns; every
+A kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db). Cards move through columns; every
 change persists in folddb. Modeled on `fbrain` — a thin Bun/TypeScript client
 of the `fold_db_node` (`/api/mutation` + `/api/query`) and the `schema_service`
 (`POST /v1/schemas`).
@@ -56,7 +56,13 @@ one before `init` in one of two ways:
   ```
 
   (`folddb daemon start` works too if you'd rather not run it as a service.)
-  First time on a machine, run `folddb setup` to create your identity.
+
+  You don't need to run `folddb setup` first: `fkanban init` auto-provisions
+  the node identity on first run against a fresh, unprovisioned node — so a
+  fkanban-only user can skip it (handy for headless/SSH/CI: just start a node,
+  then `fkanban init`, no interactive wizard required). `folddb setup` remains
+  the way to set up a full folddb identity (24-word recovery phrase, cloud
+  sync) if you want one.
 
 - **From the fold monorepo (for fold devs):**
 
@@ -163,7 +169,11 @@ line, so scripts and agents can confirm the outcome machine-readably (e.g.
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
-everything, `--limit N` sets a custom cap, and `--json` is always unabridged.
+everything and `--limit N` sets a custom per-column cap — both apply to text
+**and** `--json`. The 12-card default is a *text display* affordance only:
+`--json` returns the complete filtered board by default, and honors an explicit
+`--limit N`/`--all` to mean the same bounded (or unbounded) set the text view
+shows.
 
 `search <query>` finds cards by a case-insensitive substring across slug,
 title, body, assignee, and tags — handy once a board has more cards than fit on

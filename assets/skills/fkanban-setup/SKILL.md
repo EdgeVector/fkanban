@@ -59,7 +59,7 @@ namespace must be signed by an enrolled developer, so `init` never
 self-publishes). If you're just *using* fkanban against the default public
 schema service, you should never hit this — the schemas are already published
 there. If you're standing up fkanban against your **own** schema service, follow
-the "App creation" section in the repo README once, then re-run `fkanban init`.
+the "Republishing the schemas" section in the repo README once, then re-run `fkanban init`.
 
 ## If `doctor` fails
 

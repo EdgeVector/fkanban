@@ -386,7 +386,7 @@ export function appendPosition(): string {
 
 // Order cards within a column: explicit integer `position` ascending, then
 // created_at as a stable tiebreak. Non-numeric / empty positions sort last.
-export function sortCards(cards: Card[]): Card[] {
+export function sortCards<T extends Card>(cards: T[]): T[] {
   return cards.slice().sort((a, b) => {
     const pa = parsePosition(a.position);
     const pb = parsePosition(b.position);

@@ -111,6 +111,36 @@ export function renderBoard(
   return lines.join("\n").replace(/\n+$/, "\n");
 }
 
+// Apply the per-column cap to a flat card list, returning a flat list in the
+// same order. Mirrors the visible-card selection `renderBoard` does for text
+// (head-of-column for most columns, tail for the terminal `done` column, since
+// `done` grows by recency), so the structured `--json` view caps to the exact
+// same cards the text view shows. `limit <= 0` (or `--all`) means no cap and
+// returns the input unchanged.
+export function capPerColumn<T extends Card>(
+  board: Board,
+  cards: T[],
+  limit: number,
+  column?: string,
+): T[] {
+  if (!(limit > 0)) return cards;
+  const allColumns = board.columns.length > 0 ? board.columns : [...DEFAULT_COLUMNS];
+  const terminalCol = allColumns[allColumns.length - 1];
+  const columns = allColumns.filter((c) => !column || c === column);
+  const out: T[] = [];
+  for (const col of columns) {
+    const inCol = sortCards(cards.filter((c) => c.column === col));
+    const visible =
+      inCol.length <= limit
+        ? inCol
+        : col === terminalCol
+          ? inCol.slice(inCol.length - limit)
+          : inCol.slice(0, limit);
+    out.push(...visible);
+  }
+  return out;
+}
+
 function cardMetaSuffix(c: Card, color: boolean): string {
   const meta: string[] = [];
   if (c.assignee) meta.push(`@${c.assignee}`);

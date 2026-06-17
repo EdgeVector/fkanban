@@ -763,3 +763,92 @@ describe("listCmd --tag / --assignee filters", () => {
     expect(await slugs({ tag: "fkanban", assignee: "ann" })).toEqual(["b"]);
   });
 });
+
+describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
+  // A corpus spanning two columns with distinct positions so the per-column
+  // head/tail slice is deterministic. `todo` is a non-terminal column (head
+  // slice); `done` is the terminal column (tail slice — most recent kept).
+  const corpus: Card[] = [
+    card({ slug: "t1", column: "todo", position: "1" }),
+    card({ slug: "t2", column: "todo", position: "2" }),
+    card({ slug: "t3", column: "todo", position: "3" }),
+    card({ slug: "d1", column: "done", position: "1" }),
+    card({ slug: "d2", column: "done", position: "2" }),
+    card({ slug: "d3", column: "done", position: "3" }),
+  ];
+
+  function cardRow(c: Card): QueryRow {
+    return {
+      fields: {
+        slug: c.slug,
+        title: c.title,
+        body: c.body,
+        board: c.board,
+        column: c.column,
+        position: c.position,
+        assignee: c.assignee,
+        tags: c.tags,
+        created_at: c.created_at,
+        updated_at: c.updated_at,
+      },
+    } as unknown as QueryRow;
+  }
+
+  function populatedNode(cards: Card[]): NodeClient {
+    const empty: QueryResponse = { ok: true, results: [] };
+    return {
+      baseUrl: "http://stub",
+      userHash: "stub",
+      autoIdentity: async () => ({ provisioned: true, userHash: "stub" }),
+      bootstrap: async () => ({ userHash: "stub" }),
+      loadSchemas: async () => ({ available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] }),
+      listSchemas: async () => [],
+      createRecord: async () => {},
+      updateRecord: async () => {},
+      deleteRecord: async () => {},
+      queryAll: async (q: { schemaHash: string }): Promise<QueryResponse> =>
+        q.schemaHash === "cardhash" ? { ok: true, results: cards.map(cardRow) } : empty,
+      rawCall: async () => ({ status: 200, body: "" }),
+    } as unknown as NodeClient;
+  }
+
+  const cfg: Config = {
+    configVersion: 1,
+    nodeUrl: "http://stub",
+    schemaServiceUrl: "http://stub",
+    userHash: "stub",
+    schemaHashes: { card: "cardhash", board: "boardhash" },
+  };
+
+  async function jsonSlugs(opts: Partial<ListOptions>): Promise<string[]> {
+    const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, ...opts });
+    return (JSON.parse(out) as Card[]).map((c) => c.slug);
+  }
+
+  test("no --limit → JSON is uncapped (full filtered board, no implicit 12-cap)", async () => {
+    expect((await jsonSlugs({})).sort()).toEqual(["d1", "d2", "d3", "t1", "t2", "t3"]);
+  });
+
+  test("explicit --limit caps a single column to N (matches the text head slice)", async () => {
+    // `done --limit 2` is the terminal column → keeps the most recent 2 (tail).
+    expect(await jsonSlugs({ column: "done", limit: 2 })).toEqual(["d2", "d3"]);
+    // `todo --limit 2` is non-terminal → keeps the first 2 (head).
+    expect(await jsonSlugs({ column: "todo", limit: 2 })).toEqual(["t1", "t2"]);
+  });
+
+  test("explicit --limit caps EACH column across a multi-column view", async () => {
+    // At most 2 per column: todo head (t1,t2) + done tail (d2,d3).
+    expect((await jsonSlugs({ limit: 2 })).sort()).toEqual(["d2", "d3", "t1", "t2"]);
+  });
+
+  test("--all → JSON is uncapped (no-op, even with a limit)", async () => {
+    expect((await jsonSlugs({ all: true, limit: 1 })).sort()).toEqual([
+      "d1",
+      "d2",
+      "d3",
+      "t1",
+      "t2",
+      "t3",
+    ]);
+  });
+});

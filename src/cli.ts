@@ -152,9 +152,9 @@ Options:
   --tag <tag>           only cards carrying this tag (EXACT membership, not
                         the fuzzy text match of \`search\`)
   --assignee <name>     only cards assigned to this person (exact match)
-  --limit <N>           cap cards shown per column
-  --all                 show every card (no per-column cap)
-  --json                machine-readable output
+  --limit <N>           cap cards per column (applies to text AND --json)
+  --all                 show every card (no per-column cap; --json default)
+  --json                machine-readable output (unlimited unless --limit set)
 
 Example:
   fkanban list --board default --limit 10
@@ -267,10 +267,59 @@ export function resolveHelp(
   return undefined;
 }
 
+// Drain piped stdin to source `add --body` when no `--body` flag is given.
+// Returns "" for a TTY, an empty stream, or a pipe that delivers no data.
+//
+// This MUST NOT block on a stdin that never reaches EOF. Under Bun a pipe that
+// a parent opens but never writes to or closes — the shape of a background- or
+// agent-spawned `fkanban add` that inherits stdin without ever closing it —
+// delivers no EOF, so draining it with `for await (...of process.stdin)` hangs
+// forever. That is the bug behind "`add` never exits / silently failed to
+// persist the card": the await never resolved, so the write below it never ran.
+//
+// Instead we wait a short grace for the first byte; if none arrives we give up
+// and treat stdin as empty (no body). Once bytes do flow we assume a real
+// producer (echo/cat/heredoc) that will close its end, and read through to
+// `end`. The grace is overridable via FKANBAN_STDIN_IDLE_MS (ms).
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return "";
+  const raw = process.env.FKANBAN_STDIN_IDLE_MS;
+  const parsed = raw === undefined ? NaN : parseInt(raw, 10);
+  const firstByteMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : 250;
+
+  const stdin = process.stdin;
   const chunks: Uint8Array[] = [];
-  for await (const chunk of process.stdin) chunks.push(chunk as Uint8Array);
+  await new Promise<void>((resolve) => {
+    let gotData = false;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      stdin.off("data", onData);
+      stdin.off("end", finish);
+      stdin.off("error", finish);
+      resolve();
+    };
+    const onData = (c: Uint8Array) => {
+      gotData = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      chunks.push(c);
+    };
+    let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      // No first byte within the grace: a silent / never-EOF pipe. Give up.
+      if (!gotData) finish();
+    }, firstByteMs);
+    stdin.on("data", onData);
+    stdin.on("end", finish);
+    stdin.on("error", finish);
+  });
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -388,7 +437,7 @@ function rejectMisappliedFlags(
     if (UNIVERSAL_FLAGS.has(flag) || allowed.has(flag)) continue;
     // First disallowed flag wins — match parseArgs' single-error behavior.
     console.error(
-      `Unknown option '--${flag}'. Run \`fkanban ${cmd} --help\` to see this command's flags.`,
+      `fkanban: Unknown option '--${flag}'. Run \`fkanban ${cmd} --help\` to see this command's flags.`,
     );
     return 2;
   }
@@ -453,7 +502,7 @@ async function main(argv: string[]): Promise<number> {
       }
       // Never emit a double-period: strip any trailing `.` before our `. Run …`.
       reason = reason.replace(/\.+$/, "");
-      console.error(`${reason}. Run \`fkanban ${helpCmd}\` to see this command's flags.`);
+      console.error(`fkanban: ${reason}. Run \`fkanban ${helpCmd}\` to see this command's flags.`);
       return 2;
     }
     throw err;
@@ -475,7 +524,7 @@ async function main(argv: string[]): Promise<number> {
     // `help`/no-arg. The exit-2 "Unknown command" path is for a bogus
     // *top-level* command, a distinct case.
     if (cmd === "help" && topic !== undefined && !(topic in COMMAND_HELP)) {
-      console.error(`Unknown command "${topic}".\n`);
+      console.error(`fkanban: Unknown command "${topic}".\n`);
     }
     console.log(helpText);
     return 0;
@@ -550,8 +599,17 @@ async function dispatch(
     case "add": {
       const slug = requirePositional(positionals[1], "add <slug>");
       const ctx = loadCtx({ verbose });
-      const stdinBody = await readStdin();
-      const body = (values.body as string | undefined) ?? (stdinBody.trim().length > 0 ? stdinBody : undefined);
+      // `--body` as a flag wins, and when it's present we must NOT touch stdin
+      // at all: draining a stdin that never reaches EOF (a background-/agent-
+      // spawned `add` that inherits but never closes the pipe) used to block
+      // here indefinitely, so the card never persisted. Only consult stdin to
+      // source the body when no `--body` flag was given, and even then the read
+      // is bounded (see readStdin) so it can't hang.
+      let body = values.body as string | undefined;
+      if (body === undefined) {
+        const stdinBody = await readStdin();
+        if (stdinBody.trim().length > 0) body = stdinBody;
+      }
       try {
         const res = await addCmd({
           cfg: ctx.cfg,
@@ -638,7 +696,7 @@ async function dispatch(
         console.log(formatDep(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
+      console.error(`fkanban: Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
       return 2;
     }
 
@@ -752,12 +810,12 @@ async function dispatch(
         console.log(formatBoardRm(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`Unknown board subcommand "${sub}". Try: board create | board list | board rm`);
+      console.error(`fkanban: Unknown board subcommand "${sub}". Try: board create | board list | board rm`);
       return 2;
     }
 
     default:
-      console.error(`Unknown command "${cmd}".\n`);
+      console.error(`fkanban: Unknown command "${cmd}".\n`);
       console.log(TOP_HELP);
       return 2;
   }

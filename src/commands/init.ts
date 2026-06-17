@@ -12,7 +12,7 @@
 // claim under the `fkanban/*` namespace must be signed by an enrolled
 // developer's DevCert — that's a one-time out-of-band step done via the
 // exemem app-creation flow (`folddb-dev app publish` + `folddb-dev schema
-// publish --app fkanban`; see README "App creation"). After that, every
+// publish --app fkanban`; see README "Republishing the schemas"). After that, every
 // `fkanban init` just loads + resolves the already-published schemas.
 
 import { newNodeClient, FkanbanError, type Verbose } from "../client.ts";
@@ -128,7 +128,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       code: "schemas_not_published",
       message: `These fkanban schemas are not registered in the schema service: ${missing.join(", ")}.`,
       hint:
-        "Publish them once via the exemem app-creation flow (see README → \"App creation\"):\n" +
+        "Publish them once via the exemem app-creation flow (see README → \"Republishing the schemas\"):\n" +
         "  folddb-dev app new --id fkanban --metadata-file fkanban.app.json\n" +
         "  folddb-dev app publish --app-file app.json --schema-service-url <url> --dev-api-key <em_…>\n" +
         "  folddb-dev schema register --file card.schema.json && folddb-dev schema publish --schema Card --app fkanban --schema-service-url <url>\n" +

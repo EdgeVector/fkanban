@@ -10,7 +10,7 @@ other AGENTS.md-aware tool all read the same orientation.
 
 ## What this is
 
-fkanban is a kanban board over [fold_db](../fold) — a thin **Bun + TypeScript**
+fkanban is a kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db) — a thin **Bun + TypeScript**
 client of `fold_db_node` (`/api/mutation` + `/api/query`) and the
 `schema_service` (`POST /v1/schemas`). It ships as a **CLI** (`src/cli.ts`) and
 an **MCP server** (`src/mcp/`) so agents can drive the board. Modeled on
@@ -94,8 +94,8 @@ bun run src/cli.ts init --node-url http://127.0.0.1:9105 \
   never physically removed.
 - **Schemas are published once, out of band.** Under app_identity v3.1 a schema
   claim under `fkanban/*` must be signed by an enrolled developer's DevCert, so
-  the schemas are published to the schema_service **once** (see README → "App
-  creation"). `init` only **loads + resolves** them — a contributor does **not**
-  republish on every change.
+  the schemas are published to the schema_service **once** (see README →
+  "Republishing the schemas"). `init` only **loads + resolves** them — a
+  contributor does **not** republish on every change.
 
 Keep PRs atomic. When in doubt about a command, the README has the full catalog.
