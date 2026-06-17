@@ -127,6 +127,13 @@ export function createFkanbanMcpServer(
       inputSchema: {
         board: z.string().optional().describe("Board slug (default: `default`)."),
         column: z.string().optional().describe("Restrict to one column."),
+        tag: z
+          .string()
+          .optional()
+          .describe(
+            "Restrict to cards carrying this exact tag (membership match, not the fuzzy text search of `fkanban_search`).",
+          ),
+        assignee: z.string().optional().describe("Restrict to cards assigned to this exact person."),
       },
       outputSchema: { cards: z.array(cardSchema).describe("Matching cards, in column + position order.") },
     },
@@ -136,6 +143,8 @@ export function createFkanbanMcpServer(
         const o: Parameters<typeof listResult>[0] = { cfg, node };
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
+        if (args.tag) o.tag = args.tag;
+        if (args.assignee) o.assignee = args.assignee;
         const { text, cards } = await listResult(o);
         return readResult(text, { cards });
       } catch (err) {

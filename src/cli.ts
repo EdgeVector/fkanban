@@ -41,7 +41,7 @@ Commands:
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
-  list                 render a board as columns of cards (--board --column --json --limit N --all)
+  list                 render a board as columns of cards (--board --column --tag --assignee --json --limit N --all)
   search <query>       find cards by text across slug/title/body/tags (--board --column --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
@@ -144,12 +144,16 @@ Usage:
 Options:
   --board <slug>        board to render (default: default)
   --column <col>        only show one column
+  --tag <tag>           only cards carrying this tag (EXACT membership, not
+                        the fuzzy text match of \`search\`)
+  --assignee <name>     only cards assigned to this person (exact match)
   --limit <N>           cap cards shown per column
   --all                 show every card (no per-column cap)
   --json                machine-readable output
 
 Example:
-  fkanban list --board default --limit 10`),
+  fkanban list --board default --limit 10
+  fkanban list --tag fkanban --column doing`),
 
   search: withFooter(`fkanban search — find cards by text across slug/title/body/tags/assignee
 
@@ -338,6 +342,7 @@ async function main(argv: string[]): Promise<number> {
         title: { type: "string" },
         board: { type: "string" },
         column: { type: "string" },
+        tag: { type: "string" },
         assignee: { type: "string" },
         tags: { type: "string" },
         deps: { type: "string" },
@@ -531,6 +536,8 @@ async function dispatch(
         node: ctx.node,
         board: values.board as string | undefined,
         column: values.column as string | undefined,
+        tag: values.tag as string | undefined,
+        assignee: values.assignee as string | undefined,
         json: values.json as boolean | undefined,
         limit,
         all: values.all as boolean | undefined,

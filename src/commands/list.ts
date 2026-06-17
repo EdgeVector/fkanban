@@ -16,6 +16,11 @@ export type ListOptions = {
   node: NodeClient;
   board?: string;
   column?: string;
+  // Exact filters — tag is a membership test, assignee an equality test. Both
+  // are distinct from `search`'s fuzzy substring match. A tag/assignee need not
+  // pre-exist; an unmatched value renders an empty board, never an error.
+  tag?: string;
+  assignee?: string;
   json?: boolean;
   // Per-column cap (defaults to DEFAULT_COLUMN_LIMIT). `all` removes the cap.
   limit?: number;
@@ -54,7 +59,13 @@ export async function listResult(opts: ListOptions): Promise<{ text: string; car
 
   const allCards = await listCards(opts.node, opts.cfg);
   const cards = sortCards(
-    allCards.filter((c) => c.board === boardSlug && (!opts.column || c.column === opts.column)),
+    allCards.filter(
+      (c) =>
+        c.board === boardSlug &&
+        (!opts.column || c.column === opts.column) &&
+        (!opts.tag || c.tags?.includes(opts.tag)) &&
+        (!opts.assignee || c.assignee === opts.assignee),
+    ),
   );
 
   // Resolve blocked status against ALL live cards so cross-board deps count.
