@@ -215,11 +215,25 @@ describe("MCP write tools return structuredContent", () => {
     );
   });
 
-  test("fkanban_rm echoes { slug }", async () => {
+  test("fkanban_rm echoes { slug, orphanedDependents } (empty when nothing depends on it)", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "card-c", column: "todo" } });
     const res = await client.callTool({ name: "fkanban_rm", arguments: { slug: "card-c" } });
-    expect(res.structuredContent).toEqual({ slug: "card-c" });
+    expect(res.structuredContent).toEqual({ slug: "card-c", orphanedDependents: [] });
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toBe("removed card card-c");
+  });
+
+  test("fkanban_rm reports cards left with a dangling dependency", async () => {
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "dep-x", column: "todo" } });
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "uses-x", column: "todo", deps: ["dep-x"] },
+    });
+    const res = await client.callTool({ name: "fkanban_rm", arguments: { slug: "dep-x" } });
+    expect(res.structuredContent).toEqual({ slug: "dep-x", orphanedDependents: ["uses-x"] });
+    const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
+    expect(text).toContain("removed card dep-x");
+    expect(text).toContain("uses-x");
+    expect(text).toContain("dangling");
   });
 
   test("each write tool advertises an outputSchema", async () => {

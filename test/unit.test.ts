@@ -27,6 +27,7 @@ import {
   searchCards,
   depTag,
   isWorkingColumn,
+  orphanedDependentsWarning,
   TOMBSTONE_TAG,
   DEP_TAG_PREFIX,
   type Card,
@@ -583,7 +584,7 @@ describe("mutation result formatting (--json)", () => {
     expect(formatDep({ slug: "ui", dep: "api", action: "removed", deps: [] })).toBe(
       "ui no longer depends on api (deps: none)",
     );
-    expect(formatRm({ slug: "ship" })).toBe("removed card ship");
+    expect(formatRm({ slug: "ship", orphanedDependents: [] })).toBe("removed card ship");
     expect(formatBoardCreate({ slug: "sprint", action: "updated" })).toBe("updated board sprint");
   });
 
@@ -597,7 +598,10 @@ describe("mutation result formatting (--json)", () => {
     const dep = { slug: "ui", dep: "api", action: "added" as const, deps: ["api"] };
     expect(JSON.parse(formatDep(dep, true))).toEqual(dep);
 
-    expect(JSON.parse(formatRm({ slug: "ship" }, true))).toEqual({ slug: "ship" });
+    expect(JSON.parse(formatRm({ slug: "ship", orphanedDependents: ["ui"] }, true))).toEqual({
+      slug: "ship",
+      orphanedDependents: ["ui"],
+    });
 
     const board = { slug: "sprint", action: "created" as const };
     expect(JSON.parse(formatBoardCreate(board, true))).toEqual(board);
@@ -614,6 +618,15 @@ describe("mutation result formatting (--json)", () => {
     expect(JSON.parse(formatError({ code: "x", message: "m" }))).toEqual({
       error: { code: "x", message: "m" },
     });
+  });
+
+  test("orphanedDependentsWarning names the dangling dependents", () => {
+    expect(orphanedDependentsWarning("api", ["ui", "docs"])).toBe(
+      '  warning: 2 card(s) still depend on "api": ui, docs — their dependency is now dangling.',
+    );
+    expect(orphanedDependentsWarning("api", ["ui"])).toBe(
+      '  warning: 1 card(s) still depend on "api": ui — their dependency is now dangling.',
+    );
   });
 });
 
