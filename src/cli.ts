@@ -37,7 +37,7 @@ Usage:
 Commands:
   init                 bootstrap a node + register schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
-  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --body)
+  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --body, --force past a block)
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
@@ -106,6 +106,7 @@ Options:
   --deps a,b            comma-separated slugs this card depends on
                         (an edge that would form a cycle is rejected, exit 2)
   --body <text>         card body (Markdown); replaces the whole body
+  --force               add even past a 🔒 dependency block
   --json                echo the write result as JSON
 
 Example:
@@ -361,7 +362,7 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
 // `show`, `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
-  add: new Set(["title", "board", "column", "assignee", "tags", "deps", "body"]),
+  add: new Set(["title", "board", "column", "assignee", "tags", "deps", "body", "force"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
@@ -545,6 +546,7 @@ async function dispatch(
           tags: parseTags(values.tags as string | undefined),
           deps: parseTags(values.deps as string | undefined),
           body,
+          force: values.force as boolean | undefined,
         });
         console.log(formatAdd(res, values.json as boolean | undefined));
         return 0;

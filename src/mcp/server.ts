@@ -186,7 +186,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add or update a card",
       description:
-        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column.",
+        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. A card blocked by an unfinished dependency cannot be placed in doing/review/done unless `force` is set.",
       annotations: { title: "Add or update a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().min(1).describe("Stable card id (lowercase [a-z0-9-_])."),
@@ -202,6 +202,7 @@ export function createFkanbanMcpServer(
           .describe(
             "Slugs this card depends on (replaces the existing dep list). It is blocked until each reaches `done`.",
           ),
+        force: z.boolean().optional().describe("Place the card even if it is blocked by an unfinished dependency."),
       },
       outputSchema: {
         slug: z.string(),
@@ -221,6 +222,7 @@ export function createFkanbanMcpServer(
         if (args.assignee !== undefined) o.assignee = args.assignee;
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
+        if (args.force !== undefined) o.force = args.force;
         const res = await addCmd(o);
         return writeResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
       } catch (err) {

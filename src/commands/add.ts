@@ -8,9 +8,11 @@ import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
   cardToFields,
+  depStatus,
   ensureColumn,
   findCard,
   forwardDepWarning,
+  isWorkingColumn,
   listCardStatuses,
   normalizeDeps,
   nowIso,
@@ -33,6 +35,9 @@ export type AddOptions = {
   // self-references dropped). Omit to leave existing deps untouched on update.
   deps?: string[];
   body?: string;
+  // Override the dependency soft-block when placing the card into a working
+  // column (doing/review/done). Mirrors `move`'s --force.
+  force?: boolean;
 };
 
 // Validate + clean a user-supplied dep list for `slug`, warn (to stderr) on any
@@ -93,6 +98,31 @@ async function prepareDeps(
   return cleaned;
 }
 
+// Soft-block: refuse to place a card into a working column (doing/review/done)
+// while any dependency is unfinished, unless --force. This mirrors `move`'s
+// guard byte-for-byte so `add` and `move` read identically — `add` is also a
+// column-changing command (create+update), so a blocked card must not slip
+// into a working column through it. Backlog/todo placements are always ok.
+// Throws BEFORE any write, so a blocked add leaves no partial state.
+async function enforceDepBlock(
+  opts: { cfg: Config; node: NodeClient; force?: boolean },
+  slug: string,
+  column: string,
+  deps: string[],
+): Promise<void> {
+  if (opts.force || !isWorkingColumn(column)) return;
+  const status = depStatus({ slug, deps } as Card, await listCardStatuses(opts.node, opts.cfg));
+  if (status.blocked) {
+    throw new FkanbanError({
+      code: "card_blocked",
+      message: `Card "${slug}" is blocked by ${status.blockedBy
+        .map((d) => `"${d}"`)
+        .join(", ")} (not yet done).`,
+      hint: `Move ${status.blockedBy.length > 1 ? "those" : "it"} to \`done\` first, or pass --force to override.`,
+    });
+  }
+}
+
 export type AddResult = { slug: string; action: "created" | "updated"; board: string; column: string };
 
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
@@ -124,6 +154,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       updated_at: now,
     };
     if (opts.column) ensureColumn(updated.column, columns);
+    await enforceDepBlock(opts, opts.slug, updated.column, updated.deps);
     await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
@@ -141,6 +172,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     created_at: now,
     updated_at: now,
   };
+  await enforceDepBlock(opts, opts.slug, card.column, card.deps);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column };
 }

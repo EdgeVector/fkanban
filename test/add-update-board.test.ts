@@ -317,3 +317,116 @@ describe("add --deps rejects a dependency cycle", () => {
     expect(after?.deps).toEqual([]);
   });
 });
+
+// `add` doubles as a column-changing command (create+update), so it must
+// enforce the SAME dependency soft-block `move` does: a card blocked by an
+// unfinished dep cannot be placed into a working column (doing/review/done)
+// unless `--force`. The guard throws `card_blocked` BEFORE any write (no
+// partial state) with the message/hint byte-aligned with move's. Backlog/todo
+// placements are always allowed. This closes the silent bypass that defeated
+// the dependency-blocking feature through the most-used command (+ MCP tool).
+describe("add enforces the dependency soft-block into working columns", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
+  });
+
+  // Seed `dep` (todo, not done) and `blk` (todo) depending on it — blk is blocked.
+  async function seedBlocked(): Promise<void> {
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo" });
+    await addCmd({ cfg, node, slug: "blk", title: "Blocked", column: "todo", deps: ["dep"] });
+  }
+
+  test("update a blocked card into `doing` is refused (card_blocked, no write)", async () => {
+    await seedBlocked();
+    await expect(addCmd({ cfg, node, slug: "blk", column: "doing" })).rejects.toMatchObject({
+      code: "card_blocked",
+    });
+    // Card did not move.
+    const after = await findCard(node, cfg, "blk");
+    expect(after?.column).toBe("todo");
+  });
+
+  test("error message + hint are byte-aligned with `move`", async () => {
+    await seedBlocked();
+    try {
+      await addCmd({ cfg, node, slug: "blk", column: "doing" });
+      throw new Error("expected addCmd to throw a card_blocked error");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FkanbanError);
+      const e = err as FkanbanError;
+      expect(e.code).toBe("card_blocked");
+      expect(e.message).toBe('Card "blk" is blocked by "dep" (not yet done).');
+      expect(e.hint).toBe("Move it to `done` first, or pass --force to override.");
+    }
+  });
+
+  test("--force overrides the block and the update lands", async () => {
+    await seedBlocked();
+    const res = await addCmd({ cfg, node, slug: "blk", column: "doing", force: true });
+    expect(res).toMatchObject({ action: "updated", column: "doing" });
+    const after = await findCard(node, cfg, "blk");
+    expect(after?.column).toBe("doing");
+  });
+
+  test("an UNblocked card moves into `doing` via add (no guard fires)", async () => {
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "done" });
+    await addCmd({ cfg, node, slug: "ok", title: "OK", column: "todo", deps: ["dep"] });
+    // dep is done → ok is unblocked.
+    const res = await addCmd({ cfg, node, slug: "ok", column: "doing" });
+    expect(res).toMatchObject({ action: "updated", column: "doing" });
+  });
+
+  test("creating a blocked card directly INTO a working column is refused", async () => {
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo" });
+    await expect(
+      addCmd({ cfg, node, slug: "born-doing", title: "Born", column: "doing", deps: ["dep"] }),
+    ).rejects.toMatchObject({ code: "card_blocked" });
+    // Nothing written.
+    expect(await findCard(node, cfg, "born-doing")).toBeNull();
+  });
+
+  test("creating a blocked card into `doing` succeeds with --force", async () => {
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo" });
+    const res = await addCmd({
+      cfg,
+      node,
+      slug: "born-forced",
+      column: "doing",
+      deps: ["dep"],
+      force: true,
+    });
+    expect(res).toMatchObject({ action: "created", column: "doing" });
+  });
+
+  test("placing a blocked card into `review` and `done` is also refused", async () => {
+    await seedBlocked();
+    for (const col of ["review", "done"]) {
+      await expect(addCmd({ cfg, node, slug: "blk", column: col })).rejects.toMatchObject({
+        code: "card_blocked",
+      });
+    }
+    const after = await findCard(node, cfg, "blk");
+    expect(after?.column).toBe("todo");
+  });
+
+  test("a blocked card stays addable to backlog/todo (no guard there)", async () => {
+    await seedBlocked();
+    // blk is in todo; add it to backlog — allowed even though it's blocked.
+    const res = await addCmd({ cfg, node, slug: "blk", column: "backlog" });
+    expect(res).toMatchObject({ action: "updated", column: "backlog" });
+    // And back to todo.
+    const res2 = await addCmd({ cfg, node, slug: "blk", column: "todo" });
+    expect(res2).toMatchObject({ action: "updated", column: "todo" });
+  });
+
+  test("a missing (dangling) dep does NOT block placement into a working column", async () => {
+    // Forward dep that never resolves to a live card — non-blocking by design,
+    // exactly as depStatus treats it.
+    await addCmd({ cfg, node, slug: "fwd", title: "Fwd", column: "todo", deps: ["never-exists"] });
+    const res = await addCmd({ cfg, node, slug: "fwd", column: "doing" });
+    expect(res).toMatchObject({ action: "updated", column: "doing" });
+  });
+});

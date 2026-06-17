@@ -252,7 +252,10 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     await client.callTool({ name: "fkanban_add", arguments: { slug: "api", title: "API", column: "todo" } });
     await client.callTool({
       name: "fkanban_add",
-      arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api", "ghost"] },
+      // `ui` is deliberately a BLOCKED card sitting in `doing` (api is still in
+      // todo) — the soft-block now refuses that placement, so `force` is needed
+      // to construct the fixture state these read-tool tests assert against.
+      arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api", "ghost"], force: true },
     });
   });
 
