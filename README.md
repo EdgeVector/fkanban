@@ -1,6 +1,6 @@
 # fkanban
 
-A kanban board over [fold_db](../fold). Cards move through columns; every
+A kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db). Cards move through columns; every
 change persists in folddb. Modeled on `fbrain` — a thin Bun/TypeScript client
 of the `fold_db_node` (`/api/mutation` + `/api/query`) and the `schema_service`
 (`POST /v1/schemas`).
