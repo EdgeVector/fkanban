@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# fkanban-mcp — global shim. Resolves to this repo's src/mcp/main.ts and runs
+# it under bun, so `fkanban-mcp` (the MCP server entrypoint) works from
+# anywhere on PATH — mirrors the `fkanban` CLI shim alongside it.
+#
+# Installed by `bun run install-cli` (see bin/install.sh); removing the symlink
+# fully reverses it — nothing is published to a registry.
+#
+# Follow symlinks so the repo's src/mcp/main.ts is found even when invoked via
+# a symlink in ~/bin or /usr/local/bin.
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+dir="$(cd -P "$(dirname "$src")" && pwd)"
+
+exec bun run "$dir/../src/mcp/main.ts" "$@"

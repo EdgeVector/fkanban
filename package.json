@@ -11,6 +11,7 @@
   },
   "scripts": {
     "fkanban": "bun src/cli.ts",
+    "install-cli": "bash bin/install.sh",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
