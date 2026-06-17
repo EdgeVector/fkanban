@@ -10,6 +10,7 @@ import {
   cardToFields,
   ensureColumn,
   findCard,
+  forwardDepWarning,
   normalizeDeps,
   nowIso,
   requireBoard,
@@ -32,10 +33,23 @@ export type AddOptions = {
   body?: string;
 };
 
-// Validate + clean a user-supplied dep list for `slug`.
-function prepareDeps(deps: string[], slug: string): string[] {
+// Validate + clean a user-supplied dep list for `slug`, then point-read each
+// prepared dep and warn (to stderr) for any that doesn't resolve to a live
+// card — the same forward-dependency heads-up `dep add` emits. A missing dep is
+// non-blocking by design, so this never throws or blocks the write; it only
+// signals at write time what `show` would otherwise surface much later.
+async function prepareDeps(
+  opts: { cfg: Config; node: NodeClient },
+  deps: string[],
+  slug: string,
+): Promise<string[]> {
   const cleaned = normalizeDeps(deps, slug);
   for (const d of cleaned) validateSlug(d);
+  for (const dep of cleaned) {
+    if (!(await findCard(opts.node, opts.cfg, dep))) {
+      console.error(forwardDepWarning(dep));
+    }
+  }
   return cleaned;
 }
 
@@ -66,7 +80,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       column: opts.column ?? existing.column,
       assignee: opts.assignee ?? existing.assignee,
       tags: opts.tags ?? existing.tags,
-      deps: opts.deps ? prepareDeps(opts.deps, opts.slug) : existing.deps,
+      deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug) : existing.deps,
       updated_at: now,
     };
     if (opts.column) ensureColumn(updated.column, columns);
@@ -83,7 +97,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     position: appendPosition(),
     assignee: opts.assignee ?? "",
     tags: opts.tags ?? [],
-    deps: opts.deps ? prepareDeps(opts.deps, opts.slug) : [],
+    deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug) : [],
     created_at: now,
     updated_at: now,
   };

@@ -72,6 +72,15 @@ export function normalizeDeps(deps: string[], selfSlug: string): string[] {
   return out;
 }
 
+// The stderr heads-up both `add --deps` and `dep add` emit when a dependency
+// slug doesn't resolve to a live card. A missing dep is non-blocking by design
+// (a forward/dangling dep just never reaches `done`), so this is a warning, not
+// an error — the write still succeeds. Shared so the two authoring paths stay
+// in sync.
+export function forwardDepWarning(dep: string): string {
+  return `fkanban: warning — no card "${dep}" yet; adding it as a forward dependency.`;
+}
+
 // The columns at which dependencies actually gate work. A dependency is
 // satisfied only once its card reaches `done`; entering one of these "started"
 // columns while still blocked is what `move` refuses (unless --force).

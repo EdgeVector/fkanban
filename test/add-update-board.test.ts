@@ -10,7 +10,7 @@
 // Backed by the same in-memory fake NodeClient used in mcp.test.ts /
 // read-board-validation.test.ts — exercises the real addCmd with no live node.
 
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
@@ -166,5 +166,68 @@ describe("add update preserves the card's board", () => {
   test("(d') create with explicit --board honors it", async () => {
     const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "icebox" });
     expect(created).toMatchObject({ action: "created", board: "other", column: "icebox" });
+  });
+});
+
+// `add --deps` must warn (to stderr) on a dep slug that doesn't resolve to a
+// live card — the same forward-dependency heads-up `dep add` emits — WITHOUT
+// blocking the write. A missing dep is non-blocking by design; we only signal
+// at write time what `show` would otherwise surface much later.
+describe("add --deps warns on missing dependency slugs", () => {
+  let node: NodeClient;
+  let warnings: string[];
+  let restore: () => void;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
+    warnings = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    restore = () => {
+      console.error = orig;
+    };
+  });
+
+  afterEach(() => restore());
+
+  test("missing dep → warns once and STILL creates the card", async () => {
+    const created = await addCmd({
+      cfg,
+      node,
+      slug: "warn-a",
+      title: "A",
+      deps: ["does-not-exist"],
+    });
+    expect(created).toMatchObject({ action: "created" });
+    expect(warnings).toEqual([
+      'fkanban: warning — no card "does-not-exist" yet; adding it as a forward dependency.',
+    ]);
+    // Write still landed, with the forward dep recorded.
+    const after = await findCard(node, cfg, "warn-a");
+    expect(after?.deps).toEqual(["does-not-exist"]);
+  });
+
+  test("existing dep → no warning", async () => {
+    await addCmd({ cfg, node, slug: "dep-target", title: "Target" });
+    warnings.length = 0;
+    await addCmd({ cfg, node, slug: "warn-b", title: "B", deps: ["dep-target"] });
+    expect(warnings).toEqual([]);
+  });
+
+  test("mixed deps → exactly one warning, for the missing one only", async () => {
+    await addCmd({ cfg, node, slug: "dep-ok", title: "OK" });
+    warnings.length = 0;
+    await addCmd({ cfg, node, slug: "warn-c", title: "C", deps: ["dep-ok", "dep-missing"] });
+    expect(warnings).toEqual([
+      'fkanban: warning — no card "dep-missing" yet; adding it as a forward dependency.',
+    ]);
+  });
+
+  test("no --deps → never reads or warns", async () => {
+    await addCmd({ cfg, node, slug: "warn-d", title: "D" });
+    expect(warnings).toEqual([]);
   });
 });
