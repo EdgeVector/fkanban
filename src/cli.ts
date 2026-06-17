@@ -54,6 +54,8 @@ Commands:
   version              print the fkanban version and exit (alias of --version)
   help                 print this help
 
+Run \`fkanban help <command>\` or \`fkanban <command> --help\` for command details.
+
 Global flags:
   --verbose            echo HTTP requests + responses
   --json               machine-readable output (add/move/dep/rm/board create/
@@ -236,11 +238,26 @@ Example:
   fkanban version`),
 };
 
-// Resolve which help text to print for the parsed argv. `cmd` is positionals[0].
-// Per-command help only when --help/-h is set AND cmd names a known command;
-// otherwise the global help (covers `--help`, `help`, no command, unknown cmd).
-export function resolveHelp(cmd: string | undefined, help: boolean): string | undefined {
-  if (!cmd || cmd === "help") return TOP_HELP;
+// Resolve which help text to print for the parsed argv. `cmd` is positionals[0],
+// `topic` is positionals[1] (only consulted for `fkanban help <topic>`).
+//
+// Routing, in order:
+//   - `fkanban help <command>` → that command's per-command help (byte-identical
+//     to `fkanban <command> --help`). An unknown topic falls back to TOP_HELP;
+//     the caller is responsible for the "unknown command" note on stderr (this
+//     stays a pure text->text function so the unit suite can assert it directly).
+//   - `fkanban help` / `fkanban --help` / no command / unknown command → TOP_HELP.
+//   - `fkanban <command> --help` → that command's per-command help.
+export function resolveHelp(
+  cmd: string | undefined,
+  help: boolean,
+  topic?: string,
+): string | undefined {
+  if (cmd === "help") {
+    if (topic !== undefined && topic in COMMAND_HELP) return COMMAND_HELP[topic];
+    return TOP_HELP; // bare `help`, or `help <unknown-topic>` (caller notes it)
+  }
+  if (!cmd) return TOP_HELP;
   if (help) {
     return cmd in COMMAND_HELP ? COMMAND_HELP[cmd] : TOP_HELP;
   }
@@ -429,8 +446,17 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const cmd = positionals[0];
-  const helpText = resolveHelp(cmd, values.help as boolean | undefined ?? false);
+  const topic = positionals[1];
+  const helpText = resolveHelp(cmd, values.help as boolean | undefined ?? false, topic);
   if (helpText !== undefined) {
+    // `fkanban help <unknown-topic>` falls back to TOP_HELP but says so on
+    // stderr first, so the topic isn't silently ignored (the whole point of
+    // this command). `help` is not a usage error — keep exit 0, matching bare
+    // `help`/no-arg. The exit-2 "Unknown command" path is for a bogus
+    // *top-level* command, a distinct case.
+    if (cmd === "help" && topic !== undefined && !(topic in COMMAND_HELP)) {
+      console.error(`Unknown command "${topic}".\n`);
+    }
     console.log(helpText);
     return 0;
   }
