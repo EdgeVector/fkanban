@@ -104,6 +104,7 @@ Options:
   --assignee <name>     who owns the card
   --tags a,b,c          comma-separated tags
   --deps a,b            comma-separated slugs this card depends on
+                        (an edge that would form a cycle is rejected, exit 2)
   --body <text>         card body (Markdown); replaces the whole body
   --json                echo the write result as JSON
 
@@ -532,20 +533,36 @@ async function dispatch(
       const ctx = loadCtx({ verbose });
       const stdinBody = await readStdin();
       const body = (values.body as string | undefined) ?? (stdinBody.trim().length > 0 ? stdinBody : undefined);
-      const res = await addCmd({
-        cfg: ctx.cfg,
-        node: ctx.node,
-        slug,
-        title: values.title as string | undefined,
-        board: values.board as string | undefined,
-        column: values.column as string | undefined,
-        assignee: values.assignee as string | undefined,
-        tags: parseTags(values.tags as string | undefined),
-        deps: parseTags(values.deps as string | undefined),
-        body,
-      });
-      console.log(formatAdd(res, values.json as boolean | undefined));
-      return 0;
+      try {
+        const res = await addCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug,
+          title: values.title as string | undefined,
+          board: values.board as string | undefined,
+          column: values.column as string | undefined,
+          assignee: values.assignee as string | undefined,
+          tags: parseTags(values.tags as string | undefined),
+          deps: parseTags(values.deps as string | undefined),
+          body,
+        });
+        console.log(formatAdd(res, values.json as boolean | undefined));
+        return 0;
+      } catch (err) {
+        // A `--deps` edge that would close a cycle is a bad-input error, not a
+        // node failure: report it LOUDLY with the exit-2 contract (matching
+        // `dep add`), and as a clean envelope under --json — never a half write.
+        if (err instanceof FkanbanError && err.code === "dep_cycle") {
+          if (values.json) {
+            console.log(formatError(err));
+          } else {
+            console.error(`fkanban: ${err.message}`);
+            if (err.hint) console.error(`  hint: ${err.hint}`);
+          }
+          return 2;
+        }
+        throw err;
+      }
     }
 
     case "move": {
