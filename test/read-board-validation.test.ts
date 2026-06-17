@@ -199,3 +199,59 @@ describe("list validates an explicit --column", () => {
     expect(out).toContain("card-a");
   });
 });
+
+// `search --column <col>` must validate the column the same way `list --column`
+// does (the shared `ensureColumn`): a typo'd column should throw the canonical
+// `invalid_column` FkanbanError (message + hint, non-zero exit) — inherited by
+// the MCP `fkanban_search` tool via `searchResult` — not silently filter every
+// card out and report "No cards match". With `--board` the custom board's
+// columns are honored; without it, the canonical `DEFAULT_COLUMNS`. The
+// no-`--column` path must stay unchanged.
+describe("search validates an explicit --column", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedDefaultBoard(node);
+    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo" });
+  });
+
+  test("search --column <bogus> throws invalid_column (message + hint)", async () => {
+    expect(searchCmd({ cfg, node, query: "card", column: "notacolumn" })).rejects.toMatchObject({
+      code: "invalid_column",
+      message: `"notacolumn" is not a column on this board.`,
+      hint: `Valid columns: ${[...DEFAULT_COLUMNS].join(" | ")}`,
+    });
+  });
+
+  test("search --column <bogus> is a FkanbanError (non-zero exit via top-level handler)", async () => {
+    expect(searchCmd({ cfg, node, query: "card", column: "notacolumn" })).rejects.toBeInstanceOf(FkanbanError);
+  });
+
+  test("search --column <bogus> --json also throws (no `[]` render)", async () => {
+    expect(searchCmd({ cfg, node, query: "card", column: "notacolumn", json: true })).rejects.toBeInstanceOf(
+      FkanbanError,
+    );
+  });
+
+  test("search --board <existing> --column <bogus> throws invalid_column", async () => {
+    expect(searchCmd({ cfg, node, query: "card", board: "default", column: "notacolumn" })).rejects.toMatchObject({
+      code: "invalid_column",
+    });
+  });
+
+  test("search --column <valid> still succeeds", async () => {
+    const out = await searchCmd({ cfg, node, query: "card", column: "todo" });
+    expect(out).toContain("card-a");
+  });
+
+  test("search --column <valid> --json returns the filtered cards", async () => {
+    const out = await searchCmd({ cfg, node, query: "card", column: "todo", json: true });
+    expect(JSON.parse(out)).toHaveLength(1);
+  });
+
+  test("search with no --column still succeeds (unchanged hot path)", async () => {
+    const out = await searchCmd({ cfg, node, query: "card" });
+    expect(out).toContain("card-a");
+  });
+});

@@ -4,8 +4,18 @@
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, listCards, queryTerms, requireBoard, searchCards, sortCards, type Card } from "../record.ts";
+import {
+  blockedSlugSet,
+  ensureColumn,
+  listCards,
+  queryTerms,
+  requireBoard,
+  searchCards,
+  sortCards,
+  type Card,
+} from "../record.ts";
 import { renderSearchResults } from "../board.ts";
+import { DEFAULT_COLUMNS } from "../schemas.ts";
 
 export type SearchOptions = {
   cfg: Config;
@@ -34,8 +44,16 @@ export async function searchResult(opts: SearchOptions): Promise<{ text: string;
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently report "No cards match". Without `--board`
   // the search spans all boards, so there's nothing to validate.
-  if (opts.board !== undefined) {
-    await requireBoard(opts.node, opts.cfg, opts.board);
+  const board = opts.board !== undefined ? await requireBoard(opts.node, opts.cfg, opts.board) : null;
+  // An explicitly-passed `--column` must be a real column — a typo'd name
+  // should error loudly (matching `list --column` via the shared `ensureColumn`),
+  // not silently filter every card out and report "No cards match". With
+  // `--board` we validate against that board's columns; cross-board search
+  // (no `--board`) validates against the canonical `DEFAULT_COLUMNS`, mirroring
+  // `list`'s default-board behavior. Only checked when `--column` is set, so the
+  // no-`--column` hot path is unchanged.
+  if (opts.column !== undefined) {
+    ensureColumn(opts.column, board?.columns ?? [...DEFAULT_COLUMNS]);
   }
   const allCards = await listCards(opts.node, opts.cfg);
   const scoped = allCards.filter(
