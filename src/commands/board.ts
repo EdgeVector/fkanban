@@ -23,6 +23,31 @@ export async function boardCreateCmd(opts: {
   body?: string;
 }): Promise<{ slug: string; action: "created" | "updated" }> {
   validateSlug(opts.slug);
+  // Only when columns were explicitly supplied: reject DUPLICATE names. The
+  // list is already trim/filter-cleaned by parseTags, so an empty/all-empty
+  // string falls back to DEFAULT_COLUMNS below and is never checked here.
+  // A duplicate would otherwise be stored verbatim and silently corrupt the
+  // board — `list` renders the doubled column (and its cards) twice. This is
+  // the same validate-loudly contract slugs / `--column` typos / dep cycles
+  // already enforce; column names are compared as exact strings (matching how
+  // `ensureColumn` does `boardColumns.includes(column)` elsewhere).
+  if (opts.columns && opts.columns.length > 0) {
+    const seen = new Set<string>();
+    const dups = new Set<string>();
+    for (const name of opts.columns) {
+      if (seen.has(name)) dups.add(name);
+      seen.add(name);
+    }
+    if (dups.size > 0) {
+      const list = [...dups].map((d) => `"${d}"`).join(", ");
+      const first = [...dups][0]!;
+      throw new FkanbanError({
+        code: "dup_columns",
+        message: `Duplicate column name "${first}" in --columns.`,
+        hint: `Column names must be unique: ${list}.`,
+      });
+    }
+  }
   const columns = opts.columns && opts.columns.length > 0 ? opts.columns : [...DEFAULT_COLUMNS];
   const existing = await findBoard(opts.node, opts.cfg, opts.slug);
   const now = nowIso();

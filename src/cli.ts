@@ -681,16 +681,33 @@ async function dispatch(
       const ctx = loadCtx({ verbose });
       if (sub === "create") {
         const slug = requirePositional(positionals[2], "board create <slug>");
-        const res = await boardCreateCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          slug,
-          title: values.title as string | undefined,
-          columns: parseTags(values.columns as string | undefined),
-          body: values.body as string | undefined,
-        });
-        console.log(formatBoardCreate(res, values.json as boolean | undefined));
-        return 0;
+        try {
+          const res = await boardCreateCmd({
+            cfg: ctx.cfg,
+            node: ctx.node,
+            slug,
+            title: values.title as string | undefined,
+            columns: parseTags(values.columns as string | undefined),
+            body: values.body as string | undefined,
+          });
+          console.log(formatBoardCreate(res, values.json as boolean | undefined));
+          return 0;
+        } catch (err) {
+          // A `--columns` list with a duplicate name is a bad-input error, not a
+          // node failure: report it LOUDLY with the exit-2 contract (matching
+          // `dep add` / `dep_cycle`), and as a clean envelope under --json —
+          // never a half write.
+          if (err instanceof FkanbanError && err.code === "dup_columns") {
+            if (values.json) {
+              console.log(formatError(err));
+            } else {
+              console.error(`fkanban: ${err.message}`);
+              if (err.hint) console.error(`  hint: ${err.hint}`);
+            }
+            return 2;
+          }
+          throw err;
+        }
       }
       if (sub === "list" || sub === undefined) {
         const out = await boardListCmd({ cfg: ctx.cfg, node: ctx.node, json: values.json as boolean | undefined });
