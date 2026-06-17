@@ -31,13 +31,17 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
 describe("missing-argument exit code (usage error → exit 2)", () => {
   // Every "Missing argument …" case routes through requirePositional(), so
   // covering a representative spread of commands proves the seam, not each one.
+  // These commands all run requirePositional() *before* loadCtx(), so they
+  // throw missing_arg with no config/node present (the CI runner has neither).
+  // (`board create` / `dep` load config first, so their missing-arg path is
+  // gated behind config and would need a node in CI — not exercised here.)
   const cases: Array<{ name: string; args: string[] }> = [
     { name: "search (missing query)", args: ["search"] },
     { name: "move (missing slug + column)", args: ["move"] },
     { name: "move (missing column)", args: ["move", "some-card"] },
     { name: "add (missing slug)", args: ["add"] },
     { name: "show (missing slug)", args: ["show"] },
-    { name: "board create (missing slug)", args: ["board", "create"] },
+    { name: "rm (missing slug)", args: ["rm"] },
   ];
 
   for (const { name, args } of cases) {
