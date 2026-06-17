@@ -7,6 +7,7 @@ import { schemaHashFor, type Config } from "../config.ts";
 import {
   cardToFields,
   findCard,
+  forwardDepWarning,
   listCardStatuses,
   normalizeDeps,
   nowIso,
@@ -44,7 +45,7 @@ export async function depAddCmd(opts: {
   // Warn (don't fail) on a forward/dangling dep — it just never resolves.
   const all = await listCardStatuses(opts.node, opts.cfg);
   if (!all.some((c) => c.slug === opts.dep)) {
-    console.error(`fkanban: warning — no card "${opts.dep}" yet; adding it as a forward dependency.`);
+    console.error(forwardDepWarning(opts.dep));
   }
   // Refuse to close a dependency cycle: if `opts.dep` already (transitively)
   // depends on `opts.slug`, adding `opts.slug → opts.dep` would deadlock every
