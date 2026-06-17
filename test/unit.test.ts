@@ -30,8 +30,8 @@ import {
   DEP_TAG_PREFIX,
   type Card,
 } from "../src/record.ts";
-import { FkanbanError, type NodeClient, type QueryResponse } from "../src/client.ts";
-import { listCmd } from "../src/commands/list.ts";
+import { FkanbanError, type NodeClient, type QueryResponse, type QueryRow } from "../src/client.ts";
+import { listCmd, type ListOptions } from "../src/commands/list.ts";
 import { type Config } from "../src/config.ts";
 import {
   formatAdd,
@@ -624,5 +624,90 @@ describe("listCmd empty board", () => {
     expect(out).not.toContain("No cards yet");
     expect(out).toContain("TODO  (0)");
     expect(out).toContain("  —");
+  });
+});
+
+describe("listCmd --tag / --assignee filters", () => {
+  // A populated stub: `queryAll` returns card rows for the card schema (and an
+  // empty set for the board schema, exercising the default-board synthesis).
+  function cardRow(c: Card): QueryRow {
+    return {
+      fields: {
+        slug: c.slug,
+        title: c.title,
+        body: c.body,
+        board: c.board,
+        column: c.column,
+        position: c.position,
+        assignee: c.assignee,
+        tags: c.tags,
+        created_at: c.created_at,
+        updated_at: c.updated_at,
+      },
+    } as unknown as QueryRow;
+  }
+
+  function populatedNode(cards: Card[]): NodeClient {
+    const empty: QueryResponse = { ok: true, results: [] };
+    return {
+      baseUrl: "http://stub",
+      userHash: "stub",
+      autoIdentity: async () => ({ provisioned: true, userHash: "stub" }),
+      bootstrap: async () => ({ userHash: "stub" }),
+      loadSchemas: async () => ({ available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] }),
+      listSchemas: async () => [],
+      createRecord: async () => {},
+      updateRecord: async () => {},
+      deleteRecord: async () => {},
+      // Cards live under `cardhash`; the board read (`boardhash`) returns empty,
+      // so the default-board synthesis path is used.
+      queryAll: async (q: { schemaHash: string }): Promise<QueryResponse> =>
+        q.schemaHash === "cardhash" ? { ok: true, results: cards.map(cardRow) } : empty,
+      rawCall: async () => ({ status: 200, body: "" }),
+    } as unknown as NodeClient;
+  }
+
+  const corpus = [
+    card({ slug: "a", column: "todo", tags: ["fkanban", "dx"], assignee: "tom" }),
+    card({ slug: "b", column: "doing", tags: ["fkanban"], assignee: "ann" }),
+    card({ slug: "c", column: "todo", tags: ["infra"], assignee: "tom" }),
+  ];
+
+  async function slugs(opts: Partial<ListOptions>): Promise<string[]> {
+    const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, ...opts });
+    return (JSON.parse(out) as Card[]).map((c) => c.slug).sort();
+  }
+
+  const cfg: Config = {
+    configVersion: 1,
+    nodeUrl: "http://stub",
+    schemaServiceUrl: "http://stub",
+    userHash: "stub",
+    schemaHashes: { card: "cardhash", board: "boardhash" },
+  };
+
+  test("--tag is an exact membership filter (not fuzzy)", async () => {
+    expect(await slugs({ tag: "fkanban" })).toEqual(["a", "b"]);
+  });
+
+  test("--tag with no matching card renders empty cleanly (exit 0, no error)", async () => {
+    // Must NOT throw — a tag need not pre-exist (unlike --column, which is
+    // validated against the board's columns). It just yields zero cards.
+    const out = await listCmd({ cfg, node: populatedNode(corpus), tag: "nonexistent-xyz" });
+    expect(typeof out).toBe("string");
+    const json = await listCmd({ cfg, node: populatedNode(corpus), tag: "nonexistent-xyz", json: true });
+    expect(JSON.parse(json)).toEqual([]);
+  });
+
+  test("--assignee is an exact equality filter", async () => {
+    expect(await slugs({ assignee: "tom" })).toEqual(["a", "c"]);
+  });
+
+  test("--column and --tag compose (both applied)", async () => {
+    expect(await slugs({ column: "todo", tag: "fkanban" })).toEqual(["a"]);
+  });
+
+  test("--tag and --assignee compose (both applied)", async () => {
+    expect(await slugs({ tag: "fkanban", assignee: "ann" })).toEqual(["b"]);
   });
 });

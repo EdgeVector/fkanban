@@ -47,10 +47,14 @@ describe("unknown-flag rejection", () => {
     expect(stderr).toContain("fkanban list --help");
   });
 
-  test("list: a typo'd --tag errors with exit 2", async () => {
+  test("list: --tag is now a recognized flag (NOT an unknown-flag exit 2)", async () => {
+    // `--tag` is a first-class list filter, so it must not trip the
+    // unknown-flag rejection. (It may still exit non-zero if no node is
+    // reachable in CI, but never with the exit-2 unknown-flag contract, and
+    // never with the unknown-flag hint.)
     const { code, stderr } = await runCli(["list", "--tag", "test"]);
-    expect(code).toBe(2);
-    expect(stderr).toContain("--tag");
+    expect(code).not.toBe(2);
+    expect(stderr).not.toContain("Unknown option");
   });
 
   test("known flags still parse: `add --help` prints help and exits 0", async () => {
