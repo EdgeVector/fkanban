@@ -231,3 +231,89 @@ describe("add --deps warns on missing dependency slugs", () => {
     expect(warnings).toEqual([]);
   });
 });
+
+// `add --deps` must refuse to close a dependency cycle, exactly like `dep add`
+// (#38). The guard lives in `prepareDeps` (shared by the CLI + the MCP
+// `fkanban_add` tool), throws `dep_cycle` BEFORE any write (no partial card),
+// and only checks edges that are NEW relative to the card's existing deps.
+describe("add --deps rejects a dependency cycle", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
+  });
+
+  async function expectCycle(promise: Promise<unknown>): Promise<void> {
+    await expect(promise).rejects.toMatchObject({ code: "dep_cycle" });
+  }
+
+  test("direct mutual edge (a→b then add b --deps a) is rejected, nothing written", async () => {
+    // a depends on b.
+    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
+    await addCmd({ cfg, node, slug: "b", title: "B" });
+    // Now b --deps a would close a 2-cycle.
+    await expectCycle(addCmd({ cfg, node, slug: "b", deps: ["a"] }));
+    // No edge written: b still has no deps.
+    const after = await findCard(node, cfg, "b");
+    expect(after?.deps).toEqual([]);
+  });
+
+  test("transitive cycle (a→b→c then add c --deps a) is rejected", async () => {
+    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
+    await addCmd({ cfg, node, slug: "b", title: "B", deps: ["c"] });
+    await addCmd({ cfg, node, slug: "c", title: "C" });
+    await expectCycle(addCmd({ cfg, node, slug: "c", deps: ["a"] }));
+    const after = await findCard(node, cfg, "c");
+    expect(after?.deps).toEqual([]);
+  });
+
+  test("error message + hint are byte-aligned with `dep add`", async () => {
+    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
+    await addCmd({ cfg, node, slug: "b", title: "B" });
+    try {
+      await addCmd({ cfg, node, slug: "b", deps: ["a"] });
+      throw new Error("expected addCmd to throw a dep_cycle error");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FkanbanError);
+      const e = err as FkanbanError;
+      expect(e.code).toBe("dep_cycle");
+      expect(e.message).toBe('Adding "b" → "a" would create a dependency cycle.');
+      expect(e.hint).toBe("Cycle: a → b → a (no edge written).");
+    }
+  });
+
+  test("a valid DAG edge is still accepted", async () => {
+    await addCmd({ cfg, node, slug: "a", title: "A" });
+    await addCmd({ cfg, node, slug: "b", title: "B", deps: ["a"] });
+    // c → a and c → b are both fine (no cycle).
+    const res = await addCmd({ cfg, node, slug: "c", title: "C", deps: ["a", "b"] });
+    expect(res).toMatchObject({ action: "created" });
+    const after = await findCard(node, cfg, "c");
+    expect(after?.deps).toEqual(["a", "b"]);
+  });
+
+  test("re-adding a card with an already-present dep does NOT falsely trip the guard", async () => {
+    // a → b exists; b → a is the only cycle edge. Re-`add` a with its EXISTING
+    // dep b plus a title change must not re-check b (b→a not present, so a→b is
+    // fine anyway) — but more importantly, an already-present edge is skipped.
+    await addCmd({ cfg, node, slug: "b", title: "B" });
+    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
+    // Re-add a with the same dep — should succeed (idempotent), no cycle.
+    const res = await addCmd({ cfg, node, slug: "a", title: "A v2", deps: ["b"] });
+    expect(res).toMatchObject({ action: "updated" });
+    const after = await findCard(node, cfg, "a");
+    expect(after?.deps).toEqual(["b"]);
+  });
+
+  test("cumulative: --deps adds two edges where the SECOND closes a cycle", async () => {
+    // x → y exists. add y --deps z,x : z is fine, but x closes y→x→y.
+    await addCmd({ cfg, node, slug: "x", title: "X", deps: ["y"] });
+    await addCmd({ cfg, node, slug: "y", title: "Y" });
+    await addCmd({ cfg, node, slug: "z", title: "Z" });
+    await expectCycle(addCmd({ cfg, node, slug: "y", deps: ["z", "x"] }));
+    // Nothing written — y still has no deps.
+    const after = await findCard(node, cfg, "y");
+    expect(after?.deps).toEqual([]);
+  });
+});

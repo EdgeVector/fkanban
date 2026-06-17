@@ -3,7 +3,7 @@
 // the end of that column. The whole command is two point reads (board, card)
 // plus one write — it never scans the board.
 
-import { type NodeClient } from "../client.ts";
+import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
@@ -11,10 +11,12 @@ import {
   ensureColumn,
   findCard,
   forwardDepWarning,
+  listCardStatuses,
   normalizeDeps,
   nowIso,
   requireBoard,
   validateSlug,
+  wouldCreateCycle,
   type Card,
 } from "../record.ts";
 
@@ -33,22 +35,60 @@ export type AddOptions = {
   body?: string;
 };
 
-// Validate + clean a user-supplied dep list for `slug`, then point-read each
-// prepared dep and warn (to stderr) for any that doesn't resolve to a live
-// card — the same forward-dependency heads-up `dep add` emits. A missing dep is
-// non-blocking by design, so this never throws or blocks the write; it only
-// signals at write time what `show` would otherwise surface much later.
+// Validate + clean a user-supplied dep list for `slug`, warn (to stderr) on any
+// forward/dangling dep — the same heads-up `dep add` emits — and REJECT any new
+// edge that would close a dependency cycle, exactly like `dep add` does (#38).
+//
+// `existingDeps` is the card's current dep list (empty on create). Only deps
+// that are NEW relative to it are cycle-checked, so re-`add`ing a card with an
+// already-present dep never falsely trips the guard. New edges are checked
+// cumulatively (against the board plus the edges this same call already added),
+// so `--deps a,b` can't sneak a cycle through across two edges. The check throws
+// BEFORE any write, so a rejected cycle leaves no partial card.
 async function prepareDeps(
   opts: { cfg: Config; node: NodeClient },
   deps: string[],
   slug: string,
+  existingDeps: string[],
 ): Promise<string[]> {
   const cleaned = normalizeDeps(deps, slug);
   for (const d of cleaned) validateSlug(d);
+
+  // Board graph for the forward-dep warning + the cycle guard. One scan shared
+  // by both, mirroring the single `listCardStatuses` call `dep add` makes.
+  const all = await listCardStatuses(opts.node, opts.cfg);
+  const live = new Set(all.map((c) => c.slug));
   for (const dep of cleaned) {
-    if (!(await findCard(opts.node, opts.cfg, dep))) {
-      console.error(forwardDepWarning(dep));
+    if (!live.has(dep)) console.error(forwardDepWarning(dep));
+  }
+
+  // Cycle guard: walk the NEW edges (those not already on the card) and reject
+  // the first one that would close a loop. Build the graph from `all` but with
+  // THIS card's deps replaced by the cleaned list as edges accumulate, so a
+  // cumulative cycle (`--deps` adds several edges at once) is caught too.
+  const had = new Set(existingDeps);
+  // `accrued` is the card's deps as the walk should see them: existing edges
+  // plus every NEW edge accepted so far. It's the same array reference the
+  // card's node in `graph` holds, so pushing to it is visible to the next
+  // `wouldCreateCycle` walk (which re-reads `.deps` each call).
+  const accrued: string[] = [...existingDeps];
+  const graph: Card[] = all.map((c) => (c.slug === slug ? { ...c, deps: accrued } : c));
+  // The card may not exist on the board yet (create): ensure it has a node so
+  // its outgoing edges are visible to the walk.
+  if (!live.has(slug)) graph.push({ slug, deps: accrued } as Card);
+  for (const dep of cleaned) {
+    if (had.has(dep)) continue; // already an edge on the card — don't re-check
+    const cycle = wouldCreateCycle(graph, slug, dep);
+    if (cycle) {
+      throw new FkanbanError({
+        code: "dep_cycle",
+        message: `Adding "${slug}" → "${dep}" would create a dependency cycle.`,
+        hint: `Cycle: ${cycle.join(" → ")} (no edge written).`,
+      });
     }
+    // Edge accepted: fold it into the graph so a later new edge is checked
+    // against it too (the cumulative `--deps a,b` case).
+    accrued.push(dep);
   }
   return cleaned;
 }
@@ -80,7 +120,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       column: opts.column ?? existing.column,
       assignee: opts.assignee ?? existing.assignee,
       tags: opts.tags ?? existing.tags,
-      deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug) : existing.deps,
+      deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, existing.deps) : existing.deps,
       updated_at: now,
     };
     if (opts.column) ensureColumn(updated.column, columns);
@@ -97,7 +137,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     position: appendPosition(),
     assignee: opts.assignee ?? "",
     tags: opts.tags ?? [],
-    deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug) : [],
+    deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, []) : [],
     created_at: now,
     updated_at: now,
   };
