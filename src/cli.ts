@@ -152,9 +152,9 @@ Options:
   --tag <tag>           only cards carrying this tag (EXACT membership, not
                         the fuzzy text match of \`search\`)
   --assignee <name>     only cards assigned to this person (exact match)
-  --limit <N>           cap cards shown per column
-  --all                 show every card (no per-column cap)
-  --json                machine-readable output
+  --limit <N>           cap cards per column (applies to text AND --json)
+  --all                 show every card (no per-column cap; --json default)
+  --json                machine-readable output (unlimited unless --limit set)
 
 Example:
   fkanban list --board default --limit 10
