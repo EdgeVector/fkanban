@@ -4,6 +4,7 @@
 
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import pkg from "../../package.json" with { type: "json" };
 import { FkanbanError, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
@@ -27,20 +28,23 @@ export type DoctorOptions = {
 
 // The machine-readable doctor report — the single shape shared by the CLI
 // `doctor --json` path and the MCP `fkanban_doctor` tool's `structuredContent`,
-// so the two can't diverge. `lines` is the human report (joined ✓/✗ output) for
-// callers that also want the text (the MCP tool surfaces it as `content`).
-export type DoctorReport = { ok: boolean; checks: DoctorCheck[]; lines: string[] };
+// so the two can't diverge. `version` is the installed fkanban CLI version
+// (from package.json, the same source as `fkanban --version`) — a report field,
+// not a check, so it never affects `ok`. `lines` is the human report (joined
+// ✓/✗ output) for callers that also want the text (the MCP tool surfaces it as
+// `content`).
+export type DoctorReport = { ok: boolean; version: string; checks: DoctorCheck[]; lines: string[] };
 
-// Run doctor while collecting the structured `{ ok, checks }` report and the
-// human lines, without printing anything. Both the CLI `--json` flag and the
-// MCP handler build their output from this so the shape stays identical.
+// Run doctor while collecting the structured `{ ok, version, checks }` report
+// and the human lines, without printing anything. Both the CLI `--json` flag and
+// the MCP handler build their output from this so the shape stays identical.
 export async function runDoctorStructured(
   opts: Omit<DoctorOptions, "print" | "onCheck"> = {},
 ): Promise<DoctorReport> {
   const lines: string[] = [];
   const checks: DoctorCheck[] = [];
   const ok = await doctor({ ...opts, print: (l) => lines.push(l), onCheck: (c) => checks.push(c) });
-  return { ok, checks, lines };
+  return { ok, version: pkg.version, checks, lines };
 }
 
 export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
@@ -52,6 +56,11 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     print(`${pass ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}`);
     onCheck?.({ name: label, status: pass ? "pass" : "fail", detail });
   };
+
+  // Report the installed fkanban version up front — the one fact a bug report
+  // most needs. Sourced from package.json (same as `fkanban --version`), it's a
+  // report line, not a check, so it never flips `ok`.
+  print(`  fkanban v${pkg.version}`);
 
   // Informational only — the global shim is optional, so this never flips `ok`.
   // It just tells the user whether bare `fkanban` resolves on PATH.
