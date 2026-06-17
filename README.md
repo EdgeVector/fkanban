@@ -162,7 +162,11 @@ line, so scripts and agents can confirm the outcome machine-readably (e.g.
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
-everything, `--limit N` sets a custom cap, and `--json` is always unabridged.
+everything and `--limit N` sets a custom per-column cap — both apply to text
+**and** `--json`. The 12-card default is a *text display* affordance only:
+`--json` returns the complete filtered board by default, and honors an explicit
+`--limit N`/`--all` to mean the same bounded (or unbounded) set the text view
+shows.
 
 `search <query>` finds cards by a case-insensitive substring across slug,
 title, body, assignee, and tags — handy once a board has more cards than fit on

@@ -3,8 +3,8 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, ensureColumn, findBoard, listCards, requireBoard, sortCards, type Card } from "../record.ts";
-import { renderBoard, type RenderOptions } from "../board.ts";
+import { blockedSlugSet, ensureColumn, findBoard, listCards, requireBoard, sortCards, type Card, type Board } from "../record.ts";
+import { capPerColumn, renderBoard, type RenderOptions } from "../board.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
 // Cards shown per column before the rest collapse to a "… N more" line.
@@ -31,7 +31,18 @@ export type ListOptions = {
 // single board+cards read. `listCmd` (CLI) returns one or the other; the MCP
 // tool returns both, so it computes the data once and hands the structured
 // `cards` array straight to `structuredContent`.
-export async function listResult(opts: ListOptions): Promise<{ text: string; cards: Card[] }> {
+//
+// `cards` is the FULL filtered set (the implicit DEFAULT_COLUMN_LIMIT is a
+// text *display* affordance only — `renderBoard` applies it to `text` and
+// shows a "… N more" footer, but the structured array stays complete so
+// machine consumers get every card). An *explicit* `--limit`/`--all` is
+// different: it's an intentional per-column cap that should mean the same
+// thing on both surfaces, so it's surfaced as `jsonLimit` for callers that
+// serialize `cards` (`listCmd` for `--json`) to apply via `capPerColumn`.
+// `jsonLimit`: 0 = no cap (default, and `--all`); >0 = explicit `--limit` cap.
+export async function listResult(
+  opts: ListOptions,
+): Promise<{ text: string; cards: Card[]; board: Board; jsonLimit: number }> {
   const boardSlug = opts.board ?? "default";
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently render an empty default-column board. The
@@ -69,6 +80,9 @@ export async function listResult(opts: ListOptions): Promise<{ text: string; car
   );
 
   // Resolve blocked status against ALL live cards so cross-board deps count.
+  // Text render cap: an explicit `--limit` (always >= 1 after flag parsing),
+  // `--all` removes the cap (0), and the no-flag default falls back to
+  // DEFAULT_COLUMN_LIMIT so a long column collapses to a "… N more" line.
   const limit = opts.all
     ? 0
     : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
@@ -76,12 +90,24 @@ export async function listResult(opts: ListOptions): Promise<{ text: string; car
       : DEFAULT_COLUMN_LIMIT;
   const renderOpts: RenderOptions = { blocked: blockedSlugSet(cards, allCards), limit };
   if (opts.column) renderOpts.column = opts.column;
-  return { text: renderBoard(resolvedBoard, cards, renderOpts), cards };
+  // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`
+  // and the no-flag default leave it uncapped (0). The implicit
+  // DEFAULT_COLUMN_LIMIT never applies to JSON.
+  const jsonLimit =
+    !opts.all && Number.isFinite(opts.limit) && (opts.limit as number) >= 0
+      ? (opts.limit as number)
+      : 0;
+  return { text: renderBoard(resolvedBoard, cards, renderOpts), cards, board: resolvedBoard, jsonLimit };
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
-  const { text, cards } = await listResult(opts);
-  return opts.json ? JSON.stringify(cards, null, 2) : text;
+  const { text, cards, board, jsonLimit } = await listResult(opts);
+  if (!opts.json) return text;
+  // Honor an explicit `--limit` on the machine-readable surface too: cap each
+  // column to the same cards the text view shows. No explicit limit (jsonLimit
+  // 0) → the full filtered board, unchanged.
+  const out = jsonLimit > 0 ? capPerColumn(board, cards, jsonLimit, opts.column) : cards;
+  return JSON.stringify(out, null, 2);
 }
 
 export function summarize(cards: Card[]): Record<string, number> {
