@@ -636,6 +636,11 @@ if (import.meta.main) {
       } else if (err instanceof FkanbanError) {
         console.error(`fkanban: ${err.message}`);
         if (err.hint) console.error(`  hint: ${err.hint}`);
+        // A missing required argument is a usage error, like an unknown
+        // command or a bad flag — exit 2 ("bad invocation"). Every other
+        // FkanbanError (card_not_found, service_unreachable, card_blocked, …)
+        // is a genuine operational failure and stays exit 1.
+        process.exit(err.code === "missing_arg" ? 2 : 1);
       } else {
         console.error(`fkanban: ${err instanceof Error ? err.message : String(err)}`);
       }
