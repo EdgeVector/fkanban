@@ -10,7 +10,7 @@ other AGENTS.md-aware tool all read the same orientation.
 
 ## What this is
 
-fkanban is a kanban board over [fold_db](../fold) — a thin **Bun + TypeScript**
+fkanban is a kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db) — a thin **Bun + TypeScript**
 client of `fold_db_node` (`/api/mutation` + `/api/query`) and the
 `schema_service` (`POST /v1/schemas`). It ships as a **CLI** (`src/cli.ts`) and
 an **MCP server** (`src/mcp/`) so agents can drive the board. Modeled on
