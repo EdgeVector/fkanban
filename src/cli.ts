@@ -388,7 +388,7 @@ function rejectMisappliedFlags(
     if (UNIVERSAL_FLAGS.has(flag) || allowed.has(flag)) continue;
     // First disallowed flag wins — match parseArgs' single-error behavior.
     console.error(
-      `Unknown option '--${flag}'. Run \`fkanban ${cmd} --help\` to see this command's flags.`,
+      `fkanban: Unknown option '--${flag}'. Run \`fkanban ${cmd} --help\` to see this command's flags.`,
     );
     return 2;
   }
@@ -453,7 +453,7 @@ async function main(argv: string[]): Promise<number> {
       }
       // Never emit a double-period: strip any trailing `.` before our `. Run …`.
       reason = reason.replace(/\.+$/, "");
-      console.error(`${reason}. Run \`fkanban ${helpCmd}\` to see this command's flags.`);
+      console.error(`fkanban: ${reason}. Run \`fkanban ${helpCmd}\` to see this command's flags.`);
       return 2;
     }
     throw err;
@@ -475,7 +475,7 @@ async function main(argv: string[]): Promise<number> {
     // `help`/no-arg. The exit-2 "Unknown command" path is for a bogus
     // *top-level* command, a distinct case.
     if (cmd === "help" && topic !== undefined && !(topic in COMMAND_HELP)) {
-      console.error(`Unknown command "${topic}".\n`);
+      console.error(`fkanban: Unknown command "${topic}".\n`);
     }
     console.log(helpText);
     return 0;
@@ -638,7 +638,7 @@ async function dispatch(
         console.log(formatDep(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
+      console.error(`fkanban: Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
       return 2;
     }
 
@@ -752,12 +752,12 @@ async function dispatch(
         console.log(formatBoardRm(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`Unknown board subcommand "${sub}". Try: board create | board list | board rm`);
+      console.error(`fkanban: Unknown board subcommand "${sub}". Try: board create | board list | board rm`);
       return 2;
     }
 
     default:
-      console.error(`Unknown command "${cmd}".\n`);
+      console.error(`fkanban: Unknown command "${cmd}".\n`);
       console.log(TOP_HELP);
       return 2;
   }
