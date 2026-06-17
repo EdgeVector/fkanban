@@ -164,8 +164,15 @@ export function blockedSlugSet(cards: Card[], allCards: Card[]): Set<string> {
 // title, body, assignee, and visible tags — dep/tombstone tags never reach
 // here). Multi-word queries are AND-matched: every whitespace-separated term
 // must appear somewhere in the card, so `auth p1` finds cards mentioning both.
+// Tokenize a search query into its effective lowercased terms: trim, split on
+// whitespace, drop empties. A whitespace-only query yields `[]` — callers (see
+// `searchResult`) treat zero terms as a usage error rather than match-all.
+export function queryTerms(query: string): string[] {
+  return query.toLowerCase().trim().split(/\s+/).filter((t) => t.length > 0);
+}
+
 export function cardMatchesQuery(card: Card, query: string): boolean {
-  const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  const terms = queryTerms(query);
   if (terms.length === 0) return true;
   const hay = [card.slug, card.title, card.body, card.assignee, ...card.tags]
     .join("\n")
