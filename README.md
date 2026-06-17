@@ -56,7 +56,13 @@ one before `init` in one of two ways:
   ```
 
   (`folddb daemon start` works too if you'd rather not run it as a service.)
-  First time on a machine, run `folddb setup` to create your identity.
+
+  You don't need to run `folddb setup` first: `fkanban init` auto-provisions
+  the node identity on first run against a fresh, unprovisioned node — so a
+  fkanban-only user can skip it (handy for headless/SSH/CI: just start a node,
+  then `fkanban init`, no interactive wizard required). `folddb setup` remains
+  the way to set up a full folddb identity (24-word recovery phrase, cloud
+  sync) if you want one.
 
 - **From the fold monorepo (for fold devs):**
 
