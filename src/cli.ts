@@ -327,6 +327,54 @@ function isParseArgsError(err: unknown): err is Error & { code: string } {
   );
 }
 
+// Flags accepted by EVERY command. `parseArgs` runs globally (one options set
+// spanning all commands), so it only rejects a flag NO command declares. A
+// flag that's valid on some *other* command (`show --column`, `move --board`,
+// `rm --tags`) slips through and gets silently ignored — contradicting the
+// per-command "Run `fkanban <cmd> --help` to see this command's flags." hint.
+// UNIVERSAL_FLAGS + COMMAND_FLAGS let us re-check each provided flag against
+// the command it was actually given to, and reject the misapplied ones with
+// the same exit-2 + per-command-help contract as a truly unknown flag.
+const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
+
+// Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
+// names as COMMAND_HELP. Derived from each command's `--help` text and the
+// flags its dispatch branch actually reads. Commands absent here (e.g. `dep`,
+// `show`, `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
+const COMMAND_FLAGS: Record<string, Set<string>> = {
+  init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
+  add: new Set(["title", "board", "column", "assignee", "tags", "deps", "body"]),
+  // move ignores --board on purpose: slugs are global, so it can't scope a
+  // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
+  move: new Set(["position", "force"]),
+  list: new Set(["board", "column", "tag", "assignee", "limit", "all"]),
+  search: new Set(["board", "column"]),
+  // board's subcommands read title/columns/body (create) and force (rm).
+  board: new Set(["title", "columns", "body", "force"]),
+};
+
+// Reject a flag that parseArgs accepted globally but that THIS command doesn't
+// declare (e.g. `show --column`, `move --board`). Mirrors the unknown-flag
+// contract exactly: same `Unknown option '--<flag>'.` wording + per-command
+// help hint + exit 2. Only fires for commands we know; an unknown command
+// falls through to its own "Unknown command" handling untouched.
+function rejectMisappliedFlags(
+  cmd: string,
+  values: Record<string, unknown>,
+): number | undefined {
+  if (!(cmd in COMMAND_HELP)) return undefined;
+  const allowed = COMMAND_FLAGS[cmd] ?? new Set<string>();
+  for (const flag of Object.keys(values)) {
+    if (UNIVERSAL_FLAGS.has(flag) || allowed.has(flag)) continue;
+    // First disallowed flag wins — match parseArgs' single-error behavior.
+    console.error(
+      `Unknown option '--${flag}'. Run \`fkanban ${cmd} --help\` to see this command's flags.`,
+    );
+    return 2;
+  }
+  return undefined;
+}
+
 async function main(argv: string[]): Promise<number> {
   let parsed;
   try {
@@ -385,6 +433,14 @@ async function main(argv: string[]): Promise<number> {
   if (helpText !== undefined) {
     console.log(helpText);
     return 0;
+  }
+
+  // Now that the command is known, reject any globally-valid flag that this
+  // specific command doesn't accept (parseArgs only catches flags NO command
+  // declares). Runs after the help short-circuit so `<cmd> --help` still works.
+  if (cmd !== undefined) {
+    const misapplied = rejectMisappliedFlags(cmd, values);
+    if (misapplied !== undefined) return misapplied;
   }
 
   const verbose: Verbose | undefined = values.verbose ? (m) => console.error(m) : undefined;

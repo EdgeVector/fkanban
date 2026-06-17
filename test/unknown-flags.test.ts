@@ -75,3 +75,58 @@ describe("unknown-flag rejection", () => {
     expect(stderr).toContain("Unknown command");
   });
 });
+
+// A flag that's globally known (some command declares it) but misapplied to a
+// command that does NOT accept it used to slip past parseArgs and get silently
+// ignored — `show --column todo`, `move --board X`, `rm --tags foo`. These must
+// be rejected with the same exit-2 + per-command-help contract as an unknown
+// flag, so the hint's "this command's flags" promise actually holds.
+describe("misapplied-flag rejection (globally-known, wrong command)", () => {
+  test("show --column: rejected with exit 2 and a show-scoped hint", async () => {
+    const { code, stderr } = await runCli(["show", "any-slug", "--column", "todo"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("Unknown option '--column'");
+    expect(stderr).toContain("fkanban show --help");
+  });
+
+  test("move --board: rejected with exit 2 (slugs are global; move can't scope)", async () => {
+    const { code, stderr } = await runCli(["move", "any-slug", "doing", "--board", "X"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("Unknown option '--board'");
+    expect(stderr).toContain("fkanban move --help");
+  });
+
+  test("rm --tags: rejected with exit 2", async () => {
+    const { code, stderr } = await runCli(["rm", "any-slug", "--tags", "foo"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("Unknown option '--tags'");
+    expect(stderr).toContain("fkanban rm --help");
+  });
+
+  test("add --tags: accepted (NOT an exit-2 unknown-flag rejection)", async () => {
+    // --tags is a first-class `add` flag, so it must never trip the
+    // misapplied-flag rejection. (It may still exit non-zero if no node is
+    // reachable in CI, but never with the exit-2 unknown-flag contract.)
+    const { code, stderr } = await runCli(["add", "zz", "--title", "T", "--tags", "a,b"]);
+    expect(code).not.toBe(2);
+    expect(stderr).not.toContain("Unknown option");
+  });
+
+  test("move --position N --force: both accepted (no false rejection)", async () => {
+    const { code, stderr } = await runCli(["move", "zz", "doing", "--position", "0", "--force"]);
+    expect(code).not.toBe(2);
+    expect(stderr).not.toContain("Unknown option");
+  });
+
+  test("search --board/--column: accepted on search", async () => {
+    const { code, stderr } = await runCli(["search", "q", "--board", "default", "--column", "todo"]);
+    expect(code).not.toBe(2);
+    expect(stderr).not.toContain("Unknown option");
+  });
+
+  test("universal --json works on a command with no other flags (show)", async () => {
+    const { code, stderr } = await runCli(["show", "any-slug", "--json"]);
+    expect(code).not.toBe(2);
+    expect(stderr).not.toContain("Unknown option");
+  });
+});
