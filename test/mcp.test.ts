@@ -18,12 +18,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ConfigMissingError } from "../src/config.ts";
 
 import { createFkanbanMcpServer } from "../src/mcp/server.ts";
+import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { boardToFields, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { listCmd } from "../src/commands/list.ts";
-import { searchCmd } from "../src/commands/search.ts";
+import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { showCmd } from "../src/commands/show.ts";
 import { boardListCmd } from "../src/commands/board.ts";
 
@@ -269,6 +270,31 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     const cliCards = JSON.parse(await searchCmd({ cfg, node, query: "search me", json: true }));
     expect(res.structuredContent).toEqual({ cards: cliCards });
     expect((cliCards as Array<{ slug: string }>).map((c) => c.slug)).toEqual(["ui"]);
+  });
+
+  test("searchResult rejects a whitespace-only query (missing_arg) instead of dumping the board", async () => {
+    // A zero-effective-term query is a usage error, not a match-all wildcard —
+    // guarding at the single entry point fixes both the CLI and the MCP tool.
+    for (const q of ["", "   ", "\t\n "]) {
+      let err: unknown;
+      try {
+        await searchResult({ cfg, node, query: q });
+      } catch (e) {
+        err = e;
+      }
+      expect(err, `query ${JSON.stringify(q)} should throw`).toBeInstanceOf(FkanbanError);
+      expect((err as FkanbanError).code).toBe("missing_arg");
+      expect((err as FkanbanError).message).toContain("usage: fkanban search");
+    }
+  });
+
+  test("fkanban_search reports a clean isError on a whitespace-only query, not a board dump", async () => {
+    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "   " } });
+    expect(res.isError).toBe(true);
+    const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
+    expect(text).toContain("Missing search query");
+    // It must NOT have returned the board.
+    expect(res.structuredContent).toBeUndefined();
   });
 
   test("fkanban_show returns the card detail deep-equal to `show --json` (blocked/missingDeps surfaced)", async () => {

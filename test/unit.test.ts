@@ -23,6 +23,7 @@ import {
   blockedSlugSet,
   wouldCreateCycle,
   cardMatchesQuery,
+  queryTerms,
   searchCards,
   depTag,
   isWorkingColumn,
@@ -272,7 +273,20 @@ describe("search", () => {
     expect(cardMatchesQuery(corpus[2]!, "oauth missing")).toBe(false);
   });
 
-  test("an empty query matches everything", () => {
+  test("queryTerms tokenizes, trimming and dropping empties", () => {
+    expect(queryTerms("auth")).toEqual(["auth"]);
+    expect(queryTerms("  OAuth   Auth  ")).toEqual(["oauth", "auth"]);
+    // Truly-empty and whitespace-only queries yield zero effective terms —
+    // `searchResult` treats that as a usage error (see search.ts guard test).
+    expect(queryTerms("")).toEqual([]);
+    expect(queryTerms("   ")).toEqual([]);
+    expect(queryTerms("\t\n ")).toEqual([]);
+  });
+
+  test("cardMatchesQuery treats a zero-term query as match-all (entry-point guards it)", () => {
+    // The low-level matcher keeps the empty=all wildcard; the authoritative
+    // whitespace-only rejection lives at `searchResult` so both CLI + MCP error
+    // uniformly. See search.ts for that guard.
     expect(cardMatchesQuery(corpus[0]!, "   ")).toBe(true);
   });
 

@@ -2,9 +2,9 @@
 // across slug, title, body, assignee, and tags. Matches can span columns and
 // boards, so results render as a flat, location-annotated list (or `--json`).
 
-import { type NodeClient } from "../client.ts";
+import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, listCards, requireBoard, searchCards, sortCards, type Card } from "../record.ts";
+import { blockedSlugSet, listCards, queryTerms, requireBoard, searchCards, sortCards, type Card } from "../record.ts";
 import { renderSearchResults } from "../board.ts";
 
 export type SearchOptions = {
@@ -19,6 +19,18 @@ export type SearchOptions = {
 // Both the human text and the structured (`--json`) matches, from a single
 // read. `searchCmd` (CLI) returns one; the MCP tool returns both.
 export async function searchResult(opts: SearchOptions): Promise<{ text: string; cards: Card[] }> {
+  // A query with zero effective terms (truly empty, or whitespace-only like
+  // "   ") is a usage error, not a match-everything wildcard. Guard here — the
+  // single entry point for both the CLI (`searchCmd`) and the MCP
+  // `fkanban_search` tool — so both surfaces reject uniformly instead of
+  // dumping the entire board. Reuse `missing_arg` so the CLI catch maps it to
+  // exit 2 (the usage-error code from PR #44).
+  if (queryTerms(opts.query).length === 0) {
+    throw new FkanbanError({
+      code: "missing_arg",
+      message: "Missing search query — usage: fkanban search <query>",
+    });
+  }
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently report "No cards match". Without `--board`
   // the search spans all boards, so there's nothing to validate.
