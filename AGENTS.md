@@ -93,8 +93,8 @@ bun run src/cli.ts init --node-url http://127.0.0.1:9105 \
   never physically removed.
 - **Schemas are published once, out of band.** Under app_identity v3.1 a schema
   claim under `fkanban/*` must be signed by an enrolled developer's DevCert, so
-  the schemas are published to the schema_service **once** (see README → "App
-  creation"). `init` only **loads + resolves** them — a contributor does **not**
-  republish on every change.
+  the schemas are published to the schema_service **once** (see README →
+  "Republishing the schemas"). `init` only **loads + resolves** them — a
+  contributor does **not** republish on every change.
 
 Keep PRs atomic. When in doubt about a command, the README has the full catalog.
