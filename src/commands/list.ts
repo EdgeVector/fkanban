@@ -3,9 +3,10 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, ensureColumn, findBoard, listCards, requireBoard, sortCards, type Card, type Board } from "../record.ts";
+import { blockedSlugSet, depStatus, ensureColumn, findBoard, listCards, requireBoard, sortCards, type Card, type Board } from "../record.ts";
 import { capPerColumn, renderBoard, type RenderOptions } from "../board.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
+import { type CardDetail } from "./show.ts";
 
 // Cards shown per column before the rest collapse to a "… N more" line.
 // Comfortably above a healthy active column; trims an unbounded `done`.
@@ -40,9 +41,15 @@ export type ListOptions = {
 // thing on both surfaces, so it's surfaced as `jsonLimit` for callers that
 // serialize `cards` (`listCmd` for `--json`) to apply via `capPerColumn`.
 // `jsonLimit`: 0 = no cap (default, and `--all`); >0 = explicit `--limit` cap.
+//
+// Each returned card is enriched with its resolved dependency status (`blocked`,
+// `blockedBy`, `missingDeps`) — the SAME shape `show --json` emits — so the
+// structured/JSON surface tells a machine consumer which cards are blocked
+// without re-deriving dep status or a per-card `show`. The text render is
+// unchanged (it consumes only the 🔒 marker via `blockedSlugSet`).
 export async function listResult(
   opts: ListOptions,
-): Promise<{ text: string; cards: Card[]; board: Board; jsonLimit: number }> {
+): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number }> {
   const boardSlug = opts.board ?? "default";
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently render an empty default-column board. The
@@ -90,6 +97,12 @@ export async function listResult(
       : DEFAULT_COLUMN_LIMIT;
   const renderOpts: RenderOptions = { blocked: blockedSlugSet(cards, allCards), limit };
   if (opts.column) renderOpts.column = opts.column;
+  // Enrich each filtered card with its dependency status (resolved against ALL
+  // live cards so cross-board deps count), matching show's CardDetail shape.
+  const enriched: CardDetail[] = cards.map((c) => {
+    const status = depStatus(c, allCards);
+    return { ...c, blocked: status.blocked, blockedBy: status.blockedBy, missingDeps: status.missing };
+  });
   // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`
   // and the no-flag default leave it uncapped (0). The implicit
   // DEFAULT_COLUMN_LIMIT never applies to JSON.
@@ -97,7 +110,7 @@ export async function listResult(
     !opts.all && Number.isFinite(opts.limit) && (opts.limit as number) >= 0
       ? (opts.limit as number)
       : 0;
-  return { text: renderBoard(resolvedBoard, cards, renderOpts), cards, board: resolvedBoard, jsonLimit };
+  return { text: renderBoard(resolvedBoard, cards, renderOpts), cards: enriched, board: resolvedBoard, jsonLimit };
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {

@@ -117,17 +117,17 @@ export function renderBoard(
 // `done` grows by recency), so the structured `--json` view caps to the exact
 // same cards the text view shows. `limit <= 0` (or `--all`) means no cap and
 // returns the input unchanged.
-export function capPerColumn(
+export function capPerColumn<T extends Card>(
   board: Board,
-  cards: Card[],
+  cards: T[],
   limit: number,
   column?: string,
-): Card[] {
+): T[] {
   if (!(limit > 0)) return cards;
   const allColumns = board.columns.length > 0 ? board.columns : [...DEFAULT_COLUMNS];
   const terminalCol = allColumns[allColumns.length - 1];
   const columns = allColumns.filter((c) => !column || c === column);
-  const out: Card[] = [];
+  const out: T[] = [];
   for (const col of columns) {
     const inCol = sortCards(cards.filter((c) => c.column === col));
     const visible =

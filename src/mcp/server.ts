@@ -123,7 +123,7 @@ export function createFkanbanMcpServer(
     {
       title: "Show kanban board",
       description:
-        "Render a kanban board as columns of cards. Cards are grouped under their column (backlog → todo → doing → review → done) in position order.",
+        "Render a kanban board as columns of cards. Cards are grouped under their column (backlog → todo → doing → review → done) in position order. Each card carries its resolved dependency status (`blocked`, `blockedBy`, `missingDeps`) — the same fields `fkanban_show` returns — so a caller can pick the next *workable* card without a per-card show.",
       annotations: { title: "Show kanban board", readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         board: z.string().optional().describe("Board slug (default: `default`)."),
@@ -136,7 +136,11 @@ export function createFkanbanMcpServer(
           ),
         assignee: z.string().optional().describe("Restrict to cards assigned to this exact person."),
       },
-      outputSchema: { cards: z.array(cardSchema).describe("Matching cards, in column + position order.") },
+      outputSchema: {
+        cards: z
+          .array(cardDetailSchema)
+          .describe("Matching cards, in column + position order, each with resolved dependency status."),
+      },
     },
     async (args) => {
       try {
