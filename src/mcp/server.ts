@@ -441,6 +441,7 @@ export function createFkanbanMcpServer(
       // shim) are advisory and never flip `ok`.
       outputSchema: {
         ok: z.boolean(),
+        version: z.string().describe("The installed fkanban CLI version (from package.json)."),
         checks: z.array(
           z.object({
             name: z.string(),
@@ -452,11 +453,11 @@ export function createFkanbanMcpServer(
     },
     async () => {
       try {
-        const { ok, checks, lines } = await runDoctorStructured();
+        const { ok, version, checks, lines } = await runDoctorStructured();
         const report = lines.join("\n");
         return {
           content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }],
-          structuredContent: { ok, checks },
+          structuredContent: { ok, version, checks },
           isError: !ok,
         };
       } catch (err) {

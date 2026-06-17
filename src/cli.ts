@@ -51,6 +51,7 @@ Commands:
                        board with live cards unless --force)
   doctor               health-check the local setup (--json)
   mcp                  start an MCP server over stdio
+  version              print the fkanban version and exit (alias of --version)
   help                 print this help
 
 Global flags:
@@ -218,6 +219,17 @@ Usage:
 
 Exposes the board to MCP clients (e.g. Claude). Speaks JSON-RPC on
 stdin/stdout; not meant to be run interactively.`),
+
+  version: withFooter(`fkanban version — print the fkanban version and exit
+
+Usage:
+  fkanban version
+
+An alias of the \`--version\`/\`-V\` flag: prints just the version (from
+package.json) to stdout and exits 0.
+
+Example:
+  fkanban version`),
 };
 
 // Resolve which help text to print for the parsed argv. `cmd` is positionals[0].
@@ -407,13 +419,21 @@ async function dispatch(
       return 0;
     }
 
+    case "version": {
+      // Bare `version` subcommand — an alias for the `--version` flag (humans
+      // and agents reflexively type `<tool> version`). Print just the version
+      // from package.json (same source as `--version`/`-V`) and exit 0.
+      console.log(pkg.version);
+      return 0;
+    }
+
     case "doctor": {
       if (values.json) {
         // Machine-readable: collect the structured report (no human ✓/✗ lines
-        // leak to stdout) and emit the SAME { ok, checks } shape the
+        // leak to stdout) and emit the SAME { ok, version, checks } shape the
         // `fkanban_doctor` MCP tool returns as structuredContent.
-        const { ok, checks } = await runDoctorStructured({ verbose });
-        console.log(JSON.stringify({ ok, checks }));
+        const { ok, version, checks } = await runDoctorStructured({ verbose });
+        console.log(JSON.stringify({ ok, version, checks }));
         return ok ? 0 : 1;
       }
       const ok = await doctor({ verbose });
