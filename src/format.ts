@@ -29,6 +29,9 @@ export interface DepResult {
 
 export interface RmResult {
   slug: string;
+  // Slugs of live cards that still listed `slug` in their deps — now dangling.
+  // Surfaced as a stderr warning by the CLI and echoed under --json.
+  orphanedDependents: string[];
 }
 
 export interface BoardCreateResult {

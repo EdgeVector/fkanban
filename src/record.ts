@@ -81,6 +81,17 @@ export function forwardDepWarning(dep: string): string {
   return `fkanban: warning — no card "${dep}" yet; adding it as a forward dependency.`;
 }
 
+// The heads-up `rm` emits when the card being deleted is still listed in another
+// live card's deps: deleting it leaves those edges dangling. The mirror of
+// forwardDepWarning — adding a missing dep warns, and so does deleting a card to
+// CREATE a missing dep. Like forwardDepWarning this is non-blocking (a dangling
+// dep can't reach `done` but doesn't itself fail anything), so the rm still
+// succeeds. Shared so the CLI + MCP messages stay in sync. `dependents` is
+// non-empty by contract.
+export function orphanedDependentsWarning(slug: string, dependents: string[]): string {
+  return `  warning: ${dependents.length} card(s) still depend on "${slug}": ${dependents.join(", ")} — their dependency is now dangling.`;
+}
+
 // The columns at which dependencies actually gate work. A dependency is
 // satisfied only once its card reaches `done`; entering one of these "started"
 // columns while still blocked is what `move` refuses (unless --force).

@@ -18,6 +18,7 @@ import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
+import { orphanedDependentsWarning } from "../record.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
@@ -348,13 +349,22 @@ export function createFkanbanMcpServer(
       description: "Soft-delete a card (fold_db is append-only; the card is tombstoned and hidden).",
       annotations: { title: "Delete a card", destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().min(1).describe("Card slug.") },
-      outputSchema: { slug: z.string() },
+      outputSchema: {
+        slug: z.string(),
+        orphanedDependents: z
+          .array(z.string())
+          .describe("Live cards that still depend on the deleted card — now dangling."),
+      },
     },
     async (args) => {
       try {
         const { cfg, node } = requireConfig();
         const res = await rmCmd({ cfg, node, slug: args.slug });
-        return writeResult(`removed card ${res.slug}`, res);
+        const text =
+          res.orphanedDependents.length > 0
+            ? `removed card ${res.slug}\n${orphanedDependentsWarning(res.slug, res.orphanedDependents)}`
+            : `removed card ${res.slug}`;
+        return writeResult(text, res);
       } catch (err) {
         return errorResult(err);
       }

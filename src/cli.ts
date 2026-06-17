@@ -18,6 +18,7 @@ import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
+import { orphanedDependentsWarning } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import {
   formatAdd,
@@ -675,6 +676,13 @@ async function dispatch(
       const ctx = loadCtx({ verbose });
       const res = await rmCmd({ cfg: ctx.cfg, node: ctx.node, slug });
       console.log(formatRm(res, values.json as boolean | undefined));
+      // Deleting a card that other live cards still depend on leaves those edges
+      // dangling — warn loudly (stderr), mirroring `add --deps <missing>`. Under
+      // --json the dependents ride along in the result object, so suppress the
+      // prose line (same convention as the rest of the CLI).
+      if (!values.json && res.orphanedDependents.length > 0) {
+        console.error(orphanedDependentsWarning(res.slug, res.orphanedDependents));
+      }
       return 0;
     }
 
