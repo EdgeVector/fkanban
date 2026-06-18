@@ -33,7 +33,8 @@ Cards live in two schemas published under the `fkanban/*` app namespace
 | `src/client.ts` | folddb HTTP client (`/api/mutation`, `/api/query`) |
 | `src/schemas.ts` | single source of truth for the Card/Board schemas |
 | `src/config.ts` | `~/.fkanban/config.json` (override via `$FKANBAN_CONFIG`) |
-| `bin/fkanban` | PATH shim (`bun run src/cli.ts "$@"`) |
+| `bin/fkanban`, `bin/fkanban-mcp` | PATH shims (`bun run src/cli.ts` / `src/mcp/main.ts`) |
+| `bin/install.sh` | `bun run install-cli` — symlinks both shims onto PATH |
 | `README.md` | full command + install reference (user-facing) |
 | `.github/workflows/ci.yml` | CI: Typecheck + Tests + `ci-required` umbrella |
 

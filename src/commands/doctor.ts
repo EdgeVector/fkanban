@@ -187,10 +187,11 @@ async function reportShim(
     return;
   }
 
-  // Point at this repo's bundled wrapper so the hint is copy-pasteable.
+  // Point at this repo's one-line installer so the hint is copy-pasteable from
+  // any cwd (the `cd …` makes `bun run install-cli` resolve this repo's script).
   const cliPath = fileURLToPath(import.meta.url); // .../src/commands/doctor.ts
   const repoRoot = cliPath.replace(/\/src\/commands\/doctor\.ts$/, "");
-  const hint = `ln -sf "${repoRoot}/bin/fkanban" /usr/local/bin/fkanban`;
+  const hint = `(cd "${repoRoot}" && bun run install-cli)`;
   print(`· no global \`fkanban\` shim on PATH (optional) — install with: ` + hint);
   onCheck?.({
     name: "global `fkanban` shim on PATH",

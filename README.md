@@ -76,20 +76,21 @@ Once a node is up, run `bun src/cli.ts doctor` to confirm it's reachable, then
 ## Install the global `fkanban` shim
 
 The commands below are written as `fkanban <cmd>`. To make a bare `fkanban`
-resolve from any directory, symlink the bundled `bin/fkanban` wrapper (a tiny
-`bun run src/cli.ts "$@"` script) into a directory on your `PATH`:
+resolve from any directory, run the one-line installer from the repo root:
 
 ```bash
 cd fkanban
-ln -sf "$PWD/bin/fkanban" /usr/local/bin/fkanban   # or ~/bin, anywhere on PATH
-fkanban doctor                                     # confirms the shim is on PATH
+bun run install-cli   # symlinks the fkanban + fkanban-mcp shims onto your PATH
+fkanban doctor        # confirms the shim is on PATH
 ```
 
-This is fully local and reversible — nothing is published to a registry, and
-`rm /usr/local/bin/fkanban` removes it. (`bun link` works too — it picks up the
-`bin` entry already declared in `package.json` — but the wrapper symlink needs
-no global Bun state.) Without the shim, run the CLI as `bun run src/cli.ts <cmd>`
-from inside the repo; the two are equivalent.
+`install-cli` auto-picks a writable PATH directory (`/usr/local/bin`,
+`~/.local/bin`, or `~/bin`); pass an explicit one if you prefer
+(`bun run install-cli ~/bin`). Under the hood it just symlinks the bundled
+`bin/fkanban` wrapper (a tiny `bun run src/cli.ts "$@"` script, plus a matching
+`fkanban-mcp` one) — so it's fully local and reversible, nothing is published to
+a registry, and the `rm …` line it prints removes it. Without the shim, run the
+CLI as `bun run src/cli.ts <cmd>` from inside the repo; the two are equivalent.
 
 ## Quick start
 
@@ -97,7 +98,7 @@ With the prerequisites in place (Bun installed, repo cloned, `bun install` run,
 a folddb node up), from inside the `fkanban` repo:
 
 ```bash
-ln -sf "$PWD/bin/fkanban" /usr/local/bin/fkanban   # one-time: put fkanban on PATH
+bun run install-cli   # one-time: put fkanban on PATH (see "Install the global shim")
 
 # Bootstrap the node, LOAD + RESOLVE the published fkanban schemas, seed the
 # default board. Defaults: node http://127.0.0.1:9001, schema service = prod
