@@ -72,6 +72,45 @@ function capCards<T extends Card>(
   return { cards: capped, total, truncated: capped.length < total };
 }
 
+// Even after #70's COUNT cap, the per-card `body` dominates a list/search
+// payload — on the live 167-card board a default 20-card page was ~16.4K tokens,
+// 87% of which was full card bodies (each multi-KB spec). The agent-facing
+// multi-card read tools (`fkanban_list`/`fkanban_search`) don't need the full
+// body to triage a board — they need to see WHICH cards exist and a hint of
+// each. So by default we ship a short, single-lined `body` PREVIEW plus a
+// `bodyTruncated` flag, and point the agent at `fkanban_show <slug>` for the
+// full body (mirrors fbrain_search's snippet vs fbrain_get's full record).
+// `full_body:true` opts back into the complete body per card for the rare agent
+// that genuinely needs it inline. The single-card `fkanban_show` is unchanged
+// (always full body). The CLI `list --json`/`search --json` are also unchanged
+// (full bodies — they feed scripts, not a token budget).
+const BODY_PREVIEW_CHARS = 200;
+
+// Collapse newlines/runs of whitespace to single spaces (so a preview is one
+// line) and truncate to BODY_PREVIEW_CHARS. Returns the (possibly) shortened
+// body plus whether it was truncated against the ORIGINAL untouched body.
+function previewBody(body: string): { body: string; bodyTruncated: boolean } {
+  const flattened = body.replace(/\s+/g, " ").trim();
+  if (flattened.length <= BODY_PREVIEW_CHARS) {
+    // Note: when the only change was whitespace-collapsing (no length cut), the
+    // body still wasn't dropped, so this is not "truncated" content-wise. Flag
+    // truncation strictly on a length cut against the flattened single-line form.
+    return { body: flattened, bodyTruncated: false };
+  }
+  return { body: flattened.slice(0, BODY_PREVIEW_CHARS), bodyTruncated: true };
+}
+
+// Apply the body-preview transform to each card unless `full_body` is set. Each
+// previewed card gains a `bodyTruncated: boolean`; a full-body card sets it
+// false (the field is always present so the shape is stable for the schema).
+function previewBodies<T extends Card>(cards: T[], fullBody: boolean): Array<T & { bodyTruncated: boolean }> {
+  if (fullBody) return cards.map((c) => ({ ...c, bodyTruncated: false }));
+  return cards.map((c) => {
+    const { body, bodyTruncated } = previewBody(c.body);
+    return { ...c, body, bodyTruncated };
+  });
+}
+
 // Card shape the CLI `--json` emits (mirrors the `Card` type in record.ts).
 const cardShape = {
   slug: z.string(),
@@ -149,7 +188,7 @@ export function createFkanbanMcpServer(
     {
       title: "Show kanban board",
       description:
-        "Render a kanban board as columns of cards. Cards are grouped under their column (backlog → todo → doing → review → done) in position order. Each card carries its resolved dependency status (`blocked`, `blockedBy`, `missingDeps`) — the same fields `fkanban_show` returns — so a caller can pick the next *workable* card without a per-card show.",
+        "Render a kanban board as columns of cards. Cards are grouped under their column (backlog → todo → doing → review → done) in position order. Each card carries its resolved dependency status (`blocked`, `blockedBy`, `missingDeps`) — the same fields `fkanban_show` returns — so a caller can pick the next *workable* card without a per-card show. To keep the payload small, each card's `body` is a short single-line PREVIEW (first ~200 chars) with a `bodyTruncated` flag; call `fkanban_show <slug>` for the full body, or pass `full_body:true` to inline complete bodies.",
       annotations: { title: "Show kanban board", readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         board: z.string().optional().describe("Board slug (default: `default`)."),
@@ -167,14 +206,22 @@ export function createFkanbanMcpServer(
           .min(0)
           .optional()
           .describe(
-            "Cap on returned cards (default 20). Each card carries its full body, so an unbounded board overflows context — `0` returns the complete set (same as `all`).",
+            "Cap on returned cards (default 20). An unbounded board overflows context — `0` returns the complete set (same as `all`).",
           ),
         all: z.boolean().optional().describe("Return every matching card, uncapped (overrides `limit`)."),
+        full_body: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return each card's complete `body` instead of the default ~200-char single-line preview. Off by default — bodies are the bulk of a page's tokens; use `fkanban_show <slug>` for one full body.",
+          ),
       },
       outputSchema: {
         cards: z
-          .array(cardDetailSchema)
-          .describe("Matching cards, in column + position order, each with resolved dependency status (capped — see `total`/`truncated`)."),
+          .array(cardDetailSchema.extend({ bodyTruncated: z.boolean() }))
+          .describe(
+            "Matching cards, in column + position order, each with resolved dependency status (capped — see `total`/`truncated`). By default `body` is a single-line ~200-char preview and `bodyTruncated` says whether it was shortened; pass `full_body:true` for complete bodies (then `bodyTruncated` is always false). Use `fkanban_show <slug>` for one card's full body.",
+          ),
         total: z.number().describe("Total matching cards before the cap."),
         truncated: z.boolean().describe("True when the cap dropped cards — re-call with a higher `limit` or `all` for the rest."),
       },
@@ -192,7 +239,10 @@ export function createFkanbanMcpServer(
         // position order, so `capFlat` slicing keeps ordering intact). The
         // human `text` is independently capped already.
         const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
-        return readResult(text, { cards: capped, total, truncated });
+        // Then preview each card's body (the bulk of the payload) unless the
+        // caller opted into full bodies.
+        const previewed = previewBodies(capped, args.full_body ?? false);
+        return readResult(text, { cards: previewed, total, truncated });
       } catch (err) {
         return errorResult(err);
       }
@@ -204,7 +254,7 @@ export function createFkanbanMcpServer(
     {
       title: "Search cards",
       description:
-        "Find cards by a case-insensitive substring match across slug, title, body, assignee, and tags. Multi-word queries are AND-matched (every term must appear). Results span columns/boards; each is annotated with its `[board/column]`.",
+        "Find cards by a case-insensitive substring match across slug, title, body, assignee, and tags. Multi-word queries are AND-matched (every term must appear). Results span columns/boards; each is annotated with its `[board/column]`. To keep the payload small, each match's `body` is a short single-line PREVIEW (first ~200 chars) with a `bodyTruncated` flag; call `fkanban_show <slug>` for the full body, or pass `full_body:true` to inline complete bodies.",
       annotations: { title: "Search cards", readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         query: z.string().min(1).describe("Search text. Space-separated terms are all required (AND)."),
@@ -216,12 +266,22 @@ export function createFkanbanMcpServer(
           .min(0)
           .optional()
           .describe(
-            "Cap on returned matches (default 20). Each match carries its full body, so a broad query overflows context — `0` returns the complete set (same as `all`).",
+            "Cap on returned matches (default 20). A broad query overflows context — `0` returns the complete set (same as `all`).",
           ),
         all: z.boolean().optional().describe("Return every match, uncapped (overrides `limit`)."),
+        full_body: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return each match's complete `body` instead of the default ~200-char single-line preview. Off by default — bodies are the bulk of a result's tokens; use `fkanban_show <slug>` for one full body.",
+          ),
       },
       outputSchema: {
-        cards: z.array(cardSchema).describe("Matching cards across boards/columns (capped — see `total`/`truncated`)."),
+        cards: z
+          .array(cardSchema.extend({ bodyTruncated: z.boolean() }))
+          .describe(
+            "Matching cards across boards/columns (capped — see `total`/`truncated`). By default `body` is a single-line ~200-char preview and `bodyTruncated` says whether it was shortened; pass `full_body:true` for complete bodies (then `bodyTruncated` is always false). Use `fkanban_show <slug>` for one card's full body.",
+          ),
         total: z.number().describe("Total matches before the cap."),
         truncated: z.boolean().describe("True when the cap dropped matches — re-call with a higher `limit` or `all` for the rest."),
       },
@@ -236,7 +296,10 @@ export function createFkanbanMcpServer(
         // Cap the agent-facing structured array (matches already sorted); the
         // human `text` is independently capped already.
         const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
-        return readResult(text, { cards: capped, total, truncated });
+        // Then preview each card's body (the bulk of the payload) unless the
+        // caller opted into full bodies.
+        const previewed = previewBodies(capped, args.full_body ?? false);
+        return readResult(text, { cards: previewed, total, truncated });
       } catch (err) {
         return errorResult(err);
       }
