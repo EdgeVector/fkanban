@@ -304,6 +304,28 @@ describe("search", () => {
     expect(out).toContain("ship-login");
     expect(renderSearchResults([], "ghost", { color: false })).toBe('No cards match "ghost".');
   });
+
+  test("renderSearchResults caps rendered matches and prints an overflow line", () => {
+    // 5 matching cards, capped at 2 → 2 bullet lines + a "… 3 more" overflow.
+    const many = Array.from({ length: 5 }, (_, i) =>
+      card({ slug: `auth-${i}`, title: `auth ${i}`, column: "todo" }),
+    );
+    const out = renderSearchResults(many, "auth", { color: false, limit: 2 });
+    const bullets = out.split("\n").filter((l) => l.trim().startsWith("•"));
+    expect(bullets).toHaveLength(2);
+    expect(out).toContain('5 matches for "auth"'); // header counts ALL matches
+    expect(out).toContain("… 3 more (use --limit N or --all)");
+  });
+
+  test("renderSearchResults limit<=0 (--all) renders every match, no overflow line", () => {
+    const many = Array.from({ length: 5 }, (_, i) =>
+      card({ slug: `auth-${i}`, title: `auth ${i}`, column: "todo" }),
+    );
+    const out = renderSearchResults(many, "auth", { color: false, limit: 0 });
+    const bullets = out.split("\n").filter((l) => l.trim().startsWith("•"));
+    expect(bullets).toHaveLength(5);
+    expect(out).not.toContain("more (use --limit");
+  });
 });
 
 describe("render", () => {

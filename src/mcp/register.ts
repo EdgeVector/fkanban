@@ -33,6 +33,15 @@ export function mcpAddCommand(): string {
   return `claude mcp add fkanban -- bun ${mainEntrypointPath()}`;
 }
 
+// The command prefix that runs fkanban for THIS dev: the global `fkanban` shim
+// if it's on PATH, else `bun run src/cli.ts` from the repo. Mirrors the
+// shim-branching in mcpAddCommand() so init's Next-steps `list`/`add` lines (and
+// doctor) print commands that actually run on a shim-less fresh clone — where
+// `command -v fkanban` is empty until `bun run install-cli`.
+export function fkanbanInvocation(): string {
+  return resolveFkanbanShim() ? "fkanban" : "bun run src/cli.ts";
+}
+
 // The MCP entrypoint `claude mcp add` would target, resolved for THIS dev:
 //   - shim on PATH → the installed `fkanban-mcp` bin (else the `fkanban` shim
 //     itself, which serves `fkanban mcp`)

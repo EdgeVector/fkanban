@@ -155,25 +155,51 @@ function renderCardLine(c: Card, color: boolean, blocked: boolean): string {
   return `  • ${marker}${c.title || c.slug}  ${slug}${cardMetaSuffix(c, color)}`;
 }
 
+// The default number of search hits the text view renders before collapsing the
+// rest behind a `… N more` overflow line. Search is a flat sorted list (unlike
+// the per-column board), so it gets a single flat cap rather than `capPerColumn`.
+export const DEFAULT_SEARCH_LIMIT = 20;
+
+// Cap a flat, already-sorted card list, returning the first `limit`. `limit <= 0`
+// (or `--all`) means no cap and returns the input unchanged. Mirrors
+// `capPerColumn`'s contract for the flat search list so the text and `--json`
+// views agree on which cards are shown.
+export function capFlat<T extends Card>(cards: T[], limit: number): T[] {
+  if (!(limit > 0)) return cards;
+  return cards.slice(0, limit);
+}
+
 // Render search hits as a flat list. Unlike the board view, matches can span
 // columns and boards, so each line is annotated with its `[board/column]`.
+// Caps the rendered matches at `limit` (default `DEFAULT_SEARCH_LIMIT`) and
+// appends a dim `… N more` overflow line, mirroring how `renderBoard` caps each
+// column — so a search on a busy board doesn't flood the terminal. `limit <= 0`
+// disables the cap (the `--all` path).
 export function renderSearchResults(
   cards: Card[],
   query: string,
-  opts: { color?: boolean; blocked?: Set<string> } = {},
+  opts: { color?: boolean; blocked?: Set<string>; limit?: number } = {},
 ): string {
   const color = opts.color ?? Boolean(process.stdout.isTTY);
   if (cards.length === 0) return paint(color, "dim", `No cards match "${query}".`);
+
+  const cap = opts.limit ?? DEFAULT_SEARCH_LIMIT;
+  const sorted = sortCards(cards);
+  const hidden = cap > 0 && sorted.length > cap ? sorted.length - cap : 0;
+  const visible = hidden === 0 ? sorted : sorted.slice(0, cap);
 
   const lines: string[] = [];
   const count = `${cards.length} match${cards.length === 1 ? "" : "es"}`;
   lines.push(paint(color, "bold", `${count} for "${query}"`));
   lines.push("");
-  for (const c of sortCards(cards)) {
+  for (const c of visible) {
     const loc = paint(color, "dim", `[${c.board}/${c.column}]`);
     const slug = paint(color, "cyan", c.slug);
     const marker = opts.blocked?.has(c.slug) ? paint(color, "yellow", "🔒 ") : "";
     lines.push(`  • ${marker}${loc} ${c.title || c.slug}  ${slug}${cardMetaSuffix(c, color)}`);
+  }
+  if (hidden > 0) {
+    lines.push(paint(color, "dim", `  … ${hidden} more (use --limit N or --all)`));
   }
   return lines.join("\n");
 }
