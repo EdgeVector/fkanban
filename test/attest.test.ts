@@ -77,20 +77,29 @@ describe("attestOwnerSession", () => {
 describe("newNodeClient attestation wiring", () => {
   test("attaches X-Folddb-Session to node requests once paired", async () => {
     const sock = socketPath();
-    const uds = Bun.serve({ unix: sock, fetch: () => Response.json({ pairing_code: "pc" }) });
-    track(uds);
-
+    // Socket-first (this card): the UDS now serves BOTH the control-plane mint
+    // AND the data-plane (query), since a present socket is the default
+    // transport for `service: node`. The session header must still be threaded
+    // onto the data-plane requests, now arriving over the socket.
     const seenSessionHeaders: Array<string | null> = [];
-    const tcp = Bun.serve({
-      port: 0,
-      async fetch(req) {
+    const uds = Bun.serve({
+      unix: sock,
+      fetch(req) {
         const url = new URL(req.url);
-        if (url.pathname === "/api/session/browser-pair") {
-          return Response.json({ session_token: "sess-1" });
+        if (url.pathname === "/control/browser-pairing-code") {
+          return Response.json({ pairing_code: "pc" });
         }
         seenSessionHeaders.push(req.headers.get("X-Folddb-Session"));
         return Response.json({ ok: true, results: [], has_more: false });
       },
+    });
+    track(uds);
+
+    // The pairing-code EXCHANGE still happens over TCP (attestation design,
+    // unchanged by socket-first) — only the data plane moved to the socket.
+    const tcp = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ session_token: "sess-1" }),
     });
     track(tcp);
 
@@ -101,30 +110,25 @@ describe("newNodeClient attestation wiring", () => {
     });
     await node.queryAll({ schemaHash: "s", fields: ["slug"] });
     await node.queryAll({ schemaHash: "s", fields: ["slug"] });
-    // Both queries carried the session token; mint happened exactly once.
+    // Both queries (over the socket) carried the session token; mint once.
     expect(seenSessionHeaders).toEqual(["sess-1", "sess-1"]);
   });
 
   test("re-pairs once on 403 transport_not_attested and retries", async () => {
     const sock = socketPath();
     let mintCount = 0;
+    // Socket-first: the UDS serves the mint AND the data-plane mutation. The
+    // first mutation (over the socket) returns a stale-session 403; the client
+    // re-mints over the socket and retries — also over the socket — carrying
+    // the fresh token.
+    let mutationCalls = 0;
     const uds = Bun.serve({
       unix: sock,
-      fetch() {
-        mintCount++;
-        return Response.json({ pairing_code: `pc-${mintCount}` });
-      },
-    });
-    track(uds);
-
-    let mutationCalls = 0;
-    const tcp = Bun.serve({
-      port: 0,
       async fetch(req) {
         const url = new URL(req.url);
-        if (url.pathname === "/api/session/browser-pair") {
-          const body = (await req.json()) as Record<string, unknown>;
-          return Response.json({ session_token: `sess-from-${body.code as string}` });
+        if (url.pathname === "/control/browser-pairing-code") {
+          mintCount++;
+          return Response.json({ pairing_code: `pc-${mintCount}` });
         }
         if (url.pathname === "/api/mutation") {
           mutationCalls++;
@@ -135,6 +139,20 @@ describe("newNodeClient attestation wiring", () => {
           // Retry must carry the freshly re-minted session token.
           expect(req.headers.get("X-Folddb-Session")).toBe("sess-from-pc-2");
           return Response.json({ ok: true });
+        }
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+    track(uds);
+
+    // The pairing-code EXCHANGE still goes over TCP (unchanged by socket-first).
+    const tcp = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/api/session/browser-pair") {
+          const body = (await req.json()) as Record<string, unknown>;
+          return Response.json({ session_token: `sess-from-${body.code as string}` });
         }
         return Response.json({ error: "unexpected" }, { status: 500 });
       },

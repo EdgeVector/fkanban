@@ -74,6 +74,25 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   print(`  schema: ${cfg.schemaServiceUrl}`);
 
   const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
+
+  // Which transport the node data-plane probes will take. Socket-first is live
+  // when the control socket exists; otherwise requests go over loopback TCP.
+  // Informational only — never flips `ok`; it just lets a user confirm
+  // socket-first is active (or see why it fell back to TCP). Printed BEFORE the
+  // reachability probe so the transport is named even if that probe then fails.
+  const transport = node.nodeTransport();
+  if (transport.transport === "socket") {
+    const detail = `Unix socket — ${transport.socketPath} (TCP ${cfg.nodeUrl} is fallback)`;
+    print(`✓ node transport: socket — ${detail}`);
+    onCheck?.({ name: "node transport", status: "info", detail });
+  } else {
+    const detail = transport.socketPath
+      ? `loopback TCP ${cfg.nodeUrl} (no socket at ${transport.socketPath})`
+      : `loopback TCP ${cfg.nodeUrl} (no socket configured)`;
+    print(`· node transport: tcp — ${detail}`);
+    onCheck?.({ name: "node transport", status: "info", detail });
+  }
+
   try {
     const id = await node.autoIdentity();
     check(id.provisioned, "node reachable + provisioned", id.provisioned ? undefined : id.reason);

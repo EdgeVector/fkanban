@@ -125,6 +125,12 @@ export type NodeClient = {
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
+  // Which transport node requests take RIGHT NOW: `socket` when a control socket
+  // was threaded in and the file currently exists (socket-first is live, TCP is
+  // fallback-only), else `tcp`. `socketPath` echoes the path consulted (so
+  // `fkanban doctor` can name it). Re-evaluates `existsSync` on each call so a
+  // socket that appears/vanishes between calls is reported accurately.
+  nodeTransport(): { transport: "socket" | "tcp"; socketPath?: string };
 };
 
 export function newSchemaServiceClient(
@@ -406,6 +412,7 @@ export function newNodeClient(opts: {
         service: "node",
         headers: nodeHeaders(),
         timeoutMs,
+        socketPath,
       });
       const parsed = await readBody();
       return { status: res.status, body: parsed };
@@ -546,6 +553,7 @@ export function newNodeClient(opts: {
           service: "node",
           headers: nodeHeaders(),
           timeoutMs,
+          socketPath,
         });
       let { res, readBody } = await doFetch();
       let text = await readBody({ asText: true });
@@ -563,6 +571,10 @@ export function newNodeClient(opts: {
         throw attestationUnavailableError(path);
       }
       return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
+    },
+    nodeTransport() {
+      const live = socketPath !== undefined && socketPath.length > 0 && existsSync(socketPath);
+      return live ? { transport: "socket", socketPath } : { transport: "tcp", socketPath };
     },
   };
 }
@@ -616,6 +628,32 @@ type BoundedResponse = {
   readBody: ReadBody;
 };
 
+// True when a fetch rejection is a *connect-class* failure (the socket vanished,
+// the listener refused, the path is gone) rather than a real HTTP response or a
+// deadline abort. Only these justify the socket-first → TCP fallback: an HTTP
+// 4xx/5xx is a genuine answer from the node and must NOT trigger a fallback, and
+// a timeout has its own mapping. Bun surfaces UDS connect failures as a plain
+// Error whose message/code names ENOENT/ECONNREFUSED/"Unable to connect" etc.;
+// match those loosely so a missing or refused socket falls back cleanly.
+function isConnectError(err: unknown): boolean {
+  if (isTimeoutError(err)) return false;
+  if (!(err instanceof Error)) return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string" && /ENOENT|ECONNREFUSED|ECONNRESET|EPIPE|ENXIO|EACCES/.test(code)) {
+    return true;
+  }
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("unable to connect") ||
+    msg.includes("connection refused") ||
+    msg.includes("econnrefused") ||
+    msg.includes("enoent") ||
+    msg.includes("failed to connect") ||
+    msg.includes("socket") ||
+    msg.includes("connection closed")
+  );
+}
+
 async function verboseFetch(opts: {
   baseUrl: string;
   path: string;
@@ -625,8 +663,14 @@ async function verboseFetch(opts: {
   service: "node" | "schema";
   headers: Record<string, string>;
   timeoutMs?: number;
+  // The node's Unix-domain socket. When set AND the service is `node` AND the
+  // socket file exists, the request goes over the UDS (socket-first, mirroring
+  // fold#1004's transport discovery) with a single automatic fall-back to TCP
+  // `baseUrl` if the socket connect fails. NEVER consulted for `service: schema`
+  // — the schema service is the remote HTTPS Lambda, which has no local socket.
+  socketPath?: string;
 }): Promise<BoundedResponse> {
-  const url = `${opts.baseUrl}${opts.path}`;
+  const tcpUrl = `${opts.baseUrl}${opts.path}`;
   const tag = opts.service === "node" ? "NODE" : "SCHEMA";
   const headers = { ...opts.headers };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -637,7 +681,17 @@ async function verboseFetch(opts: {
         ? opts.body
         : JSON.stringify(opts.body);
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
-  opts.verbose(`→ ${tag} ${opts.method} ${url}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""));
+
+  // Socket-first selection. Only `service: node` is ever a candidate for the
+  // UDS — and only when a socketPath was threaded in and the file actually
+  // exists (so a node without a socket, or the schema service, transparently
+  // uses TCP). Bun's UDS fetch keeps the URL as `http://localhost<path>` and
+  // routes the connection over `{ unix: socketPath }`.
+  const useSocket =
+    opts.service === "node" &&
+    opts.socketPath !== undefined &&
+    opts.socketPath.length > 0 &&
+    existsSync(opts.socketPath);
 
   // One controller for the whole request lifecycle (headers + body). The timer
   // keeps running after the fetch resolves, so if the body read stalls past the
@@ -650,22 +704,57 @@ async function verboseFetch(opts: {
     if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
   }, timeoutMs);
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
+  // Issue the request over a given transport. `viaSocket` selects the UDS
+  // (Bun's `{ unix }` option) vs the plain TCP url; the verbose log names which.
+  const attempt = async (viaSocket: boolean): Promise<Response> => {
+    const url = viaSocket ? `http://localhost${opts.path}` : tcpUrl;
+    const transport = viaSocket ? `unix:${opts.socketPath}` : "tcp";
+    opts.verbose(
+      `→ ${tag} ${opts.method} ${url} [${transport}]` +
+        (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
+    );
+    const init: RequestInit & { unix?: string } = {
       method: opts.method,
       headers,
       body: bodyStr,
       signal: controller.signal,
-    });
-    opts.verbose(`← ${tag} ${opts.method} ${url} status=${res.status}`);
+    };
+    if (viaSocket) init.unix = opts.socketPath;
+    const r = await fetch(url, init);
+    opts.verbose(`← ${tag} ${opts.method} ${url} [${transport}] status=${r.status}`);
+    return r;
+  };
+
+  let res: Response;
+  try {
+    if (useSocket) {
+      try {
+        res = await attempt(true);
+      } catch (socketErr) {
+        // A connect-class failure (socket vanished / refused) → fall back to TCP
+        // once, matching fold#1004's discovery semantics. A timeout is NOT a
+        // connect failure (the request reached the node), so don't retry it.
+        if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
+          opts.verbose(
+            `node: socket ${opts.socketPath} unreachable (${
+              socketErr instanceof Error ? socketErr.message : String(socketErr)
+            }) — falling back to TCP ${opts.baseUrl}`,
+          );
+          res = await attempt(false);
+        } else {
+          throw socketErr;
+        }
+      }
+    } else {
+      res = await attempt(false);
+    }
   } catch (err) {
     done = true;
     clearTimeout(timer);
     if (isTimeoutError(err)) {
       throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
     }
-    throw connectionError(opts.baseUrl, opts.service, err);
+    throw connectionError(opts.baseUrl, opts.service, err, useSocket ? opts.socketPath : undefined);
   }
 
   const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
@@ -681,7 +770,7 @@ async function verboseFetch(opts: {
       if (isTimeoutError(err)) {
         throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
       }
-      throw connectionError(opts.baseUrl, opts.service, err);
+      throw connectionError(opts.baseUrl, opts.service, err, useSocket ? opts.socketPath : undefined);
     }
   }) as ReadBody;
 
@@ -733,11 +822,20 @@ function parseBody(text: string): unknown {
   }
 }
 
-function connectionError(baseUrl: string, service: "node" | "schema", cause: unknown): FkanbanError {
+function connectionError(
+  baseUrl: string,
+  service: "node" | "schema",
+  cause: unknown,
+  socketPath?: string,
+): FkanbanError {
   const which = service === "node" ? "node" : "schema service";
+  // When socket-first was active, both the UDS and the TCP fallback failed —
+  // name BOTH so `fkanban doctor` output stays actionable about which transports
+  // were tried.
+  const where = socketPath ? `over the socket ${socketPath} or at ${baseUrl}` : `at ${baseUrl}`;
   return new FkanbanError({
     code: "service_unreachable",
-    message: `${which} not reachable at ${baseUrl} — run \`fkanban doctor\` for a diagnosis.`,
+    message: `${which} not reachable ${where} — run \`fkanban doctor\` for a diagnosis.`,
     hint:
       service === "node"
         ? "Is a folddb node running? Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `fkanban init`."

@@ -75,6 +75,7 @@ function fakeNode(opts: { boards: Board[]; cards: Card[]; updates: Update[] }): 
     createRecord: stub as never,
     deleteRecord: stub as never,
     rawCall: stub as never,
+    nodeTransport: stub as never,
     async updateRecord(u) {
       opts.updates.push(u);
     },
