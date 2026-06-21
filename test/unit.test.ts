@@ -48,7 +48,7 @@ import {
 import { renderBoard, renderSearchResults } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
-import { TOP_HELP, COMMAND_HELP, resolveHelp } from "../src/cli.ts";
+import { TOP_HELP, COMMAND_HELP, resolveHelp, suggestFlag } from "../src/cli.ts";
 import { levenshtein, suggestClosest } from "../src/suggest.ts";
 
 function card(partial: Partial<Card>): Card {
@@ -933,5 +933,18 @@ describe("command suggestion (did-you-mean)", () => {
   test("a far-off token yields no suggestion (falls back to full help)", () => {
     expect(suggestClosest("frobnicate", commands)).toBeNull();
     expect(suggestClosest("", commands)).toBeNull();
+  });
+
+  test("a flag typo suggests the closest valid flag for that command", () => {
+    // suggestFlag drives the new "Did you mean \"--title\"?" line in the
+    // unknown-OPTION catch branch (mirrors the unknown-command path above).
+    expect(suggestFlag("add", "titel")).toBe("title");
+    expect(suggestFlag("list", "collumn")).toBe("column");
+  });
+
+  test("a far-off flag token yields no suggestion (no false positive)", () => {
+    expect(suggestFlag("add", "frobnicate")).toBeNull();
+    // An unknown command never suggests a flag.
+    expect(suggestFlag("nosuchcmd", "titel")).toBeNull();
   });
 });
