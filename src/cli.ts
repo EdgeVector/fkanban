@@ -453,6 +453,17 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   board: new Set(["title", "columns", "body", "force"]),
 };
 
+// Closest valid flag for a mistyped option on a known command. Mirrors the
+// unknown-COMMAND "did you mean" path (suggestClosest over COMMAND_HELP keys),
+// but over this command's accepted flags (its COMMAND_FLAGS ∪ UNIVERSAL_FLAGS).
+// Returns the bare flag name (no dashes) or null when the token is unknown OR
+// too far off to be a likely typo — so `--frobnicate` yields no false positive.
+export function suggestFlag(cmd: string, flag: string): string | null {
+  if (!(cmd in COMMAND_HELP)) return null;
+  const candidates = [...(COMMAND_FLAGS[cmd] ?? []), ...UNIVERSAL_FLAGS];
+  return suggestClosest(flag, candidates);
+}
+
 // Reject a flag that parseArgs accepted globally but that THIS command doesn't
 // declare (e.g. `show --column`, `move --board`). Mirrors the unknown-flag
 // contract exactly: same `Unknown option '--<flag>'.` wording + per-command
@@ -533,6 +544,15 @@ async function main(argv: string[]): Promise<number> {
       }
       // Never emit a double-period: strip any trailing `.` before our `. Run …`.
       reason = reason.replace(/\.+$/, "");
+      // For a genuine unknown-OPTION typo on a known command, name the closest
+      // valid flag before the help hint — the same recovery the unknown-COMMAND
+      // path already offers (`Did you mean "list"?`). Only the typo path: the
+      // ambiguous/missing-value branch above is a different error, not a typo.
+      if (err.code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" && cmd) {
+        const flag = err.message.match(/'(?:--?)?([^']+)'/)?.[1];
+        const suggestion = flag ? suggestFlag(cmd, flag) : null;
+        if (suggestion) console.error(`fkanban: Did you mean "--${suggestion}"?`);
+      }
       console.error(`fkanban: ${reason}. Run \`fkanban ${helpCmd}\` to see this command's flags.`);
       return 2;
     }
