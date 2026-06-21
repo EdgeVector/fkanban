@@ -128,11 +128,16 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       code: "schemas_not_published",
       message: `These fkanban schemas are not registered in the schema service: ${missing.join(", ")}.`,
       hint:
-        "Publish them once via the exemem app-creation flow (see README → \"Republishing the schemas\"):\n" +
-        "  folddb-dev app new --id fkanban --metadata-file fkanban.app.json\n" +
-        "  folddb-dev app publish --app-file app.json --schema-service-url <url> --dev-api-key <em_…>\n" +
-        "  folddb-dev schema register --file card.schema.json && folddb-dev schema publish --schema Card --app fkanban --schema-service-url <url>\n" +
-        "  (repeat for Board), then re-run `fkanban init`.",
+        `This schema_service (${schemaServiceUrl}) doesn't have the fkanban/* schemas. ` +
+        "They're already published on the default prod schema_service, so most people who hit this " +
+        "pointed --schema-service-url (or a saved config) at a different service.\n" +
+        "Fix: re-run `fkanban init` WITHOUT --schema-service-url (uses the default where fkanban/* lives), " +
+        "or point it at a service where fkanban/* is published. " +
+        "If you also overrode it in ~/.fkanban/config.json, clear it there too.\n" +
+        "\n" +
+        "Maintainer only — standing the schemas up on a *new* schema_service:\n" +
+        "  Publish fkanban/* via the exemem app-creation flow, then re-run `fkanban init`.\n" +
+        "  See README → \"Republishing the schemas\" (needs a DevCert + enrolled developer + em_… API key).",
     });
   }
 
