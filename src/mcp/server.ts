@@ -143,6 +143,24 @@ const boardSchema = z.object({
   updated_at: z.string(),
 });
 
+// Required string args are declared without a Zod `.min(1)` so an empty/missing
+// value reaches the handler instead of the SDK's pre-handler validation, which
+// would dump a raw `MCP error -32602: Input validation error … too_small` Zod
+// blob. Each handler calls this at the top of its `try` to turn an
+// empty/whitespace-only required arg into a voiced FkanbanError — the same
+// `error:`/`hint:` shape `errorResult` produces for every domain error, and
+// matching the CLI's `Missing argument — usage: …` voice.
+function requireArg(value: string, name: string, usage: string): string {
+  if (value.trim().length === 0) {
+    throw new FkanbanError({
+      code: "missing_argument",
+      message: `Missing ${name}.`,
+      hint: usage,
+    });
+  }
+  return value;
+}
+
 function errorResult(err: unknown): ToolResult {
   const msg =
     err instanceof FkanbanError
@@ -257,7 +275,7 @@ export function createFkanbanMcpServer(
         "Find cards by a case-insensitive substring match across slug, title, body, assignee, and tags. Multi-word queries are AND-matched (every term must appear). Results span columns/boards; each is annotated with its `[board/column]`. To keep the payload small, each match's `body` is a short single-line PREVIEW (first ~200 chars) with a `bodyTruncated` flag; call `fkanban_show <slug>` for the full body, or pass `full_body:true` to inline complete bodies.",
       annotations: { title: "Search cards", readOnlyHint: true, openWorldHint: false },
       inputSchema: {
-        query: z.string().min(1).describe("Search text. Space-separated terms are all required (AND)."),
+        query: z.string().describe("Search text. Space-separated terms are all required (AND)."),
         board: z.string().optional().describe("Restrict to one board."),
         column: z.string().optional().describe("Restrict to one column."),
         limit: z
@@ -288,6 +306,7 @@ export function createFkanbanMcpServer(
     },
     async (args) => {
       try {
+        requireArg(args.query, "search query", "Pass a non-empty `query`.");
         const { cfg, node } = requireConfig();
         const o: Parameters<typeof searchResult>[0] = { cfg, node, query: args.query };
         if (args.board) o.board = args.board;
@@ -314,7 +333,7 @@ export function createFkanbanMcpServer(
         "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. A card blocked by an unfinished dependency cannot be placed in doing/review/done unless `force` is set.",
       annotations: { title: "Add or update a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        slug: z.string().min(1).describe("Stable card id (lowercase [a-z0-9-_])."),
+        slug: z.string().describe("Stable card id (lowercase [a-z0-9-_])."),
         title: z.string().optional().describe("Card title."),
         body: z.string().optional().describe("Markdown description / notes."),
         board: z.string().optional().describe("Board slug (default: `default`)."),
@@ -338,6 +357,7 @@ export function createFkanbanMcpServer(
     },
     async (args) => {
       try {
+        requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const o: Parameters<typeof addCmd>[0] = { cfg, node, slug: args.slug };
         if (args.title !== undefined) o.title = args.title;
@@ -364,8 +384,8 @@ export function createFkanbanMcpServer(
         "Move a card to a different column on its board. A card blocked by an unfinished dependency cannot move into doing/review/done unless `force` is set.",
       annotations: { title: "Move a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        slug: z.string().min(1).describe("Card slug."),
-        column: z.string().min(1).describe("Target column."),
+        slug: z.string().describe("Card slug."),
+        column: z.string().describe("Target column."),
         position: z.number().int().optional().describe("Explicit ordering within the column."),
         force: z.boolean().optional().describe("Move even if the card is blocked by an unfinished dependency."),
       },
@@ -377,6 +397,8 @@ export function createFkanbanMcpServer(
     },
     async (args) => {
       try {
+        requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
+        requireArg(args.column, "target column", "Pass a non-empty `column`.");
         const { cfg, node } = requireConfig();
         const o: Parameters<typeof moveCmd>[0] = { cfg, node, slug: args.slug, column: args.column };
         if (args.position !== undefined) o.position = args.position;
@@ -397,8 +419,8 @@ export function createFkanbanMcpServer(
         "Make `slug` depend on `dep`. `slug` is then blocked (cannot enter doing/review/done) until `dep` reaches the `done` column.",
       annotations: { title: "Add a dependency", idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        slug: z.string().min(1).describe("The dependent card."),
-        dep: z.string().min(1).describe("The card it depends on (must reach `done` first)."),
+        slug: z.string().describe("The dependent card."),
+        dep: z.string().describe("The card it depends on (must reach `done` first)."),
       },
       outputSchema: {
         slug: z.string(),
@@ -409,6 +431,8 @@ export function createFkanbanMcpServer(
     },
     async (args) => {
       try {
+        requireArg(args.slug, "dependent card slug", "Pass a non-empty `slug`.");
+        requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
         const res = await depAddCmd({ cfg, node, slug: args.slug, dep: args.dep });
         return writeResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
@@ -425,8 +449,8 @@ export function createFkanbanMcpServer(
       description: "Remove the dependency edge from `slug` to `dep`.",
       annotations: { title: "Remove a dependency", idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        slug: z.string().min(1).describe("The dependent card."),
-        dep: z.string().min(1).describe("The dependency to remove."),
+        slug: z.string().describe("The dependent card."),
+        dep: z.string().describe("The dependency to remove."),
       },
       outputSchema: {
         slug: z.string(),
@@ -437,6 +461,8 @@ export function createFkanbanMcpServer(
     },
     async (args) => {
       try {
+        requireArg(args.slug, "dependent card slug", "Pass a non-empty `slug`.");
+        requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
         const res = await depRmCmd({ cfg, node, slug: args.slug, dep: args.dep });
         return writeResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
@@ -452,11 +478,12 @@ export function createFkanbanMcpServer(
       title: "Show a card",
       description: "Print one card in detail by slug, including its dependencies and blocked state.",
       annotations: { title: "Show a card", readOnlyHint: true, openWorldHint: false },
-      inputSchema: { slug: z.string().min(1).describe("Card slug.") },
+      inputSchema: { slug: z.string().describe("Card slug.") },
       outputSchema: cardDetailSchema.shape,
     },
     async (args) => {
       try {
+        requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const { text, card } = await showResult({ cfg, node, slug: args.slug });
         return readResult(text, card);
@@ -472,7 +499,7 @@ export function createFkanbanMcpServer(
       title: "Delete a card",
       description: "Soft-delete a card (fold_db is append-only; the card is tombstoned and hidden).",
       annotations: { title: "Delete a card", destructiveHint: true, idempotentHint: true, openWorldHint: false },
-      inputSchema: { slug: z.string().min(1).describe("Card slug.") },
+      inputSchema: { slug: z.string().describe("Card slug.") },
       outputSchema: {
         slug: z.string(),
         orphanedDependents: z
@@ -482,6 +509,7 @@ export function createFkanbanMcpServer(
     },
     async (args) => {
       try {
+        requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const res = await rmCmd({ cfg, node, slug: args.slug });
         const text =
@@ -502,7 +530,7 @@ export function createFkanbanMcpServer(
       description: "Create a board (or update it). Columns default to backlog → todo → doing → review → done.",
       annotations: { title: "Create or update a board", idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        slug: z.string().min(1).describe("Board slug."),
+        slug: z.string().describe("Board slug."),
         title: z.string().optional().describe("Board title."),
         columns: z.array(z.string()).optional().describe("Ordered column names."),
         body: z.string().optional().describe("Markdown description."),
@@ -514,6 +542,7 @@ export function createFkanbanMcpServer(
     },
     async (args) => {
       try {
+        requireArg(args.slug, "board slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const o: Parameters<typeof boardCreateCmd>[0] = { cfg, node, slug: args.slug };
         if (args.title !== undefined) o.title = args.title;
@@ -556,13 +585,14 @@ export function createFkanbanMcpServer(
         "Refuses the default board, and refuses a board with live cards unless force is set.",
       annotations: { title: "Delete a board", destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        slug: z.string().min(1).describe("Board slug."),
+        slug: z.string().describe("Board slug."),
         force: z.boolean().optional().describe("Remove even if the board still has live cards."),
       },
       outputSchema: { slug: z.string() },
     },
     async (args) => {
       try {
+        requireArg(args.slug, "board slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const res = await boardRmCmd({ cfg, node, slug: args.slug, force: args.force });
         return writeResult(`removed board ${res.slug}`, res);

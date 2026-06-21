@@ -458,6 +458,77 @@ describe("MCP read tools cap the structured card array by default", () => {
   });
 });
 
+// An empty/whitespace-only REQUIRED string arg used to bypass each handler's
+// try/catch: the args were declared `z.string().min(1)`, so the MCP SDK rejected
+// them in pre-handler validation and dumped a raw `MCP error -32602: Input
+// validation error … too_small` Zod blob — the one place fkanban's voiced error
+// surface broke. The required strings are now declared without `.min(1)` and each
+// handler calls `requireArg` at the top of its `try`, so an empty value becomes
+// the same voiced `error:`/`hint:` result every domain error returns. These tests
+// pin that voiced result (and that it's NOT a `-32602` dump) for every tool that
+// takes a required string arg.
+describe("MCP tools voice an empty required string arg (no raw -32602 Zod dump)", () => {
+  let node: NodeClient;
+  let client: Client;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedDefaultBoard(node);
+    // Seed two real cards so dep tools' SECOND arg is what's empty, not a
+    // missing-card domain error masking the empty-arg path.
+    client = await connectedClient(node);
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "real-a", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "real-b", column: "todo" } });
+  });
+
+  function textOf(res: unknown): string {
+    const content = (res as { content?: unknown }).content;
+    return (content as Array<{ type: string; text: string }>)[0]?.text ?? "";
+  }
+
+  // For each tool, the EMPTY-arg arguments and the substring its voiced message
+  // must contain. `""` and a whitespace-only value both count as empty.
+  const cases: Array<{ tool: string; args: Record<string, unknown>; expect: string }> = [
+    { tool: "fkanban_search", args: { query: "" }, expect: "Missing search query" },
+    { tool: "fkanban_show", args: { slug: "  " }, expect: "Missing card slug" },
+    { tool: "fkanban_add", args: { slug: "" }, expect: "Missing card slug" },
+    { tool: "fkanban_move", args: { slug: "", column: "doing" }, expect: "Missing card slug" },
+    { tool: "fkanban_move", args: { slug: "real-a", column: "" }, expect: "Missing target column" },
+    { tool: "fkanban_dep_add", args: { slug: "real-a", dep: "" }, expect: "Missing dependency slug" },
+    { tool: "fkanban_dep_add", args: { slug: "", dep: "real-b" }, expect: "Missing dependent card slug" },
+    { tool: "fkanban_dep_rm", args: { slug: "real-a", dep: "  " }, expect: "Missing dependency slug" },
+    { tool: "fkanban_rm", args: { slug: "" }, expect: "Missing card slug" },
+    { tool: "fkanban_board_create", args: { slug: "\t" }, expect: "Missing board slug" },
+    { tool: "fkanban_board_rm", args: { slug: "" }, expect: "Missing board slug" },
+  ];
+
+  for (const c of cases) {
+    test(`${c.tool} ${JSON.stringify(c.args)} → voiced isError, not -32602`, async () => {
+      const res = await client.callTool({ name: c.tool, arguments: c.args });
+      expect(res.isError).toBe(true);
+      const text = textOf(res);
+      expect(text.startsWith("error: ")).toBe(true);
+      expect(text).toContain(c.expect);
+      expect(text).toContain("hint:");
+      // It must NOT be the raw SDK Zod dump.
+      expect(text).not.toContain("-32602");
+      expect(text).not.toContain("too_small");
+      // A voiced error short-circuits before any work — no structuredContent.
+      expect(res.structuredContent).toBeUndefined();
+    });
+  }
+
+  test("a VALID required arg still works unchanged (no false positives)", async () => {
+    const search = await client.callTool({ name: "fkanban_search", arguments: { query: "real" } });
+    expect(search.isError).toBeFalsy();
+    expect(search.structuredContent).toBeDefined();
+
+    const show = await client.callTool({ name: "fkanban_show", arguments: { slug: "real-a" } });
+    expect(show.isError).toBeFalsy();
+    expect((show.structuredContent as { slug: string }).slug).toBe("real-a");
+  });
+});
+
 // After #70's COUNT cap, the per-card `body` is the bulk of a list/search
 // payload (87% of a default page on the live board). The agent-facing
 // multi-card read tools now ship a short single-line body PREVIEW + a
