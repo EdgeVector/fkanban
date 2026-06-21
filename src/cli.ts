@@ -43,7 +43,7 @@ Commands:
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
   list                 render a board as columns of cards (--board --column --tag --assignee --json --limit N --all)
-  search <query>       find cards by text across slug/title/body/tags (--board --column --json)
+  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
