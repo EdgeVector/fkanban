@@ -36,7 +36,7 @@ Usage:
   fkanban <command> [options]
 
 Commands:
-  init                 bootstrap a node + register schemas + seed default board
+  init                 bootstrap a node + load/resolve schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --tags --deps --body, --force past a block)
   move <slug> <col>    move a card to a column (--position N, --force past a block)
@@ -79,7 +79,7 @@ function withFooter(body: string): string {
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
-  init: withFooter(`fkanban init — bootstrap a node + register schemas + seed the default board
+  init: withFooter(`fkanban init — bootstrap a node + load/resolve schemas + seed the default board
 
 Usage:
   fkanban init [options]
