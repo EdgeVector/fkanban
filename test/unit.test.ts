@@ -19,6 +19,7 @@ import {
   rowToCard,
   cardToFields,
   normalizeDeps,
+  normalizeTags,
   depStatus,
   blockedSlugSet,
   wouldCreateCycle,
@@ -39,6 +40,7 @@ import {
   formatAdd,
   formatMove,
   formatDep,
+  formatTag,
   formatRm,
   formatBoardCreate,
   formatError,
@@ -171,6 +173,10 @@ describe("dependencies", () => {
 
   test("normalizeDeps drops blanks, self, and dupes (order-stable)", () => {
     expect(normalizeDeps([" a ", "self", "a", "", "b"], "self")).toEqual(["a", "b"]);
+  });
+
+  test("normalizeTags trims, drops blanks, and dedupes (order-stable)", () => {
+    expect(normalizeTags([" p1 ", "p1", "", "blocked", "p1"])).toEqual(["p1", "blocked"]);
   });
 
   test("a card is blocked until every dep reaches done", () => {
@@ -606,6 +612,12 @@ describe("mutation result formatting (--json)", () => {
     expect(formatDep({ slug: "ui", dep: "api", action: "removed", deps: [] })).toBe(
       "ui no longer depends on api (deps: none)",
     );
+    expect(formatTag({ slug: "ship", tag: ["p1"], action: "added", tags: ["auth", "p1"] })).toBe(
+      "tagged ship p1 (tags: auth, p1)",
+    );
+    expect(formatTag({ slug: "ship", tag: ["p1"], action: "removed", tags: [] })).toBe(
+      "untagged ship p1 (tags: none)",
+    );
     expect(formatRm({ slug: "ship", orphanedDependents: [] })).toBe("removed card ship");
     expect(formatBoardCreate({ slug: "sprint", action: "updated" })).toBe("updated board sprint");
   });
@@ -619,6 +631,9 @@ describe("mutation result formatting (--json)", () => {
 
     const dep = { slug: "ui", dep: "api", action: "added" as const, deps: ["api"] };
     expect(JSON.parse(formatDep(dep, true))).toEqual(dep);
+
+    const tag = { slug: "ui", tag: ["p1"], action: "added" as const, tags: ["p1"] };
+    expect(JSON.parse(formatTag(tag, true))).toEqual(tag);
 
     expect(JSON.parse(formatRm({ slug: "ship", orphanedDependents: ["ui"] }, true))).toEqual({
       slug: "ship",

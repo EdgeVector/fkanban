@@ -27,6 +27,15 @@ export interface DepResult {
   deps: string[];
 }
 
+export interface TagResult {
+  slug: string;
+  // The tag(s) the invocation acted on (after normalize/dedupe).
+  tag: string[];
+  action: "added" | "removed";
+  // The card's full tag list after the edit.
+  tags: string[];
+}
+
 export interface RmResult {
   slug: string;
   // Slugs of live cards that still listed `slug` in their deps — now dangling.
@@ -68,6 +77,13 @@ export function formatDep(res: DepResult, json?: boolean): string {
   const verb = res.action === "added" ? "now depends on" : "no longer depends on";
   const deps = res.deps.join(", ") || "none";
   return emit(res, `${res.slug} ${verb} ${res.dep} (deps: ${deps})`, json);
+}
+
+export function formatTag(res: TagResult, json?: boolean): string {
+  const verb = res.action === "added" ? "tagged" : "untagged";
+  const acted = res.tag.join(", ") || "nothing";
+  const tags = res.tags.join(", ") || "none";
+  return emit(res, `${verb} ${res.slug} ${acted} (tags: ${tags})`, json);
 }
 
 export function formatRm(res: RmResult, json?: boolean): string {

@@ -18,12 +18,14 @@ import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
+import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
 import { orphanedDependentsWarning } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import {
   formatAdd,
   formatMove,
   formatDep,
+  formatTag,
   formatRm,
   formatBoardCreate,
   formatBoardRm,
@@ -42,6 +44,8 @@ Commands:
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
+  tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
+  tag rm <slug> <tag>  remove one or more tags from a card
   list                 render a board as columns of cards (--board --column --tag --assignee --json --limit N --all)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
@@ -140,6 +144,25 @@ Edges that would form a cycle (direct or transitive) are rejected (exit 2).
 
 Example:
   fkanban dep add ui api`),
+
+  tag: withFooter(`fkanban tag — add or remove tags on a card, incrementally
+
+Usage:
+  fkanban tag add <slug> <tag> [tag...]   # union into the card's tags
+  fkanban tag rm  <slug> <tag> [tag...]   # remove from the card's tags
+
+Options:
+  --json                echo the write result as JSON
+
+Unlike \`add --tags a,b,c\` (which REPLACES the whole tag list), \`tag add\`/
+\`tag rm\` edit one tag at a time without disturbing the rest — the same
+distinction \`dep add\`/\`dep rm\` has to \`add --deps\`. Adding a tag the card
+already carries is a no-op; removing one it lacks warns but succeeds. Reserved
+tags (\`dep:<slug>\`, the delete tombstone) are rejected — use \`dep\`/\`rm\`.
+
+Example:
+  fkanban tag add ship-login p1
+  fkanban tag rm  ship-login blocked`),
 
   list: withFooter(`fkanban list — render a board as columns of cards
 
@@ -704,6 +727,45 @@ async function dispatch(
         return 0;
       }
       console.error(`fkanban: Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
+      return 2;
+    }
+
+    case "tag": {
+      const sub = positionals[1];
+      const slug = requirePositional(positionals[2], "tag <add|rm> <slug> <tag...>");
+      // Accept one OR MORE tags as positional rest (a card carries many).
+      const tags = positionals.slice(3);
+      if (tags.length === 0) {
+        requirePositional(undefined, "tag <add|rm> <slug> <tag...>");
+      }
+      const ctx = loadCtx({ verbose });
+      if (sub === "add") {
+        try {
+          const res = await tagAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, tag: tags });
+          console.log(formatTag(res, values.json as boolean | undefined));
+          return 0;
+        } catch (err) {
+          // A reserved tag (dep:<slug> / tombstone) is a bad-input error, not a
+          // node failure: report it LOUDLY with the exit-2 contract (matching
+          // `dep_cycle`), and as a clean envelope under --json — never a half write.
+          if (err instanceof FkanbanError && err.code === "reserved_tag") {
+            if (values.json) {
+              console.log(formatError(err));
+            } else {
+              console.error(`fkanban: ${err.message}`);
+              if (err.hint) console.error(`  hint: ${err.hint}`);
+            }
+            return 2;
+          }
+          throw err;
+        }
+      }
+      if (sub === "rm" || sub === "remove") {
+        const res = await tagRmCmd({ cfg: ctx.cfg, node: ctx.node, slug, tag: tags });
+        console.log(formatTag(res, values.json as boolean | undefined));
+        return 0;
+      }
+      console.error(`fkanban: Unknown tag subcommand "${sub ?? ""}". Try: tag add | tag rm`);
       return 2;
     }
 
