@@ -433,6 +433,28 @@ describe("render", () => {
     expect(out).not.toContain("BACKLOG  (0)");
   });
 
+  test("empty-board hint is shim-aware — uses the injected invocation prefix", () => {
+    // On a shim-less fresh clone the hint must print runnable
+    // `bun run src/cli.ts …` commands, not bare `fkanban …` (which would
+    // `command not found`). list.ts injects `fkanbanInvocation()`; here we pass
+    // the shim-less form directly. Mirrors init's Next-steps behavior (PR #69).
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [], { color: false, invocation: "bun run src/cli.ts" });
+    expect(out).toContain(`bun run src/cli.ts add my-first-card --title "My first card"`);
+    expect(out).toContain("`bun run src/cli.ts list`");
+    expect(out).toContain("`bun run src/cli.ts mcp`");
+    // No bare-`fkanban` form leaks through (it would `command not found`).
+    expect(out).not.toContain("fkanban add my-first-card");
+    expect(out).not.toContain("`fkanban list`");
+  });
+
   test("a non-default empty board is equally welcoming", () => {
     const board = {
       slug: "sprint",

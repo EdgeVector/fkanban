@@ -178,29 +178,41 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
 
   print(`[init] ok`);
-  printNextSteps(print, bootstrapped);
+  // Surface the full Next steps block (incl. the `claude mcp add` registration
+  // line) on a genuine FIRST-TIME fkanban setup — `existing === null` means no
+  // `~/.fkanban/config.json` pre-existed — OR a fresh node bootstrap. A
+  // first-time `init` pointed at an *already-provisioned* node leaves
+  // `bootstrapped` false, but it's still first-time fkanban setup and the dev
+  // most needs the MCP hint, so don't hide it. A true re-init (config already
+  // present) still collapses to the quiet one-line hint.
+  const freshFkanbanConfig = existing === null;
+  printNextSteps(print, bootstrapped || freshFkanbanConfig);
 
   return { config, bootstrapped };
 }
 
-// Guide the next action. On a fresh bootstrap, emit a copy-pasteable Next steps
-// block (list the board, add a card, register the MCP server) — this is the
-// natural moment to surface the `claude mcp add` command, which is otherwise
-// discoverable only by reading the README. On an idempotent re-init, collapse
-// to a single quiet line so re-runs stay calm. Every command is printed in the
-// form that actually runs for THIS dev — `fkanbanInvocation()` returns the
-// global `fkanban` shim when it's on PATH, else `bun run src/cli.ts` from the
-// repo (the fresh-clone default, before `bun run install-cli`) — so copy-pasting
-// never hits `command not found: fkanban`. The `invocation` arg is injectable
-// for unit testing both branches without touching PATH. Threaded through the
-// same `print` callback as the rest of `init` so test/`--json` callers stay
-// deterministic. Exported for unit testing.
+// Guide the next action. On a genuine first-time fkanban setup — no prior
+// `~/.fkanban/config.json`, OR a freshly bootstrapped node — emit a
+// copy-pasteable Next steps block (list the board, add a card, register the MCP
+// server). This is the natural moment to surface the `claude mcp add` command,
+// which is otherwise discoverable only by reading the README; it must NOT be
+// hidden from someone whose first `init` happened to point at an
+// already-provisioned node (where the node wasn't bootstrapped). On an
+// idempotent re-init (config already present), collapse to a single quiet line
+// so re-runs stay calm. Every command is printed in the form that actually runs
+// for THIS dev — `fkanbanInvocation()` returns the global `fkanban` shim when
+// it's on PATH, else `bun run src/cli.ts` from the repo (the fresh-clone
+// default, before `bun run install-cli`) — so copy-pasting never hits `command
+// not found: fkanban`. The `invocation` arg is injectable for unit testing both
+// branches without touching PATH. Threaded through the same `print` callback as
+// the rest of `init` so test/`--json` callers stay deterministic. Exported for
+// unit testing.
 export function printNextSteps(
   print: (line: string) => void,
-  bootstrapped: boolean,
+  firstTimeSetup: boolean,
   invocation: string = fkanbanInvocation(),
 ): void {
-  if (bootstrapped) {
+  if (firstTimeSetup) {
     // Align the trailing `#` comments to a common column for readability; the
     // `add` line is the longest, so pad the others to match it.
     const listCmd = `${invocation} list`;

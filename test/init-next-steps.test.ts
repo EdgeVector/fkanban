@@ -1,6 +1,10 @@
-// `fkanban init` ends by guiding the dev's next action: on a fresh bootstrap it
-// prints a copy-pasteable Next steps block (list / add / register the MCP
-// server); on an idempotent re-init it collapses to a single quiet line. The
+// `fkanban init` ends by guiding the dev's next action: on a genuine first-time
+// fkanban setup — no prior config, OR a freshly bootstrapped node — it prints a
+// copy-pasteable Next steps block (list / add / register the MCP server); on an
+// idempotent re-init (config already present) it collapses to a single quiet
+// line. `runInit` computes that combined first-time-setup flag
+// (`bootstrapped || existing === null`) and passes it to `printNextSteps`, so
+// these tests drive `printNextSteps` directly with the resolved boolean. The
 // Next steps emission is threaded through the same injectable `print` callback
 // as the rest of `init`, so we assert on captured lines without a live node.
 //
@@ -15,9 +19,12 @@
 import { describe, expect, test } from "bun:test";
 import { printNextSteps } from "../src/commands/init.ts";
 
-function capture(bootstrapped: boolean, invocation: string): string[] {
+// `printNextSteps`'s gate is the combined first-time-setup flag that `runInit`
+// computes as `bootstrapped || existing === null`. We pass the resolved boolean
+// here (true = first-time setup, false = re-init over an existing config).
+function capture(firstTimeSetup: boolean, invocation: string): string[] {
   const lines: string[] = [];
-  printNextSteps((line) => lines.push(line), bootstrapped, invocation);
+  printNextSteps((line) => lines.push(line), firstTimeSetup, invocation);
   return lines;
 }
 
@@ -39,6 +46,17 @@ describe("init next-steps", () => {
     // No bare-`fkanban list`/`fkanban add` form (it would `command not found`).
     expect(out).not.toMatch(/^\s*fkanban list\b/m);
     expect(out).not.toMatch(/^\s*fkanban add\b/m);
+  });
+
+  test("first-time setup on an already-provisioned node prints the full Next steps block", () => {
+    // The node was already provisioned (so `bootstrapped` is false), but there
+    // was no prior `~/.fkanban/config.json` (`existing === null`) — a genuine
+    // first-time fkanban setup. `runInit` resolves the combined flag to true,
+    // so the MCP-registration hint must still be surfaced.
+    const out = capture(true, "fkanban").join("\n");
+    expect(out).toContain("Next steps:");
+    expect(out).toContain("fkanban add my-first-card --title");
+    expect(out).toMatch(/claude mcp add fkanban -- (fkanban mcp|bun .+\/src\/mcp\/main\.ts)/);
   });
 
   test("idempotent re-init collapses to a single quiet line, no Next steps block", () => {

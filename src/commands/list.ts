@@ -5,6 +5,7 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { blockedSlugSet, depStatus, ensureColumn, findBoard, listCards, requireBoard, sortCards, type Card, type Board } from "../record.ts";
 import { capPerColumn, renderBoard, type RenderOptions } from "../board.ts";
+import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 import { type CardDetail } from "./show.ts";
 
@@ -95,7 +96,15 @@ export async function listResult(
     : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
       ? (opts.limit as number)
       : DEFAULT_COLUMN_LIMIT;
-  const renderOpts: RenderOptions = { blocked: blockedSlugSet(cards, allCards), limit };
+  // Print the empty-board first-touch hint in the form that actually runs for
+  // THIS dev — the `fkanban` shim if it's on PATH, else `bun run src/cli.ts`
+  // (the fresh-clone default). Mirrors how init injects its Next-steps
+  // invocation (PR #69); board.ts stays pure and defaults to bare `fkanban`.
+  const renderOpts: RenderOptions = {
+    blocked: blockedSlugSet(cards, allCards),
+    limit,
+    invocation: fkanbanInvocation(),
+  };
   if (opts.column) renderOpts.column = opts.column;
   // Enrich each filtered card with its dependency status (resolved against ALL
   // live cards so cross-board deps count), matching show's CardDetail shape.
