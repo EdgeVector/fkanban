@@ -240,6 +240,23 @@ claude mcp add fkanban -- bun "$PWD/src/mcp/main.ts"
 same `~/.fkanban/config.json` the CLI writes (override the path with
 `$FKANBAN_CONFIG`).
 
+### Token economy (list / search)
+
+The read tools `fkanban_list` and `fkanban_search` are token-budgeted by
+default, so a board with hundreds of cards doesn't blow an agent's context
+window — card bodies are the bulk of a page's tokens, so both the result count
+and each body are capped unless you opt out.
+
+- **Count cap.** Results default-cap to 20 cards (`DEFAULT_SEARCH_LIMIT`), and
+  every response reports `total` (matches before the cap) and `truncated`
+  (whether the cap hid any). Raise the cap with `limit: N` (`0` = uncapped) or
+  `all: true`.
+- **Body preview.** Each returned card's `body` is a ~200-char single-line
+  PREVIEW with a `bodyTruncated` flag. Pass `full_body: true` to inline complete
+  bodies, or call `fkanban_show <slug>` — the full-body path for a single card.
+
+(The CLI's `--json` output is unaffected — it intentionally returns full bodies.)
+
 ## Republishing the schemas (maintainers / one-time)
 
 > You do **not** need this to use fkanban — the `fkanban/*` schemas are already
