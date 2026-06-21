@@ -21,6 +21,7 @@ import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
 import { orphanedDependentsWarning } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
+import { suggestClosest } from "./suggest.ts";
 import {
   formatAdd,
   formatMove,
@@ -893,7 +894,18 @@ async function dispatch(
     }
 
     default:
-      console.error(`fkanban: Unknown command "${cmd}".\n`);
+      console.error(`fkanban: Unknown command "${cmd}".`);
+      // Source the candidate set from COMMAND_HELP so it can never drift from
+      // the documented/dispatched commands. When the typo is close to a known
+      // command (`lst`→`list`, `ad`→`add`), name it before the help wall — the
+      // recovery every dev already expects from git/cargo/npm/gh. A genuinely
+      // unrelated token (`frobnicate`) yields no suggestion and falls back to
+      // the full help unchanged.
+      {
+        const suggestion = cmd ? suggestClosest(cmd, Object.keys(COMMAND_HELP)) : null;
+        if (suggestion) console.error(`fkanban: Did you mean "${suggestion}"?`);
+      }
+      console.error("");
       console.log(TOP_HELP);
       return 2;
   }

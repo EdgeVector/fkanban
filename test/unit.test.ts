@@ -49,6 +49,7 @@ import { renderBoard, renderSearchResults } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
 import { TOP_HELP, COMMAND_HELP, resolveHelp } from "../src/cli.ts";
+import { levenshtein, suggestClosest } from "../src/suggest.ts";
 
 function card(partial: Partial<Card>): Card {
   return {
@@ -909,5 +910,28 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
       "t2",
       "t3",
     ]);
+  });
+});
+
+describe("command suggestion (did-you-mean)", () => {
+  const commands = Object.keys(COMMAND_HELP);
+
+  test("levenshtein computes standard edit distance", () => {
+    expect(levenshtein("list", "list")).toBe(0);
+    expect(levenshtein("lst", "list")).toBe(1); // one insertion
+    expect(levenshtein("mvoe", "move")).toBe(2); // transposition = 2 edits
+    expect(levenshtein("", "add")).toBe(3);
+  });
+
+  test("a close typo suggests the nearest command", () => {
+    expect(suggestClosest("lst", commands)).toBe("list");
+    expect(suggestClosest("ad", commands)).toBe("add");
+    expect(suggestClosest("serach", commands)).toBe("search");
+    expect(suggestClosest("mvoe", commands)).toBe("move");
+  });
+
+  test("a far-off token yields no suggestion (falls back to full help)", () => {
+    expect(suggestClosest("frobnicate", commands)).toBeNull();
+    expect(suggestClosest("", commands)).toBeNull();
   });
 });
