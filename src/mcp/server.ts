@@ -18,7 +18,8 @@ import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
-import { orphanedDependentsWarning } from "../record.ts";
+import { orphanedDependentsWarning, type Card } from "../record.ts";
+import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
@@ -44,6 +45,31 @@ function writeResult(text: string, structured: Record<string, unknown>): ToolRes
 // wrap their arrays as `{ cards }` / `{ boards }`; show returns the card object.
 function readResult(text: string, structured: Record<string, unknown>): ToolResult {
   return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }], structuredContent: structured };
+}
+
+// Cap the structured card array the AGENT consumes. The human `text` block is
+// already capped (#69's DEFAULT_SEARCH_LIMIT + "… N more" footer); the
+// machine-readable `cards` array was NOT, so a single `fkanban_search`/
+// `fkanban_list` on a real board (160+ cards, each with its full `body`) dumps
+// ~160K tokens and evicts the caller's working context. Default to a sane cap
+// (DEFAULT_SEARCH_LIMIT) reusing the existing `capFlat`, with an explicit
+// opt-out, and ALWAYS report `total`/`truncated` so the cap is never silent
+// (mirrors `fbrain_get`'s `bodyTruncated`/`bodyTotalChars` precedent).
+//
+// `limit`: undefined → default cap; an explicit value caps to it; `0` (like
+// `all`) returns the complete set. `all` short-circuits to the complete set.
+function capCards<T extends Card>(
+  cards: T[],
+  opts: { limit?: number; all?: boolean },
+): { cards: T[]; total: number; truncated: boolean } {
+  const total = cards.length;
+  const cap = opts.all
+    ? 0
+    : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
+      ? (opts.limit as number)
+      : DEFAULT_SEARCH_LIMIT;
+  const capped = capFlat(cards, cap);
+  return { cards: capped, total, truncated: capped.length < total };
 }
 
 // Card shape the CLI `--json` emits (mirrors the `Card` type in record.ts).
@@ -135,11 +161,22 @@ export function createFkanbanMcpServer(
             "Restrict to cards carrying this exact tag (membership match, not the fuzzy text search of `fkanban_search`).",
           ),
         assignee: z.string().optional().describe("Restrict to cards assigned to this exact person."),
+        limit: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe(
+            "Cap on returned cards (default 20). Each card carries its full body, so an unbounded board overflows context — `0` returns the complete set (same as `all`).",
+          ),
+        all: z.boolean().optional().describe("Return every matching card, uncapped (overrides `limit`)."),
       },
       outputSchema: {
         cards: z
           .array(cardDetailSchema)
-          .describe("Matching cards, in column + position order, each with resolved dependency status."),
+          .describe("Matching cards, in column + position order, each with resolved dependency status (capped — see `total`/`truncated`)."),
+        total: z.number().describe("Total matching cards before the cap."),
+        truncated: z.boolean().describe("True when the cap dropped cards — re-call with a higher `limit` or `all` for the rest."),
       },
     },
     async (args) => {
@@ -151,7 +188,11 @@ export function createFkanbanMcpServer(
         if (args.tag) o.tag = args.tag;
         if (args.assignee) o.assignee = args.assignee;
         const { text, cards } = await listResult(o);
-        return readResult(text, { cards });
+        // Cap the agent-facing structured array (cards already in column +
+        // position order, so `capFlat` slicing keeps ordering intact). The
+        // human `text` is independently capped already.
+        const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
+        return readResult(text, { cards: capped, total, truncated });
       } catch (err) {
         return errorResult(err);
       }
@@ -169,8 +210,21 @@ export function createFkanbanMcpServer(
         query: z.string().min(1).describe("Search text. Space-separated terms are all required (AND)."),
         board: z.string().optional().describe("Restrict to one board."),
         column: z.string().optional().describe("Restrict to one column."),
+        limit: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe(
+            "Cap on returned matches (default 20). Each match carries its full body, so a broad query overflows context — `0` returns the complete set (same as `all`).",
+          ),
+        all: z.boolean().optional().describe("Return every match, uncapped (overrides `limit`)."),
       },
-      outputSchema: { cards: z.array(cardSchema).describe("Matching cards across boards/columns.") },
+      outputSchema: {
+        cards: z.array(cardSchema).describe("Matching cards across boards/columns (capped — see `total`/`truncated`)."),
+        total: z.number().describe("Total matches before the cap."),
+        truncated: z.boolean().describe("True when the cap dropped matches — re-call with a higher `limit` or `all` for the rest."),
+      },
     },
     async (args) => {
       try {
@@ -179,7 +233,10 @@ export function createFkanbanMcpServer(
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
         const { text, cards } = await searchResult(o);
-        return readResult(text, { cards });
+        // Cap the agent-facing structured array (matches already sorted); the
+        // human `text` is independently capped already.
+        const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
+        return readResult(text, { cards: capped, total, truncated });
       } catch (err) {
         return errorResult(err);
       }
