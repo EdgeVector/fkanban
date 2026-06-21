@@ -16,10 +16,19 @@
 // no token is obtained, and fkanban works exactly as before — the change is
 // fully backward-compatible.
 
+import { existsSync } from "node:fs";
+
 import type { AddSchemaRequest } from "./schemas.ts";
 
 export type Verbose = (msg: string) => void;
 const noopVerbose: Verbose = () => {};
+
+// A non-verbose, always-visible warning line (distinct from `verbose`, which is
+// gated behind --verbose). Used to surface an attestation skip the moment it
+// happens, so a user isn't blind to it before the owner verb 403s. Defaults to
+// a no-op so library callers stay silent unless they opt in.
+export type Warn = (msg: string) => void;
+const noopWarn: Warn = () => {};
 
 export class FkanbanError extends Error {
   readonly code: string;
@@ -172,19 +181,33 @@ export function newSchemaServiceClient(
   };
 }
 
+// The outcome of one attestation attempt. On failure it carries enough context
+// (whether the socket file even existed, plus the human-readable reason) for the
+// caller to build an actionable error if an owner verb later 403s.
+export type AttestationOutcome =
+  | { ok: true; token: string }
+  | { ok: false; socketPath: string; socketExists: boolean; reason: string };
+
 // Mint a one-time pairing code over the node's Unix-domain control socket and
 // exchange it over TCP for an owner-session token — the TypeScript twin of the
 // CLI's `attest_owner_session` (fold_db_node/src/bin/folddb/commands/ui.rs).
 //
-// Returns the session token, or `null` on ANY failure (socket missing, mint or
-// exchange non-2xx, parse error). `null` means "proceed unattested": on a
-// device-trust node nothing is governed, so an unattested transport works
-// fully — exactly fkanban's behavior before app-isolation existed.
-export async function attestOwnerSession(
+// Returns a structured outcome: `{ ok: true, token }` on success, or
+// `{ ok: false, ... }` on ANY failure (socket missing, mint or exchange
+// non-2xx, parse error) with the reason + whether the socket existed. A failed
+// outcome means "proceed unattested": on a device-trust node nothing is
+// governed, so an unattested transport works fully — exactly fkanban's behavior
+// before app-isolation existed. Only when the node *does* enforce app-isolation
+// does the failure later surface (a `transport_not_attested` 403), and the
+// captured reason is what turns that into an actionable error.
+export async function attestOwnerSessionDetailed(
   nodeUrl: string,
   socketPath: string,
   verbose: Verbose = noopVerbose,
-): Promise<string | null> {
+): Promise<AttestationOutcome> {
+  const socketExists = existsSync(socketPath);
+  const fail = (reason: string): AttestationOutcome => ({ ok: false, socketPath, socketExists, reason });
+
   // Mint over the UDS control socket. Bun speaks unix-socket fetch directly;
   // the `/control/*` verbs exist ONLY on this owner-attested channel.
   let pairingCode: string;
@@ -196,19 +219,24 @@ export async function attestOwnerSession(
     });
     if (!mintRes.ok) {
       verbose(`attest: mint refused (HTTP ${mintRes.status}) — proceeding unattested`);
-      return null;
+      return fail(`the control socket refused the pairing-code mint (HTTP ${mintRes.status})`);
     }
     const minted = (await mintRes.json()) as Record<string, unknown>;
     const code = minted.pairing_code;
     if (typeof code !== "string" || code.length === 0) {
       verbose("attest: mint response missing pairing_code — proceeding unattested");
-      return null;
+      return fail("the control socket's mint response carried no pairing_code");
     }
     pairingCode = code;
   } catch (err) {
     // Socket missing / connect refused / timeout → not an app-isolation node.
-    verbose(`attest: mint over socket ${socketPath} failed (${err instanceof Error ? err.message : String(err)}) — proceeding unattested`);
-    return null;
+    const detail = err instanceof Error ? err.message : String(err);
+    verbose(`attest: mint over socket ${socketPath} failed (${detail}) — proceeding unattested`);
+    return fail(
+      socketExists
+        ? `the mint over the control socket failed (${detail})`
+        : `no control socket exists at that path`,
+    );
   }
 
   // Exchange the code over TCP for a session token.
@@ -221,26 +249,45 @@ export async function attestOwnerSession(
     });
     if (!exchangeRes.ok) {
       verbose(`attest: exchange refused (HTTP ${exchangeRes.status}) — proceeding unattested`);
-      return null;
+      return fail(`the pairing-code exchange over TCP was refused (HTTP ${exchangeRes.status})`);
     }
     const exchanged = (await exchangeRes.json()) as Record<string, unknown>;
     const token = exchanged.session_token;
     if (typeof token !== "string" || token.length === 0) {
       verbose("attest: exchange response missing session_token — proceeding unattested");
-      return null;
+      return fail("the pairing-code exchange returned no session_token");
     }
     verbose("attest: owner session established");
-    return token;
+    return { ok: true, token };
   } catch (err) {
-    verbose(`attest: exchange failed (${err instanceof Error ? err.message : String(err)}) — proceeding unattested`);
-    return null;
+    const detail = err instanceof Error ? err.message : String(err);
+    verbose(`attest: exchange failed (${detail}) — proceeding unattested`);
+    return fail(`the pairing-code exchange over TCP failed (${detail})`);
   }
+}
+
+// Token-or-null wrapper around `attestOwnerSessionDetailed`. Kept for callers
+// (and tests) that only need the session token; `null` means "proceed
+// unattested". New code that needs the failure reason should call the detailed
+// form directly.
+export async function attestOwnerSession(
+  nodeUrl: string,
+  socketPath: string,
+  verbose: Verbose = noopVerbose,
+): Promise<string | null> {
+  const outcome = await attestOwnerSessionDetailed(nodeUrl, socketPath, verbose);
+  return outcome.ok ? outcome.token : null;
 }
 
 export function newNodeClient(opts: {
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
+  // A non-verbose, always-visible warning sink. When attestation is skipped
+  // because the derived control socket doesn't exist, the client emits one line
+  // here so an app-isolation node's owner-verb 403 doesn't arrive out of the
+  // blue. Omit to stay silent.
+  warn?: Warn;
   timeoutMs?: number;
   // When set, the node's Unix-domain control socket. fkanban attests an owner
   // session over it once (lazily, on the first request) and re-attests once if
@@ -250,6 +297,7 @@ export function newNodeClient(opts: {
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
+  const warn = opts.warn ?? noopWarn;
   const userHash = opts.userHash;
   const timeoutMs = opts.timeoutMs;
   const socketPath = opts.socketPath;
@@ -257,9 +305,14 @@ export function newNodeClient(opts: {
   // Owner-session token, established lazily on the first request and shared
   // across every subsequent call. `attesting` dedupes concurrent first-hits so
   // we mint exactly one pairing code. `null` token = unattested (fine on a
-  // device-trust node).
+  // device-trust node). `lastAttestFailure` retains WHY the last attempt failed
+  // so a later `transport_not_attested` 403 can be turned into an actionable
+  // error instead of leaking the raw folddb message. `warnedNoSocket` makes the
+  // one-line skip warning fire at most once.
   let sessionToken: string | null = null;
   let attesting: Promise<void> | null = null;
+  let lastAttestFailure: (AttestationOutcome & { ok: false }) | null = null;
+  let warnedNoSocket = false;
 
   const ensureAttested = async (force = false): Promise<void> => {
     if (!socketPath) return;
@@ -270,10 +323,60 @@ export function newNodeClient(opts: {
     }
     if (attesting === null) {
       attesting = (async () => {
-        sessionToken = await attestOwnerSession(url, socketPath, verbose);
+        const outcome = await attestOwnerSessionDetailed(url, socketPath, verbose);
+        if (outcome.ok) {
+          sessionToken = outcome.token;
+          lastAttestFailure = null;
+        } else {
+          sessionToken = null;
+          lastAttestFailure = outcome;
+          // Surface a non-verbose skip warning the moment the socket is missing
+          // (the most common misconfiguration), so the user sees a hint before
+          // any owner verb 403s. Fire it once.
+          if (!outcome.socketExists && !warnedNoSocket) {
+            warnedNoSocket = true;
+            warn(
+              `fkanban: control socket not found at ${outcome.socketPath}; proceeding ` +
+                "unattested — owner verbs (e.g. loading schemas) will fail on an " +
+                "app-isolation node. Point fkanban at the node's control socket with " +
+                "--node-socket-path <path> or FOLDDB_SOCKET_PATH=<path>.",
+            );
+          }
+        }
       })();
     }
     await attesting;
+  };
+
+  // Build the actionable error for a `transport_not_attested` 403 on an owner
+  // verb when fkanban never established an owner session. It names the cause
+  // (this node enforces app-isolation) and the remedy (point fkanban at the
+  // control socket), threading in the socket path it tried, whether that path
+  // exists, and the mint/exchange failure reason captured during attestation.
+  const attestationUnavailableError = (path: string): FkanbanError => {
+    const failure = lastAttestFailure;
+    const triedSocket = failure?.socketPath ?? socketPath;
+    let why: string;
+    if (failure) {
+      why = `fkanban tried the control socket ${failure.socketPath} but ${failure.reason}.`;
+    } else if (triedSocket) {
+      why = `fkanban tried the control socket ${triedSocket} but could not establish an owner session.`;
+    } else {
+      why = "fkanban did not have a control socket to attest over.";
+    }
+    return new FkanbanError({
+      code: "node_attestation_unavailable",
+      message:
+        `This node enforces app-isolation, so owner verbs (here: ${path}) require an ` +
+        `attested owner session over the node's control socket — bare loopback TCP can't ` +
+        `drive them. ${why}`,
+      hint:
+        "The control socket lives at <node data-dir>/folddb.sock. Point fkanban at it with " +
+        "`--node-socket-path <path>` or `FOLDDB_SOCKET_PATH=<path>` and re-run `fkanban init` " +
+        "(by default fkanban looks under $FOLDDB_HOME/data, which only matches a node started " +
+        "with --data-dir $FOLDDB_HOME/data). Alternatively, drive the node via the desktop app " +
+        "or a browser paired with `folddb ui`.",
+    });
   };
 
   const nodeHeaders = (): Record<string, string> => {
@@ -313,6 +416,13 @@ export function newNodeClient(opts: {
       verbose("node: transport_not_attested — re-pairing owner session and retrying");
       await ensureAttested(true);
       result = await doFetch();
+    }
+    // Still rejected as un-attested after any re-pair: fkanban could not stand up
+    // an owner session for this app-isolation node. Replace the raw folddb 403
+    // with an actionable error that names the socket + the --node-socket-path /
+    // FOLDDB_SOCKET_PATH remedy (instead of leaking transport_not_attested).
+    if (isNotAttested(result.status, result.body) && sessionToken === null) {
+      throw attestationUnavailableError(path);
     }
     return result;
   };
@@ -444,6 +554,13 @@ export function newNodeClient(opts: {
         await ensureAttested(true);
         ({ res, readBody } = await doFetch());
         text = await readBody({ asText: true });
+      }
+      if (
+        res.status === 403 &&
+        bodyError(parseJsonSafe(text)) === "transport_not_attested" &&
+        sessionToken === null
+      ) {
+        throw attestationUnavailableError(path);
       }
       return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
     },

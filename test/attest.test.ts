@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { attestOwnerSession, newNodeClient } from "../src/client.ts";
+import { attestOwnerSession, FkanbanError, newNodeClient } from "../src/client.ts";
 
 type Stoppable = { stop: (closeActive?: boolean) => void };
 const cleanups: Array<() => void> = [];
@@ -150,6 +150,65 @@ describe("newNodeClient attestation wiring", () => {
     await node.createRecord({ schemaHash: "s", fields: { a: 1 }, keyHash: "k" });
     expect(mutationCalls).toBe(2);
     expect(mintCount).toBe(2);
+  });
+
+  test("actionable error (not raw 403) when an owner verb 403s un-attested", async () => {
+    // App-isolation node: the socket path doesn't exist, so attestation can't
+    // mint, and the owner verb keeps returning transport_not_attested.
+    const tcp = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ error: "transport_not_attested" }, { status: 403 }),
+    });
+    track(tcp);
+
+    const missingSock = socketPath();
+    const node = newNodeClient({
+      baseUrl: `http://127.0.0.1:${tcp.port}`,
+      userHash: "uh",
+      socketPath: missingSock,
+    });
+
+    let caught: unknown;
+    try {
+      await node.loadSchemas();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(FkanbanError);
+    const fk = caught as FkanbanError;
+    expect(fk.code).toBe("node_attestation_unavailable");
+    // The raw folddb token must NOT leak in the message.
+    expect(fk.message).not.toContain("transport_not_attested");
+    // Names the socket it tried and that no socket exists.
+    expect(fk.message).toContain(missingSock);
+    expect(fk.message.toLowerCase()).toContain("app-isolation");
+    // Hint names both remedies.
+    expect(fk.hint).toContain("--node-socket-path");
+    expect(fk.hint).toContain("FOLDDB_SOCKET_PATH");
+  });
+
+  test("emits a non-verbose warn when the control socket is missing", async () => {
+    const tcp = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ ok: true, results: [], has_more: false }),
+    });
+    track(tcp);
+
+    const missingSock = socketPath();
+    const warnings: string[] = [];
+    const node = newNodeClient({
+      baseUrl: `http://127.0.0.1:${tcp.port}`,
+      userHash: "uh",
+      socketPath: missingSock,
+      warn: (m) => warnings.push(m),
+    });
+    // Two calls: the skip warning must fire exactly once, not per request.
+    await node.queryAll({ schemaHash: "s", fields: ["slug"] });
+    await node.queryAll({ schemaHash: "s", fields: ["slug"] });
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain(missingSock);
+    expect(warnings[0]).toContain("--node-socket-path");
+    expect(warnings[0]).toContain("proceeding");
   });
 
   test("no socket → no token → no session header (unattested, unchanged behavior)", async () => {

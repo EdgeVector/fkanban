@@ -78,7 +78,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // so every node client here attests an owner session over the control socket
   // (no-op fallback when the node serves no socket — see attestOwnerSession).
   print(`[1/${STEPS}] probing node identity at ${nodeUrl}`);
-  const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe", verbose, socketPath });
+  const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe", verbose, warn: print, socketPath });
   const identity = await probe.autoIdentity();
 
   let userHash: string;
@@ -94,6 +94,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`        bootstrap ok (user_hash=${userHash.slice(0, 8)}…)`);
   }
 
+  // The probe (step 1) already emitted the one-line "control socket not found"
+  // warning if the socket is missing, so the schema-load client stays quiet on
+  // that front — it still raises the actionable `node_attestation_unavailable`
+  // error if the owner verb 403s.
   const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath });
 
   // Step 2: load schemas into the node (it pulls everything published in the
