@@ -17,7 +17,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { ConfigMissingError } from "../src/config.ts";
 
-import { createFkanbanMcpServer } from "../src/mcp/server.ts";
+import { createFkanbanMcpServer, FKANBAN_MCP_INSTRUCTIONS } from "../src/mcp/server.ts";
 import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
@@ -117,6 +117,40 @@ async function connectedClient(node: NodeClient): Promise<Client> {
 // built in the not-yet-configured state, connect + listTools succeed, every
 // config-dependent tool short-circuits to a clean `isError` "Run `fkanban init`
 // first." result, and `fkanban_doctor` still runs to self-diagnose.
+// On connect, an MCP host surfaces the server's `instructions` (from the
+// `initialize` result) to the model. fkanban now sends a concise board-level
+// orientation so a connecting agent gets the column workflow, the blocking
+// rule, and (the token-budget one) the list/search cap + body-preview contract
+// in ONE read — instead of reverse-engineering it from 12 per-tool descriptions.
+// These assert the client receives that non-empty orientation and that it names
+// the token-economy knobs the agent must know to avoid burning context.
+describe("MCP server sends board-level instructions on connect", () => {
+  test("client.getInstructions() returns the non-empty fkanban orientation", async () => {
+    const client = await connectServer(createFkanbanMcpServer({ configError: new ConfigMissingError("/nope") }));
+    const instructions = client.getInstructions();
+    expect(instructions).toBeDefined();
+    expect((instructions ?? "").length).toBeGreaterThan(0);
+    expect(instructions).toBe(FKANBAN_MCP_INSTRUCTIONS);
+  });
+
+  test("the instructions cover board model, blocking, and the token-economy knobs", async () => {
+    const client = await connectServer(createFkanbanMcpServer({ configError: new ConfigMissingError("/nope") }));
+    const text = client.getInstructions() ?? "";
+    // Board model: the column flow.
+    expect(text).toContain("backlog → todo → doing → review → done");
+    // Blocking rule mentions the force opt-out.
+    expect(text.toLowerCase()).toContain("force");
+    expect(text.toLowerCase()).toContain("depend");
+    // Token economy: the cap, the widen knobs, the body preview, and the
+    // prefer-fkanban_show-for-one-card guidance.
+    expect(text).toContain("20");
+    expect(text).toContain("full_body");
+    expect(text).toContain("fkanban_show");
+    // Discovery entry point.
+    expect(text).toContain("fkanban_doctor");
+  });
+});
+
 describe("MCP server starts (degrades, not crashes) when config is unavailable", () => {
   let client: Client;
   const configError = new ConfigMissingError("/nope/config.json");

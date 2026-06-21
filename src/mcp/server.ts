@@ -24,6 +24,30 @@ import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
 
+// Server-level orientation surfaced to the model in the `initialize` result.
+// Keep this SHORT — hosts inject it into context every session, so verbosity
+// costs tokens for every user. Point at the tools; don't restate each one.
+export const FKANBAN_MCP_INSTRUCTIONS = [
+  "fkanban is a kanban board over fold_db. 12 tools: read tools",
+  "(fkanban_list, fkanban_search, fkanban_show, fkanban_board_list, fkanban_doctor)",
+  "never mutate; the rest (add, move, rm, dep_add, dep_rm, board_create, board_rm) write.",
+  "",
+  "Board model: a card lives on a board, in one column, at a position. Columns flow",
+  "backlog → todo → doing → review → done.",
+  "",
+  "Blocking: a card with an unfinished dependency cannot enter doing/review/done",
+  "unless `force:true` is passed.",
+  "",
+  "Token economy (read this before fetching): fkanban_list and fkanban_search default-cap",
+  "structuredContent.cards to 20 (the `total`/`truncated` fields signal there are more —",
+  "widen with `limit` or `all:true`), and return each `body` as a ~200-char single-line",
+  "preview (`bodyTruncated`). Pass `full_body:true` for complete bodies, or call",
+  "fkanban_show <slug> for one card's full body. Prefer fkanban_show over full_body when",
+  "you only need one card — it's cheaper.",
+  "",
+  "Discovery: if anything seems misconfigured, start with fkanban_doctor.",
+].join("\n");
+
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   structuredContent?: Record<string, unknown>;
@@ -204,7 +228,10 @@ export function createFkanbanMcpServer(
     const node = explicitNode ?? newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
     return { cfg, node };
   };
-  const server = new McpServer({ name: FKANBAN_MCP_NAME, version: FKANBAN_MCP_VERSION });
+  const server = new McpServer(
+    { name: FKANBAN_MCP_NAME, version: FKANBAN_MCP_VERSION },
+    { instructions: FKANBAN_MCP_INSTRUCTIONS },
+  );
 
   server.registerTool(
     "fkanban_list",
