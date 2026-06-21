@@ -282,7 +282,10 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     // an enriched-card-shape mismatch would fail this callTool, not just assert.
     // The structured array now carries a truncation signal; the small fixture is
     // under the default cap, so `truncated` is false and `cards` is the full set.
-    expect(res.structuredContent).toEqual({ cards: cliCards, total: cliCards.length, truncated: false });
+    // Each card also now ships a single-line body PREVIEW + `bodyTruncated`; the
+    // fixture bodies are short so they're previewed unchanged with bodyTruncated:false.
+    const cliCardsPreviewed = cliCards.map((c: Record<string, unknown>) => ({ ...c, bodyTruncated: false }));
+    expect(res.structuredContent).toEqual({ cards: cliCardsPreviewed, total: cliCards.length, truncated: false });
     // Each list card now carries the same resolved dep status `show` returns:
     // `ui` is blocked by the unfinished `api` and reports the dangling `ghost`
     // as a missing (non-blocking) dep; `api` itself is unblocked.
@@ -303,8 +306,10 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
   test("fkanban_search returns { cards } deep-equal to `search --json`", async () => {
     const res = await client.callTool({ name: "fkanban_search", arguments: { query: "search me" } });
     const cliCards = JSON.parse(await searchCmd({ cfg, node, query: "search me", json: true }));
-    // One match, under the default cap → full set + `truncated:false`.
-    expect(res.structuredContent).toEqual({ cards: cliCards, total: cliCards.length, truncated: false });
+    // One match, under the default cap → full set + `truncated:false`. Body is
+    // previewed (short fixture body → unchanged, bodyTruncated:false).
+    const cliCardsPreviewed = cliCards.map((c: Record<string, unknown>) => ({ ...c, bodyTruncated: false }));
+    expect(res.structuredContent).toEqual({ cards: cliCardsPreviewed, total: cliCards.length, truncated: false });
     expect((cliCards as Array<{ slug: string }>).map((c) => c.slug)).toEqual(["ui"]);
   });
 
@@ -450,5 +455,84 @@ describe("MCP read tools cap the structured card array by default", () => {
     const fullSlugs = (full.cards as Array<{ slug: string }>).map((c) => c.slug);
     // The cap is a prefix of the full ordered list — no reordering.
     expect(cappedSlugs).toEqual(fullSlugs.slice(0, DEFAULT_SEARCH_LIMIT));
+  });
+});
+
+// After #70's COUNT cap, the per-card `body` is the bulk of a list/search
+// payload (87% of a default page on the live board). The agent-facing
+// multi-card read tools now ship a short single-line body PREVIEW + a
+// `bodyTruncated` flag by default, with a `full_body:true` opt-in that restores
+// complete bodies; `fkanban_show` always returns the full body. These tests pin
+// that behavior on a card whose body is multiple KB.
+describe("MCP read tools preview card bodies by default, full under full_body / fkanban_show", () => {
+  let node: NodeClient;
+  let client: Client;
+  // A multi-KB body, on one line and well over the ~200-char preview cap.
+  const BIG_BODY = "needle " + "x".repeat(4000);
+  const PREVIEW_LEN = 200;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedDefaultBoard(node);
+    client = await connectedClient(node);
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "huge", title: "Huge card", body: BIG_BODY, column: "todo" },
+    });
+  });
+
+  function cardsOf(res: unknown): Array<{ slug: string; body: string; bodyTruncated: boolean }> {
+    return (res as { structuredContent: { cards: Array<{ slug: string; body: string; bodyTruncated: boolean }> } })
+      .structuredContent.cards;
+  }
+
+  test("fkanban_list previews the body by default (≤200 chars, bodyTruncated:true) and shrinks the payload ~8x+", async () => {
+    const def = await client.callTool({ name: "fkanban_list", arguments: { column: "todo" } });
+    const full = await client.callTool({ name: "fkanban_list", arguments: { column: "todo", full_body: true } });
+    const huge = cardsOf(def).find((c) => c.slug === "huge")!;
+    expect(huge.body.length).toBe(PREVIEW_LEN);
+    expect(huge.bodyTruncated).toBe(true);
+    expect(huge.body.startsWith("needle")).toBe(true);
+
+    const hugeFull = cardsOf(full).find((c) => c.slug === "huge")!;
+    expect(hugeFull.body).toBe(BIG_BODY);
+    expect(hugeFull.bodyTruncated).toBe(false);
+
+    // The default payload must be dramatically smaller than full bodies.
+    const defSize = JSON.stringify((def as { structuredContent: unknown }).structuredContent).length;
+    const fullSize = JSON.stringify((full as { structuredContent: unknown }).structuredContent).length;
+    expect(fullSize / defSize).toBeGreaterThan(8);
+  });
+
+  test("fkanban_search previews the body by default and restores it under full_body:true", async () => {
+    const def = await client.callTool({ name: "fkanban_search", arguments: { query: "needle" } });
+    const full = await client.callTool({ name: "fkanban_search", arguments: { query: "needle", full_body: true } });
+    const huge = cardsOf(def).find((c) => c.slug === "huge")!;
+    expect(huge.body.length).toBe(PREVIEW_LEN);
+    expect(huge.bodyTruncated).toBe(true);
+
+    const hugeFull = cardsOf(full).find((c) => c.slug === "huge")!;
+    expect(hugeFull.body).toBe(BIG_BODY);
+    expect(hugeFull.bodyTruncated).toBe(false);
+  });
+
+  test("fkanban_show still returns the complete body (unchanged, no preview)", async () => {
+    const res = await client.callTool({ name: "fkanban_show", arguments: { slug: "huge" } });
+    const card = (res.structuredContent ?? {}) as { body: string };
+    expect(card.body).toBe(BIG_BODY);
+    // show does not declare/emit bodyTruncated — it's the full-read path.
+    expect(card).not.toHaveProperty("bodyTruncated");
+  });
+
+  test("a multi-line body is flattened to a single line in the preview", async () => {
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "multiline", title: "ML", body: "line one\n\nline two\tline three", column: "todo" },
+    });
+    const res = await client.callTool({ name: "fkanban_list", arguments: { column: "todo" } });
+    const ml = cardsOf(res).find((c) => c.slug === "multiline")!;
+    expect(ml.body).toBe("line one line two line three");
+    expect(ml.body).not.toContain("\n");
+    expect(ml.bodyTruncated).toBe(false);
   });
 });
