@@ -27,6 +27,7 @@ import { listCmd } from "../src/commands/list.ts";
 import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { showCmd } from "../src/commands/show.ts";
 import { boardListCmd } from "../src/commands/board.ts";
+import { DEFAULT_SEARCH_LIMIT } from "../src/board.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -279,7 +280,9 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     expect(res.structuredContent).toBeDefined();
     // The client validates structuredContent against the widened outputSchema —
     // an enriched-card-shape mismatch would fail this callTool, not just assert.
-    expect(res.structuredContent).toEqual({ cards: cliCards });
+    // The structured array now carries a truncation signal; the small fixture is
+    // under the default cap, so `truncated` is false and `cards` is the full set.
+    expect(res.structuredContent).toEqual({ cards: cliCards, total: cliCards.length, truncated: false });
     // Each list card now carries the same resolved dep status `show` returns:
     // `ui` is blocked by the unfinished `api` and reports the dangling `ghost`
     // as a missing (non-blocking) dep; `api` itself is unblocked.
@@ -300,7 +303,8 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
   test("fkanban_search returns { cards } deep-equal to `search --json`", async () => {
     const res = await client.callTool({ name: "fkanban_search", arguments: { query: "search me" } });
     const cliCards = JSON.parse(await searchCmd({ cfg, node, query: "search me", json: true }));
-    expect(res.structuredContent).toEqual({ cards: cliCards });
+    // One match, under the default cap → full set + `truncated:false`.
+    expect(res.structuredContent).toEqual({ cards: cliCards, total: cliCards.length, truncated: false });
     expect((cliCards as Array<{ slug: string }>).map((c) => c.slug)).toEqual(["ui"]);
   });
 
@@ -357,5 +361,94 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     expect(res.isError).toBe(true);
     expect(res.structuredContent).toBeUndefined();
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toContain("error:");
+  });
+});
+
+// The agent-facing structured `cards` array is the token-budget risk: on a real
+// board (160+ cards, each with its full body) an uncapped `fkanban_search`/
+// `fkanban_list` dumps ~160K tokens and evicts the caller's context. These tests
+// pin the default cap (DEFAULT_SEARCH_LIMIT=20), the `limit`/`all` opt-out, and
+// the `total`/`truncated` signal — on a board seeded with MORE than the cap.
+describe("MCP read tools cap the structured card array by default", () => {
+  let node: NodeClient;
+  let client: Client;
+  const N = 30; // > DEFAULT_SEARCH_LIMIT (20)
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedDefaultBoard(node);
+    client = await connectedClient(node);
+    // Seed N cards in `todo`, each whose body contains the term "needle" so a
+    // single search matches all of them.
+    for (let i = 0; i < N; i++) {
+      const idx = String(i).padStart(3, "0");
+      await client.callTool({
+        name: "fkanban_add",
+        arguments: { slug: `card-${idx}`, title: `Card ${idx}`, body: "needle in the body", column: "todo" },
+      });
+    }
+  });
+
+  function struct(res: unknown): { cards: unknown[]; total: number; truncated: boolean } {
+    return (res as { structuredContent: { cards: unknown[]; total: number; truncated: boolean } }).structuredContent;
+  }
+
+  test("fkanban_search caps at DEFAULT_SEARCH_LIMIT (20) with truncated:true and the true total", async () => {
+    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "needle" } });
+    const s = struct(res);
+    expect(s.cards.length).toBe(DEFAULT_SEARCH_LIMIT);
+    expect(s.total).toBe(N);
+    expect(s.truncated).toBe(true);
+  });
+
+  test("fkanban_search honors an explicit limit", async () => {
+    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "needle", limit: 5 } });
+    const s = struct(res);
+    expect(s.cards.length).toBe(5);
+    expect(s.total).toBe(N);
+    expect(s.truncated).toBe(true);
+  });
+
+  test("fkanban_search all:true returns the complete set, untruncated", async () => {
+    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "needle", all: true } });
+    const s = struct(res);
+    expect(s.cards.length).toBe(N);
+    expect(s.total).toBe(N);
+    expect(s.truncated).toBe(false);
+  });
+
+  test("fkanban_search limit:0 is an opt-out equivalent to all:true", async () => {
+    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "needle", limit: 0 } });
+    const s = struct(res);
+    expect(s.cards.length).toBe(N);
+    expect(s.truncated).toBe(false);
+  });
+
+  test("fkanban_list caps at DEFAULT_SEARCH_LIMIT (20) with truncated:true and the true total", async () => {
+    const res = await client.callTool({ name: "fkanban_list", arguments: { column: "todo" } });
+    const s = struct(res);
+    expect(s.cards.length).toBe(DEFAULT_SEARCH_LIMIT);
+    expect(s.total).toBe(N);
+    expect(s.truncated).toBe(true);
+  });
+
+  test("fkanban_list honors limit and all:true (opt-out)", async () => {
+    const five = struct(await client.callTool({ name: "fkanban_list", arguments: { column: "todo", limit: 5 } }));
+    expect(five.cards.length).toBe(5);
+    expect(five.truncated).toBe(true);
+
+    const all = struct(await client.callTool({ name: "fkanban_list", arguments: { column: "todo", all: true } }));
+    expect(all.cards.length).toBe(N);
+    expect(all.total).toBe(N);
+    expect(all.truncated).toBe(false);
+  });
+
+  test("the capped fkanban_list keeps position order (first 20 of the sorted set)", async () => {
+    const capped = struct(await client.callTool({ name: "fkanban_list", arguments: { column: "todo" } }));
+    const full = struct(await client.callTool({ name: "fkanban_list", arguments: { column: "todo", all: true } }));
+    const cappedSlugs = (capped.cards as Array<{ slug: string }>).map((c) => c.slug);
+    const fullSlugs = (full.cards as Array<{ slug: string }>).map((c) => c.slug);
+    // The cap is a prefix of the full ordered list — no reordering.
+    expect(cappedSlugs).toEqual(fullSlugs.slice(0, DEFAULT_SEARCH_LIMIT));
   });
 });

@@ -33,14 +33,21 @@ export type SearchOptions = {
 // Both the human text and the structured (`--json`) matches, from a single
 // read. `searchCmd` (CLI) returns one; the MCP tool returns both.
 //
-// `cards` is the COMPLETE match set — the default text cap
-// (DEFAULT_SEARCH_LIMIT) is a display affordance only (`renderSearchResults`
-// applies it and prints a "… N more" footer; the structured array stays
-// complete so the MCP tool and other machine consumers get every match). An
-// *explicit* `--limit`/`--all` is intentional and should mean the same thing on
-// both surfaces, so it's surfaced as `jsonLimit` for `searchCmd` to apply to the
-// serialized array via `capFlat`. `jsonLimit`: 0 = no cap (default and `--all`);
-// >0 = explicit `--limit` cap. Mirrors `list`'s contract exactly.
+// `cards` here is the COMPLETE match set — capping is the *caller's* job so each
+// surface applies its own contract:
+//   - The text view caps at DEFAULT_SEARCH_LIMIT as a display affordance only
+//     (`renderSearchResults` applies it and prints a "… N more" footer).
+//   - `searchCmd` (`--json`) applies an *explicit* `--limit` to the serialized
+//     array via `capFlat` (`jsonLimit`); no flag → the full array (the CLI
+//     `--json` consumer asked for it explicitly).
+//   - The `fkanban_search` MCP tool caps the structured array BY DEFAULT
+//     (DEFAULT_SEARCH_LIMIT, via `server.ts`'s `capCards`), because its consumer
+//     is a token-bounded LLM: every match carries its full `body`, so returning
+//     all of them on a real board (160+ cards) overflows the agent's context in
+//     one call. It accepts `limit`/`all` to opt out and reports `total`/
+//     `truncated` so the cap is never silent.
+// `jsonLimit` is the CLI-only knob: 0 = no cap (default and `--all`); >0 =
+// explicit `--limit` cap. Mirrors `list`'s contract exactly.
 export async function searchResult(
   opts: SearchOptions,
 ): Promise<{ text: string; cards: Card[]; jsonLimit: number }> {
