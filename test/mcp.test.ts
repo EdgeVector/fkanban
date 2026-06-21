@@ -159,9 +159,9 @@ describe("MCP server starts (degrades, not crashes) when config is unavailable",
     client = await connectServer(createFkanbanMcpServer({ configError }));
   });
 
-  test("connect succeeds and listTools returns all 12 tools", async () => {
+  test("connect succeeds and listTools returns all 14 tools", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(12);
+    expect(tools).toHaveLength(14);
   });
 
   test("fkanban_list returns isError with the actionable 'run init' hint", async () => {
@@ -250,6 +250,31 @@ describe("MCP write tools return structuredContent", () => {
     );
   });
 
+  test("fkanban_tag_add / fkanban_tag_rm edit one tag without clobbering the rest", async () => {
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "tg", column: "todo", tags: ["a", "b"] } });
+
+    // Incremental add unions; the existing tags survive.
+    const added = await client.callTool({ name: "fkanban_tag_add", arguments: { slug: "tg", tags: ["c"] } });
+    expect(added.structuredContent).toEqual({ slug: "tg", tag: ["c"], action: "added", tags: ["a", "b", "c"] });
+    expect((added.content as Array<{ type: string; text: string }>)[0]?.text).toBe("tagged tg c (tags: a, b, c)");
+
+    // Adding a present tag is idempotent (no duplicate).
+    const dup = await client.callTool({ name: "fkanban_tag_add", arguments: { slug: "tg", tags: ["a"] } });
+    expect(dup.structuredContent).toEqual({ slug: "tg", tag: ["a"], action: "added", tags: ["a", "b", "c"] });
+
+    // Incremental rm drops only the named tag.
+    const removed = await client.callTool({ name: "fkanban_tag_rm", arguments: { slug: "tg", tags: ["b"] } });
+    expect(removed.structuredContent).toEqual({ slug: "tg", tag: ["b"], action: "removed", tags: ["a", "c"] });
+    expect((removed.content as Array<{ type: string; text: string }>)[0]?.text).toBe("untagged tg b (tags: a, c)");
+  });
+
+  test("fkanban_tag_add rejects a reserved dep: tag", async () => {
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "tg2", column: "todo" } });
+    const res = await client.callTool({ name: "fkanban_tag_add", arguments: { slug: "tg2", tags: ["dep:foo"] } });
+    expect(res.isError).toBe(true);
+    expect((res.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain("reserved");
+  });
+
   test("fkanban_rm echoes { slug, orphanedDependents } (empty when nothing depends on it)", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "card-c", column: "todo" } });
     const res = await client.callTool({ name: "fkanban_rm", arguments: { slug: "card-c" } });
@@ -279,6 +304,8 @@ describe("MCP write tools return structuredContent", () => {
       "fkanban_move",
       "fkanban_dep_add",
       "fkanban_dep_rm",
+      "fkanban_tag_add",
+      "fkanban_tag_rm",
       "fkanban_rm",
       "fkanban_board_create",
     ]) {

@@ -149,6 +149,8 @@ DONE  (0)
 | `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` past a dependency block) |
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
+| `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
+| `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
 | `fkanban list` | render a board as columns (`--board --column --tag --assignee --json --limit N --all`); blocked cards show 🔒 |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
@@ -161,8 +163,8 @@ DONE  (0)
 
 Global: `--verbose` (echo HTTP), `--version`, `--help`.
 
-`--json` works on the write commands too — `add`, `move`, `dep add/rm`, `rm`,
-`board create`, and `board rm` echo the write result as a JSON object instead of a prose
+`--json` works on the write commands too — `add`, `move`, `dep add/rm`,
+`tag add/rm`, `rm`, `board create`, and `board rm` echo the write result as a JSON object instead of a prose
 line, so scripts and agents can confirm the outcome machine-readably (e.g.
 `fkanban move ship-login doing --json` → `{"slug":"ship-login","from":"todo","to":"doing"}`).
 
@@ -214,10 +216,31 @@ array, so dependencies needed **no schema change / republish** — the same
 trick used for the soft-delete tombstone. A dep pointing at a non-existent
 card is surfaced as a warning but never blocks (it could never reach `done`).
 
+## Tags
+
+Tags are freeform labels for filtering (`fkanban list --tag <tag>`). There are
+two ways to set them, mirroring dependencies exactly:
+
+```bash
+fkanban add ship-login --tags auth,p1     # REPLACES the whole tag list
+fkanban tag add ship-login blocked        # add one tag, keep the rest
+fkanban tag rm  ship-login blocked        # drop one tag, keep the rest
+fkanban tag add ship-login p1 needs-review  # add several at once
+```
+
+`--tags a,b,c` on `add` overwrites the entire list — supplying it drops any tag
+not in the new set. `tag add`/`tag rm` edit a card's labels **incrementally**,
+so a groomer can add `p1` without first reading and re-sending every existing
+tag (the same distinction `dep add`/`dep rm` have to `add --deps`). Adding a tag
+the card already carries is a no-op; removing one it lacks warns but succeeds.
+Reserved tags (`dep:<slug>` dependency edges, the delete tombstone) are rejected
+— use `dep add`/`dep rm` and `rm` for those.
+
 ## MCP server
 
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
-`fkanban_move`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_show`,
+`fkanban_move`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
+`fkanban_tag_rm`, `fkanban_show`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
 `fkanban_doctor`)
 so agents can drive — and self-diagnose — the board.

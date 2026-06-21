@@ -17,6 +17,7 @@ import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
+import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
 import { orphanedDependentsWarning, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
@@ -28,9 +29,9 @@ export const FKANBAN_MCP_VERSION = "0.1.0";
 // Keep this SHORT — hosts inject it into context every session, so verbosity
 // costs tokens for every user. Point at the tools; don't restate each one.
 export const FKANBAN_MCP_INSTRUCTIONS = [
-  "fkanban is a kanban board over fold_db. 12 tools: read tools",
+  "fkanban is a kanban board over fold_db. 14 tools: read tools",
   "(fkanban_list, fkanban_search, fkanban_show, fkanban_board_list, fkanban_doctor)",
-  "never mutate; the rest (add, move, rm, dep_add, dep_rm, board_create, board_rm) write.",
+  "never mutate; the rest (add, move, rm, dep_add, dep_rm, tag_add, tag_rm, board_create, board_rm) write.",
   "",
   "Board model: a card lives on a board, in one column, at a position. Columns flow",
   "backlog → todo → doing → review → done.",
@@ -498,6 +499,72 @@ export function createFkanbanMcpServer(
         const { cfg, node } = requireConfig();
         const res = await depRmCmd({ cfg, node, slug, dep });
         return writeResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_tag_add",
+    {
+      title: "Add tags",
+      description:
+        "Add one or more tags to a card WITHOUT replacing its existing tags (the incremental counterpart to `fkanban_add`'s `tags`, which replaces the whole list — the same relationship `fkanban_dep_add` has to `add`'s `deps`). Adding a tag the card already carries is a no-op. Reserved tags (`dep:<slug>` dependency edges, the delete tombstone) are rejected — use `fkanban_dep_add`/`fkanban_rm` for those.",
+      annotations: { title: "Add tags", idempotentHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        slug: z.string().optional().describe("The card to tag."),
+        tags: z.array(z.string()).optional().describe("One or more tags to union into the card's tags."),
+      },
+      outputSchema: {
+        slug: z.string(),
+        tag: z.array(z.string()),
+        action: z.enum(["added", "removed"]),
+        tags: z.array(z.string()),
+      },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
+        if (args.tags == null || args.tags.length === 0) {
+          throw new FkanbanError({ code: "missing_argument", message: "Missing tags.", hint: "Pass a non-empty `tags` array." });
+        }
+        const { cfg, node } = requireConfig();
+        const res = await tagAddCmd({ cfg, node, slug, tag: args.tags });
+        return writeResult(`tagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_tag_rm",
+    {
+      title: "Remove tags",
+      description:
+        "Remove one or more tags from a card without disturbing the rest. Removing a tag the card doesn't carry is a no-op (it succeeds).",
+      annotations: { title: "Remove tags", idempotentHint: true, destructiveHint: true, openWorldHint: false },
+      inputSchema: {
+        slug: z.string().optional().describe("The card to untag."),
+        tags: z.array(z.string()).optional().describe("One or more tags to remove from the card's tags."),
+      },
+      outputSchema: {
+        slug: z.string(),
+        tag: z.array(z.string()),
+        action: z.enum(["added", "removed"]),
+        tags: z.array(z.string()),
+      },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
+        if (args.tags == null || args.tags.length === 0) {
+          throw new FkanbanError({ code: "missing_argument", message: "Missing tags.", hint: "Pass a non-empty `tags` array." });
+        }
+        const { cfg, node } = requireConfig();
+        const res = await tagRmCmd({ cfg, node, slug, tag: args.tags });
+        return writeResult(`untagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
       }

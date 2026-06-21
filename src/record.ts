@@ -59,6 +59,22 @@ export function depTag(slug: string): string {
   return `${DEP_TAG_PREFIX}${slug}`;
 }
 
+// Clean a tag list: trim, drop blanks, dedupe (order-stable). The label
+// counterpart of normalizeDeps — used by the incremental `tag add`/`tag rm`
+// editors so adding a present tag is idempotent and a blank/duplicate arg is a
+// no-op. Reserved tags (dep:<slug>, the tombstone) are filtered out elsewhere.
+export function normalizeTags(tags: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of tags) {
+    const s = t.trim();
+    if (s.length === 0 || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 // Clean a dep list: trim, drop blanks, drop self-references, dedupe (order-stable).
 export function normalizeDeps(deps: string[], selfSlug: string): string[] {
   const out: string[] = [];
