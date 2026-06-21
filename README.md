@@ -149,7 +149,7 @@ DONE  (0)
 | `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` past a dependency block) |
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
-| `fkanban list` | render a board as columns (`--board --column --json --limit N --all`); blocked cards show 🔒 |
+| `fkanban list` | render a board as columns (`--board --column --tag --assignee --json --limit N --all`); blocked cards show 🔒 |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
@@ -174,6 +174,10 @@ everything and `--limit N` sets a custom per-column cap — both apply to text
 `--json` returns the complete filtered board by default, and honors an explicit
 `--limit N`/`--all` to mean the same bounded (or unbounded) set the text view
 shows.
+
+`--tag <tag>` and `--assignee <name>` apply **exact-match** filters to the
+listing (contrast the fuzzy substring `search` below), e.g.
+`fkanban list --tag fkanban --column doing`.
 
 `search <query>` finds cards by a case-insensitive substring across slug,
 title, body, assignee, and tags — handy once a board has more cards than fit on
