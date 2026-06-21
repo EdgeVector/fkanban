@@ -16,7 +16,7 @@
 // `fkanban init` just loads + resolves the already-published schemas.
 
 import { newNodeClient, FkanbanError, type Verbose } from "../client.ts";
-import { mcpAddCommand } from "../mcp/register.ts";
+import { fkanbanInvocation, mcpAddCommand } from "../mcp/register.ts";
 import {
   UNIQUE_SCHEMAS,
   OWNER_APP_ID,
@@ -187,18 +187,32 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 // block (list the board, add a card, register the MCP server) — this is the
 // natural moment to surface the `claude mcp add` command, which is otherwise
 // discoverable only by reading the README. On an idempotent re-init, collapse
-// to a single quiet line so re-runs stay calm. Threaded through the same
-// `print` callback as the rest of `init` so test/`--json` callers stay
+// to a single quiet line so re-runs stay calm. Every command is printed in the
+// form that actually runs for THIS dev — `fkanbanInvocation()` returns the
+// global `fkanban` shim when it's on PATH, else `bun run src/cli.ts` from the
+// repo (the fresh-clone default, before `bun run install-cli`) — so copy-pasting
+// never hits `command not found: fkanban`. The `invocation` arg is injectable
+// for unit testing both branches without touching PATH. Threaded through the
+// same `print` callback as the rest of `init` so test/`--json` callers stay
 // deterministic. Exported for unit testing.
-export function printNextSteps(print: (line: string) => void, bootstrapped: boolean): void {
+export function printNextSteps(
+  print: (line: string) => void,
+  bootstrapped: boolean,
+  invocation: string = fkanbanInvocation(),
+): void {
   if (bootstrapped) {
+    // Align the trailing `#` comments to a common column for readability; the
+    // `add` line is the longest, so pad the others to match it.
+    const listCmd = `${invocation} list`;
+    const addCmd = `${invocation} add my-first-card --title "..."`;
+    const col = Math.max(listCmd.length, addCmd.length) + 3;
     print("");
     print("Next steps:");
-    print("  fkanban list                              # see your board");
-    print('  fkanban add my-first-card --title "..."   # add a card');
+    print(`  ${listCmd.padEnd(col)}# see your board`);
+    print(`  ${addCmd.padEnd(col)}# add a card`);
     print(`  ${mcpAddCommand()}   # register the MCP server`);
   } else {
     print("");
-    print("Already initialized — run `fkanban list` to see your board.");
+    print(`Already initialized — run \`${invocation} list\` to see your board.`);
   }
 }

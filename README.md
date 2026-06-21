@@ -150,7 +150,7 @@ DONE  (0)
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban list` | render a board as columns (`--board --column --tag --assignee --json --limit N --all`); blocked cards show 🔒 |
-| `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --json`) |
+| `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
 | `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
@@ -183,7 +183,14 @@ listing (contrast the fuzzy substring `search` below), e.g.
 title, body, assignee, and tags — handy once a board has more cards than fit on
 screen. Space-separated terms are AND-matched (`fkanban search auth p1` needs
 both), results span columns/boards and are annotated with `[board/column]`,
-and `--board` / `--column` scope the search.
+and `--board` / `--column` scope the search. Like `list`, the text output caps
+the rendered matches at **20** by default so a busy board doesn't flood the
+terminal; the overflow collapses to a dim `… N more (use --limit N or --all)`
+line. `--all` shows every match and `--limit N` sets a custom cap — both apply
+to text **and** `--json`. As with `list`, the 20-match default is a *text
+display* affordance only: `--json` returns the complete match set by default and
+honors an explicit `--limit N`/`--all` to mean the same bounded (or unbounded)
+set the text view shows.
 
 ## Dependencies
 

@@ -43,7 +43,7 @@ Commands:
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
   list                 render a board as columns of cards (--board --column --tag --assignee --json --limit N --all)
-  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --json)
+  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
@@ -168,10 +168,14 @@ Usage:
 Options:
   --board <slug>        restrict to one board
   --column <col>        restrict to one column
-  --json                machine-readable output
+  --limit <N>           cap rendered matches (applies to text AND --json)
+  --all                 show every match (no cap; --json default)
+  --json                machine-readable output (complete unless --limit set)
 
 Example:
-  fkanban search "auth p1"`),
+  fkanban search "auth p1"
+  fkanban search auth --limit 5
+  fkanban search auth --all`),
 
   show: withFooter(`fkanban show — print one card in detail (deps + blocked state)
 
@@ -420,7 +424,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
   list: new Set(["board", "column", "tag", "assignee", "limit", "all"]),
-  search: new Set(["board", "column"]),
+  search: new Set(["board", "column", "limit", "all"]),
   // board's subcommands read title/columns/body (create) and force (rm).
   board: new Set(["title", "columns", "body", "force"]),
 };
@@ -728,6 +732,13 @@ async function dispatch(
 
     case "search": {
       const query = requirePositional(positionals[1], "search <query>");
+      // Validate the numeric flag before touching config/node, so a bad
+      // `--limit` reports the exit-2 flag error rather than a config error
+      // (same contract as `list`).
+      const limit =
+        values.limit !== undefined
+          ? parseIntFlag(values.limit as string, "limit", "search", { min: 1 })
+          : undefined;
       const ctx = loadCtx({ verbose });
       const out = await searchCmd({
         cfg: ctx.cfg,
@@ -736,6 +747,8 @@ async function dispatch(
         board: values.board as string | undefined,
         column: values.column as string | undefined,
         json: values.json as boolean | undefined,
+        limit,
+        all: values.all as boolean | undefined,
       });
       console.log(out);
       return 0;

@@ -14,7 +14,7 @@ import {
   sortCards,
   type Card,
 } from "../record.ts";
-import { renderSearchResults } from "../board.ts";
+import { capFlat, DEFAULT_SEARCH_LIMIT, renderSearchResults } from "../board.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
 export type SearchOptions = {
@@ -24,11 +24,26 @@ export type SearchOptions = {
   board?: string;
   column?: string;
   json?: boolean;
+  // Flat cap on rendered matches (defaults to DEFAULT_SEARCH_LIMIT for text).
+  // `all` removes the cap. Mirrors `list`'s `--limit`/`--all` contract.
+  limit?: number;
+  all?: boolean;
 };
 
 // Both the human text and the structured (`--json`) matches, from a single
 // read. `searchCmd` (CLI) returns one; the MCP tool returns both.
-export async function searchResult(opts: SearchOptions): Promise<{ text: string; cards: Card[] }> {
+//
+// `cards` is the COMPLETE match set — the default text cap
+// (DEFAULT_SEARCH_LIMIT) is a display affordance only (`renderSearchResults`
+// applies it and prints a "… N more" footer; the structured array stays
+// complete so the MCP tool and other machine consumers get every match). An
+// *explicit* `--limit`/`--all` is intentional and should mean the same thing on
+// both surfaces, so it's surfaced as `jsonLimit` for `searchCmd` to apply to the
+// serialized array via `capFlat`. `jsonLimit`: 0 = no cap (default and `--all`);
+// >0 = explicit `--limit` cap. Mirrors `list`'s contract exactly.
+export async function searchResult(
+  opts: SearchOptions,
+): Promise<{ text: string; cards: Card[]; jsonLimit: number }> {
   // A query with zero effective terms (truly empty, or whitespace-only like
   // "   ") is a usage error, not a match-everything wildcard. Guard here — the
   // single entry point for both the CLI (`searchCmd`) and the MCP
@@ -61,12 +76,34 @@ export async function searchResult(opts: SearchOptions): Promise<{ text: string;
   );
   const matches = sortCards(searchCards(scoped, opts.query));
 
+  // Text render cap: an explicit `--limit` (always >= 1 after flag parsing),
+  // `--all` removes the cap (0), and the no-flag default falls back to
+  // DEFAULT_SEARCH_LIMIT so a long match list collapses to a "… N more" line.
+  const limit = opts.all
+    ? 0
+    : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
+      ? (opts.limit as number)
+      : DEFAULT_SEARCH_LIMIT;
   // Resolve blocked status against ALL live cards so cross-board deps count.
-  const text = renderSearchResults(matches, opts.query, { blocked: blockedSlugSet(matches, allCards) });
-  return { text, cards: matches };
+  const text = renderSearchResults(matches, opts.query, {
+    blocked: blockedSlugSet(matches, allCards),
+    limit,
+  });
+  // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`
+  // and the no-flag default leave it complete (0).
+  const jsonLimit =
+    !opts.all && Number.isFinite(opts.limit) && (opts.limit as number) >= 0
+      ? (opts.limit as number)
+      : 0;
+  return { text, cards: matches, jsonLimit };
 }
 
 export async function searchCmd(opts: SearchOptions): Promise<string> {
-  const { text, cards } = await searchResult(opts);
-  return opts.json ? JSON.stringify(cards, null, 2) : text;
+  const { text, cards, jsonLimit } = await searchResult(opts);
+  if (!opts.json) return text;
+  // Honor an explicit `--limit` on the machine-readable surface too: cap to the
+  // same matches the text view shows. No explicit limit (jsonLimit 0) → the
+  // full match array, unchanged.
+  const out = jsonLimit > 0 ? capFlat(cards, jsonLimit) : cards;
+  return JSON.stringify(out, null, 2);
 }

@@ -46,6 +46,7 @@ import {
 import { renderBoard, renderSearchResults } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
+import { printNextSteps } from "../src/commands/init.ts";
 import { TOP_HELP, COMMAND_HELP, resolveHelp } from "../src/cli.ts";
 
 function card(partial: Partial<Card>): Card {
@@ -304,6 +305,28 @@ describe("search", () => {
     expect(out).toContain("ship-login");
     expect(renderSearchResults([], "ghost", { color: false })).toBe('No cards match "ghost".');
   });
+
+  test("renderSearchResults caps rendered matches and prints an overflow line", () => {
+    // 5 matching cards, capped at 2 → 2 bullet lines + a "… 3 more" overflow.
+    const many = Array.from({ length: 5 }, (_, i) =>
+      card({ slug: `auth-${i}`, title: `auth ${i}`, column: "todo" }),
+    );
+    const out = renderSearchResults(many, "auth", { color: false, limit: 2 });
+    const bullets = out.split("\n").filter((l) => l.trim().startsWith("•"));
+    expect(bullets).toHaveLength(2);
+    expect(out).toContain('5 matches for "auth"'); // header counts ALL matches
+    expect(out).toContain("… 3 more (use --limit N or --all)");
+  });
+
+  test("renderSearchResults limit<=0 (--all) renders every match, no overflow line", () => {
+    const many = Array.from({ length: 5 }, (_, i) =>
+      card({ slug: `auth-${i}`, title: `auth ${i}`, column: "todo" }),
+    );
+    const out = renderSearchResults(many, "auth", { color: false, limit: 0 });
+    const bullets = out.split("\n").filter((l) => l.trim().startsWith("•"));
+    expect(bullets).toHaveLength(5);
+    expect(out).not.toContain("more (use --limit");
+  });
 });
 
 describe("render", () => {
@@ -490,6 +513,42 @@ describe("mcp register helper (single source of truth)", () => {
       expect(cmd).toContain(entry!);
       expect(entry!.endsWith("/src/mcp/main.ts")).toBe(true);
     }
+  });
+});
+
+describe("init Next steps are shim-aware", () => {
+  // On a fresh clone there is no global `fkanban` shim yet (init runs before
+  // `install-cli`), so the printed `list`/`add`/re-init commands must use the
+  // `bun run src/cli.ts` form — copy-pasting the bare-`fkanban` form would fail
+  // with `command not found`. With the shim present they use `fkanban`.
+  function capture(bootstrapped: boolean, invocation: string): string[] {
+    const lines: string[] = [];
+    printNextSteps((l) => lines.push(l), bootstrapped, invocation);
+    return lines;
+  }
+
+  test("shim-less fresh clone prints runnable `bun run src/cli.ts` commands", () => {
+    const out = capture(true, "bun run src/cli.ts").join("\n");
+    expect(out).toContain("bun run src/cli.ts list");
+    expect(out).toContain('bun run src/cli.ts add my-first-card --title "..."');
+    // The hardcoded bare-`fkanban list`/`fkanban add` form must be gone.
+    expect(out).not.toMatch(/^\s*fkanban list\b/m);
+    expect(out).not.toMatch(/^\s*fkanban add\b/m);
+  });
+
+  test("shim present prints the short `fkanban` commands", () => {
+    const out = capture(true, "fkanban").join("\n");
+    expect(out).toContain("fkanban list");
+    expect(out).toContain('fkanban add my-first-card --title "..."');
+  });
+
+  test("re-init line uses the same invocation form", () => {
+    expect(capture(false, "bun run src/cli.ts").join("\n")).toContain(
+      "Already initialized — run `bun run src/cli.ts list`",
+    );
+    expect(capture(false, "fkanban").join("\n")).toContain(
+      "Already initialized — run `fkanban list`",
+    );
   });
 });
 
