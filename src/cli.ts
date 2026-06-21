@@ -195,20 +195,23 @@ Options:
 Example:
   fkanban rm ship-login`),
 
-  board: withFooter(`fkanban board — create/update boards or list them
+  board: withFooter(`fkanban board — create/update, list, or remove boards
 
 Usage:
   fkanban board create <slug> [options]
   fkanban board list [options]
+  fkanban board rm <slug> [options]
 
 Options:
   --title <text>        board title (create)
   --columns a,b,c       comma-separated column names (create)
   --body <text>         board body (create)
+  --force               soft-delete a board with live cards (rm)
   --json                machine-readable output
 
-Example:
-  fkanban board create sprint --title "Sprint 1" --columns todo,doing,done`),
+Examples:
+  fkanban board create sprint --title "Sprint 1" --columns todo,doing,done
+  fkanban board rm sprint`),
 
   doctor: withFooter(`fkanban doctor — health-check the local setup
 
