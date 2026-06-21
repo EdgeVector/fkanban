@@ -17,6 +17,15 @@ export type RenderOptions = {
   // 0 or undefined → no cap. The terminal (last) column shows the most
   // RECENT N (tail); other columns show the first N (top of the column).
   limit?: number;
+  // Command prefix the empty-board first-touch hint prints — the global
+  // `fkanban` shim when it's on PATH, else `bun run src/cli.ts` from the repo
+  // (the fresh-clone default, before `bun run install-cli`). Threaded in by the
+  // caller (`list.ts`, via `fkanbanInvocation()`) rather than computed here so
+  // `board.ts` stays pure/testable. Defaults to the bare `fkanban` form, which
+  // keeps existing pure-render tests unaffected. Mirrors init's Next-steps
+  // shim-awareness (PR #69) so copy-pasting the hint never hits `command not
+  // found: fkanban`.
+  invocation?: string;
 };
 
 const COLORS: Record<string, string> = {
@@ -69,14 +78,15 @@ export function renderBoard(
   // deliberate narrow look and keeps its `—`; a board with any card renders
   // normally.
   if (!opts.column && cards.length === 0) {
+    const invocation = opts.invocation ?? "fkanban";
     lines.push("No cards yet. Create your first:");
-    lines.push(paint(color, "cyan", `  fkanban add my-first-card --title "My first card"`));
+    lines.push(paint(color, "cyan", `  ${invocation} add my-first-card --title "My first card"`));
     lines.push("");
     lines.push(
       paint(
         color,
         "dim",
-        "(then `fkanban list` to see it, or `fkanban mcp` to drive the board from an agent)",
+        `(then \`${invocation} list\` to see it, or \`${invocation} mcp\` to drive the board from an agent)`,
       ),
     );
     return lines.join("\n").replace(/\n+$/, "\n");
