@@ -13,6 +13,47 @@ import { type CardDetail } from "./show.ts";
 // Comfortably above a healthy active column; trims an unbounded `done`.
 export const DEFAULT_COLUMN_LIMIT = 12;
 
+// How many other-board names the multi-board footer enumerates inline before
+// collapsing the remainder to a `+K more` tail — keeps the hint a single line.
+export const OTHER_BOARDS_FOOTER_LIMIT = 5;
+
+// One-line footer pointing a dev at OTHER boards that hold live cards, so a
+// card created on a non-default board (e.g. `add x --board roadmap`) is
+// discoverable from the default `list` view instead of seeming to vanish.
+// Pure: derives counts from the already-fetched cross-board card set (no extra
+// node read) so it's unit-testable and `list.ts`'s only node read stays the
+// existing one. Returns "" (no footer) when no OTHER board has a live card —
+// a dev on a single board sees nothing. `cards` must already be the live
+// (non-tombstoned) set, as `listCards` returns. `viewedBoard` is the board
+// being rendered; its own cards are excluded. The other-board count is an
+// unfiltered live-card count (it ignores any --tag/--column/--assignee that
+// narrow the CURRENT view) — "these other boards have cards" is the useful
+// navigation signal, independent of the current filter.
+export function otherBoardsFooter(
+  cards: Card[],
+  viewedBoard: string,
+  invocation: string,
+): string {
+  const counts = new Map<string, number>();
+  for (const c of cards) {
+    if (c.board === viewedBoard) continue;
+    counts.set(c.board, (counts.get(c.board) ?? 0) + 1);
+  }
+  if (counts.size === 0) return "";
+
+  const boards = [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const n = boards.length;
+  const shown = boards.slice(0, OTHER_BOARDS_FOOTER_LIMIT);
+  const hidden = n - shown.length;
+  const list = shown.map(([slug, count]) => `${slug} (${count})`).join(", ");
+  const tail = hidden > 0 ? `, +${hidden} more` : "";
+  const noun = n === 1 ? "board has" : "boards have";
+  // `counts.size > 0` guarantees a first entry; the `?? ""` only satisfies the
+  // compiler's index-access check (noUncheckedIndexedAccess) and never fires.
+  const hintSlug = boards[0]?.[0] ?? "";
+  return `ℹ ${n} other ${noun} cards: ${list}${tail}. View with \`${invocation} list --board ${hintSlug}\`.`;
+}
+
 export type ListOptions = {
   cfg: Config;
   node: NodeClient;
@@ -123,7 +164,18 @@ export async function listResult(
     !opts.all && Number.isFinite(opts.limit) && (opts.limit as number) >= 0
       ? (opts.limit as number)
       : 0;
-  return { text: renderBoard(resolvedBoard, cards, renderOpts), cards: enriched, board: resolvedBoard, jsonLimit };
+  // Multi-board discoverability footer: if any OTHER board holds live cards,
+  // append a one-line hint so a card created on a non-default board (and thus
+  // absent from this view) is still discoverable. Text surface ONLY — the
+  // `cards`/`structuredContent` array is untouched (machine consumers reach
+  // every board via separate calls), and `listCmd` returns `text` only when
+  // `!--json`, so the footer is naturally suppressed under `--json`. Derived
+  // from the already-fetched `allCards` — no extra node read.
+  const footer = otherBoardsFooter(allCards, boardSlug, fkanbanInvocation());
+  const text = footer
+    ? `${renderBoard(resolvedBoard, cards, renderOpts)}\n${footer}\n`
+    : renderBoard(resolvedBoard, cards, renderOpts);
+  return { text, cards: enriched, board: resolvedBoard, jsonLimit };
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
