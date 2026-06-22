@@ -86,7 +86,9 @@ fkanban doctor        # confirms the shim is on PATH
 
 `install-cli` auto-picks a writable PATH directory (`/usr/local/bin`,
 `~/.local/bin`, or `~/bin`); pass an explicit one if you prefer
-(`bun run install-cli ~/bin`). Under the hood it just symlinks the bundled
+(`bun run install-cli ~/bin`). If the directory you pass isn't on your
+PATH, it links the shims anyway but tells you so (and prints the exact
+`export PATH=…` line to add) rather than falsely claiming success. Under the hood it just symlinks the bundled
 `bin/fkanban` wrapper (a tiny `bun run src/cli.ts "$@"` script, plus a matching
 `fkanban-mcp` one) — so it's fully local and reversible, nothing is published to
 a registry, and the `rm …` line it prints removes it. Without the shim, run the
