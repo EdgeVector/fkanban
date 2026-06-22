@@ -1,7 +1,7 @@
 // Render a kanban board to the terminal: one section per column, cards
 // listed under their column in position order.
 
-import { DEFAULT_COLUMNS } from "./schemas.ts";
+import { DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "./schemas.ts";
 import { sortCards, type Board, type Card, type DepStatus } from "./record.ts";
 
 export type RenderOptions = {
@@ -79,14 +79,22 @@ export function renderBoard(
   // normally.
   if (!opts.column && cards.length === 0) {
     const invocation = opts.invocation ?? "fkanban";
+    // On a non-default board, the hint must carry `--board <slug>` on both the
+    // `add` and the follow-up `list` so a dev who copy-pastes it literally
+    // lands their first card on the board they're VIEWING — not the default
+    // board (where a bare `add` resolves). Default board keeps the bare,
+    // byte-for-byte-unchanged form (no `--board` noise).
+    const boardFlag = board.slug !== DEFAULT_BOARD_SLUG ? ` --board ${board.slug}` : "";
     lines.push("No cards yet. Create your first:");
-    lines.push(paint(color, "cyan", `  ${invocation} add my-first-card --title "My first card"`));
+    lines.push(
+      paint(color, "cyan", `  ${invocation} add my-first-card --title "My first card"${boardFlag}`),
+    );
     lines.push("");
     lines.push(
       paint(
         color,
         "dim",
-        `(then \`${invocation} list\` to see it, or \`${invocation} mcp\` to drive the board from an agent)`,
+        `(then \`${invocation} list${boardFlag}\` to see it, or \`${invocation} mcp\` to drive the board from an agent)`,
       ),
     );
     return lines.join("\n").replace(/\n+$/, "\n");
