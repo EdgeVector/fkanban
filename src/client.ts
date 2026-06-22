@@ -125,11 +125,15 @@ export type NodeClient = {
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
-  // Which transport node requests take RIGHT NOW: `socket` when a control socket
-  // was threaded in and the file currently exists (socket-first is live, TCP is
-  // fallback-only), else `tcp`. `socketPath` echoes the path consulted (so
-  // `fkanban doctor` can name it). Re-evaluates `existsSync` on each call so a
-  // socket that appears/vanishes between calls is reported accurately.
+  // Which transport node DATA-PLANE requests take RIGHT NOW: `socket` when a
+  // control socket was threaded in and the file currently exists (socket-first
+  // is live for `/api/query`+`/api/mutation`, TCP is fallback-only), else `tcp`.
+  // Reports `socket` whenever the socket exists because it IS the live
+  // data-plane transport (and the doctor "transport" line should say so) — even
+  // though system/identity/schema routes always use TCP (the fold#1004 socket
+  // is data-plane-only and 404s them). `socketPath` echoes the path consulted
+  // (so `fkanban doctor` can name it). Re-evaluates `existsSync` on each call so
+  // a socket that appears/vanishes between calls is reported accurately.
   nodeTransport(): { transport: "socket" | "tcp"; socketPath?: string };
 };
 
@@ -654,6 +658,15 @@ function isConnectError(err: unknown): boolean {
   );
 }
 
+// The node routes the fold#1004-discovered Unix socket actually serves. The
+// socket is a *data-plane* socket: only `/api/query` + `/api/mutation` exist on
+// it; every system/identity/schema route 404s. Socket-first is therefore
+// restricted to this allowlist (default-deny) so doctor's reachability probe
+// and init's bootstrap/schema-load never hit a false 404 over the socket — they
+// go TCP, where those routes live. Card ops (`fkanban list/add/move`) are pure
+// `/api/query`+`/api/mutation`, so they still get the socket fast-path.
+const SOCKET_DATA_PLANE_PATHS = ["/api/query", "/api/mutation"];
+
 async function verboseFetch(opts: {
   baseUrl: string;
   path: string;
@@ -664,10 +677,13 @@ async function verboseFetch(opts: {
   headers: Record<string, string>;
   timeoutMs?: number;
   // The node's Unix-domain socket. When set AND the service is `node` AND the
-  // socket file exists, the request goes over the UDS (socket-first, mirroring
-  // fold#1004's transport discovery) with a single automatic fall-back to TCP
-  // `baseUrl` if the socket connect fails. NEVER consulted for `service: schema`
-  // — the schema service is the remote HTTPS Lambda, which has no local socket.
+  // path is a DATA-PLANE route (`/api/query`/`/api/mutation` — the only routes
+  // the fold#1004 socket serves) AND the socket file exists, the request goes
+  // over the UDS (socket-first, mirroring fold#1004's transport discovery) with
+  // a single automatic fall-back to TCP `baseUrl` if the socket connect fails.
+  // System/identity/schema routes always go TCP (the socket 404s them). NEVER
+  // consulted for `service: schema` — the schema service is the remote HTTPS
+  // Lambda, which has no local socket.
   socketPath?: string;
 }): Promise<BoundedResponse> {
   const tcpUrl = `${opts.baseUrl}${opts.path}`;
@@ -682,13 +698,22 @@ async function verboseFetch(opts: {
         : JSON.stringify(opts.body);
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
 
-  // Socket-first selection. Only `service: node` is ever a candidate for the
-  // UDS — and only when a socketPath was threaded in and the file actually
-  // exists (so a node without a socket, or the schema service, transparently
-  // uses TCP). Bun's UDS fetch keeps the URL as `http://localhost<path>` and
-  // routes the connection over `{ unix: socketPath }`.
+  // Socket-first selection — DATA-PLANE ROUTES ONLY. The fold#1004-discovered
+  // node socket (`~/.folddb/data/folddb.sock`) is a *data-plane* socket: it
+  // serves `/api/query` + `/api/mutation` (card reads/writes) but 404s every
+  // SYSTEM/identity/schema route (`/api/system/*`, `/api/setup/*`,
+  // `/api/schemas`, `/api/schemas/load`, `/api/health`). Those 404s are genuine
+  // answers, so `isConnectError` correctly does NOT fall back to TCP — which is
+  // why a system route mistakenly sent over the socket would surface a false
+  // "node unreachable". So we use the socket ONLY for the data-plane routes it
+  // actually serves; everything else (default-deny) goes TCP. Beyond the path
+  // allowlist the usual guards apply: only `service: node`, only when a
+  // socketPath was threaded in and the file exists (a node without a socket, or
+  // the schema service, transparently uses TCP). Bun's UDS fetch keeps the URL
+  // as `http://localhost<path>` and routes the connection over `{ unix }`.
   const useSocket =
     opts.service === "node" &&
+    SOCKET_DATA_PLANE_PATHS.includes(opts.path) &&
     opts.socketPath !== undefined &&
     opts.socketPath.length > 0 &&
     existsSync(opts.socketPath);

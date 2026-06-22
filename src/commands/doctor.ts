@@ -75,11 +75,16 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
 
   const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
 
-  // Which transport the node data-plane probes will take. Socket-first is live
-  // when the control socket exists; otherwise requests go over loopback TCP.
-  // Informational only — never flips `ok`; it just lets a user confirm
-  // socket-first is active (or see why it fell back to TCP). Printed BEFORE the
-  // reachability probe so the transport is named even if that probe then fails.
+  // Which transport the node DATA-PLANE ops (`fkanban list/add/move`, i.e.
+  // `/api/query`+`/api/mutation`) take. Socket-first is live for those when the
+  // control socket exists; otherwise they go over loopback TCP. The reachability
+  // probe below hits a SYSTEM route (`/api/system/auto-identity`), which always
+  // goes TCP — the fold#1004-discovered socket is data-plane-only and 404s
+  // system/identity/schema routes, so socket-first deliberately excludes them.
+  // This line is informational only — never flips `ok`; it just lets a user
+  // confirm socket-first is active for the data plane (or see why it fell back
+  // to TCP). Printed BEFORE the reachability probe so the transport is named
+  // even if that probe then fails.
   const transport = node.nodeTransport();
   if (transport.transport === "socket") {
     const detail = `Unix socket — ${transport.socketPath} (TCP ${cfg.nodeUrl} is fallback)`;
