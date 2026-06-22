@@ -35,7 +35,7 @@ import {
   type Card,
 } from "../src/record.ts";
 import { FkanbanError, type NodeClient, type QueryResponse, type QueryRow } from "../src/client.ts";
-import { listCmd, type ListOptions } from "../src/commands/list.ts";
+import { listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
 import { type Config } from "../src/config.ts";
 import {
   formatAdd,
@@ -1018,6 +1018,153 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
       "t2",
       "t3",
     ]);
+  });
+});
+
+describe("otherBoardsFooter (multi-board discoverability hint)", () => {
+  test("names each OTHER board with its live-card count, sorted by slug", () => {
+    const cards = [
+      card({ slug: "x", board: "roadmap" }),
+      card({ slug: "y", board: "roadmap" }),
+      card({ slug: "z", board: "roadmap" }),
+      card({ slug: "b1", board: "bugs" }),
+      card({ slug: "d1", board: "default" }), // current board — excluded
+    ];
+    const out = otherBoardsFooter(cards, "default", "fkanban");
+    expect(out).toBe(
+      "ℹ 2 other boards have cards: bugs (1), roadmap (3). View with `fkanban list --board bugs`.",
+    );
+  });
+
+  test("singular grammar + count for a single other board", () => {
+    const cards = [card({ slug: "x", board: "roadmap" }), card({ slug: "d1", board: "default" })];
+    expect(otherBoardsFooter(cards, "default", "fkanban")).toBe(
+      "ℹ 1 other board has cards: roadmap (1). View with `fkanban list --board roadmap`.",
+    );
+  });
+
+  test("empty string (no footer) when no OTHER board holds a live card", () => {
+    const cards = [card({ slug: "a", board: "default" }), card({ slug: "b", board: "default" })];
+    expect(otherBoardsFooter(cards, "default", "fkanban")).toBe("");
+    expect(otherBoardsFooter([], "default", "fkanban")).toBe("");
+  });
+
+  test("excludes the board being viewed (works for a non-default --board too)", () => {
+    const cards = [
+      card({ slug: "r1", board: "roadmap" }),
+      card({ slug: "d1", board: "default" }),
+      card({ slug: "d2", board: "default" }),
+    ];
+    // Viewing `roadmap` → only `default` is "other".
+    expect(otherBoardsFooter(cards, "roadmap", "fkanban")).toBe(
+      "ℹ 1 other board has cards: default (2). View with `fkanban list --board default`.",
+    );
+  });
+
+  test("caps the enumerated boards and collapses the rest to +K more (one line)", () => {
+    const cards = ["b1", "b2", "b3", "b4", "b5", "b6", "b7"].map((b) =>
+      card({ slug: `c-${b}`, board: b }),
+    );
+    const out = otherBoardsFooter(cards, "default", "fkanban");
+    // First 5 enumerated, remaining 2 collapsed.
+    expect(out).toContain("b1 (1), b2 (1), b3 (1), b4 (1), b5 (1), +2 more.");
+    expect(out).not.toContain("b6 (1)");
+    expect(out.split("\n")).toHaveLength(1);
+  });
+
+  test("uses the injected invocation prefix in the copy-paste hint", () => {
+    const cards = [card({ slug: "x", board: "roadmap" })];
+    expect(otherBoardsFooter(cards, "default", "bun run src/cli.ts")).toContain(
+      "View with `bun run src/cli.ts list --board roadmap`.",
+    );
+  });
+});
+
+describe("listCmd multi-board footer", () => {
+  function cardRow(c: Card): QueryRow {
+    return {
+      fields: {
+        slug: c.slug,
+        title: c.title,
+        body: c.body,
+        board: c.board,
+        column: c.column,
+        position: c.position,
+        assignee: c.assignee,
+        tags: c.tags,
+        created_at: c.created_at,
+        updated_at: c.updated_at,
+      },
+    } as unknown as QueryRow;
+  }
+
+  function populatedNode(cards: Card[]): NodeClient {
+    const empty: QueryResponse = { ok: true, results: [] };
+    return {
+      baseUrl: "http://stub",
+      userHash: "stub",
+      autoIdentity: async () => ({ provisioned: true, userHash: "stub" }),
+      bootstrap: async () => ({ userHash: "stub" }),
+      loadSchemas: async () => ({ available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] }),
+      listSchemas: async () => [],
+      createRecord: async () => {},
+      updateRecord: async () => {},
+      deleteRecord: async () => {},
+      queryAll: async (q: { schemaHash: string }): Promise<QueryResponse> =>
+        q.schemaHash === "cardhash" ? { ok: true, results: cards.map(cardRow) } : empty,
+      rawCall: async () => ({ status: 200, body: "" }),
+    } as unknown as NodeClient;
+  }
+
+  const cfg: Config = {
+    configVersion: 1,
+    nodeUrl: "http://stub",
+    schemaServiceUrl: "http://stub",
+    userHash: "stub",
+    schemaHashes: { card: "cardhash", board: "boardhash" },
+  };
+
+  const multiBoard = [
+    card({ slug: "d1", board: "default", column: "todo" }),
+    card({ slug: "r1", board: "roadmap", column: "todo" }),
+    card({ slug: "r2", board: "roadmap", column: "doing" }),
+    card({ slug: "b1", board: "bugs", column: "todo" }),
+  ];
+
+  test("default list surfaces the footer naming OTHER boards + counts", async () => {
+    const out = await listCmd({ cfg, node: populatedNode(multiBoard) });
+    expect(out).toContain("ℹ 2 other boards have cards: bugs (1), roadmap (2).");
+  });
+
+  test("no footer when only the viewed board has cards", async () => {
+    const only = [card({ slug: "d1", board: "default" }), card({ slug: "d2", board: "default" })];
+    const out = await listCmd({ cfg, node: populatedNode(only) });
+    expect(out).not.toContain("other board");
+  });
+
+  test("--json never carries the footer (machine surface untouched)", async () => {
+    const out = await listCmd({ cfg, node: populatedNode(multiBoard), json: true });
+    expect(out).not.toContain("other board");
+    // And the JSON array is exactly the viewed board's cards.
+    expect((JSON.parse(out) as Card[]).map((c) => c.slug).sort()).toEqual(["d1"]);
+  });
+
+  test("tombstoned other-board cards are excluded from the count", async () => {
+    const withDeleted = [
+      card({ slug: "d1", board: "default" }),
+      card({ slug: "r1", board: "roadmap" }),
+      card({ slug: "r-gone", board: "roadmap", tags: [TOMBSTONE_TAG] }),
+    ];
+    const out = await listCmd({ cfg, node: populatedNode(withDeleted) });
+    // listCards drops the tombstoned card → roadmap counts 1, not 2.
+    expect(out).toContain("ℹ 1 other board has cards: roadmap (1).");
+  });
+
+  test("a current-board filter (--tag) does not suppress the other-board count", async () => {
+    // The current view is filtered to nothing on `default`, but other boards
+    // still hold cards — the footer reflects an unfiltered other-board count.
+    const out = await listCmd({ cfg, node: populatedNode(multiBoard), tag: "nonexistent-xyz" });
+    expect(out).toContain("ℹ 2 other boards have cards: bugs (1), roadmap (2).");
   });
 });
 
