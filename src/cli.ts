@@ -91,9 +91,16 @@ Usage:
 
 Options:
   --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1:9001)
-  --schema-service-url <url>  schema service to resolve fkanban schemas from
+  --schema-service-url <url>  schema_service URL recorded in config for diagnostics
+                              (the NODE loads schemas, not the CLI — see below)
   --node-socket-path <path>   unix socket of the node, instead of --node-url
   --name <name>               display name to seed the default board with
+
+Schema loading is performed by the NODE: it pulls the published fkanban/*
+schemas from its own configured schema_service. The CLI never contacts
+--schema-service-url; that URL is only recorded in ~/.fkanban/config.json
+for diagnostics (it shows up in \`fkanban doctor\`). If init fails with
+schemas_not_published, fix it node-side — see that error's hint.
 
 Example:
   fkanban init --node-url http://127.0.0.1:9001 --name "Tom's board"`),

@@ -132,12 +132,16 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       code: "schemas_not_published",
       message: `These fkanban schemas are not registered in the schema service: ${missing.join(", ")}.`,
       hint:
-        `This schema_service (${schemaServiceUrl}) doesn't have the fkanban/* schemas. ` +
-        "They're already published on the default prod schema_service, so most people who hit this " +
-        "pointed --schema-service-url (or a saved config) at a different service.\n" +
-        "Fix: re-run `fkanban init` WITHOUT --schema-service-url (uses the default where fkanban/* lives), " +
-        "or point it at a service where fkanban/* is published. " +
-        "If you also overrode it in ~/.fkanban/config.json, clear it there too.\n" +
+        "The NODE loads schemas from its OWN configured schema_service (via " +
+        "/api/schemas/load) — the CLI's --schema-service-url flag does NOT drive " +
+        "this and changing it won't fix the failure. The schema_service the node " +
+        "uses just doesn't have the fkanban/* schemas published yet.\n" +
+        "Fix (node-side): publish fkanban/* to the schema_service the node is " +
+        "configured to use, or point the node at a schema_service where fkanban/* " +
+        "already lives, then re-run `fkanban init`. The fkanban/* schemas are " +
+        "already published on the default prod schema_service.\n" +
+        `(For reference, the schema_service URL recorded in config is ${schemaServiceUrl}; ` +
+        "it's informational/diagnostic only — the node, not the CLI, decides where schemas load from.)\n" +
         "\n" +
         "Maintainer only — standing the schemas up on a *new* schema_service:\n" +
         "  Publish fkanban/* via the exemem app-creation flow, then re-run `fkanban init`.\n" +

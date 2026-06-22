@@ -109,7 +109,10 @@ bun run install-cli   # one-time: put fkanban on PATH (see "Install the global s
 # (the form is picked for you based on whether the `fkanban` shim is on PATH).
 fkanban init
 
-# …or point at an ephemeral dev node + the dev schema service:
+# …or point at an ephemeral dev node. The NODE loads schemas from its own
+# configured schema_service; the CLI's --schema-service-url is recorded in
+# config for diagnostics only (it shows in `fkanban doctor`) and does NOT
+# change where schemas load from.
 fkanban init \
   --node-url http://127.0.0.1:9105 \
   --schema-service-url https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com
@@ -123,9 +126,12 @@ fkanban list
 (Haven't installed the shim? Every `fkanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
-If `init` reports `schemas_not_published`, the one-time
+If `init` reports `schemas_not_published`, the **node's** configured
+schema_service doesn't have the `fkanban/*` schemas — the node, not the CLI,
+loads schemas (`--schema-service-url` is diagnostic-only and won't fix it). The
+one-time
 [Republishing the schemas](#republishing-the-schemas-maintainers--one-time)
-maintainer step hasn't run against that schema service yet.
+maintainer step hasn't run against the schema_service the node uses yet.
 
 ```
 Default board  (default)
