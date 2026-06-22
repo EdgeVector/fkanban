@@ -71,7 +71,8 @@ Global flags:
   --version, -V        print the fkanban version and exit
 
 Dependencies: a card with deps is 🔒 blocked until each dep card reaches its
-board's final column. \`move\` into doing/review/done refuses a blocked card unless --force.
+board's final column. \`move\`/\`add\` into doing/review/done — or the board's own
+final column — refuses a blocked card unless --force.
 
 Columns (default board): backlog → todo → doing → review → done`;
 

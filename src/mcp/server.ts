@@ -37,7 +37,7 @@ export const FKANBAN_MCP_INSTRUCTIONS = [
   "backlog → todo → doing → review → done.",
   "",
   "Blocking: a card with an unfinished dependency cannot enter doing/review/done",
-  "unless `force:true` is passed.",
+  "(or its board's final column) unless `force:true` is passed.",
   "",
   "Token economy (read this before fetching): fkanban_list and fkanban_search default-cap",
   "structuredContent.cards to 20 (the `total`/`truncated` fields signal there are more —",
@@ -363,7 +363,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add or update a card",
       description:
-        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. A card blocked by an unfinished dependency cannot be placed in doing/review/done unless `force` is set.",
+        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. A card blocked by an unfinished dependency cannot be placed in doing/review/done (or its board's final column) unless `force` is set.",
       annotations: { title: "Add or update a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Stable card id (lowercase [a-z0-9-_])."),
@@ -414,7 +414,7 @@ export function createFkanbanMcpServer(
     {
       title: "Move a card",
       description:
-        "Move a card to a different column on its board. A card blocked by an unfinished dependency cannot move into doing/review/done unless `force` is set.",
+        "Move a card to a different column on its board. A card blocked by an unfinished dependency cannot move into doing/review/done (or its board's final column) unless `force` is set.",
       annotations: { title: "Move a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Card slug."),

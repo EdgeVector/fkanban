@@ -5,13 +5,15 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  blockedByHint,
+  blockedByMessage,
   boardTerminalMap,
   cardToFields,
   depStatus,
   ensureColumn,
   findBoard,
   findCard,
-  isWorkingColumn,
+  isDepEnforcedColumn,
   listBoards,
   listCardStatuses,
   nowIso,
@@ -39,21 +41,24 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   const columns = board?.columns ?? [];
   ensureColumn(opts.column, columns);
 
-  // Soft-block: refuse to start a card (move into doing/review/done) while any
-  // dependency is unfinished, unless --force. Backlog/todo moves are always ok.
-  if (!opts.force && isWorkingColumn(opts.column)) {
-    // Resolve dep done-ness against each dep board's terminal column (deps may
-    // live on other boards), falling back to `done` for unresolvable boards.
+  // Soft-block: refuse to complete/start a card while any dependency is
+  // unfinished, unless --force. Backlog/todo (intake) moves are always ok. The
+  // gated set is the default working columns (doing/review/done) PLUS the card's
+  // own board's terminal column — so on a custom board a blocked card still
+  // can't be moved into its completion column. Resolve dep done-ness, and the
+  // gating column, against each board's terminal column (deps may live on other
+  // boards), falling back to `done` for unresolvable boards.
+  if (!opts.force) {
     const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
-    const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg), boardTerminal);
-    if (status.blocked) {
-      throw new FkanbanError({
-        code: "card_blocked",
-        message: `Card "${card.slug}" is blocked by ${status.blockedBy
-          .map((d) => `"${d}"`)
-          .join(", ")} (not yet done).`,
-        hint: `Move ${status.blockedBy.length > 1 ? "those" : "it"} to \`done\` first, or pass --force to override.`,
-      });
+    if (isDepEnforcedColumn(opts.column, card.board, boardTerminal)) {
+      const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg), boardTerminal);
+      if (status.blocked) {
+        throw new FkanbanError({
+          code: "card_blocked",
+          message: blockedByMessage(card.slug, status.blockedBy),
+          hint: blockedByHint(),
+        });
+      }
     }
   }
 
