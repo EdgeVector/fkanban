@@ -82,6 +82,60 @@ function defaultTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
 }
 
+// Transient backpressure (HTTP 503 "node is busy") is self-resolving: a busy
+// node sheds load and *rejects* the request (so it was never applied) while
+// literally telling you to retry. fkanban retries such a 503 a bounded number
+// of times with backoff before surfacing an accurate "overloaded, re-run"
+// error. Retry is safe for both reads (pure) and writes (upserts keyed by
+// slug, and a rejected request can neither double-apply nor corrupt).
+const BUSY_RETRY_MAX = 3;
+// Exponential backoff schedule (ms) used when the node gives no explicit
+// "retry after Ns" hint. Index i is the wait BEFORE attempt i+1.
+const BUSY_BACKOFF_MS = [250, 500, 1000];
+// Cap on any single honored "retry after" hint, so a misbehaving hint can't
+// make a command hang. The per-request deadline still governs each attempt.
+const BUSY_RETRY_AFTER_CAP_MS = 5_000;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// True when a node response is transient backpressure we should retry: a 503
+// whose error/message clearly signals overload ("busy", "too many concurrent",
+// "overloaded", or a "retry after" directive). Deliberately conservative — only
+// clearly-transient signals retry. `node_not_provisioned` is a non-transient
+// 503 (the node isn't set up; retrying never helps) and is explicitly excluded.
+function isTransientBusy(status: number, body: unknown): boolean {
+  if (status !== 503) return false;
+  const errCode = bodyError(body);
+  if (errCode === "node_not_provisioned") return false;
+  const haystack = `${errCode ?? ""} ${bodyMessage(body) ?? ""}`.toLowerCase();
+  return (
+    haystack.includes("busy") ||
+    haystack.includes("too many concurrent") ||
+    haystack.includes("overloaded") ||
+    haystack.includes("retry after")
+  );
+}
+
+// If the node's message carries a "retry after Ns" directive, return that wait
+// in ms (capped). Otherwise null — the caller falls back to the backoff table.
+function retryAfterHintMs(body: unknown): number | null {
+  const text = `${bodyError(body) ?? ""} ${bodyMessage(body) ?? ""}`;
+  const m = text.match(/retry after\s+(\d+(?:\.\d+)?)\s*s/i);
+  if (!m) return null;
+  const secs = parseFloat(m[1]!);
+  if (!Number.isFinite(secs) || secs <= 0) return null;
+  return Math.min(secs * 1000, BUSY_RETRY_AFTER_CAP_MS);
+}
+
+// The wait before retry attempt `attempt` (1-based): honor the node's own
+// "retry after" hint when present (capped), else the exponential table, plus a
+// little jitter so concurrent clients don't re-stampede in lockstep.
+function busyBackoffMs(attempt: number, body: unknown): number {
+  const hinted = retryAfterHintMs(body);
+  const base = hinted ?? BUSY_BACKOFF_MS[Math.min(attempt - 1, BUSY_BACKOFF_MS.length - 1)]!;
+  return base + Math.floor(Math.random() * 100);
+}
+
 export type RegisteredSchema = {
   name: string;
   descriptive_name: string;
@@ -426,6 +480,25 @@ export function newNodeClient(opts: {
       // Stale in-memory session (node restarted) — re-pair once and retry.
       verbose("node: transport_not_attested — re-pairing owner session and retrying");
       await ensureAttested(true);
+      result = await doFetch();
+    }
+    // Transient backpressure (HTTP 503 "node is busy") is self-resolving: the
+    // node rejected the request (never applied it) and asked us to retry. Retry
+    // up to BUSY_RETRY_MAX times with bounded backoff — safe for reads (pure)
+    // and writes (slug-keyed upserts; a rejected request can't double-apply).
+    // `node_not_provisioned` 503s are excluded by `isTransientBusy` (retrying
+    // never helps), as are all non-503 mappings.
+    for (
+      let attempt = 1;
+      attempt <= BUSY_RETRY_MAX && isTransientBusy(result.status, result.body);
+      attempt++
+    ) {
+      const wait = busyBackoffMs(attempt, result.body);
+      verbose(
+        `node: transient 503 backpressure (${bodyError(result.body) ?? "busy"}) — ` +
+          `retry ${attempt}/${BUSY_RETRY_MAX} after ${wait}ms`,
+      );
+      await sleep(wait);
       result = await doFetch();
     }
     // Still rejected as un-attested after any re-pair: fkanban could not stand up
@@ -884,6 +957,18 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
       code: "node_not_provisioned",
       message: `Node not set up.`,
       hint: "Run `fkanban init` to bootstrap the node.",
+    });
+  }
+  // A transient-busy 503 that survived the in-client retries (callJson tried
+  // BUSY_RETRY_MAX times). The node is shedding load, not broken — say so
+  // accurately instead of the catch-all "looks like a node-side bug" hint.
+  if (isTransientBusy(status, body)) {
+    return new FkanbanError({
+      code: "node_overloaded",
+      message: `Node is overloaded right now (HTTP 503: ${msg ?? "too many concurrent reads"}).`,
+      hint:
+        `fkanban retried ${BUSY_RETRY_MAX} times; the node is shedding load, not broken — ` +
+        "re-run shortly, or raise FKANBAN_HTTP_TIMEOUT_MS.",
     });
   }
   if (status === 400 && (errCode === "unknown_fields" || msg?.includes("unknown"))) {
