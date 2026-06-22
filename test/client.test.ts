@@ -14,6 +14,12 @@ type SeenRequest = { path: string; body: unknown };
 
 const seen: SeenRequest[] = [];
 
+// Per-suite hit counters for the busy-503 retry routes. `/busy-twice` returns a
+// transient busy-503 on its first two query hits then 200; `/busy-always` always
+// returns a transient busy-503; `/busy-not-provisioned` always returns the
+// NON-transient node_not_provisioned 503 (must NOT be retried).
+const busyHits = { twice: 0, always: 0, notProvisioned: 0 };
+
 // Stub node: records every request; /api/query echoes one card row when a
 // HashKey filter matches, an empty page otherwise; /slow never answers in time.
 const server = Bun.serve({
@@ -40,6 +46,35 @@ const server = Bun.serve({
       return new Response(stream, {
         headers: { "Content-Type": "application/json" },
       });
+    }
+    // Transient backpressure that clears: busy-503 (with the node's own
+    // "retry after Ns" directive) on the first two hits, then a normal 200.
+    if (url.pathname === "/busy-twice/api/query") {
+      busyHits.twice += 1;
+      if (busyHits.twice <= 2) {
+        // A small "retry after" hint so the test exercises hint-honoring
+        // (capped at 5s in prod) without waiting real seconds.
+        return Response.json(
+          { error: "service_unavailable", message: "node is busy: too many concurrent reads; retry after 0.25s" },
+          { status: 503 },
+        );
+      }
+      return Response.json({ ok: true, results: [], has_more: false });
+    }
+    // A node that never clears: every hit is a transient busy-503. No explicit
+    // "retry after" hint here, so the client falls back to its bounded
+    // exponential backoff (250/500/1000ms) — fast enough for a unit test.
+    if (url.pathname === "/busy-always/api/query") {
+      busyHits.always += 1;
+      return Response.json(
+        { error: "service_unavailable", message: "node is busy: too many concurrent reads" },
+        { status: 503 },
+      );
+    }
+    // A NON-transient 503: node not set up. Must NOT be retried.
+    if (url.pathname === "/busy-not-provisioned/api/query") {
+      busyHits.notProvisioned += 1;
+      return Response.json({ error: "node_not_provisioned" }, { status: 503 });
     }
     if (url.pathname === "/api/query") {
       const filter = (body as Record<string, unknown>).filter as { HashKey?: string } | undefined;
@@ -258,5 +293,53 @@ describe("request deadline", () => {
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("service_timeout");
     expect((err as FkanbanError).hint).toContain("re-running the command is safe");
+  });
+});
+
+describe("transient busy-503 backpressure retry", () => {
+  test("rides through a busy-503 that clears: succeeds after retries", async () => {
+    busyHits.twice = 0;
+    const node = newNodeClient({ baseUrl: `${baseUrl}/busy-twice`, userHash: "test-user" });
+    const start = Date.now();
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+    expect(res.results).toEqual([]);
+    // Two busy rejections + one success = three hits.
+    expect(busyHits.twice).toBe(3);
+    // Backoff is bounded: two ~0.25s honored hints (+jitter) clear well under a
+    // generous ceiling. Proves the wait is finite, not that it's instant.
+    expect(Date.now() - start).toBeLessThan(4_000);
+  });
+
+  test("an always-busy node surfaces an accurate 'overloaded, re-run' error — NOT a 'node-side bug'", async () => {
+    busyHits.always = 0;
+    const node = newNodeClient({ baseUrl: `${baseUrl}/busy-always`, userHash: "test-user" });
+    const err = await node
+      .queryAll({ schemaHash: "cardhash", fields: ["slug"] })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FkanbanError);
+    const fe = err as FkanbanError;
+    expect(fe.code).toBe("node_overloaded");
+    expect(fe.message.toLowerCase()).toContain("overloaded");
+    expect(fe.hint).toContain("shedding load, not broken");
+    // The misleading legacy hint must be gone.
+    expect(`${fe.message} ${fe.hint ?? ""}`).not.toContain("node-side bug");
+    // It retried the bounded number of times: 1 initial + BUSY_RETRY_MAX(3) = 4.
+    expect(busyHits.always).toBe(4);
+  });
+
+  test("a node_not_provisioned 503 is NOT retried and still surfaces 'Run `fkanban init`'", async () => {
+    busyHits.notProvisioned = 0;
+    const node = newNodeClient({ baseUrl: `${baseUrl}/busy-not-provisioned`, userHash: "test-user" });
+    const err = await node
+      .queryAll({ schemaHash: "cardhash", fields: ["slug"] })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FkanbanError);
+    const fe = err as FkanbanError;
+    expect(fe.code).toBe("node_not_provisioned");
+    expect(fe.hint).toContain("fkanban init");
+    // Exactly one hit — no retry for the non-transient 503.
+    expect(busyHits.notProvisioned).toBe(1);
   });
 });
