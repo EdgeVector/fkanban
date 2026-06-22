@@ -7,13 +7,15 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  blockedByHint,
+  blockedByMessage,
   boardTerminalMap,
   cardToFields,
   depStatus,
   ensureColumn,
   findCard,
   forwardDepWarning,
-  isWorkingColumn,
+  isDepEnforcedColumn,
   listBoards,
   listCardStatuses,
   normalizeDeps,
@@ -100,34 +102,37 @@ async function prepareDeps(
   return cleaned;
 }
 
-// Soft-block: refuse to place a card into a working column (doing/review/done)
-// while any dependency is unfinished, unless --force. This mirrors `move`'s
-// guard byte-for-byte so `add` and `move` read identically — `add` is also a
-// column-changing command (create+update), so a blocked card must not slip
-// into a working column through it. Backlog/todo placements are always ok.
-// Throws BEFORE any write, so a blocked add leaves no partial state.
+// Soft-block: refuse to place a card into a dep-enforced column while any
+// dependency is unfinished, unless --force. This mirrors `move`'s guard so
+// `add` and `move` read identically — `add` is also a column-changing command
+// (create+update), so a blocked card must not slip into a completion column
+// through it. The gated set is the default working columns (doing/review/done)
+// PLUS the card's own board's terminal column, so a custom board is enforced
+// too. Backlog/todo (intake) placements are always ok. Throws BEFORE any write,
+// so a blocked add leaves no partial state.
 async function enforceDepBlock(
   opts: { cfg: Config; node: NodeClient; force?: boolean },
   slug: string,
+  boardSlug: string,
   column: string,
   deps: string[],
 ): Promise<void> {
-  if (opts.force || !isWorkingColumn(column)) return;
-  // Resolve dep done-ness against each dep board's terminal column (deps may
-  // live on other boards), falling back to `done` for unresolvable boards.
+  if (opts.force) return;
+  // Resolve dep done-ness, and the gating column, against each board's terminal
+  // column (deps may live on other boards), falling back to `done` for
+  // unresolvable boards.
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
+  if (!isDepEnforcedColumn(column, boardSlug, boardTerminal)) return;
   const status = depStatus(
-    { slug, deps } as Card,
+    { slug, board: boardSlug, deps } as Card,
     await listCardStatuses(opts.node, opts.cfg),
     boardTerminal,
   );
   if (status.blocked) {
     throw new FkanbanError({
       code: "card_blocked",
-      message: `Card "${slug}" is blocked by ${status.blockedBy
-        .map((d) => `"${d}"`)
-        .join(", ")} (not yet done).`,
-      hint: `Move ${status.blockedBy.length > 1 ? "those" : "it"} to \`done\` first, or pass --force to override.`,
+      message: blockedByMessage(slug, status.blockedBy),
+      hint: blockedByHint(),
     });
   }
 }
@@ -163,7 +168,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       updated_at: now,
     };
     if (opts.column) ensureColumn(updated.column, columns);
-    await enforceDepBlock(opts, opts.slug, updated.column, updated.deps);
+    await enforceDepBlock(opts, opts.slug, boardSlug, updated.column, updated.deps);
     await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
@@ -181,7 +186,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     created_at: now,
     updated_at: now,
   };
-  await enforceDepBlock(opts, opts.slug, card.column, card.deps);
+  await enforceDepBlock(opts, opts.slug, boardSlug, card.column, card.deps);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column };
 }

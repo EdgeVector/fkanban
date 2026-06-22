@@ -108,6 +108,19 @@ export function orphanedDependentsWarning(slug: string, dependents: string[]): s
   return `  warning: ${dependents.length} card(s) still depend on "${slug}": ${dependents.join(", ")} — their dependency is now dangling.`;
 }
 
+// The message + hint emitted when the dependency soft-block refuses a card.
+// Shared by `move` and `add` (CLI) so both — and the MCP surface, which voices
+// the same FkanbanError — stay identical. The hint no longer hardcodes the
+// literal word `done`: a dep is satisfied once it reaches ITS board's final
+// column, which may not be named `done` on a custom board.
+export function blockedByMessage(slug: string, blockedBy: string[]): string {
+  return `Card "${slug}" is blocked by ${blockedBy.map((d) => `"${d}"`).join(", ")} (not yet done).`;
+}
+
+export function blockedByHint(): string {
+  return "Finish its dependencies first (move them to their board's final column), or pass --force to override.";
+}
+
 // The columns at which dependencies actually gate work. A dependency is
 // satisfied only once its card reaches its board's final column (see
 // depStatus); entering one of these "started" columns while still blocked is
@@ -155,6 +168,24 @@ function terminalColumnFor(
   boardTerminal?: Map<string, string>,
 ): string {
   return boardTerminal?.get(boardSlug) ?? FALLBACK_TERMINAL_COLUMN;
+}
+
+// Whether moving a blocked card INTO `column` (on board `boardSlug`) is gated by
+// the dependency soft-block. A blocked card may not enter a column that is a
+// default-named working column (doing/review/done) OR that is `boardSlug`'s own
+// terminal column — so on a custom board (e.g. `spec,build,ship`) a blocked card
+// can't be *completed* into its terminal column (`ship`) without --force, even
+// though that board has none of the default working columns. The default board's
+// terminal column is `done`, which is already in WORKING_COLUMNS, so the gating
+// set is unchanged there. This intentionally does NOT gate intermediate custom
+// columns (e.g. `spec → build`) — that needs board-level intake metadata that
+// doesn't exist yet, and is tracked separately.
+export function isDepEnforcedColumn(
+  column: string,
+  boardSlug: string,
+  boardTerminal?: Map<string, string>,
+): boolean {
+  return isWorkingColumn(column) || column === terminalColumnFor(boardSlug, boardTerminal);
 }
 
 // Resolve a card's deps against the full set of live cards. A dependency is

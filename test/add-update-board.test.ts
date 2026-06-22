@@ -360,7 +360,9 @@ describe("add enforces the dependency soft-block into working columns", () => {
       const e = err as FkanbanError;
       expect(e.code).toBe("card_blocked");
       expect(e.message).toBe('Card "blk" is blocked by "dep" (not yet done).');
-      expect(e.hint).toBe("Move it to `done` first, or pass --force to override.");
+      expect(e.hint).toBe(
+        "Finish its dependencies first (move them to their board's final column), or pass --force to override.",
+      );
     }
   });
 
