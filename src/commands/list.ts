@@ -3,7 +3,7 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, boardTerminalMap, depStatus, ensureColumn, findBoard, listBoards, listCards, requireBoard, sortCards, type Card, type Board } from "../record.ts";
+import { blockedSlugSet, boardTerminalMap, depStatus, ensureColumn, findBoard, listBoards, listCards, listCardsForDisplay, requireBoard, sortCards, type Card, type Board } from "../record.ts";
 import { capPerColumn, renderBoard, type RenderOptions } from "../board.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
@@ -68,6 +68,13 @@ export type ListOptions = {
   // Per-column cap (defaults to DEFAULT_COLUMN_LIMIT). `all` removes the cap.
   limit?: number;
   all?: boolean;
+  // Fetch a body-free card set (CARD_DISPLAY_FIELDS) instead of full bodies.
+  // The text board render + filters never read `body`, so the CLI text path sets
+  // this to avoid dragging every card's multi-paragraph spec over the wire. Left
+  // unset (full bodies) by the `--json` CLI path and the MCP tool, which DO
+  // surface bodies (the MCP previews/inlines them). The returned `cards` array
+  // then carries empty `body` strings — safe only when no caller reads them.
+  displayOnly?: boolean;
 };
 
 // Both the human text and the structured (`--json`) payload, built from a
@@ -117,7 +124,12 @@ export async function listResult(
   // path is unchanged.
   if (opts.column !== undefined) ensureColumn(opts.column, resolvedBoard.columns);
 
-  const allCards = await listCards(opts.node, opts.cfg);
+  // Body-free fetch on the text path (`displayOnly`): the render + filters +
+  // dep/blocked fan-out only need CARD_DISPLAY_FIELDS, never `body`. The
+  // `--json` and MCP callers leave `displayOnly` unset so they keep full bodies.
+  const allCards = opts.displayOnly
+    ? await listCardsForDisplay(opts.node, opts.cfg)
+    : await listCards(opts.node, opts.cfg);
   // Terminal column per board (board slug → last column) so a dep counts as
   // done at its OWN board's final column, not only a literal `done`. Resolved
   // against ALL boards because blocked status spans cross-board deps below.
@@ -179,7 +191,10 @@ export async function listResult(
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
-  const { text, cards, board, jsonLimit } = await listResult(opts);
+  // The text path never renders card bodies, so fetch the body-free display set
+  // (unless `--json`, which serializes full bodies). `displayOnly` is a property
+  // of THIS render request, so set it here rather than burdening every caller.
+  const { text, cards, board, jsonLimit } = await listResult({ ...opts, displayOnly: !opts.json });
   if (!opts.json) return text;
   // Honor an explicit `--limit` on the machine-readable surface too: cap each
   // column to the same cards the text view shows. No explicit limit (jsonLimit

@@ -370,6 +370,25 @@ export async function listCardStatuses(node: NodeClient, cfg: Config): Promise<C
   return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
 }
 
+// Fields the TEXT board render (`renderBoard`) + its filters actually display:
+// everything in CARD_STATUS_FIELDS plus the human-visible `title` and the
+// `assignee` filter target. Crucially this OMITS the heavy multi-paragraph
+// `body`, which the text list path never renders — so a one-screen `fkanban list`
+// no longer drags every card's full spec over the wire (the first thing to time
+// out when the node is busy). `--json`/`search`/MCP still use the full-body
+// `listCards` because they genuinely surface bodies.
+export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "assignee", "created_at"];
+
+// Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields
+// (notably `body`) come back as "" on the Card. Enough for the text board render,
+// the board/column/tag/assignee filters, and the dep/blocked fan-out — but NOT
+// for any path that must show a card's body. Mirrors listCardStatuses.
+export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promise<Card[]> {
+  const hash = schemaHashFor("card", cfg);
+  const res = await node.queryAll({ schemaHash: hash, fields: CARD_DISPLAY_FIELDS });
+  return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
+}
+
 // Point read by slug — the node resolves a HashKey filter as an indexed key
 // lookup, so this never scans the board.
 export async function findCard(node: NodeClient, cfg: Config, slug: string): Promise<Card | null> {

@@ -7,6 +7,7 @@ import {
   findBoard,
   listBoards,
   listCards,
+  listCardsForDisplay,
   nowIso,
   TOMBSTONE_TAG,
   validateSlug,
@@ -68,18 +69,56 @@ export async function boardCreateCmd(opts: {
   return { slug: board.slug, action: "created" };
 }
 
-// Both the human text and the structured board list, from a single read.
-// `boardListCmd` (CLI) returns one; the MCP tool returns both.
+// A board enriched with its live-card count. `cardCount` is the number of
+// non-tombstoned cards on the board; it is `null` when the (low-frequency) count
+// scan couldn't run (the node sheds full scans under load) — `board list` still
+// renders the boards in that case, just without counts. The field is additive,
+// so existing `Board[]` `--json` consumers keep working.
+export type BoardWithCount = Board & { cardCount: number | null };
+
+// Pluralized "(N cards)" suffix; "(empty)" for a board with no live cards.
+function cardCountLabel(count: number): string {
+  if (count === 0) return "(empty)";
+  return `(${count} card${count === 1 ? "" : "s"})`;
+}
+
+// Both the human text and the structured board list, from a single read (plus a
+// single cross-board card scan for the per-board live-card counts). `boardListCmd`
+// (CLI) returns one; the MCP tool returns both.
 export async function boardListResult(opts: {
   cfg: Config;
   node: NodeClient;
-}): Promise<{ text: string; boards: Board[] }> {
-  const boards = await listBoards(opts.node, opts.cfg);
+}): Promise<{ text: string; boards: BoardWithCount[] }> {
+  const boardList = await listBoards(opts.node, opts.cfg);
+  // Per-board live-card count, from a single body-free cross-board scan. The
+  // node can shed a full scan when it's loaded, and `board list` never needed
+  // one before — so DEGRADE GRACEFULLY: if the scan fails, fall back to a
+  // count-less board list (cardCount=null) rather than failing the command.
+  let countByBoard: Map<string, number> | null = null;
+  try {
+    const allCards = await listCardsForDisplay(opts.node, opts.cfg);
+    countByBoard = new Map<string, number>();
+    for (const c of allCards) {
+      countByBoard.set(c.board, (countByBoard.get(c.board) ?? 0) + 1);
+    }
+  } catch {
+    // Leave countByBoard null → render/serialize without counts.
+    countByBoard = null;
+  }
+
+  const boards: BoardWithCount[] = boardList.map((b) => ({
+    ...b,
+    cardCount: countByBoard ? countByBoard.get(b.slug) ?? 0 : null,
+  }));
+
   const text =
     boards.length === 0
       ? "No boards. Run `fkanban init` to seed the default board."
       : boards
-          .map((b) => `${b.slug.padEnd(20)} ${b.title}\n  columns: ${b.columns.join(" → ")}`)
+          .map((b) => {
+            const suffix = b.cardCount === null ? "" : `  ${cardCountLabel(b.cardCount)}`;
+            return `${b.slug.padEnd(20)} ${b.title}${suffix}\n  columns: ${b.columns.join(" → ")}`;
+          })
           .join("\n");
   return { text, boards };
 }

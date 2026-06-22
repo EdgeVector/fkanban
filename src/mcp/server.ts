@@ -662,7 +662,20 @@ export function createFkanbanMcpServer(
       description: "List every board with its columns.",
       annotations: { title: "List boards", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
-      outputSchema: { boards: z.array(boardSchema).describe("Every live board with its columns.") },
+      outputSchema: {
+        boards: z
+          .array(
+            boardSchema.extend({
+              cardCount: z
+                .number()
+                .nullable()
+                .describe(
+                  "Live (non-tombstoned) card count for this board, or null if the count scan couldn't run (node shed the scan under load).",
+                ),
+            }),
+          )
+          .describe("Every live board with its columns and live-card count."),
+      },
     },
     async () => {
       try {
