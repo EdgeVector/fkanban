@@ -3,7 +3,7 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, depStatus, ensureColumn, findBoard, listCards, requireBoard, sortCards, type Card, type Board } from "../record.ts";
+import { blockedSlugSet, boardTerminalMap, depStatus, ensureColumn, findBoard, listBoards, listCards, requireBoard, sortCards, type Card, type Board } from "../record.ts";
 import { capPerColumn, renderBoard, type RenderOptions } from "../board.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
@@ -77,6 +77,10 @@ export async function listResult(
   if (opts.column !== undefined) ensureColumn(opts.column, resolvedBoard.columns);
 
   const allCards = await listCards(opts.node, opts.cfg);
+  // Terminal column per board (board slug → last column) so a dep counts as
+  // done at its OWN board's final column, not only a literal `done`. Resolved
+  // against ALL boards because blocked status spans cross-board deps below.
+  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
   const cards = sortCards(
     allCards.filter(
       (c) =>
@@ -101,7 +105,7 @@ export async function listResult(
   // (the fresh-clone default). Mirrors how init injects its Next-steps
   // invocation (PR #69); board.ts stays pure and defaults to bare `fkanban`.
   const renderOpts: RenderOptions = {
-    blocked: blockedSlugSet(cards, allCards),
+    blocked: blockedSlugSet(cards, allCards, boardTerminal),
     limit,
     invocation: fkanbanInvocation(),
   };
@@ -109,7 +113,7 @@ export async function listResult(
   // Enrich each filtered card with its dependency status (resolved against ALL
   // live cards so cross-board deps count), matching show's CardDetail shape.
   const enriched: CardDetail[] = cards.map((c) => {
-    const status = depStatus(c, allCards);
+    const status = depStatus(c, allCards, boardTerminal);
     return { ...c, blocked: status.blocked, blockedBy: status.blockedBy, missingDeps: status.missing };
   });
   // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`
