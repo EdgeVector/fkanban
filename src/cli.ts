@@ -258,7 +258,14 @@ Usage:
   fkanban mcp
 
 Exposes the board to MCP clients (e.g. Claude). Speaks JSON-RPC on
-stdin/stdout; not meant to be run interactively.`),
+stdin/stdout; not meant to be run interactively.
+
+Register with Claude Code (the \`--\` separates \`claude mcp add\` flags from
+the command):
+  claude mcp add fkanban -- fkanban mcp
+
+Run \`fkanban doctor\` to print the exact \`claude mcp add\` line for your setup
+(it resolves the shim-on-PATH vs bun-entrypoint form automatically).`),
 
   version: withFooter(`fkanban version — print the fkanban version and exit
 
