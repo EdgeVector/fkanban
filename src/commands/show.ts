@@ -2,7 +2,14 @@
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { depStatus, findCard, listCardStatuses, type Card } from "../record.ts";
+import {
+  boardTerminalMap,
+  depStatus,
+  findCard,
+  listBoards,
+  listCardStatuses,
+  type Card,
+} from "../record.ts";
 import { renderCardDetail } from "../board.ts";
 
 // A card plus its resolved dependency status — the shape `show --json` emits.
@@ -23,7 +30,10 @@ export async function showResult(opts: {
   if (!card) {
     throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
   }
-  const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg));
+  // Resolve dep done-ness against each dep board's terminal column (a dep may
+  // live on a different board than this card), falling back to `done`.
+  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
+  const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg), boardTerminal);
   const detail: CardDetail = {
     ...card,
     blocked: status.blocked,

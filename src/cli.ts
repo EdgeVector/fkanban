@@ -69,8 +69,8 @@ Global flags:
   --help, -h           print this help
   --version, -V        print the fkanban version and exit
 
-Dependencies: a card with deps is 🔒 blocked until each dep card reaches
-\`done\`. \`move\` into doing/review/done refuses a blocked card unless --force.
+Dependencies: a card with deps is 🔒 blocked until each dep card reaches its
+board's final column. \`move\` into doing/review/done refuses a blocked card unless --force.
 
 Columns (default board): backlog → todo → doing → review → done`;
 
@@ -147,7 +147,7 @@ Usage:
 Options:
   --json                echo the write result as JSON
 
-A card with deps is 🔒 blocked until each dep card reaches \`done\`.
+A card with deps is 🔒 blocked until each dep card reaches its board's final column.
 Edges that would form a cycle (direct or transitive) are rejected (exit 2).
 
 Example:

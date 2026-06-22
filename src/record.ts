@@ -20,9 +20,9 @@ export type Card = {
   position: string;
   assignee: string;
   tags: string[];
-  // Slugs of cards this card depends on (it is "blocked" until each is in the
-  // `done` column). Stored on the wire as `dep:<slug>` entries in `tags` — see
-  // DEP_TAG_PREFIX — so dependencies needed no schema change / republish.
+  // Slugs of cards this card depends on (it is "blocked" until each reaches the
+  // final column of its own board). Stored on the wire as `dep:<slug>` entries
+  // in `tags` — see DEP_TAG_PREFIX — so deps needed no schema change / republish.
   deps: string[];
   created_at: string;
   updated_at: string;
@@ -109,8 +109,11 @@ export function orphanedDependentsWarning(slug: string, dependents: string[]): s
 }
 
 // The columns at which dependencies actually gate work. A dependency is
-// satisfied only once its card reaches `done`; entering one of these "started"
-// columns while still blocked is what `move` refuses (unless --force).
+// satisfied only once its card reaches its board's final column (see
+// depStatus); entering one of these "started" columns while still blocked is
+// what `move` refuses (unless --force). NOTE: this gate list is still the
+// default-board column names — generalizing which columns count as "working" on
+// an arbitrary board is tracked separately and intentionally out of scope here.
 export const WORKING_COLUMNS = ["doing", "review", "done"] as const;
 
 export function isWorkingColumn(column: string): boolean {
@@ -118,7 +121,8 @@ export function isWorkingColumn(column: string): boolean {
 }
 
 export type DepStatus = {
-  // Existing dep cards not yet in `done` — these block this card.
+  // Existing dep cards not yet in their board's terminal column — these block
+  // this card.
   blockedBy: string[];
   // Dep slugs with no live card (deleted or forward-referenced) — surfaced as a
   // warning, but they do NOT block (a dangling dep can never reach `done`).
@@ -126,8 +130,44 @@ export type DepStatus = {
   blocked: boolean;
 };
 
-// Resolve a card's deps against the full set of live cards.
-export function depStatus(card: Card, allCards: Card[]): DepStatus {
+// Fallback terminal column used when a dep's board can't be resolved (deleted
+// board, forward reference, or no board map supplied): the historical literal
+// `done`, so nothing regresses when the board context is unavailable.
+export const FALLBACK_TERMINAL_COLUMN = "done";
+
+// Map of board slug → that board's terminal (last) column. A dependency is
+// "done" once its card reaches this column on the dep card's OWN board, so a
+// board whose final column isn't named `done` (e.g. `spec,build,ship`) can
+// still unblock dependents. Built once per command from `listBoards`.
+export function boardTerminalMap(boards: Board[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const b of boards) {
+    const terminal = b.columns[b.columns.length - 1];
+    if (terminal) m.set(b.slug, terminal);
+  }
+  return m;
+}
+
+// The column at which a dep card on `boardSlug` counts as done: its board's
+// terminal column, or the literal `done` fallback when the board is unresolvable.
+function terminalColumnFor(
+  boardSlug: string,
+  boardTerminal?: Map<string, string>,
+): string {
+  return boardTerminal?.get(boardSlug) ?? FALLBACK_TERMINAL_COLUMN;
+}
+
+// Resolve a card's deps against the full set of live cards. A dependency is
+// satisfied once its dep card reaches the LAST column of the dep card's own
+// board (resolved via `boardTerminal`), not only the literal `done` — so a
+// board with a custom terminal column still unblocks its dependents. When
+// `boardTerminal` is omitted or a dep's board can't be resolved, falls back to
+// the literal `done` (preserving the default board's behavior exactly).
+export function depStatus(
+  card: Card,
+  allCards: Card[],
+  boardTerminal?: Map<string, string>,
+): DepStatus {
   const bySlug = new Map(allCards.map((c) => [c.slug, c]));
   const blockedBy: string[] = [];
   const missing: string[] = [];
@@ -135,7 +175,7 @@ export function depStatus(card: Card, allCards: Card[]): DepStatus {
     const d = bySlug.get(dep);
     if (!d) {
       missing.push(dep);
-    } else if (d.column !== "done") {
+    } else if (d.column !== terminalColumnFor(d.board, boardTerminal)) {
       blockedBy.push(dep);
     }
   }
@@ -179,10 +219,16 @@ export function wouldCreateCycle(
 }
 
 // Map of slug → blocked? across a set of cards, resolved against `allCards`.
-export function blockedSlugSet(cards: Card[], allCards: Card[]): Set<string> {
+// `boardTerminal` (board slug → terminal column) lets a dep on a custom board
+// count as done at that board's last column; omit it to fall back to `done`.
+export function blockedSlugSet(
+  cards: Card[],
+  allCards: Card[],
+  boardTerminal?: Map<string, string>,
+): Set<string> {
   const blocked = new Set<string>();
   for (const c of cards) {
-    if (depStatus(c, allCards).blocked) blocked.add(c.slug);
+    if (depStatus(c, allCards, boardTerminal).blocked) blocked.add(c.slug);
   }
   return blocked;
 }

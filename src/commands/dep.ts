@@ -1,6 +1,6 @@
 // `fkanban dep add|rm <slug> <dep-slug>` — manage one dependency edge on a
 // card without rewriting its whole dep list. A card with deps is "blocked"
-// until each dep card reaches the `done` column (see record.ts depStatus).
+// until each dep card reaches its board's final column (see record.ts depStatus).
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";

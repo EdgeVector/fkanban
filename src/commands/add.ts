@@ -7,12 +7,14 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  boardTerminalMap,
   cardToFields,
   depStatus,
   ensureColumn,
   findCard,
   forwardDepWarning,
   isWorkingColumn,
+  listBoards,
   listCardStatuses,
   normalizeDeps,
   nowIso,
@@ -111,7 +113,14 @@ async function enforceDepBlock(
   deps: string[],
 ): Promise<void> {
   if (opts.force || !isWorkingColumn(column)) return;
-  const status = depStatus({ slug, deps } as Card, await listCardStatuses(opts.node, opts.cfg));
+  // Resolve dep done-ness against each dep board's terminal column (deps may
+  // live on other boards), falling back to `done` for unresolvable boards.
+  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
+  const status = depStatus(
+    { slug, deps } as Card,
+    await listCardStatuses(opts.node, opts.cfg),
+    boardTerminal,
+  );
   if (status.blocked) {
     throw new FkanbanError({
       code: "card_blocked",

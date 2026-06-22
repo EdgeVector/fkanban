@@ -5,12 +5,14 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  boardTerminalMap,
   cardToFields,
   depStatus,
   ensureColumn,
   findBoard,
   findCard,
   isWorkingColumn,
+  listBoards,
   listCardStatuses,
   nowIso,
   type Card,
@@ -40,7 +42,10 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   // Soft-block: refuse to start a card (move into doing/review/done) while any
   // dependency is unfinished, unless --force. Backlog/todo moves are always ok.
   if (!opts.force && isWorkingColumn(opts.column)) {
-    const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg));
+    // Resolve dep done-ness against each dep board's terminal column (deps may
+    // live on other boards), falling back to `done` for unresolvable boards.
+    const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
+    const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg), boardTerminal);
     if (status.blocked) {
       throw new FkanbanError({
         code: "card_blocked",

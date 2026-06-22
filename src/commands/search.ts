@@ -6,7 +6,9 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   blockedSlugSet,
+  boardTerminalMap,
   ensureColumn,
+  listBoards,
   listCards,
   queryTerms,
   requireBoard,
@@ -91,9 +93,12 @@ export async function searchResult(
     : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
       ? (opts.limit as number)
       : DEFAULT_SEARCH_LIMIT;
-  // Resolve blocked status against ALL live cards so cross-board deps count.
+  // Resolve blocked status against ALL live cards so cross-board deps count,
+  // counting a dep as done at its own board's terminal column (board slug →
+  // last column), falling back to `done` for unresolvable boards.
+  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
   const text = renderSearchResults(matches, opts.query, {
-    blocked: blockedSlugSet(matches, allCards),
+    blocked: blockedSlugSet(matches, allCards, boardTerminal),
     limit,
   });
   // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`

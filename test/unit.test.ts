@@ -22,6 +22,7 @@ import {
   normalizeTags,
   depStatus,
   blockedSlugSet,
+  boardTerminalMap,
   wouldCreateCycle,
   cardMatchesQuery,
   queryTerms,
@@ -208,6 +209,71 @@ describe("dependencies", () => {
     const s = depStatus(x, [x]);
     expect(s.missing).toEqual(["ghost"]);
     expect(s.blocked).toBe(false);
+  });
+
+  // --- dep done-ness uses the dep board's TERMINAL column, not literal "done" ---
+
+  test("boardTerminalMap maps each board slug to its last column", () => {
+    const m = boardTerminalMap([
+      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+      { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
+      // A degenerate empty-columns board contributes no entry (falls back to "done").
+      { slug: "empty", title: "E", body: "", columns: [], created_at: "", updated_at: "" },
+    ]);
+    expect(m.get("zz")).toBe("ship");
+    expect(m.get("default")).toBe("done");
+    expect(m.has("empty")).toBe(false);
+  });
+
+  test("custom-board dep is satisfied once it reaches that board's terminal column", () => {
+    const terminal = boardTerminalMap([
+      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+    ]);
+    // c1 is in `ship`, the LAST column of board zz — as done as that board allows.
+    const c1 = card({ slug: "c1", board: "zz", column: "ship" });
+    const c2 = card({ slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
+    const all = [c1, c2];
+    expect(depStatus(c2, all, terminal).blocked).toBe(false);
+    expect(blockedSlugSet([c2], all, terminal).has("c2")).toBe(false);
+  });
+
+  test("custom-board dep in a NON-terminal column still blocks", () => {
+    const terminal = boardTerminalMap([
+      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+    ]);
+    // c1 is in `build`, not the last column — so c2 is still blocked.
+    const c1 = card({ slug: "c1", board: "zz", column: "build" });
+    const c2 = card({ slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
+    const s = depStatus(c2, [c1, c2], terminal);
+    expect(s.blocked).toBe(true);
+    expect(s.blockedBy).toEqual(["c1"]);
+  });
+
+  test("default board: dep done-ness unchanged (terminal column is `done`)", () => {
+    const terminal = boardTerminalMap([
+      { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
+    ]);
+    // Identical to the legacy behavior: `review` does NOT satisfy; `done` does.
+    const inReview = card({ slug: "a", column: "review" });
+    const inDone = card({ slug: "b", column: "done" });
+    const x = card({ slug: "x", column: "todo", deps: ["a", "b"] });
+    const all = [inReview, inDone, x];
+    // With the map AND without it (omitted → falls back to "done") behaves identically.
+    expect(depStatus(x, all, terminal).blockedBy).toEqual(["a"]);
+    expect(depStatus(x, all).blockedBy).toEqual(["a"]);
+  });
+
+  test("unresolvable dep board falls back to literal `done`", () => {
+    // No board map entry for `gone` (deleted board / forward ref): a dep there
+    // is satisfied only at literal `done`, never regressing the old behavior.
+    const inShip = card({ slug: "c1", board: "gone", column: "ship" });
+    const inDone = card({ slug: "c1d", board: "gone", column: "done" });
+    const blockedBy = card({ slug: "x", deps: ["c1"] });
+    const unblocked = card({ slug: "y", deps: ["c1d"] });
+    const all = [inShip, inDone, blockedBy, unblocked];
+    const empty = new Map<string, string>();
+    expect(depStatus(blockedBy, all, empty).blocked).toBe(true); // `ship` ≠ `done`
+    expect(depStatus(unblocked, all, empty).blocked).toBe(false); // `done` satisfies
   });
 
   test("only doing/review/done are gating (working) columns", () => {
