@@ -3,7 +3,8 @@
 //
 // `--verbose` (global) echoes each HTTP request + response.
 
-import { parseArgs } from "node:util";
+import { parseArgs, format } from "node:util";
+import * as fs from "node:fs";
 
 import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, type Verbose } from "./client.ts";
@@ -952,7 +953,43 @@ function requirePositional(value: string | undefined, usage: string): string {
   return value;
 }
 
+// Write `data` to a raw fd, looping until every byte is accepted. `console.log`
+// is asynchronous (non-blocking) when stdout is a PIPE — the opposite of a
+// file/TTY, where it's synchronous — and `process.exit()` tears the process
+// down (as does Bun on an empty event loop) WITHOUT draining that async pipe
+// buffer. The tail is then dropped at a 64 KB boundary, so a large
+// `list --json` / `board` reaches a piped consumer (an agent capturing stdout,
+// `| jq`, …) as truncated, unterminated JSON. A SYNCHRONOUS fd write blocks
+// until the bytes are handed off, so the data is already out the door before we
+// exit. The loop handles partial writes and a non-blocking fd (EAGAIN) by
+// retrying until the consumer drains.
+function writeAllSync(fd: number, data: string): void {
+  const buf = Buffer.from(data, "utf8");
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += fs.writeSync(fd, buf, off, buf.length - off);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EAGAIN") continue;
+      throw err;
+    }
+  }
+}
+
+// Route ALL CLI output through the synchronous writer. We override `console`
+// directly, NOT `process.stdout.write`: in Bun, `console.log` writes to the fd
+// natively and does NOT delegate to `process.stdout.write`, so patching the
+// stream is a no-op. `format` reproduces console's normal arg handling (%s,
+// space-joining). Scoped to the CLI entry only — the MCP stdio server is a
+// separate entrypoint and is untouched.
+//
+// Output now flushes synchronously, so `process.exit()` is safe (and necessary
+// — `add` keeps stdin open, so falling back to a natural event-loop exit would
+// HANG until stdin EOFs; the explicit exit terminates regardless).
 if (import.meta.main) {
+  console.log = (...args: unknown[]): void => writeAllSync(1, format(...args) + "\n");
+  console.error = (...args: unknown[]): void => writeAllSync(2, format(...args) + "\n");
+
   main(process.argv.slice(2))
     .then((code) => process.exit(code))
     .catch((err) => {
