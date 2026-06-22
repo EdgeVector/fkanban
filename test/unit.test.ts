@@ -471,6 +471,39 @@ describe("render", () => {
     expect(out).not.toContain("  —");
   });
 
+  test("non-default empty board: hint is board-aware — `add` carries --board <slug>", () => {
+    // A dev viewing a custom board who copy-pastes the hint must land the card
+    // on THAT board, not the default. So both the `add` and the follow-up
+    // `list` suggestion carry `--board <slug>`.
+    const board = {
+      slug: "sprint",
+      title: "Sprint board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [], { color: false });
+    expect(out).toContain(`fkanban add my-first-card --title "My first card" --board sprint`);
+    expect(out).toContain("`fkanban list --board sprint`");
+  });
+
+  test("default empty board: hint carries NO --board flag (byte-for-byte unchanged)", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [], { color: false });
+    expect(out).toContain(`fkanban add my-first-card --title "My first card"`);
+    expect(out).toContain("`fkanban list`");
+    // No `--board` noise on the default board.
+    expect(out).not.toContain("--board");
+  });
+
   test("a board with ≥1 card renders the columns, not the hint", () => {
     const board = {
       slug: "default",
