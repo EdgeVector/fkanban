@@ -380,6 +380,14 @@ export function createFkanbanMcpServer(
             "Slugs this card depends on (replaces the existing dep list). It is blocked until each reaches `done`.",
           ),
         force: z.boolean().optional().describe("Place the card even if it is blocked by an unfinished dependency."),
+        repo: z.string().optional().describe("Repo a build agent clones (owner/name). Auto-derived from a subsystem tag when omitted."),
+        base: z.string().optional().describe("Base branch a PR targets (default: main)."),
+        kind: z.enum(["pr", "registry", "tracker"]).optional().describe("pr drives to a merged PR; registry edits an fbrain record (never picked up); tracker is informational."),
+        block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional().describe("Intentional hold (NOT dependency-blocked, which is derived from deps)."),
+        block_reason: z.string().optional().describe("Why, when block_status != none."),
+        north_star: z.string().optional().describe("fbrain North Star slug this card advances."),
+        pr_url: z.string().optional().describe("PR driving this card, when in flight."),
+        branch: z.string().optional().describe("Worktree/feature branch."),
       },
       outputSchema: {
         slug: z.string(),
@@ -401,6 +409,14 @@ export function createFkanbanMcpServer(
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
         if (args.force !== undefined) o.force = args.force;
+        if (args.repo !== undefined) o.repo = args.repo;
+        if (args.base !== undefined) o.base = args.base;
+        if (args.kind !== undefined) o.kind = args.kind;
+        if (args.block_status !== undefined) o.blockStatus = args.block_status;
+        if (args.block_reason !== undefined) o.blockReason = args.block_reason;
+        if (args.north_star !== undefined) o.northStar = args.north_star;
+        if (args.pr_url !== undefined) o.prUrl = args.pr_url;
+        if (args.branch !== undefined) o.branch = args.branch;
         const res = await addCmd(o);
         return writeResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
       } catch (err) {

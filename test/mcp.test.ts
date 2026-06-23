@@ -601,7 +601,10 @@ describe("MCP read tools preview card bodies by default, full under full_body / 
   let node: NodeClient;
   let client: Client;
   // A multi-KB body, on one line and well over the ~200-char preview cap.
-  const BIG_BODY = "needle " + "x".repeat(4000);
+  // Large enough that the body dominates the per-card metadata (which grew when
+  // cards gained the structured pickup fields), so the >8x preview-shrink
+  // contract holds with margin rather than being sensitive to field count.
+  const BIG_BODY = "needle " + "x".repeat(8000);
   const PREVIEW_LEN = 200;
 
   beforeEach(async () => {

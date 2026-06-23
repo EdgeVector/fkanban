@@ -233,6 +233,17 @@ export function renderCardDetail(
   lines.push(paint(color, "dim", `${c.slug} · ${c.board}/${c.column}`));
   if (c.assignee) lines.push(`assignee: @${c.assignee}`);
   if (c.tags.length > 0) lines.push(`tags: ${c.tags.map((t) => `#${t}`).join(" ")}`);
+  // Structured pickup fields — only shown when set, so plain cards stay terse.
+  if (c.repo) lines.push(`repo: ${c.repo}${c.base ? ` (base ${c.base})` : ""}`);
+  if (c.kind && c.kind !== "pr") lines.push(`kind: ${c.kind}`);
+  if (c.block_status && c.block_status !== "none") {
+    lines.push(
+      paint(color, "yellow", `block: ${c.block_status}`) + (c.block_reason ? ` — ${c.block_reason}` : ""),
+    );
+  }
+  if (c.north_star) lines.push(`north star: ${c.north_star}`);
+  if (c.pr_url) lines.push(`pr: ${c.pr_url}`);
+  if (c.branch) lines.push(`branch: ${c.branch}`);
   if (c.deps.length > 0) {
     lines.push(`deps: ${c.deps.map((d) => renderDep(d, color, status)).join("  ")}`);
     if (status && status.missing.length > 0) {

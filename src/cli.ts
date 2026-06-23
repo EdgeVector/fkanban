@@ -126,6 +126,16 @@ Options:
   --force               add even past a 🔒 dependency block
   --json                echo the write result as JSON
 
+Structured fields (auto-derived from the body/tags when omitted):
+  --repo <owner/name>   repo a build agent clones (else inferred from a subsystem tag)
+  --base <branch>       base branch a PR targets (default: main)
+  --kind <k>            pr|registry|tracker (registry cards are never picked up)
+  --block-status <s>    none|needs_human|design_first|deferred (intentional holds)
+  --block-reason <text> why, when --block-status is set
+  --north-star <slug>   fbrain North Star this card advances
+  --pr-url <url>        the PR driving this card (when in flight)
+  --branch <name>       worktree/feature branch
+
 Multi-line bodies — pipe via stdin, don't inline:
   For any multi-line/Markdown body, PIPE it on stdin instead of passing
   --body "$(cat …)" or --body "$VAR". A body interpolated into the command
@@ -470,7 +480,10 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
 // `show`, `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
-  add: new Set(["title", "board", "column", "assignee", "tags", "deps", "body", "force"]),
+  add: new Set([
+    "title", "board", "column", "assignee", "tags", "deps", "body", "force",
+    "repo", "base", "kind", "block-status", "block-reason", "north-star", "pr-url", "branch",
+  ]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
@@ -532,6 +545,14 @@ async function main(argv: string[]): Promise<number> {
         assignee: { type: "string" },
         tags: { type: "string" },
         deps: { type: "string" },
+        repo: { type: "string" },
+        base: { type: "string" },
+        kind: { type: "string" },
+        "block-status": { type: "string" },
+        "block-reason": { type: "string" },
+        "north-star": { type: "string" },
+        "pr-url": { type: "string" },
+        branch: { type: "string" },
         force: { type: "boolean" },
         body: { type: "string" },
         columns: { type: "string" },
@@ -701,6 +722,14 @@ async function dispatch(
           deps: parseTags(values.deps as string | undefined),
           body,
           force: values.force as boolean | undefined,
+          repo: values.repo as string | undefined,
+          base: values.base as string | undefined,
+          kind: values.kind as string | undefined,
+          blockStatus: values["block-status"] as string | undefined,
+          blockReason: values["block-reason"] as string | undefined,
+          northStar: values["north-star"] as string | undefined,
+          prUrl: values["pr-url"] as string | undefined,
+          branch: values.branch as string | undefined,
         });
         console.log(formatAdd(res, values.json as boolean | undefined));
         return 0;
@@ -708,7 +737,10 @@ async function dispatch(
         // A `--deps` edge that would close a cycle is a bad-input error, not a
         // node failure: report it LOUDLY with the exit-2 contract (matching
         // `dep add`), and as a clean envelope under --json — never a half write.
-        if (err instanceof FkanbanError && err.code === "dep_cycle") {
+        if (
+          err instanceof FkanbanError &&
+          (err.code === "dep_cycle" || err.code === "invalid_kind" || err.code === "invalid_block_status")
+        ) {
           if (values.json) {
             console.log(formatError(err));
           } else {

@@ -8,14 +8,20 @@ import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
   applyHeaderDerivation,
+  BLOCK_STATUSES,
   blockedByHint,
   blockedByMessage,
   boardTerminalMap,
+  CARD_KINDS,
   cardToFields,
   depStatus,
+  deriveStructuredFields,
+  emptyStructuredFields,
   ensureColumn,
   findCard,
   forwardDepWarning,
+  isBlockStatus,
+  isCardKind,
   isDepEnforcedColumn,
   listBoards,
   listCardStatuses,
@@ -43,7 +49,51 @@ export type AddOptions = {
   // Override the dependency soft-block when placing the card into a working
   // column (doing/review/done). Mirrors `move`'s --force.
   force?: boolean;
+  // Structured pickup-decision + reconcile fields. Any omitted on create is
+  // auto-derived from the body/tags (deriveStructuredFields); any omitted on
+  // update keeps its existing value. See `fkanban-card-structured-fields`.
+  repo?: string;
+  base?: string;
+  kind?: string; // pr|registry|tracker
+  blockStatus?: string; // none|needs_human|design_first|deferred
+  blockReason?: string;
+  northStar?: string;
+  prUrl?: string;
+  branch?: string;
 };
+
+// Reject an invalid --kind / --block-status BEFORE any write, mirroring the
+// other usage-error guards (exit 2 vs operational exit 1).
+function validateStructuredOpts(opts: AddOptions): void {
+  if (opts.kind !== undefined && !isCardKind(opts.kind)) {
+    throw new FkanbanError({
+      code: "invalid_kind",
+      message: `Invalid --kind "${opts.kind}".`,
+      hint: `One of: ${CARD_KINDS.join(", ")}.`,
+    });
+  }
+  if (opts.blockStatus !== undefined && !isBlockStatus(opts.blockStatus)) {
+    throw new FkanbanError({
+      code: "invalid_block_status",
+      message: `Invalid --block-status "${opts.blockStatus}".`,
+      hint: `One of: ${BLOCK_STATUSES.join(", ")}.`,
+    });
+  }
+}
+
+// Apply explicit --field opts onto a card, then backfill any still-empty
+// structured field from the body/tags. Mutates + returns the card.
+function applyStructuredFields(card: Card, opts: AddOptions): Card {
+  if (opts.repo !== undefined) card.repo = opts.repo;
+  if (opts.base !== undefined) card.base = opts.base;
+  if (opts.kind !== undefined) card.kind = opts.kind;
+  if (opts.blockStatus !== undefined) card.block_status = opts.blockStatus;
+  if (opts.blockReason !== undefined) card.block_reason = opts.blockReason;
+  if (opts.northStar !== undefined) card.north_star = opts.northStar;
+  if (opts.prUrl !== undefined) card.pr_url = opts.prUrl;
+  if (opts.branch !== undefined) card.branch = opts.branch;
+  return Object.assign(card, deriveStructuredFields(card));
+}
 
 // Validate + clean a user-supplied dep list for `slug`, warn (to stderr) on any
 // forward/dangling dep — the same heads-up `dep add` emits — and REJECT any new
@@ -142,6 +192,7 @@ export type AddResult = { slug: string; action: "created" | "updated"; board: st
 
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
+  validateStructuredOpts(opts);
 
   const hash = schemaHashFor("card", opts.cfg);
   // Resolve the card BEFORE the board context: on update we must honor the
@@ -175,6 +226,9 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       { slug: opts.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
       console.error,
     );
+    // Apply any explicit --field opts, then backfill still-empty structured
+    // fields from the body/tags.
+    applyStructuredFields(updated, opts);
     await enforceDepBlock(opts, opts.slug, boardSlug, updated.column, updated.deps);
     await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
@@ -192,11 +246,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, []) : [],
     created_at: now,
     updated_at: now,
+    ...emptyStructuredFields(),
   };
   card.body = applyHeaderDerivation(
     { slug: card.slug, body: card.body, tags: card.tags, title: card.title, column: card.column },
     console.error,
   );
+  applyStructuredFields(card, opts);
   await enforceDepBlock(opts, opts.slug, boardSlug, card.column, card.deps);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column };
