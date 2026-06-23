@@ -120,9 +120,20 @@ Options:
   --tags a,b,c          comma-separated tags
   --deps a,b            comma-separated slugs this card depends on
                         (an edge that would form a cycle is rejected, exit 2)
-  --body <text>         card body (Markdown); replaces the whole body
+  --body <text>         card body (Markdown); replaces the whole body.
+                        Also reads the body from piped stdin when no --body
+                        is given (recommended for multi-line/Markdown bodies).
   --force               add even past a 🔒 dependency block
   --json                echo the write result as JSON
+
+Multi-line bodies — pipe via stdin, don't inline:
+  For any multi-line/Markdown body, PIPE it on stdin instead of passing
+  --body "$(cat …)" or --body "$VAR". A body interpolated into the command
+  line is re-evaluated by the shell: backticks and $(...) inside the body
+  run as commands ((eval): command not found: <word>) and the written body
+  is silently corrupted/truncated. The stdin path never puts the body on the
+  command line, so it is verbatim and immune.
+  printf '%s' "$BODY" | fkanban add ship-login --title "Ship login" --column todo
 
 Example:
   fkanban add ship-login --title "Ship login" --column todo --tags auth,p1`),
