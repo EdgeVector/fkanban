@@ -7,6 +7,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  applyHeaderDerivation,
   blockedByHint,
   blockedByMessage,
   boardTerminalMap,
@@ -168,6 +169,12 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       updated_at: now,
     };
     if (opts.column) ensureColumn(updated.column, columns);
+    // Auto-derive the pickup Repo:/Base: header from tags (or warn if it can't),
+    // so a promoted/edited card never silently strands in `todo`.
+    updated.body = applyHeaderDerivation(
+      { slug: opts.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
+      console.error,
+    );
     await enforceDepBlock(opts, opts.slug, boardSlug, updated.column, updated.deps);
     await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
@@ -186,6 +193,10 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     created_at: now,
     updated_at: now,
   };
+  card.body = applyHeaderDerivation(
+    { slug: card.slug, body: card.body, tags: card.tags, title: card.title, column: card.column },
+    console.error,
+  );
   await enforceDepBlock(opts, opts.slug, boardSlug, card.column, card.deps);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column };

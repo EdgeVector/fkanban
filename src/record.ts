@@ -133,6 +133,106 @@ export function isWorkingColumn(column: string): boolean {
   return (WORKING_COLUMNS as readonly string[]).includes(column);
 }
 
+// ── Repo/Base header auto-derivation ────────────────────────────────────────
+// `fkanban-pickup` only fans a card out to a build agent when its body carries
+// both a `Repo:` and a `Base:` header — the fkanban-agent skill is told never to
+// guess the repo. A card filed without them silently strands in `todo` forever
+// (and starves pickup's non-fold slots). To make that impossible, `add` and
+// `move` auto-derive the header from the card's subsystem tag whenever it can be
+// done UNAMBIGUOUSLY. Every filer — CLI, MCP, scheduled routine, or human — goes
+// through those two code paths, so this is the one durable chokepoint; the prose
+// in the groom/program-driver routines is a backstop, not the guarantee.
+// Ambiguous/unknown tags are NOT guessed — they're left alone and surfaced as a
+// loud warning instead of disappearing silently.
+
+// Single source of truth: subsystem tag → repo. A tag set that resolves to
+// exactly one repo is stamped; zero or >1 distinct repos is "ambiguous".
+export const TAG_TO_REPO: Readonly<Record<string, string>> = {
+  fold: "EdgeVector/fold",
+  fold_db: "EdgeVector/fold",
+  fold_db_node: "EdgeVector/fold",
+  "schema-service": "EdgeVector/fold",
+  fold_dev_node: "EdgeVector/fold",
+  wasm: "EdgeVector/fold",
+  "vector-index": "EdgeVector/fold",
+  fkanban: "EdgeVector/fkanban",
+  exemem: "EdgeVector/exemem-infra",
+  ci: "EdgeVector/exemem-infra",
+  infra: "EdgeVector/exemem-infra",
+  "schema-infra": "EdgeVector/schema-infra",
+  fold_db_website: "EdgeVector/fold_db_website",
+  "folddb-website": "EdgeVector/fold_db_website",
+  website: "EdgeVector/fold_db_website",
+};
+
+export const DEFAULT_BASE = "main";
+
+// True iff the body already carries both pickup headers (line-anchored so a
+// passing mention in prose doesn't count). Idempotency guard for re-`add`s.
+export function hasRepoHeaders(body: string): boolean {
+  return /^[ \t]*Repo:/m.test(body) && /^[ \t]*Base:/m.test(body);
+}
+
+// Recipe/registry cards target an fbrain record, not a git repo — they are not
+// meant for the pickup→PR flow and must never be stamped.
+export function isRegistryCard(body: string, title: string): boolean {
+  return (
+    /Target:\s*fbrain record/i.test(body) ||
+    /\bdogfood-registry\b/.test(body) ||
+    /^fix dogfood recipe\b/i.test(title.trim())
+  );
+}
+
+// The single repo a tag set unambiguously maps to, or null (zero or >1 match).
+export function inferRepoFromTags(tags: string[]): string | null {
+  const repos = new Set<string>();
+  for (const t of tags) {
+    const repo = TAG_TO_REPO[t.replace(/^#/, "").trim().toLowerCase()];
+    if (repo) repos.add(repo);
+  }
+  return repos.size === 1 ? [...repos][0]! : null;
+}
+
+export type HeaderDerivation =
+  | { kind: "present" } // already had Repo:/Base:
+  | { kind: "skip-registry" } // recipe/registry card — never stamp
+  | { kind: "ambiguous" } // tags don't map to a single repo — don't guess
+  | { kind: "stamped"; repo: string; base: string; body: string };
+
+// Pure decision + transform. Callers stamp the returned `body` when the result
+// is "stamped", and emit `missingHeaderWarning` when it's "ambiguous".
+export function deriveRepoHeaders(body: string, tags: string[], title: string): HeaderDerivation {
+  if (hasRepoHeaders(body)) return { kind: "present" };
+  if (isRegistryCard(body, title)) return { kind: "skip-registry" };
+  const repo = inferRepoFromTags(tags);
+  if (!repo) return { kind: "ambiguous" };
+  return { kind: "stamped", repo, base: DEFAULT_BASE, body: `Repo: ${repo}\nBase: ${DEFAULT_BASE}\n\n${body}` };
+}
+
+export function missingHeaderWarning(slug: string): string {
+  return (
+    `warning: card "${slug}" is in todo with no Repo:/Base: header and its tags ` +
+    `don't map to a single repo — fkanban-pickup will skip it. Add a "Repo: <owner>/<name>" ` +
+    `and "Base: <branch>" header (or a single subsystem tag) to make it pickup-eligible.`
+  );
+}
+
+// Orchestration shared by `add` and `move`: in a pre-execution column
+// (backlog/todo) auto-stamp the header when derivable, and warn (only in `todo`,
+// where it actually blocks pickup) when it's missing-and-ambiguous. Working
+// columns (doing/review/done) are left untouched. Returns the (possibly
+// header-prefixed) body. `warn` is injected so it's testable / silenceable.
+export function applyHeaderDerivation(
+  card: { slug: string; body: string; tags: string[]; title: string; column: string },
+  warn: (msg: string) => void,
+): string {
+  if (isWorkingColumn(card.column)) return card.body;
+  const d = deriveRepoHeaders(card.body, card.tags, card.title);
+  if (d.kind === "stamped") return d.body;
+  if (d.kind === "ambiguous" && card.column === "todo") warn(missingHeaderWarning(card.slug));
+  return card.body;
+}
+
 export type DepStatus = {
   // Existing dep cards not yet in their board's terminal column — these block
   // this card.
