@@ -12,6 +12,7 @@ import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError, 
 import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
+import { rankCmd } from "../commands/rank.ts";
 import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
@@ -19,7 +20,7 @@ import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.t
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
-import { orphanedDependentsWarning, type Card } from "../record.ts";
+import { orphanedDependentsWarning, PRIORITY_TIERS, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
@@ -29,9 +30,9 @@ export const FKANBAN_MCP_VERSION = "0.1.0";
 // Keep this SHORT — hosts inject it into context every session, so verbosity
 // costs tokens for every user. Point at the tools; don't restate each one.
 export const FKANBAN_MCP_INSTRUCTIONS = [
-  "fkanban is a kanban board over fold_db. 14 tools: read tools",
+  "fkanban is a kanban board over fold_db. 15 tools: read tools",
   "(fkanban_list, fkanban_search, fkanban_show, fkanban_board_list, fkanban_doctor)",
-  "never mutate; the rest (add, move, rm, dep_add, dep_rm, tag_add, tag_rm, board_create, board_rm) write.",
+  "never mutate; the rest (add, move, rank, rm, dep_add, dep_rm, tag_add, tag_rm, board_create, board_rm) write.",
   "",
   "Board model: a card lives on a board, in one column, at a position. Columns flow",
   "backlog → todo → doing → review → done.",
@@ -379,6 +380,12 @@ export function createFkanbanMcpServer(
           .describe(
             "Slugs this card depends on (replaces the existing dep list). It is blocked until each reaches `done`.",
           ),
+        priority: z
+          .enum(PRIORITY_TIERS)
+          .optional()
+          .describe(
+            "Card priority (P0 = most urgent … P3 = least). Stored as a p0–p3 tag; `fkanban_rank` orders a column by it so fkanban-pickup works urgent cards first.",
+          ),
         force: z.boolean().optional().describe("Place the card even if it is blocked by an unfinished dependency."),
       },
       outputSchema: {
@@ -400,6 +407,7 @@ export function createFkanbanMcpServer(
         if (args.assignee !== undefined) o.assignee = args.assignee;
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
+        if (args.priority !== undefined) o.priority = args.priority;
         if (args.force !== undefined) o.force = args.force;
         const res = await addCmd(o);
         return writeResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
@@ -438,6 +446,43 @@ export function createFkanbanMcpServer(
         if (args.force !== undefined) o.force = args.force;
         const res = await moveCmd(o);
         return writeResult(`moved ${res.slug}: ${res.from} → ${res.to}`, res);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_rank",
+    {
+      title: "Rank a column by priority",
+      description:
+        "Reorder a column by card priority so fkanban-pickup (which drains the lowest `position` first) works the most urgent cards first. Reassigns each card's `position` in priority order (P0→P3, tie-broken by created_at). Priority comes from a `Priority: P<n>` body header or a p0–p3 tag (set via fkanban_add's `priority`); cards with neither rank as P2. Defaults to the `todo` column on the default board — the column pickup reads. Idempotent: a re-run on an already-ranked column writes nothing.",
+      annotations: { title: "Rank a column by priority", idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        board: z.string().optional().describe("Board whose column to rank (default: `default`)."),
+        column: z.string().optional().describe("Column to rank (default: `todo`)."),
+      },
+      outputSchema: {
+        board: z.string(),
+        column: z.string(),
+        total: z.number().int(),
+        reordered: z.number().int(),
+        order: z.array(z.object({ slug: z.string(), priority: z.string(), position: z.number().int() })),
+      },
+    },
+    async (args) => {
+      try {
+        const { cfg, node } = requireConfig();
+        const o: Parameters<typeof rankCmd>[0] = { cfg, node };
+        if (args.board !== undefined) o.board = args.board;
+        if (args.column !== undefined) o.column = args.column;
+        const res = await rankCmd(o);
+        const human =
+          res.total === 0
+            ? `ranked ${res.board}/${res.column}: no cards`
+            : `ranked ${res.board}/${res.column}: ${res.reordered} of ${res.total} reordered by priority`;
+        return writeResult(human, res);
       } catch (err) {
         return errorResult(err);
       }

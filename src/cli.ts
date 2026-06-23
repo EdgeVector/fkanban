@@ -14,13 +14,14 @@ import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
 import { moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
+import { rankCmd } from "./commands/rank.ts";
 import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
-import { orphanedDependentsWarning } from "./record.ts";
+import { orphanedDependentsWarning, normalizePriority, PRIORITY_TIERS, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import { suggestClosest } from "./suggest.ts";
 import {
@@ -31,6 +32,7 @@ import {
   formatRm,
   formatBoardCreate,
   formatBoardRm,
+  formatRank,
   formatError,
 } from "./format.ts";
 
@@ -42,13 +44,14 @@ Usage:
 Commands:
   init                 bootstrap a node + load/resolve schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
-  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --body, --force past a block)
+  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --priority P0-P3 --body, --force past a block)
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
   list                 render a board as columns of cards (--board --column --tag --assignee --json --limit N --all)
+  rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
@@ -120,6 +123,9 @@ Options:
   --tags a,b,c          comma-separated tags
   --deps a,b            comma-separated slugs this card depends on
                         (an edge that would form a cycle is rejected, exit 2)
+  --priority <P0-P3>    card priority (P0 = most urgent … P3 = least); stored as
+                        a p0–p3 tag. \`fkanban rank\` orders a column by this so
+                        fkanban-pickup works urgent cards first.
   --body <text>         card body (Markdown); replaces the whole body.
                         Also reads the body from piped stdin when no --body
                         is given (recommended for multi-line/Markdown bodies).
@@ -136,7 +142,7 @@ Multi-line bodies — pipe via stdin, don't inline:
   printf '%s' "$BODY" | fkanban add ship-login --title "Ship login" --column todo
 
 Example:
-  fkanban add ship-login --title "Ship login" --column todo --tags auth,p1`),
+  fkanban add ship-login --title "Ship login" --column todo --priority P1 --tags auth`),
 
   move: withFooter(`fkanban move — move a card to another column
 
@@ -203,6 +209,28 @@ Options:
 Example:
   fkanban list --board default --limit 10
   fkanban list --tag fkanban --column doing`),
+
+  rank: withFooter(`fkanban rank — reorder a column by card priority
+
+Usage:
+  fkanban rank [options]
+
+Reassigns each card's \`position\` in priority order so \`fkanban-pickup\` (which
+drains the LOWEST position first) works the most urgent cards first. Priority is
+read from a \`Priority: P<n>\` body header (wins) or a p0–p3 tag (set via
+\`add --priority\`); cards with neither sort as P2 (normal). Ties break by
+created_at (oldest first). Idempotent — re-running an already-ranked column
+writes nothing. This is the step the board groomer runs after promoting cards
+into \`todo\`.
+
+Options:
+  --board <slug>        board whose column to rank (default: default)
+  --column <col>        column to rank (default: todo — the column pickup reads)
+  --json                echo the resulting order as JSON
+
+Example:
+  fkanban rank
+  fkanban rank --board roadmap --column backlog`),
 
   search: withFooter(`fkanban search — find cards by text across slug/title/body/tags/assignee
 
@@ -435,6 +463,21 @@ function parseIntFlag(
   return n;
 }
 
+// Coerce a `--priority` value to a canonical tier (P0–P3), rejecting anything
+// else LOUDLY (stderr + exit 2) — same contract as parseIntFlag, so a typo'd
+// priority is a clean flag error, never a silently-dropped default. Accepts any
+// case (`p1`/`P1`).
+function parsePriorityFlag(raw: string, cmd: string): PriorityTier {
+  const tier = normalizePriority(raw);
+  if (tier === null) {
+    const help = cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+    const msg = `error: --priority must be one of ${PRIORITY_TIERS.join(", ")} (P0 = most urgent), got "${raw}".`;
+    console.error(`${msg} Run \`fkanban ${help}\` to see this command's flags.`);
+    throw new FlagValidationError(msg);
+  }
+  return tier;
+}
+
 // Node's parseArgs error codes for malformed flags. With `strict: true`,
 // an unknown `--flag`, a value handed to a boolean flag, or a missing value
 // for a string flag all throw a TypeError carrying one of these codes. We
@@ -470,11 +513,12 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
 // `show`, `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
-  add: new Set(["title", "board", "column", "assignee", "tags", "deps", "body", "force"]),
+  add: new Set(["title", "board", "column", "assignee", "tags", "deps", "priority", "body", "force"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
   list: new Set(["board", "column", "tag", "assignee", "limit", "all"]),
+  rank: new Set(["board", "column"]),
   search: new Set(["board", "column", "limit", "all"]),
   // board's subcommands read title/columns/body (create) and force (rm).
   board: new Set(["title", "columns", "body", "force"]),
@@ -532,6 +576,7 @@ async function main(argv: string[]): Promise<number> {
         assignee: { type: "string" },
         tags: { type: "string" },
         deps: { type: "string" },
+        priority: { type: "string" },
         force: { type: "boolean" },
         body: { type: "string" },
         columns: { type: "string" },
@@ -688,6 +733,10 @@ async function dispatch(
         const stdinBody = await readStdin();
         if (stdinBody.trim().length > 0) body = stdinBody;
       }
+      // Validate --priority before touching the node, so a bad value reports the
+      // exit-2 flag error rather than a config/node error (same as --position).
+      const priority =
+        values.priority !== undefined ? parsePriorityFlag(values.priority as string, "add") : undefined;
       try {
         const res = await addCmd({
           cfg: ctx.cfg,
@@ -699,6 +748,7 @@ async function dispatch(
           assignee: values.assignee as string | undefined,
           tags: parseTags(values.tags as string | undefined),
           deps: parseTags(values.deps as string | undefined),
+          priority,
           body,
           force: values.force as boolean | undefined,
         });
@@ -837,6 +887,18 @@ async function dispatch(
         all: values.all as boolean | undefined,
       });
       console.log(out);
+      return 0;
+    }
+
+    case "rank": {
+      const ctx = loadCtx({ verbose });
+      const res = await rankCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        board: values.board as string | undefined,
+        column: values.column as string | undefined,
+      });
+      console.log(formatRank(res, values.json as boolean | undefined));
       return 0;
     }
 

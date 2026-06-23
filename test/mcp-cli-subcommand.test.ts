@@ -47,11 +47,11 @@ describe("`fkanban mcp` CLI subcommand starts gracefully on a missing config", (
     close = undefined;
   });
 
-  test("connect succeeds and listTools returns all 14 tools", async () => {
+  test("connect succeeds and listTools returns all 15 tools", async () => {
     const { client, close: c } = await connectViaCliSubcommand();
     close = c;
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
   });
 
   test("fkanban_list returns isError with the actionable 'run init' hint", async () => {

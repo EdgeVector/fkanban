@@ -52,6 +52,14 @@ export interface BoardRmResult {
   slug: string;
 }
 
+export interface RankResult {
+  board: string;
+  column: string;
+  total: number;
+  reordered: number;
+  order: { slug: string; priority: string; position: number }[];
+}
+
 function emit(res: unknown, human: string, json: boolean | undefined): string {
   return json ? JSON.stringify(res) : human;
 }
@@ -96,4 +104,13 @@ export function formatBoardCreate(res: BoardCreateResult, json?: boolean): strin
 
 export function formatBoardRm(res: BoardRmResult, json?: boolean): string {
   return emit(res, `removed board ${res.slug}`, json);
+}
+
+export function formatRank(res: RankResult, json?: boolean): string {
+  const human =
+    res.total === 0
+      ? `ranked ${res.board}/${res.column}: no cards`
+      : `ranked ${res.board}/${res.column}: ${res.reordered} of ${res.total} reordered by priority ` +
+        `(${res.order.map((c) => `${c.slug}[${c.priority}]`).join(", ")})`;
+  return emit(res, human, json);
 }
