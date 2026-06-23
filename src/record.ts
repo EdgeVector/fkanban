@@ -612,6 +612,89 @@ function parsePosition(p: string): number {
   return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
 }
 
+// ── Priority ranking ────────────────────────────────────────────────────────
+// A card's priority is an optional signal that lets `rank` order a column so
+// `fkanban-pickup` — which drains the LOWEST `position` first — works the most
+// urgent cards first. `rank` is the step that turns this signal into the
+// `position` field pickup/list/sortCards already order by; without it priority
+// is inert. Priority is read, in precedence order, from:
+//   1. a line-anchored `Priority: P<n>` body header (most explicit — a human or
+//      generator wrote it into the spec), then
+//   2. a `p0`..`p3` tag (the structured channel `add --priority` writes to),
+//   3. else DEFAULT_PRIORITY.
+// P0 = most urgent … P3 = least. Storing priority as a TAG (not a new schema
+// field) keeps it republish-free, exactly like deps and the delete tombstone.
+export const PRIORITY_TIERS = ["P0", "P1", "P2", "P3"] as const;
+export type PriorityTier = (typeof PRIORITY_TIERS)[number];
+
+// A card with no priority signal sorts as "normal" — below an explicit P0/P1
+// and above an explicit P3 — so an un-prioritized backlog isn't shoved beneath
+// one deliberately-deferred card.
+export const DEFAULT_PRIORITY: PriorityTier = "P2";
+
+// Line-anchored so a "Priority:" mention mid-prose doesn't count (mirrors
+// hasRepoHeaders). Case-insensitive on both the label and the P<n> token.
+const PRIORITY_HEADER_RE = /^[ \t]*Priority:[ \t]*(P[0-3])\b/im;
+const PRIORITY_TAG_RE = /^p([0-3])$/i;
+
+// Normalize any accepted spelling (`p1`, `P1`, ` p1 `) to the canonical `P1`,
+// or null if it isn't a priority tier. Used by `add --priority` flag parsing.
+export function normalizePriority(s: string): PriorityTier | null {
+  const up = s.trim().toUpperCase();
+  return (PRIORITY_TIERS as readonly string[]).includes(up) ? (up as PriorityTier) : null;
+}
+
+// The tag a `--priority P1` flag stores (lower-case `p1`) so it reads as an
+// ordinary label and `priorityOf` picks it up.
+export function priorityTag(tier: PriorityTier): string {
+  return tier.toLowerCase();
+}
+
+// True for a `p0`..`p3` priority tag (leading `#` and surrounding space ok).
+export function isPriorityTag(tag: string): boolean {
+  return PRIORITY_TAG_RE.test(tag.replace(/^#/, "").trim());
+}
+
+// Resolve a card's priority tier from its body header (wins) or a p0..p3 tag,
+// falling back to DEFAULT_PRIORITY. Pure — the core read used by rankCards.
+export function priorityOf(card: { body: string; tags: string[] }): PriorityTier {
+  const m = card.body.match(PRIORITY_HEADER_RE);
+  if (m) return m[1]!.toUpperCase() as PriorityTier;
+  for (const t of card.tags) {
+    const tm = t.replace(/^#/, "").trim().match(PRIORITY_TAG_RE);
+    if (tm) return `P${tm[1]}` as PriorityTier;
+  }
+  return DEFAULT_PRIORITY;
+}
+
+// 0-based urgency rank (P0 → 0 … P3 → 3) — lower sorts first.
+export function priorityRank(tier: PriorityTier): number {
+  return PRIORITY_TIERS.indexOf(tier);
+}
+
+// Gap left between adjacent ranked positions so a human can hand-insert a card
+// between two without forcing a full re-rank (10, 20, 30, …).
+export const RANK_POSITION_STEP = 10;
+
+// Order a set of cards the way pickup should drain them: by priority ascending
+// (P0 first), then created_at ascending (older first) — the same stable
+// secondary key sortCards uses. Pure; does not mutate the input array.
+export function rankCards<T extends Card>(cards: T[]): T[] {
+  return cards.slice().sort((a, b) => {
+    const ra = priorityRank(priorityOf(a));
+    const rb = priorityRank(priorityOf(b));
+    if (ra !== rb) return ra - rb;
+    return a.created_at.localeCompare(b.created_at);
+  });
+}
+
+// Set a card's priority tag: drop any existing p0..p3 tag and append the new
+// one, preserving the order of the other tags. Returns a fresh array (input
+// untouched). Used by `add --priority`.
+export function withPriorityTag(tags: string[], tier: PriorityTier): string[] {
+  return [...tags.filter((t) => !isPriorityTag(t)), priorityTag(tier)];
+}
+
 // Type guard for record-type-keyed config lookups used by the CLI.
 export function recordTypeFields(type: RecordType): string[] {
   return fieldsFor(type);

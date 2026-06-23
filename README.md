@@ -153,13 +153,14 @@ DONE  (0)
 | Command | What it does |
 |---|---|
 | `fkanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
-| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --body`, or pipe body on stdin) |
+| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --priority P0-P3 --body`, or pipe body on stdin) |
 | `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` past a dependency block) |
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
 | `fkanban list` | render a board as columns (`--board --column --tag --assignee --json --limit N --all`); blocked cards show 🔒 |
+| `fkanban rank` | reorder a column by card priority so pickup works urgent cards first (`--board --column`, default `todo`) |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
@@ -244,10 +245,35 @@ the card already carries is a no-op; removing one it lacks warns but succeeds.
 Reserved tags (`dep:<slug>` dependency edges, the delete tombstone) are rejected
 — use `dep add`/`dep rm` and `rm` for those.
 
+## Priority
+
+A card has an optional **priority** — `P0` (most urgent) … `P3` (least). It lets
+`fkanban rank` order a column so the `fkanban-pickup` routine (which works the
+**lowest `position` first**) picks up the most urgent cards first.
+
+```bash
+fkanban add ship-login --priority P0      # stored as a `p0` tag
+fkanban rank                              # reorder the `todo` column by priority
+fkanban rank --board roadmap --column backlog
+```
+
+Priority is read, in precedence order, from **(1)** a line-anchored
+`Priority: P<n>` header in the card body (most explicit), then **(2)** a
+`p0`..`p3` tag (what `--priority` writes), else **(3)** `P2` (normal). Like deps
+and the tombstone, it rides on the existing `tags` array — **no schema change /
+republish**.
+
+`rank` reassigns each card's `position` in priority order (ties broken by
+`created_at`, oldest first), leaving gaps (`10, 20, 30, …`) so a card can be
+hand-inserted between two without a full re-rank. It's **idempotent** — re-running
+an already-ranked column writes nothing — and is the step the board groomer runs
+after promoting cards into `todo`. The priority *signal* alone does nothing until
+`rank` turns it into `position`.
+
 ## MCP server
 
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
-`fkanban_move`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
+`fkanban_move`, `fkanban_rank`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
 `fkanban_tag_rm`, `fkanban_show`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
 `fkanban_doctor`)
@@ -335,3 +361,7 @@ confirm.)
   `__fkanban_deleted__` tag and every read path filters it.
 - **Append-with-gaps positions.** New cards land at `maxPosition + 10` so a
   card can later be inserted between two others.
+- **Priority is a signal over `position`.** A card's priority (`Priority:` header
+  or `p0`..`p3` tag) does nothing on its own; `fkanban rank` is what turns it into
+  the `position` field pickup/list/sort already order by. Keeps priority
+  republish-free (rides on `tags`) and keeps one ordering primitive (`position`).

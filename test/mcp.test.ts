@@ -160,9 +160,9 @@ describe("MCP server starts (degrades, not crashes) when config is unavailable",
     client = await connectServer(createFkanbanMcpServer({ configError }));
   });
 
-  test("connect succeeds and listTools returns all 14 tools", async () => {
+  test("connect succeeds and listTools returns all 15 tools", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
   });
 
   test("fkanban_list returns isError with the actionable 'run init' hint", async () => {
