@@ -85,6 +85,20 @@ export const cardSchema: AddSchemaRequest = {
       "tags",
       "created_at",
       "updated_at",
+      // Structured pickup-decision + reconcile fields (see fbrain design
+      // `fkanban-card-structured-fields`). Promote signals a fresh agent needs
+      // to decide "what do I pick up?" out of body prose into real fields, so
+      // every routine reads them the same way. `priority` is intentionally
+      // ABSENT — it's owned by a parallel design and added later (cheap, per
+      // LastDB's read-through field-mapper republish).
+      "repo",
+      "base",
+      "kind",
+      "block_status",
+      "block_reason",
+      "north_star",
+      "pr_url",
+      "branch",
     ],
     field_types: {
       slug: "String",
@@ -97,6 +111,14 @@ export const cardSchema: AddSchemaRequest = {
       tags: { Array: "String" },
       created_at: "String",
       updated_at: "String",
+      repo: "String",
+      base: "String",
+      kind: "String",
+      block_status: "String",
+      block_reason: "String",
+      north_star: "String",
+      pr_url: "String",
+      branch: "String",
     },
     field_descriptions: {
       slug: "stable url-style id (board-unique card key)",
@@ -109,6 +131,14 @@ export const cardSchema: AddSchemaRequest = {
       tags: "array of freeform labels",
       created_at: "RFC 3339 timestamp",
       updated_at: "RFC 3339 timestamp",
+      repo: "owner/name of the repo a build agent clones (empty = not a code card)",
+      base: "base branch a PR targets (default: main)",
+      kind: "pr|registry|tracker — pr drives to a merged PR; registry edits an fbrain record (never picked up); tracker is informational",
+      block_status: "none|needs_human|design_first|deferred — INTENTIONAL holds only (dependency-blocked stays derived from deps)",
+      block_reason: "free-text why, when block_status != none",
+      north_star: "fbrain North Star slug this card advances",
+      pr_url: "URL/number of the PR driving this card, when in flight",
+      branch: "worktree/feature branch a build agent works on",
     },
     field_classifications: { title: ["word"], body: ["word"] },
     field_data_classifications: {
@@ -122,6 +152,14 @@ export const cardSchema: AddSchemaRequest = {
       tags: GENERAL,
       created_at: GENERAL,
       updated_at: GENERAL,
+      repo: GENERAL,
+      base: GENERAL,
+      kind: GENERAL,
+      block_status: GENERAL,
+      block_reason: GENERAL,
+      north_star: GENERAL,
+      pr_url: GENERAL,
+      branch: GENERAL,
     },
   },
   mutation_mappers: {},

@@ -26,6 +26,19 @@ export type Card = {
   deps: string[];
   created_at: string;
   updated_at: string;
+  // ── Structured pickup-decision + reconcile fields ───────────────────────
+  // (fbrain design `fkanban-card-structured-fields`). Stored as plain String
+  // schema fields; enum-valued ones (kind/block_status) are normalized on use
+  // via normalizeKind/normalizeBlockStatus so a stale/legacy value never throws.
+  // All default to "" for pre-migration cards (rowToCard).
+  repo: string; // owner/name a build agent clones; "" = not a code card
+  base: string; // base branch a PR targets (default "main")
+  kind: string; // CardKind: pr|registry|tracker (normalizeKind for the enum)
+  block_status: string; // BlockStatus: none|needs_human|design_first|deferred
+  block_reason: string; // free-text why, when block_status != none
+  north_star: string; // fbrain North Star slug this advances
+  pr_url: string; // PR driving this card, when in flight
+  branch: string; // worktree/feature branch
 };
 
 export type Board = {
@@ -233,6 +246,104 @@ export function applyHeaderDerivation(
   return card.body;
 }
 
+// ── Structured card fields: enums, normalizers, eligibility, backfill ───────
+// (fbrain design `fkanban-card-structured-fields`.) These promote the signals a
+// fresh agent needs to decide "what do I pick up?" out of body prose into real
+// fields. Enum fields are stored as plain strings and normalized on use so a
+// stale/legacy/empty value degrades to the safe default instead of throwing.
+
+export const CARD_KINDS = ["pr", "registry", "tracker"] as const;
+export type CardKind = (typeof CARD_KINDS)[number];
+
+export const BLOCK_STATUSES = ["none", "needs_human", "design_first", "deferred"] as const;
+export type BlockStatus = (typeof BLOCK_STATUSES)[number];
+
+export function isCardKind(s: string): s is CardKind {
+  return (CARD_KINDS as readonly string[]).includes(s);
+}
+
+export function isBlockStatus(s: string): s is BlockStatus {
+  return (BLOCK_STATUSES as readonly string[]).includes(s);
+}
+
+// Empty/unknown kind → "pr" (the default flow). Backfill sets "registry"
+// explicitly for fbrain-record cards; until then isPickupEligible also guards
+// with isRegistryCard as a belt-and-suspenders for un-migrated cards.
+export function normalizeKind(s: string): CardKind {
+  return isCardKind(s) ? s : "pr";
+}
+
+// Empty/unknown block_status → "none" (not held).
+export function normalizeBlockStatus(s: string): BlockStatus {
+  return isBlockStatus(s) ? s : "none";
+}
+
+// Read a `Name: value` line from a card body (first match, line-anchored). Used
+// to backfill the structured fields from the legacy body-header convention.
+export function parseBodyHeader(body: string, name: string): string {
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.+?)[ \\t]*$`, "im");
+  const m = body.match(re);
+  return m ? m[1]!.trim() : "";
+}
+
+// The card-LOCAL half of "can a build agent pick this up?". Dependency
+// satisfaction is NOT included here — it needs board context (depStatus); a
+// caller ANDs this with `!depStatus(...).blocked`. Keeping the two separate
+// mirrors how `move`'s soft-block and the pickup readiness check already split.
+export function isPickupEligible(card: Card): boolean {
+  return (
+    normalizeKind(card.kind) === "pr" &&
+    !isRegistryCard(card.body, card.title) && // fallback for un-backfilled cards
+    card.repo.trim().length > 0 &&
+    card.base.trim().length > 0 &&
+    normalizeBlockStatus(card.block_status) === "none"
+  );
+}
+
+// Backfill the structured fields for a card from its legacy body/tags, WITHOUT
+// overwriting a value already set. Reuses the #91 derivation (body `Repo:`/
+// `Base:` headers, then the tag→repo map) plus the `North Star:` line and the
+// registry-card classifier. Returns a partial of only the fields it filled, so
+// callers can apply + report what changed. Pure.
+export function deriveStructuredFields(card: Card): Partial<Card> {
+  const out: Partial<Card> = {};
+
+  // kind: classify registry/recipe cards so they never enter the pickup flow.
+  const registry = isRegistryCard(card.body, card.title);
+  if (!card.kind) out.kind = registry ? "registry" : "pr";
+
+  // repo/base: registry cards target an fbrain record, not a repo — never give
+  // them one (even if they carry a subsystem tag). For PR cards, an explicit
+  // body header wins, else the unambiguous tag map; base defaults to main once
+  // a repo is known.
+  if (!registry) {
+    if (!card.repo) {
+      const fromHeader = parseBodyHeader(card.body, "Repo");
+      out.repo = fromHeader || inferRepoFromTags(card.tags) || "";
+    }
+    if (!card.base) {
+      const fromHeader = parseBodyHeader(card.body, "Base");
+      const repo = out.repo ?? card.repo;
+      out.base = fromHeader || (repo ? DEFAULT_BASE : "");
+    }
+  }
+  // north_star: the `North Star:` body line.
+  if (!card.north_star) {
+    const ns = parseBodyHeader(card.body, "North Star");
+    if (ns) out.north_star = ns;
+  }
+  return out;
+}
+
+// The structured fields all-empty — for building a fresh Card literal (the
+// create path, test factories) without spelling out eight defaults each time.
+export function emptyStructuredFields(): Pick<
+  Card,
+  "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch"
+> {
+  return { repo: "", base: "", kind: "", block_status: "", block_reason: "", north_star: "", pr_url: "", branch: "" };
+}
+
 export type DepStatus = {
   // Existing dep cards not yet in their board's terminal column — these block
   // this card.
@@ -429,6 +540,15 @@ export function rowToCard(row: QueryRow): Card {
     deps,
     created_at: stringField(f, "created_at"),
     updated_at: stringField(f, "updated_at"),
+    // New fields default to "" for cards written before the schema gained them.
+    repo: stringField(f, "repo"),
+    base: stringField(f, "base"),
+    kind: stringField(f, "kind"),
+    block_status: stringField(f, "block_status"),
+    block_reason: stringField(f, "block_reason"),
+    north_star: stringField(f, "north_star"),
+    pr_url: stringField(f, "pr_url"),
+    branch: stringField(f, "branch"),
   };
 }
 
@@ -543,6 +663,14 @@ export function cardToFields(c: Card): Record<string, unknown> {
     tags: [...c.tags.filter((t) => !isDepTag(t)), ...c.deps.map(depTag)],
     created_at: c.created_at,
     updated_at: c.updated_at,
+    repo: c.repo ?? "",
+    base: c.base ?? "",
+    kind: c.kind ?? "",
+    block_status: c.block_status ?? "",
+    block_reason: c.block_reason ?? "",
+    north_star: c.north_star ?? "",
+    pr_url: c.pr_url ?? "",
+    branch: c.branch ?? "",
   };
 }
 

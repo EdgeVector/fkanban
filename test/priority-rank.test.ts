@@ -13,6 +13,7 @@ import type { Config } from "../src/config.ts";
 import {
   DEFAULT_PRIORITY,
   boardToFields,
+  emptyStructuredFields,
   findCard,
   isPriorityTag,
   normalizePriority,
@@ -105,6 +106,7 @@ describe("rankCards", () => {
     assignee: "",
     tags,
     deps: [],
+    ...emptyStructuredFields(),
     created_at,
     updated_at: created_at,
   });

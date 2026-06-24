@@ -10,6 +10,7 @@ import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } f
 import {
   boardToFields,
   cardToFields,
+  emptyStructuredFields,
   isTombstoned,
   rowToBoard,
   type Board,
@@ -48,6 +49,7 @@ function card(partial: Partial<Card>): Card {
     assignee: "",
     tags: [],
     deps: [],
+    ...emptyStructuredFields(),
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     ...partial,

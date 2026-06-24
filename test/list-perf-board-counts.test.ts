@@ -15,7 +15,7 @@ import { describe, expect, test } from "bun:test";
 import { boardListCmd, boardListResult } from "../src/commands/board.ts";
 import { listCmd } from "../src/commands/list.ts";
 import { type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
-import { boardToFields, cardToFields, type Board, type Card } from "../src/record.ts";
+import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
 
 const cfg: Config = {
@@ -49,6 +49,7 @@ function card(partial: Partial<Card>): Card {
     assignee: "",
     tags: [],
     deps: [],
+    ...emptyStructuredFields(),
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     ...partial,
