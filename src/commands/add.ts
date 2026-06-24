@@ -29,8 +29,10 @@ import {
   nowIso,
   requireBoard,
   validateSlug,
+  withPriorityTag,
   wouldCreateCycle,
   type Card,
+  type PriorityTier,
 } from "../record.ts";
 
 export type AddOptions = {
@@ -45,6 +47,10 @@ export type AddOptions = {
   // Replace the card's dependency list with these slugs (validated, deduped,
   // self-references dropped). Omit to leave existing deps untouched on update.
   deps?: string[];
+  // Set the card's priority tier (P0–P3). Stored as a `p0`..`p3` tag: any
+  // existing priority tag is replaced, the rest of the tags are preserved.
+  // Omit to leave the card's current priority untouched on update.
+  priority?: PriorityTier;
   body?: string;
   // Override the dependency soft-block when placing the card into a working
   // column (doing/review/done). Mirrors `move`'s --force.
@@ -188,6 +194,13 @@ async function enforceDepBlock(
   }
 }
 
+// Apply an optional `--priority` to a resolved tag list: replace any existing
+// p0..p3 tag and leave the rest. A no-op when no priority was requested, so an
+// ordinary update never disturbs the card's current priority tag.
+function applyPriority(tags: string[], priority?: PriorityTier): string[] {
+  return priority ? withPriorityTag(tags, priority) : tags;
+}
+
 export type AddResult = { slug: string; action: "created" | "updated"; board: string; column: string };
 
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
@@ -215,7 +228,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       board: boardSlug,
       column: opts.column ?? existing.column,
       assignee: opts.assignee ?? existing.assignee,
-      tags: opts.tags ?? existing.tags,
+      tags: applyPriority(opts.tags ?? existing.tags, opts.priority),
       deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, existing.deps) : existing.deps,
       updated_at: now,
     };
@@ -242,7 +255,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     column,
     position: appendPosition(),
     assignee: opts.assignee ?? "",
-    tags: opts.tags ?? [],
+    tags: applyPriority(opts.tags ?? [], opts.priority),
     deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, []) : [],
     created_at: now,
     updated_at: now,
