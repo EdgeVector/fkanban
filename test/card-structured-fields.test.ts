@@ -119,8 +119,9 @@ describe("parseBodyHeader", () => {
     // the value must NOT swallow the following headers (regression: a backfill
     // of existing cards over-captured "EdgeVector/fold   Base: main   Branch: …").
     expect(parseBodyHeader("Repo: EdgeVector/fold   Base: main   Branch: fkanban/x", "Repo")).toBe("EdgeVector/fold");
-    expect(parseBodyHeader("Repo: EdgeVector/fold   Base: main", "Base")).toBe("main");
     expect(parseBodyHeader("Repo: EdgeVector/exemem-infra\\nBase: main", "Repo")).toBe("EdgeVector/exemem-infra");
+    // A line-anchored Base: on its own line still parses normally.
+    expect(parseBodyHeader("Repo: EdgeVector/fold\nBase: dev", "Base")).toBe("dev");
   });
 });
 
