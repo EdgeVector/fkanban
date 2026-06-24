@@ -289,7 +289,9 @@ export function normalizeBlockStatus(s: string): BlockStatus {
 export function parseBodyHeader(body: string, name: string): string {
   const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(\\S+)`, "im");
   const m = body.match(re);
-  return m ? m[1]!.trim() : "";
+  // `\S+` stops the value at the next whitespace (the space-joined case). Also
+  // cut at a literal escaped newline ("o/n\nBase:") for bodies stored that way.
+  return m ? m[1]!.split("\\n")[0]!.trim() : "";
 }
 
 // The card-LOCAL half of "can a build agent pick this up?". Dependency
