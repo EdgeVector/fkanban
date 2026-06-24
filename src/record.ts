@@ -278,10 +278,16 @@ export function normalizeBlockStatus(s: string): BlockStatus {
   return isBlockStatus(s) ? s : "none";
 }
 
-// Read a `Name: value` line from a card body (first match, line-anchored). Used
-// to backfill the structured fields from the legacy body-header convention.
+// Read a `Name: value` header from a card body, used to backfill the structured
+// fields from the legacy body-header convention. All callers (repo/base/
+// north_star) carry SINGLE-TOKEN values (an owner/name, a branch, a slug), so
+// capture the first non-whitespace run after the colon — never the rest of the
+// line. This is deliberately strict: some card bodies run the headers together
+// on one physical line ("Repo: o/n   Base: main   Branch: x") or store them with
+// escaped newlines, and a greedy `(.+)$` capture swallowed the following headers
+// into the value (observed corrupting a backfill of existing cards).
 export function parseBodyHeader(body: string, name: string): string {
-  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.+?)[ \\t]*$`, "im");
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(\\S+)`, "im");
   const m = body.match(re);
   return m ? m[1]!.trim() : "";
 }

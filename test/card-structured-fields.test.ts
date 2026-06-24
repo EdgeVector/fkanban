@@ -113,6 +113,15 @@ describe("parseBodyHeader", () => {
     expect(parseBodyHeader("North Star: foo-bar\n", "North Star")).toBe("foo-bar");
     expect(parseBodyHeader("no header here", "Repo")).toBe("");
   });
+
+  test("captures only the single-token value when headers run together on one line", () => {
+    // Some bodies store the header block space-joined or with escaped newlines;
+    // the value must NOT swallow the following headers (regression: a backfill
+    // of existing cards over-captured "EdgeVector/fold   Base: main   Branch: …").
+    expect(parseBodyHeader("Repo: EdgeVector/fold   Base: main   Branch: fkanban/x", "Repo")).toBe("EdgeVector/fold");
+    expect(parseBodyHeader("Repo: EdgeVector/fold   Base: main", "Base")).toBe("main");
+    expect(parseBodyHeader("Repo: EdgeVector/exemem-infra\\nBase: main", "Repo")).toBe("EdgeVector/exemem-infra");
+  });
 });
 
 describe("deriveStructuredFields (backfill)", () => {
