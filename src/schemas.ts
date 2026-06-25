@@ -239,3 +239,71 @@ export function schemaFor(type: RecordType): AddSchemaRequest {
 export function isDefaultColumn(s: string): s is Column {
   return (DEFAULT_COLUMNS as readonly string[]).includes(s);
 }
+
+// One candidate schema loaded on the node, as the resolver sees it: the
+// canonical hash plus the field set the node reports for it. (Structurally a
+// subset of client.ts's `LoadedSchema`, redeclared here so this pure module
+// has no client dependency.)
+export type LoadedSchemaCandidate = {
+  name: string;
+  descriptive_name: string;
+  owner_app_id: string;
+  fields: string[];
+};
+
+export type SchemaResolution =
+  | { kind: "ok"; hash: string; ambiguous: boolean }
+  | { kind: "missing" }
+  | { kind: "narrower"; hash: string; missingFields: string[] };
+
+// Resolve which loaded schema fkanban should pin its config to for `type`.
+//
+// The node can have MORE THAN ONE schema sharing an `owner_app_id` +
+// `descriptive_name` — a stale, narrower version lingering beside the current
+// one (fkanban #94: a 10-field `fkanban/Card` alongside the live 18-field one).
+// Picking the first descriptive_name match (the old behavior) can pin config to
+// the narrower version, and then EVERY write 400s because fkanban always emits
+// its full field set. So:
+//
+//   1. Filter to schemas matching this app's `owner_app_id` + `descriptive_name`.
+//   2. Among those, PREFER a schema whose `fields` SUPERSET the local definition
+//      (so a write of every local field is accepted). If several do, that's
+//      benign ambiguity (they're all write-compatible) — pick the first and flag
+//      `ambiguous` so the caller can warn.
+//   3. If NONE supersets the local fields, the only candidates are narrower than
+//      the app expects — return `narrower` with the missing fields so the caller
+//      refuses to adopt it (rather than silently pinning a write-broken hash).
+//   4. No match at all → `missing`.
+//
+// A node that omits `fields` (older nodes) yields empty `fields` for every
+// candidate, so no candidate supersets a non-empty local set → `narrower`; the
+// caller's write-probe (which exercises a real create) is the backstop there.
+export function resolveLoadedSchema(
+  type: RecordType,
+  loaded: LoadedSchemaCandidate[],
+): SchemaResolution {
+  const def = RECORDS[type].schema.schema;
+  const localFields = def.fields;
+  const candidates = loaded.filter(
+    (s) =>
+      s.owner_app_id === def.owner_app_id &&
+      s.descriptive_name === def.descriptive_name &&
+      s.name.length > 0,
+  );
+  if (candidates.length === 0) return { kind: "missing" };
+
+  const superset = candidates.filter((s) =>
+    localFields.every((f) => s.fields.includes(f)),
+  );
+  if (superset.length > 0) {
+    return { kind: "ok", hash: superset[0]!.name, ambiguous: superset.length > 1 };
+  }
+
+  // No write-compatible candidate. Report the BEST (widest) narrower one and the
+  // fields it's missing, so the caller's error is specific.
+  const best = candidates
+    .slice()
+    .sort((a, b) => b.fields.length - a.fields.length)[0]!;
+  const missingFields = localFields.filter((f) => !best.fields.includes(f));
+  return { kind: "narrower", hash: best.name, missingFields };
+}

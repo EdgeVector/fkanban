@@ -8,8 +8,8 @@ import pkg from "../../package.json" with { type: "json" };
 import { FkanbanError, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
-import { listBoards, listCards } from "../record.ts";
-import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../schemas.ts";
+import { listBoards, listCards, probeSchemaWritable } from "../record.ts";
+import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveLoadedSchema } from "../schemas.ts";
 
 // A single machine-readable health check. `pass`/`fail` checks flip `ok`;
 // `info` checks (e.g. the optional PATH shim) are advisory and never do.
@@ -124,19 +124,49 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   check(Boolean(cfg.schemaHashes.card), "card schema hash in config", cfg.schemaHashes.card);
   check(Boolean(cfg.schemaHashes.board), "board schema hash in config", cfg.schemaHashes.board);
 
-  // Cross-check the config hashes against the node's loaded schema set.
+  // Cross-check the config hashes against the node's loaded schema set, and
+  // WRITE-PROBE the configured hash. A bare "config hash == a loaded hash"
+  // match is NOT enough: the node can load a stale, narrower schema version that
+  // resolves fine yet rejects every write (fkanban #94). So for each schema:
+  //   - confirm the configured hash is actually loaded, AND
+  //   - confirm it's the write-compatible resolution (its fields superset the
+  //     local definition) — flagging a config pinned to a narrower version, AND
+  //   - write-probe it (create+delete an all-fields throwaway), the runtime
+  //     backstop that catches non-writability regardless of reported fields.
+  // This makes `doctor` red — not cosmetically green — when writes are broken.
   try {
     const loaded = await node.listSchemas();
     for (const entry of UNIQUE_SCHEMAS) {
       const descriptive = entry.schema.schema.descriptive_name;
-      const match = loaded.find(
-        (s) => s.owner_app_id === OWNER_APP_ID && s.descriptive_name === descriptive,
-      );
       const configHash = cfg.schemaHashes[entry.key];
+      const match = loaded.find((s) => s.name === configHash);
+      const resolution = resolveLoadedSchema(entry.key, loaded);
+
+      if (!match) {
+        check(false, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, `config hash ${configHash ?? "(unset)"} not loaded on node`);
+        continue;
+      }
+      // The config hash IS loaded. Is it the write-compatible version?
+      if (resolution.kind === "ok" && resolution.hash !== configHash) {
+        check(
+          false,
+          `${OWNER_APP_ID}/${descriptive} config hash is the writable version`,
+          `config is pinned to ${configHash} but the node's write-compatible ${descriptive} is ${resolution.hash} — run \`fkanban init\` to adopt it`,
+        );
+        continue;
+      }
+      check(true, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, configHash);
+
+      // Write-probe the configured hash — the actual "can the board be written?"
+      // signal. A red here is the #94 outage made visible (instead of a green
+      // doctor over a write-broken board).
+      const probe = await probeSchemaWritable(node, configHash!, entry.key);
       check(
-        Boolean(match) && match!.name === configHash,
-        `${OWNER_APP_ID}/${descriptive} loaded + matches config`,
-        match ? match.name : "not loaded on node — re-run `fkanban init`",
+        probe.writable,
+        `${OWNER_APP_ID}/${descriptive} write-probe`,
+        probe.writable
+          ? "create+delete of an all-fields record round-tripped"
+          : `node rejected a write of all fields — ${probe.reason}`,
       );
     }
   } catch (err) {

@@ -4,7 +4,7 @@
 // enum normalizers, the round-trip through cardToFields/rowToCard (incl. legacy
 // cards with the fields absent), pickup-eligibility, and the body→field backfill.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import {
   cardToFields,
   deriveStructuredFields,
@@ -16,6 +16,8 @@ import {
   rowToCard,
   type Card,
 } from "../src/record.ts";
+import { newNodeClient } from "../src/client.ts";
+import { fieldsFor } from "../src/schemas.ts";
 
 function card(partial: Partial<Card>): Card {
   return {
@@ -122,6 +124,72 @@ describe("parseBodyHeader", () => {
     expect(parseBodyHeader("Repo: EdgeVector/exemem-infra\\nBase: main", "Repo")).toBe("EdgeVector/exemem-infra");
     // A line-anchored Base: on its own line still parses normally.
     expect(parseBodyHeader("Repo: EdgeVector/fold\nBase: dev", "Base")).toBe("dev");
+  });
+});
+
+// fkanban #94: the new structured fields must round-trip through a real
+// create→query against a node that has the full Card schema loaded — proving
+// they're WRITABLE end-to-end, not just modeled. (A stub node stands in for the
+// live node so this runs in CI; the resolver/write-probe guards in
+// init-write-probe-guard + doctor-write-probe cover the not-writable case.)
+describe("structured fields write+read-back against a node (real wire path)", () => {
+  const store = new Map<string, Record<string, unknown>>();
+  const FULL = "fullcardschemahash";
+  const node = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const text = req.method === "POST" ? await req.text() : "";
+      const body = text.length > 0 ? (JSON.parse(text) as Record<string, unknown>) : {};
+      if (url.pathname === "/api/mutation") {
+        const schema = body.schema as string;
+        const keyHash = (body.key_value as { hash: string }).hash;
+        if ((body.mutation_type as string) === "delete") store.delete(`${schema}::${keyHash}`);
+        else store.set(`${schema}::${keyHash}`, body.fields_and_values as Record<string, unknown>);
+        return Response.json({ ok: true, success: true });
+      }
+      if (url.pathname === "/api/query") {
+        const schema = body.schema_name as string;
+        const want = (body.filter as { HashKey?: string } | undefined)?.HashKey;
+        const rows = [...store.entries()]
+          .filter(([k]) => k.startsWith(`${schema}::`))
+          .map(([k, f]) => ({ fields: f, key: { hash: k.split("::")[1]!, range: null } }))
+          .filter((r) => want === undefined || r.key.hash === want);
+        return Response.json({ ok: true, results: rows, has_more: false });
+      }
+      return Response.json({ error: "unexpected" }, { status: 500 });
+    },
+  });
+  afterAll(() => node.stop(true));
+
+  test("every new field persists a non-empty value and reads it back", async () => {
+    const client = newNodeClient({ baseUrl: `http://127.0.0.1:${node.port}`, userHash: "u" });
+    const c = card({
+      slug: "wire-card",
+      repo: "EdgeVector/fold",
+      base: "dev",
+      kind: "pr",
+      block_status: "needs_human",
+      block_reason: "waiting on Tom",
+      north_star: "ns-x",
+      pr_url: "https://github.com/EdgeVector/fold/pull/42",
+      branch: "fkanban/wire-card",
+    });
+    await client.createRecord({ schemaHash: FULL, fields: cardToFields(c), keyHash: c.slug });
+    const res = await client.queryAll({
+      schemaHash: FULL,
+      fields: fieldsFor("card"),
+      filter: { HashKey: "wire-card" },
+    });
+    const back = rowToCard(res.results[0]!);
+    expect(back.repo).toBe("EdgeVector/fold");
+    expect(back.base).toBe("dev");
+    expect(back.kind).toBe("pr");
+    expect(back.block_status).toBe("needs_human");
+    expect(back.block_reason).toBe("waiting on Tom");
+    expect(back.north_star).toBe("ns-x");
+    expect(back.pr_url).toBe("https://github.com/EdgeVector/fold/pull/42");
+    expect(back.branch).toBe("fkanban/wire-card");
   });
 });
 
