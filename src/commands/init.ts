@@ -22,6 +22,7 @@ import {
   OWNER_APP_ID,
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
+  resolveLoadedSchema,
 } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -32,7 +33,13 @@ import {
   schemaHashFor,
   type Config,
 } from "../config.ts";
-import { boardToFields, findBoard, nowIso, type Board } from "../record.ts";
+import {
+  boardToFields,
+  findBoard,
+  nowIso,
+  probeSchemaWritable,
+  type Board,
+} from "../record.ts";
 
 // `:9001` is the homebrew fold_db_node daemon; the schema service defaults to
 // the prod cloud Lambda. Override both with --node-url / --schema-service-url
@@ -110,22 +117,52 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   print(`        loaded ${loadResult.schemas_loaded_to_db}/${loadResult.available_schemas_loaded} (failed_schemas empty ✓)`);
 
   // Step 3: resolve each fkanban schema's canonical hash from the node's
-  // loaded set, matched by owner_app_id + descriptive_name.
+  // loaded set. The node can have MORE THAN ONE schema sharing
+  // owner_app_id + descriptive_name (a stale, narrower version lingering beside
+  // the current one — fkanban #94). `resolveLoadedSchema` therefore prefers the
+  // candidate whose FIELDS superset the local definition, so we never pin config
+  // to a narrower version the node would reject every write against.
   print(`[3/${STEPS}] resolving ${UNIQUE_SCHEMAS.length} schema hashes for app "${OWNER_APP_ID}"`);
   const loaded = await node.listSchemas();
   const schemaHashes: Record<string, string> = {};
   const missing: string[] = [];
+  const narrower: string[] = [];
   for (const entry of UNIQUE_SCHEMAS) {
     const descriptive = entry.schema.schema.descriptive_name;
-    const match = loaded.find(
-      (s) => s.owner_app_id === OWNER_APP_ID && s.descriptive_name === descriptive,
-    );
-    if (!match || match.name.length === 0) {
+    const resolution = resolveLoadedSchema(entry.key, loaded);
+    if (resolution.kind === "missing") {
       missing.push(`${OWNER_APP_ID}/${descriptive}`);
       continue;
     }
-    schemaHashes[entry.key] = match.name;
-    print(`        ${descriptive.padEnd(6)} → ${match.name}`);
+    if (resolution.kind === "narrower") {
+      // Every loaded `fkanban/<descriptive>` is narrower than the app expects —
+      // adopting it would 400 every write. Refuse, naming the missing fields.
+      narrower.push(
+        `${OWNER_APP_ID}/${descriptive} (loaded hash ${resolution.hash} is missing fields: ${resolution.missingFields.join(", ")})`,
+      );
+      continue;
+    }
+    schemaHashes[entry.key] = resolution.hash;
+    print(
+      `        ${descriptive.padEnd(6)} → ${resolution.hash}` +
+        (resolution.ambiguous ? " (multiple write-compatible versions loaded; picked one)" : ""),
+    );
+  }
+  if (narrower.length > 0) {
+    throw new FkanbanError({
+      code: "schema_not_writable",
+      message:
+        `The node's loaded ${narrower.length === 1 ? "schema is" : "schemas are"} an OLDER, narrower ` +
+        `version than this fkanban build expects — adopting ${narrower.length === 1 ? "it" : "them"} would ` +
+        `reject every write:\n  ${narrower.join("\n  ")}`,
+      hint:
+        "Do NOT pin config to a narrower schema. The node needs the current " +
+        "fkanban/* schema version (with all fields) loaded. Either the current " +
+        "version isn't published to the schema_service the node uses, or only a " +
+        "stale version is loaded. Republish/load the current fkanban/* schemas " +
+        "(README → \"Republishing the schemas\"), then re-run `fkanban init`. " +
+        "Your existing config was left untouched, so current writes keep working.",
+    });
   }
   if (missing.length > 0) {
     throw new FkanbanError({
@@ -149,7 +186,42 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     });
   }
 
-  // Step 4: persist config.
+  // Step 3b: WRITE-PROBE each resolved hash before adopting it. The
+  // field-superset resolution above catches a narrower schema only when the
+  // node reports `fields`; this probe is the runtime backstop — it creates +
+  // deletes a throwaway record carrying EVERY field against each resolved hash,
+  // so a hash is adopted only once a real all-fields write round-trips. This is
+  // the guard that closes the #94 footgun where `init` happily pinned a
+  // resolved-but-not-writable hash and broke every subsequent `add`.
+  print(`[3b/${STEPS}] write-probing resolved schema hashes`);
+  const notWritable: string[] = [];
+  for (const entry of UNIQUE_SCHEMAS) {
+    const hash = schemaHashes[entry.key];
+    if (!hash) continue;
+    const probe = await probeSchemaWritable(node, hash, entry.key);
+    if (probe.writable) {
+      print(`        ${entry.key.padEnd(6)} writable ✓`);
+    } else {
+      notWritable.push(`${entry.key} (${hash}): ${probe.reason}`);
+    }
+  }
+  if (notWritable.length > 0) {
+    throw new FkanbanError({
+      code: "schema_not_writable",
+      message:
+        `A write probe was REJECTED for the resolved schema ${notWritable.length === 1 ? "hash" : "hashes"} — ` +
+        `the node will not accept fkanban's full field set, so init is refusing to adopt ` +
+        `${notWritable.length === 1 ? "it" : "them"} (this would otherwise break every ` +
+        `subsequent write):\n  ${notWritable.join("\n  ")}`,
+      hint:
+        "The node has a schema version that resolves but isn't writable for all " +
+        "fields. Load/republish the current fkanban/* schemas on the node " +
+        "(README → \"Republishing the schemas\"), then re-run `fkanban init`. " +
+        "Your existing config was left untouched — current writes keep working.",
+    });
+  }
+
+  // Step 4: persist config — only now that every resolved hash write-probed OK.
   print(`[4/${STEPS}] writing config to ${configPath}`);
   const config: Config = {
     configVersion: CONFIG_VERSION,

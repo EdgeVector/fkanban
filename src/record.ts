@@ -7,6 +7,7 @@ import {
   DEFAULT_COLUMNS,
   fieldsFor,
   isDefaultColumn,
+  schemaFor,
   type Column,
   type RecordType,
 } from "./schemas.ts";
@@ -680,6 +681,76 @@ export function cardToFields(c: Card): Record<string, unknown> {
     pr_url: c.pr_url ?? "",
     branch: c.branch ?? "",
   };
+}
+
+// The outcome of probing whether a schema hash actually accepts a write of
+// EVERY field the app emits. `writable` means a create carrying all local
+// fields succeeded (and the throwaway record was cleaned up). `not_writable`
+// carries the node's rejection so the caller can refuse to adopt the hash and
+// tell the user exactly which fields the node won't take.
+export type WriteProbeResult =
+  | { writable: true }
+  | { writable: false; reason: string };
+
+// The reserved slug a write probe uses. Namespaced + obviously-throwaway so it
+// never collides with a real card, and tombstoned immediately after the probe.
+export const WRITE_PROBE_SLUG = "__fkanban_write_probe__";
+
+// Verify the node ACCEPTS a write carrying every field the app emits for `type`
+// against `schemaHash`, by creating a throwaway record with all fields set to a
+// probe value and then deleting it. Returns `{ writable: true }` on success, or
+// `{ writable: false, reason }` carrying the node's rejection (e.g. the #94
+// `unknown_fields` 400) on failure.
+//
+// This is the guard that closes the #94 footgun: `init` resolves a Card hash and
+// `doctor` reads the configured one, but the node can have a stale, narrower
+// schema version that RESOLVES fine yet rejects every write. A field-superset
+// check (resolveLoadedSchema) catches that when the node reports `fields`; this
+// probe is the runtime backstop that catches it regardless — a hash is only
+// adopted/declared healthy once a real write of all fields round-trips.
+//
+// Best-effort cleanup: if the create succeeds but the delete fails, the probe
+// still reports `writable: true` (the write path works) — the leftover record is
+// a tombstone-able throwaway, never surfaced by normal reads.
+export async function probeSchemaWritable(
+  node: NodeClient,
+  schemaHash: string,
+  type: RecordType,
+): Promise<WriteProbeResult> {
+  const fields: Record<string, unknown> = {};
+  for (const f of fieldsFor(type)) {
+    // `tags` is the only array field on either schema; everything else is a
+    // String. A non-empty probe value per field exercises the write of EVERY
+    // field (an all-empty write could be silently accepted by a node that drops
+    // unknown empties), which is exactly the #94 failure we must catch.
+    fields[f] = f === "tags" || f === "columns" ? [] : `probe`;
+  }
+  // The key field must equal the key hash so the record is addressable for the
+  // cleanup delete.
+  fields[keyFieldFor(type)] = WRITE_PROBE_SLUG;
+
+  try {
+    await node.createRecord({ schemaHash, fields, keyHash: WRITE_PROBE_SLUG });
+  } catch (err) {
+    return {
+      writable: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+  // Clean up the throwaway. A delete failure does not flip the result — the
+  // write path is proven writable, which is all the probe asserts.
+  try {
+    await node.deleteRecord({ schemaHash, keyHash: WRITE_PROBE_SLUG });
+  } catch {
+    // best-effort
+  }
+  return { writable: true };
+}
+
+// The hash_field (key) name for a record type, read from the schema definition
+// so the probe never drifts if a key field is ever renamed.
+function keyFieldFor(type: RecordType): string {
+  return schemaFor(type).schema.key.hash_field;
 }
 
 export function boardToFields(b: Board): Record<string, unknown> {

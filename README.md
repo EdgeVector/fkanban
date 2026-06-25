@@ -133,6 +133,18 @@ one-time
 [Republishing the schemas](#republishing-the-schemas-maintainers--one-time)
 maintainer step hasn't run against the schema_service the node uses yet.
 
+If `init` reports `schema_not_writable`, the node has a `fkanban/*` schema that
+**resolves but isn't writable for all fields** — usually an older, narrower
+version of the schema (fewer fields than this fkanban build expects), sometimes
+loaded *alongside* the current one. `init` now refuses to adopt such a hash
+(it would 400 every subsequent write) and **leaves your existing config
+untouched**, so the board keeps working. The fix is node-side: load/republish
+the current `fkanban/*` schemas (see
+[Republishing the schemas](#republishing-the-schemas-maintainers--one-time)),
+then re-run `fkanban init`. `init` resolves to — and `fkanban doctor`
+write-probes — the schema version whose fields cover the full set fkanban
+writes, so a stale duplicate can't silently break writes.
+
 ```
 Default board  (default)
 

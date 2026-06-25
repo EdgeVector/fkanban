@@ -147,6 +147,17 @@ export type LoadedSchema = {
   name: string;
   descriptive_name: string;
   owner_app_id: string;
+  // The schema's declared field names, as the node reports them in
+  // `/api/schemas`. fkanban uses this to disambiguate when two schemas share
+  // an `owner_app_id` + `descriptive_name` (e.g. a stale duplicate alongside
+  // the current one): the resolver prefers the loaded schema whose `fields`
+  // SUPERSET the app's local definition, so a write of every local field is
+  // accepted — instead of blindly picking the first descriptive_name match,
+  // which can be a narrower stale version the node rejects writes against
+  // (fkanban #94: a 10-field `fkanban/Card` lingered beside the 18-field one).
+  // Empty when the node omits `fields` (older nodes) — callers fall back to
+  // descriptive_name matching + a write probe.
+  fields: string[];
 };
 
 export type SchemaServiceClient = {
@@ -575,6 +586,9 @@ export function newNodeClient(opts: {
         name: typeof s.name === "string" ? s.name : "",
         descriptive_name: typeof s.descriptive_name === "string" ? s.descriptive_name : "",
         owner_app_id: typeof s.owner_app_id === "string" ? s.owner_app_id : "",
+        fields: Array.isArray(s.fields)
+          ? (s.fields as unknown[]).filter((v): v is string => typeof v === "string")
+          : [],
       }));
     },
     async createRecord({ schemaHash, fields, keyHash }) {
@@ -681,6 +695,29 @@ function bodyMessage(body: unknown): string | undefined {
     if (typeof m === "string") return m;
   }
   return undefined;
+}
+
+// Pull a string[] field (e.g. `unknown_fields`, `available_fields`) out of a
+// JSON error body, returning [] if absent or the wrong shape. Used to surface
+// the node's full unknown-field detail in the mapped error.
+function bodyStringArray(body: unknown, key: string): string[] {
+  if (body && typeof body === "object" && key in body) {
+    const v = (body as Record<string, unknown>)[key];
+    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string");
+  }
+  return [];
+}
+
+// A `: <raw>` suffix for an error body that carries neither `error` nor
+// `message` — a raw JSON object or a plain-text body — so a 400/500 with an
+// unexpected shape still surfaces SOMETHING actionable instead of a bare
+// status. Bounded so a huge body can't blow up the message.
+function rawBodySuffix(body: unknown): string {
+  if (body === null || body === undefined) return "";
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  if (text.length === 0 || text === "null" || text === "{}") return "";
+  const clipped = text.length > 300 ? `${text.slice(0, 300)}…` : text;
+  return `: ${clipped}`;
 }
 
 function stripTrailingSlash(url: string): string {
@@ -972,15 +1009,35 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
     });
   }
   if (status === 400 && (errCode === "unknown_fields" || msg?.includes("unknown"))) {
+    // Surface the node's full, raw reason — the message already names which
+    // fields aren't writable and which ARE available, and `unknown_fields` /
+    // `available_fields` arrays may add detail the message omits. Without this
+    // the user only saw "Node /api/mutation returned HTTP 400." with no reason
+    // (fkanban #94). Do NOT advise `fkanban init` here: when the pinned hash is
+    // a stale, narrower schema version (the #94 footgun), re-running init can
+    // RE-ADOPT it and keep writes broken. Point at doctor's write-probe instead.
+    const unknown = bodyStringArray(body, "unknown_fields");
+    const available = bodyStringArray(body, "available_fields");
+    const detail =
+      msg ??
+      (unknown.length > 0
+        ? `fields ${unknown.join(", ")} not writable on schema${available.length > 0 ? ` (writable: ${available.join(", ")})` : ""}`
+        : "unknown field name");
     return new FkanbanError({
       code: "unknown_fields",
-      message: `Node rejected ${path}: ${msg ?? "unknown field name"}.`,
-      hint: "Schema drift — re-run `fkanban init` to re-register schemas.",
+      message: `Node rejected ${path}: ${detail}.`,
+      hint:
+        "The pinned card schema hash doesn't accept these fields — the node has a " +
+        "different (likely stale, narrower) schema version pinned in config. Run " +
+        "`fkanban doctor` to write-probe the pinned hash; do NOT blindly `fkanban init` " +
+        "(it can re-adopt the same broken hash).",
     });
   }
   return new FkanbanError({
     code: `node_http_${status}`,
-    message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""}.`,
+    // Include the full raw body when there's no structured message/error, so a
+    // 400 with an unusual shape is never reduced to a bare status (fkanban #94).
+    message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : errCode ? "" : rawBodySuffix(body)}${errCode ? ` [${errCode}]` : ""}.`,
     hint: status >= 500 ? "Check the node log; this looks like a node-side bug." : undefined,
   });
 }
