@@ -4,6 +4,8 @@
 // green even when the node rejected every write. These drive the real `doctor`
 // against a stub node and assert:
 //   - a config pinned to the writable full-18-field hash passes the write probe;
+//   - a config pinned to the writable full-18-field hash stays green even when
+//     the node also reports the stale 10-field duplicate first;
 //   - a config pinned to the stale 10-field hash FAILS the write probe (red);
 //   - a config pinned to the stale hash while a writable version IS loaded is
 //     flagged as "config hash is the writable version" = false (red), pointing
@@ -129,6 +131,25 @@ describe("doctor write-probe", () => {
       const report = lines.join("\n");
       expect(report).toContain("✓ fkanban/Card write-probe");
       expect(ok).toBe(true);
+    } finally {
+      node.stop(true);
+    }
+  });
+
+  test("green: config pinned to writable hash ignores a stale duplicate loaded first", async () => {
+    const node = makeNode([
+      { name: STALE_CARD_HASH, fields: OLD_CARD_FIELDS },
+      { name: FULL_CARD_HASH, fields: fieldsFor("card") },
+    ]);
+    const cfgPath = writeCfg("ok-with-stale-duplicate.json", FULL_CARD_HASH, node.port!);
+    const lines: string[] = [];
+    try {
+      const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
+      const report = lines.join("\n");
+      expect(ok).toBe(true);
+      expect(report).toContain(`✓ fkanban/Card loaded + matches config — ${FULL_CARD_HASH}`);
+      expect(report).toContain("✓ fkanban/Card write-probe");
+      expect(report).not.toContain(`✗ fkanban/Card loaded + matches config — ${STALE_CARD_HASH}`);
     } finally {
       node.stop(true);
     }
