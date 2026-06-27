@@ -2,11 +2,11 @@
 // point-read filter goes out on the wire and that every request has a deadline.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FkanbanError, newNodeClient } from "../src/client.ts";
+import { FkanbanError, newNodeClient, type NodeClient } from "../src/client.ts";
 import { findCard } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
 
@@ -153,6 +153,55 @@ describe("findCard", () => {
     const card = await findCard(node, cfg, "no-such-card");
     expect(card).toBeNull();
   });
+
+  test("falls back to a scan when the keyed point read hits a transport error", async () => {
+    const calls: unknown[] = [];
+    const fakeNode: NodeClient = {
+      baseUrl: "http://fake.invalid",
+      userHash: "test-user",
+      autoIdentity: async () => ({ provisioned: true, userHash: "test-user" }),
+      bootstrap: async () => ({ userHash: "test-user" }),
+      loadSchemas: async () => ({ available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] }),
+      listSchemas: async () => [],
+      createRecord: async () => {},
+      updateRecord: async () => {},
+      deleteRecord: async () => {},
+      rawCall: async () => ({ status: 200, headers: new Headers(), body: "", json: null }),
+      nodeTransport: () => ({ transport: "tcp" }),
+      async queryAll(opts) {
+        calls.push(opts);
+        if (opts.filter !== undefined) {
+          throw new FkanbanError({ code: "service_unreachable", message: "socket flaked" });
+        }
+        return {
+          ok: true,
+          results: [
+            {
+              fields: {
+                slug: "my-card",
+                title: "My card",
+                body: "spec",
+                board: "default",
+                column: "todo",
+                position: "10",
+                assignee: "",
+                tags: [],
+                created_at: "2026-01-01T00:00:00.000Z",
+                updated_at: "2026-01-01T00:00:00.000Z",
+              },
+              key: { hash: "my-card", range: null },
+            },
+          ],
+        };
+      },
+    };
+
+    const card = await findCard(fakeNode, cfg, "my-card");
+    expect(card?.slug).toBe("my-card");
+    expect(calls).toHaveLength(2);
+    expect((calls[0] as Record<string, unknown>).filter).toEqual({ HashKey: "my-card" });
+    expect("filter" in (calls[1] as Record<string, unknown>)).toBe(false);
+  });
 });
 
 // Socket-first is DATA-PLANE-ONLY: the fold#1004-discovered node socket serves
@@ -262,6 +311,38 @@ describe("socket-first is data-plane-only", () => {
     const t = node.nodeTransport();
     expect(t.transport).toBe("socket");
     expect(t.socketPath).toBe(socketPath);
+  });
+});
+
+describe("socket-first TCP fallback", () => {
+  test("data-plane query falls back to TCP when the configured socket cannot connect", async () => {
+    const sockDir = mkdtempSync(join(tmpdir(), "fkanban-bad-sock-"));
+    const badSocket = join(sockDir, "folddb.sock");
+    writeFileSync(badSocket, "");
+    const tcpSeen: string[] = [];
+    const tcpServer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        tcpSeen.push(path);
+        if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
+        return Response.json({ error: "unexpected_tcp_path" }, { status: 500 });
+      },
+    });
+
+    try {
+      const node = newNodeClient({
+        baseUrl: `http://127.0.0.1:${tcpServer.port}`,
+        userHash: "test-user",
+        socketPath: badSocket,
+      });
+      const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+      expect(res.results).toEqual([]);
+      expect(tcpSeen).toEqual(["/api/query"]);
+    } finally {
+      tcpServer.stop(true);
+      rmSync(sockDir, { recursive: true, force: true });
+    }
   });
 });
 

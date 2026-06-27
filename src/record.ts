@@ -622,11 +622,17 @@ export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promis
 // lookup, so this never scans the board.
 export async function findCard(node: NodeClient, cfg: Config, slug: string): Promise<Card | null> {
   const hash = schemaHashFor("card", cfg);
-  const res = await node.queryAll({
-    schemaHash: hash,
-    fields: fieldsFor("card"),
-    filter: { HashKey: slug },
-  });
+  let res;
+  try {
+    res = await node.queryAll({
+      schemaHash: hash,
+      fields: fieldsFor("card"),
+      filter: { HashKey: slug },
+    });
+  } catch (err) {
+    if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") throw err;
+    res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("card") });
+  }
   const card = res.results.map(rowToCard).find((c) => c.slug === slug);
   return card !== undefined && !isTombstoned(card.tags) ? card : null;
 }
