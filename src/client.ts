@@ -95,6 +95,8 @@ const BUSY_BACKOFF_MS = [250, 500, 1000];
 // Cap on any single honored "retry after" hint, so a misbehaving hint can't
 // make a command hang. The per-request deadline still governs each attempt.
 const BUSY_RETRY_AFTER_CAP_MS = 5_000;
+const SOCKET_CONNECT_RETRY_MAX = 3;
+const SOCKET_CONNECT_BACKOFF_MS = [100, 250, 500];
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -286,32 +288,41 @@ export async function attestOwnerSessionDetailed(
   // Mint over the UDS control socket. Bun speaks unix-socket fetch directly;
   // the `/control/*` verbs exist ONLY on this owner-attested channel.
   let pairingCode: string;
-  try {
-    const mintRes = await fetch("http://localhost/control/browser-pairing-code", {
-      method: "POST",
-      unix: socketPath,
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!mintRes.ok) {
-      verbose(`attest: mint refused (HTTP ${mintRes.status}) — proceeding unattested`);
-      return fail(`the control socket refused the pairing-code mint (HTTP ${mintRes.status})`);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const mintRes = await fetch("http://localhost/control/browser-pairing-code", {
+        method: "POST",
+        unix: socketPath,
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!mintRes.ok) {
+        verbose(`attest: mint refused (HTTP ${mintRes.status}) — proceeding unattested`);
+        return fail(`the control socket refused the pairing-code mint (HTTP ${mintRes.status})`);
+      }
+      const minted = (await mintRes.json()) as Record<string, unknown>;
+      const code = minted.pairing_code;
+      if (typeof code !== "string" || code.length === 0) {
+        verbose("attest: mint response missing pairing_code — proceeding unattested");
+        return fail("the control socket's mint response carried no pairing_code");
+      }
+      pairingCode = code;
+      break;
+    } catch (err) {
+      // Socket missing / connect refused / timeout → not an app-isolation node.
+      const detail = err instanceof Error ? err.message : String(err);
+      if (socketExists && isConnectError(err) && attempt < SOCKET_CONNECT_RETRY_MAX) {
+        const wait = SOCKET_CONNECT_BACKOFF_MS[attempt - 1]!;
+        verbose(`attest: mint over socket ${socketPath} failed (${detail}) — retry ${attempt}/${SOCKET_CONNECT_RETRY_MAX - 1} after ${wait}ms`);
+        await sleep(wait);
+        continue;
+      }
+      verbose(`attest: mint over socket ${socketPath} failed (${detail}) — proceeding unattested`);
+      return fail(
+        socketExists
+          ? `the mint over the control socket failed (${detail})`
+          : `no control socket exists at that path`,
+      );
     }
-    const minted = (await mintRes.json()) as Record<string, unknown>;
-    const code = minted.pairing_code;
-    if (typeof code !== "string" || code.length === 0) {
-      verbose("attest: mint response missing pairing_code — proceeding unattested");
-      return fail("the control socket's mint response carried no pairing_code");
-    }
-    pairingCode = code;
-  } catch (err) {
-    // Socket missing / connect refused / timeout → not an app-isolation node.
-    const detail = err instanceof Error ? err.message : String(err);
-    verbose(`attest: mint over socket ${socketPath} failed (${detail}) — proceeding unattested`);
-    return fail(
-      socketExists
-        ? `the mint over the control socket failed (${detail})`
-        : `no control socket exists at that path`,
-    );
   }
 
   // Exchange the code over TCP for a session token.
@@ -763,6 +774,7 @@ function isConnectError(err: unknown): boolean {
     msg.includes("econnrefused") ||
     msg.includes("enoent") ||
     msg.includes("failed to connect") ||
+    msg.includes("typo in the url or port") ||
     msg.includes("socket") ||
     msg.includes("connection closed")
   );
@@ -860,25 +872,36 @@ async function verboseFetch(opts: {
     return r;
   };
 
-  let res: Response;
+  let res: Response | undefined;
   try {
     if (useSocket) {
-      try {
-        res = await attempt(true);
-      } catch (socketErr) {
-        // A connect-class failure (socket vanished / refused) → fall back to TCP
-        // once, matching fold#1004's discovery semantics. A timeout is NOT a
-        // connect failure (the request reached the node), so don't retry it.
-        if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
-          opts.verbose(
-            `node: socket ${opts.socketPath} unreachable (${
-              socketErr instanceof Error ? socketErr.message : String(socketErr)
-            }) — falling back to TCP ${opts.baseUrl}`,
-          );
-          res = await attempt(false);
-        } else {
-          throw socketErr;
+      let socketErr: unknown = null;
+      for (let attemptNo = 1; attemptNo <= SOCKET_CONNECT_RETRY_MAX; attemptNo++) {
+        try {
+          res = await attempt(true);
+          socketErr = null;
+          break;
+        } catch (err) {
+          socketErr = err;
+          if (!isConnectError(err) || isTimeoutError(err)) throw err;
+          if (attemptNo < SOCKET_CONNECT_RETRY_MAX) {
+            const wait = SOCKET_CONNECT_BACKOFF_MS[attemptNo - 1]!;
+            opts.verbose(
+              `node: socket ${opts.socketPath} connect failed (${
+                err instanceof Error ? err.message : String(err)
+              }) — retry ${attemptNo}/${SOCKET_CONNECT_RETRY_MAX - 1} after ${wait}ms`,
+            );
+            await sleep(wait);
+          }
         }
+      }
+      if (socketErr !== null) {
+        opts.verbose(
+          `node: socket ${opts.socketPath} unreachable (${
+            socketErr instanceof Error ? socketErr.message : String(socketErr)
+          }) — falling back to TCP ${opts.baseUrl}`,
+        );
+        res = await attempt(false);
       }
     } else {
       res = await attempt(false);
@@ -890,6 +913,9 @@ async function verboseFetch(opts: {
       throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
     }
     throw connectionError(opts.baseUrl, opts.service, err, useSocket ? opts.socketPath : undefined);
+  }
+  if (res === undefined) {
+    throw connectionError(opts.baseUrl, opts.service, new Error("no response"), useSocket ? opts.socketPath : undefined);
   }
 
   const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
