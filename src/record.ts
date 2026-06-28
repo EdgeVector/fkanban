@@ -237,15 +237,24 @@ function stampHeader(repo: string, base: string, body: string, comment?: string)
 // Pure decision + transform. Callers stamp the returned `body` for "stamped" /
 // "defaulted"; surface "conflict" loudly (needs_human) and "ambiguous" as a
 // warning. `defaultRepo` is the no-signal fallback (DEFAULT_REPO; pass "" to
-// disable defaulting and get "ambiguous" instead).
+// disable defaulting and get "ambiguous" instead). `forcedRepo` is an explicit
+// caller-supplied repo (the `--repo` flag) that OVERRIDES tag inference — it
+// stamps that repo's header even when the tags conflict, so resolving a
+// conflict is a one-liner (`add <slug> --repo <owner/name>`).
 export function deriveRepoHeaders(
   body: string,
   tags: string[],
   title: string,
-  opts: { defaultRepo?: string } = {},
+  opts: { defaultRepo?: string; forcedRepo?: string } = {},
 ): HeaderDerivation {
   if (hasRepoHeaders(body)) return { kind: "present" };
   if (isRegistryCard(body, title)) return { kind: "skip-registry" };
+  // An explicit --repo is authoritative: stamp it and skip tag inference entirely
+  // (this is how the watcher's conflict-triage resolves a >1-repo card).
+  const forcedRepo = opts.forcedRepo?.trim();
+  if (forcedRepo) {
+    return { kind: "stamped", repo: forcedRepo, base: DEFAULT_BASE, body: stampHeader(forcedRepo, DEFAULT_BASE, body) };
+  }
   const repos = repoMatchesFromTags(tags);
   if (repos.size === 1) {
     const repo = [...repos][0]!;
@@ -306,7 +315,7 @@ export type HeaderDerivationResult = {
 export function applyHeaderDerivation(
   card: { slug: string; body: string; tags: string[]; title: string; column: string },
   warn: (msg: string) => void,
-  opts: { defaultRepo?: string } = {},
+  opts: { defaultRepo?: string; forcedRepo?: string } = {},
 ): HeaderDerivationResult {
   if (isWorkingColumn(card.column)) return { body: card.body };
   const d = deriveRepoHeaders(card.body, card.tags, card.title, opts);

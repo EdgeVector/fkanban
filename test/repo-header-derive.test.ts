@@ -89,6 +89,36 @@ describe("deriveRepoHeaders", () => {
     expect(r.repos).toEqual(["EdgeVector/exemem-infra", "EdgeVector/fold"]); // sorted
   });
 
+  test("an explicit forcedRepo overrides a tag conflict (the triage one-liner)", () => {
+    const r = deriveRepoHeaders("## GOAL\nfix it", ["fold", "exemem"], "t", { forcedRepo: "EdgeVector/exemem-infra" });
+    expect(r.kind).toBe("stamped");
+    if (r.kind !== "stamped") throw new Error("unreachable");
+    expect(r.repo).toBe("EdgeVector/exemem-infra");
+    expect(r.body).toBe("Repo: EdgeVector/exemem-infra\nBase: main\n\n## GOAL\nfix it");
+  });
+
+  test("forcedRepo also wins over an unambiguous tag and over the default", () => {
+    expect(deriveRepoHeaders("b", ["fold"], "t", { forcedRepo: "EdgeVector/schema-infra" })).toMatchObject({
+      kind: "stamped",
+      repo: "EdgeVector/schema-infra",
+    });
+    expect(deriveRepoHeaders("b", [], "t", { forcedRepo: "EdgeVector/fkanban" })).toMatchObject({
+      kind: "stamped",
+      repo: "EdgeVector/fkanban",
+    });
+  });
+
+  test("forcedRepo still respects present (existing header) and registry guards", () => {
+    expect(deriveRepoHeaders("Repo: EdgeVector/fold\nBase: main\n\nx", [], "t", { forcedRepo: "EdgeVector/x" }).kind).toBe("present");
+    expect(
+      deriveRepoHeaders("Target: fbrain record `dogfood-registry`", [], "fix dogfood recipe: x", { forcedRepo: "EdgeVector/x" }).kind,
+    ).toBe("skip-registry");
+  });
+
+  test("a blank forcedRepo is ignored (falls through to tag/default logic)", () => {
+    expect(deriveRepoHeaders("b", ["fold", "exemem"], "t", { forcedRepo: "   " }).kind).toBe("conflict");
+  });
+
   test("no subsystem signal → defaulted to DEFAULT_REPO with a visible marker", () => {
     const r = deriveRepoHeaders("## GOAL\nfix it", ["bug"], "t");
     expect(r.kind).toBe("defaulted");
@@ -215,5 +245,19 @@ describe("applyDerivedHeader", () => {
     applyDerivedHeader(c, applyHeaderDerivation({ ...c }, warn));
     expect(c.block_status).toBe("needs_human");
     expect(c.block_reason).toBe("waiting on legal");
+  });
+
+  test("triage resolution: forcedRepo on a held conflict card stamps the header AND clears the hold", () => {
+    // The exact state the watcher acts on: a conflict card auto-held needs_human,
+    // resolved by `add <slug> --repo EdgeVector/exemem-infra` (forcedRepo).
+    const c = card({
+      tags: ["fold", "exemem"],
+      block_status: "needs_human",
+      block_reason: `${REPO_CONFLICT_BLOCK_PREFIX} tags map to EdgeVector/exemem-infra + EdgeVector/fold.`,
+    });
+    applyDerivedHeader(c, applyHeaderDerivation({ ...c }, warn, { forcedRepo: "EdgeVector/exemem-infra" }));
+    expect(c.body.startsWith("Repo: EdgeVector/exemem-infra\nBase: main\n\n")).toBe(true);
+    expect(c.block_status).toBe("none");
+    expect(c.block_reason).toBe("");
   });
 });
