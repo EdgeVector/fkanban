@@ -5,6 +5,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  applyDerivedHeader,
   applyHeaderDerivation,
   blockedByHint,
   blockedByMessage,
@@ -73,11 +74,15 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     updated_at: nowIso(),
   };
   // Promoting to todo (or backlog) is exactly when a card becomes pickup-eligible
-  // — auto-derive the Repo:/Base: header from tags, or warn if it can't, so a
-  // promoted card never silently strands.
-  updated.body = applyHeaderDerivation(
-    { slug: card.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
-    console.error,
+  // — auto-derive the Repo:/Base: header from tags (default it when there's no
+  // signal, flag a cross-repo conflict as needs_human), so a promoted card never
+  // silently strands.
+  applyDerivedHeader(
+    updated,
+    applyHeaderDerivation(
+      { slug: card.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
+      console.error,
+    ),
   );
   const hash = schemaHashFor("card", opts.cfg);
   await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });

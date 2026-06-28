@@ -2,18 +2,24 @@
 // a `Repo:` and a `Base:` header, and the fkanban-agent skill is told never to
 // guess the repo — so a card filed without them silently strands in `todo`.
 // `add`/`move` close that hole deterministically via `applyHeaderDerivation`:
-// auto-stamp the header when tags map to exactly one repo, never stamp a
-// recipe/registry card, and WARN (not silently skip) when it's ambiguous. These
-// unit-test the pure decision core — the one durable chokepoint every filer
+// auto-stamp the header when tags map to exactly one repo; DEFAULT it when a card
+// carries no subsystem signal at all; flag a real cross-repo CONFLICT loudly
+// (needs_human) instead of guessing; and never stamp a recipe/registry card.
+// These unit-test the pure decision core — the one durable chokepoint every filer
 // (CLI, MCP, routine, human) passes through.
 
 import { describe, expect, test } from "bun:test";
 import {
+  applyDerivedHeader,
   applyHeaderDerivation,
+  DEFAULT_REPO,
   deriveRepoHeaders,
+  emptyStructuredFields,
   hasRepoHeaders,
   inferRepoFromTags,
   isRegistryCard,
+  REPO_CONFLICT_BLOCK_PREFIX,
+  type Card,
 } from "../src/record.ts";
 
 describe("hasRepoHeaders", () => {
@@ -76,9 +82,32 @@ describe("deriveRepoHeaders", () => {
     ).toBe("skip-registry");
   });
 
-  test("ambiguous/unknown tags are not guessed", () => {
-    expect(deriveRepoHeaders("body", ["fold", "exemem"], "t").kind).toBe("ambiguous");
-    expect(deriveRepoHeaders("body", ["bug"], "t").kind).toBe("ambiguous");
+  test("tags mapping to >1 repo are a conflict — never guessed", () => {
+    const r = deriveRepoHeaders("body", ["fold", "exemem"], "t");
+    expect(r.kind).toBe("conflict");
+    if (r.kind !== "conflict") throw new Error("unreachable");
+    expect(r.repos).toEqual(["EdgeVector/exemem-infra", "EdgeVector/fold"]); // sorted
+  });
+
+  test("no subsystem signal → defaulted to DEFAULT_REPO with a visible marker", () => {
+    const r = deriveRepoHeaders("## GOAL\nfix it", ["bug"], "t");
+    expect(r.kind).toBe("defaulted");
+    if (r.kind !== "defaulted") throw new Error("unreachable");
+    expect(r.repo).toBe(DEFAULT_REPO);
+    expect(r.base).toBe("main");
+    expect(r.body.startsWith(`Repo: ${DEFAULT_REPO}  # defaulted`)).toBe(true);
+    // The "# defaulted" annotation must not pollute the parsed repo value.
+    expect(hasRepoHeaders(r.body)).toBe(true);
+  });
+
+  test("empty tag set also defaults", () => {
+    expect(deriveRepoHeaders("body", [], "t").kind).toBe("defaulted");
+  });
+
+  test("defaulting can be disabled (defaultRepo: '') → ambiguous", () => {
+    expect(deriveRepoHeaders("body", ["bug"], "t", { defaultRepo: "" }).kind).toBe("ambiguous");
+    // A conflict stays a conflict even with defaulting off — never guessed.
+    expect(deriveRepoHeaders("body", ["fold", "exemem"], "t", { defaultRepo: "" }).kind).toBe("conflict");
   });
 });
 
@@ -90,45 +119,101 @@ describe("applyHeaderDerivation", () => {
 
   test("stamps a todo card and does not warn", () => {
     const { warn, warnings } = collectWarn();
-    const body = applyHeaderDerivation(
+    const r = applyHeaderDerivation(
       { slug: "c", body: "do it", tags: ["fold"], title: "t", column: "todo" },
       warn,
     );
-    expect(body.startsWith("Repo: EdgeVector/fold\nBase: main\n\n")).toBe(true);
+    expect(r.body.startsWith("Repo: EdgeVector/fold\nBase: main\n\n")).toBe(true);
+    expect(r.blockStatus).toBeUndefined();
     expect(warnings).toHaveLength(0);
   });
 
-  test("warns (and leaves body) for an ambiguous card placed in todo", () => {
+  test("defaults a no-signal todo card (with a note, no block)", () => {
     const { warn, warnings } = collectWarn();
-    const body = applyHeaderDerivation(
+    const r = applyHeaderDerivation(
+      { slug: "c", body: "do it", tags: ["bug"], title: "t", column: "todo" },
+      warn,
+    );
+    expect(r.body.startsWith(`Repo: ${DEFAULT_REPO}  # defaulted`)).toBe(true);
+    expect(r.blockStatus).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("defaulted Repo:");
+  });
+
+  test("flags a cross-repo conflict in todo as needs_human (loud, not skipped)", () => {
+    const { warn, warnings } = collectWarn();
+    const r = applyHeaderDerivation(
       { slug: "c", body: "do it", tags: ["fold", "exemem"], title: "t", column: "todo" },
       warn,
     );
-    expect(body).toBe("do it");
+    expect(r.body).toBe("do it"); // not guessed
+    expect(r.blockStatus).toBe("needs_human");
+    expect(r.blockReason).toContain(REPO_CONFLICT_BLOCK_PREFIX);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("fkanban-pickup will skip it");
+    expect(warnings[0]).toContain("refusing to guess");
   });
 
-  test("does NOT warn for an ambiguous card in backlog (not yet eligible)", () => {
+  test("does NOT warn/block a conflict in backlog (not yet eligible)", () => {
     const { warn, warnings } = collectWarn();
-    applyHeaderDerivation({ slug: "c", body: "x", tags: ["bug"], title: "t", column: "backlog" }, warn);
+    const r = applyHeaderDerivation({ slug: "c", body: "x", tags: ["fold", "exemem"], title: "t", column: "backlog" }, warn);
+    expect(r.blockStatus).toBeUndefined();
     expect(warnings).toHaveLength(0);
   });
 
-  test("does NOT warn for a registry card in todo (intentionally header-less)", () => {
+  test("does NOT warn/stamp a registry card in todo (intentionally header-less)", () => {
     const { warn, warnings } = collectWarn();
-    const body = applyHeaderDerivation(
+    const r = applyHeaderDerivation(
       { slug: "c", body: "Target: fbrain record dogfood-registry", tags: ["dogfood"], title: "fix dogfood recipe: x", column: "todo" },
       warn,
     );
-    expect(body).toBe("Target: fbrain record dogfood-registry");
+    expect(r.body).toBe("Target: fbrain record dogfood-registry");
+    expect(r.blockStatus).toBeUndefined();
     expect(warnings).toHaveLength(0);
   });
 
   test("leaves working-column cards (doing/review/done) untouched", () => {
     const { warn, warnings } = collectWarn();
-    const body = applyHeaderDerivation({ slug: "c", body: "x", tags: ["fold"], title: "t", column: "doing" }, warn);
-    expect(body).toBe("x");
+    const r = applyHeaderDerivation({ slug: "c", body: "x", tags: ["fold"], title: "t", column: "doing" }, warn);
+    expect(r.body).toBe("x");
     expect(warnings).toHaveLength(0);
+  });
+});
+
+describe("applyDerivedHeader", () => {
+  const card = (over: Partial<Card>): Card => ({
+    slug: "c", title: "t", body: "", board: "b", column: "todo", position: "1",
+    assignee: "", tags: [], deps: [], created_at: "", updated_at: "",
+    ...emptyStructuredFields(), ...over,
+  });
+  const warn = () => {};
+
+  test("sets the auto needs_human hold for a conflict", () => {
+    const c = card({ tags: ["fold", "exemem"] });
+    applyDerivedHeader(c, applyHeaderDerivation({ ...c }, warn));
+    expect(c.block_status).toBe("needs_human");
+    expect(c.block_reason.startsWith(REPO_CONFLICT_BLOCK_PREFIX)).toBe(true);
+  });
+
+  test("does NOT clobber a human's intentional hold", () => {
+    const c = card({ tags: ["fold", "exemem"], block_status: "design_first", block_reason: "spec first" });
+    applyDerivedHeader(c, applyHeaderDerivation({ ...c }, warn));
+    expect(c.block_status).toBe("design_first");
+    expect(c.block_reason).toBe("spec first");
+  });
+
+  test("self-heals — clears its own hold once the repo resolves", () => {
+    // Previously conflicted; now retagged to a single repo.
+    const c = card({ tags: ["fold"], block_status: "needs_human", block_reason: `${REPO_CONFLICT_BLOCK_PREFIX} tags map to a + b.` });
+    applyDerivedHeader(c, applyHeaderDerivation({ ...c }, warn));
+    expect(c.block_status).toBe("none");
+    expect(c.block_reason).toBe("");
+    expect(hasRepoHeaders(c.body)).toBe(true);
+  });
+
+  test("leaves an unrelated needs_human hold alone when the repo resolves", () => {
+    const c = card({ tags: ["fold"], block_status: "needs_human", block_reason: "waiting on legal" });
+    applyDerivedHeader(c, applyHeaderDerivation({ ...c }, warn));
+    expect(c.block_status).toBe("needs_human");
+    expect(c.block_reason).toBe("waiting on legal");
   });
 });
