@@ -90,16 +90,10 @@ export function normalizeTags(tags: string[]): string[] {
 }
 
 // Clean a dep list: trim, drop blanks, drop self-references, dedupe (order-stable).
+// A dep list is a tag list that additionally rejects the card's own slug, so
+// reuse normalizeTags for the trim/blank/dedupe pass and drop the self-edge.
 export function normalizeDeps(deps: string[], selfSlug: string): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const d of deps) {
-    const s = d.trim();
-    if (s.length === 0 || s === selfSlug || seen.has(s)) continue;
-    seen.add(s);
-    out.push(s);
-  }
-  return out;
+  return normalizeTags(deps).filter((d) => d !== selfSlug);
 }
 
 // The stderr heads-up both `add --deps` and `dep add` emit when a dependency
