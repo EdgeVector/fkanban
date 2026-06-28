@@ -634,6 +634,18 @@ export async function findCard(node: NodeClient, cfg: Config, slug: string): Pro
   return card !== undefined && !isTombstoned(card.tags) ? card : null;
 }
 
+// Resolve a card by slug, throwing the canonical `card_not_found` error when
+// it doesn't exist (or is tombstoned). Shared by the card-editing commands
+// (move, rm, tag, dep, show) so the message stays identical in one place —
+// the card mirror of `requireBoard`.
+export async function requireCard(node: NodeClient, cfg: Config, slug: string): Promise<Card> {
+  const card = await findCard(node, cfg, slug);
+  if (!card) {
+    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${slug}".` });
+  }
+  return card;
+}
+
 export async function findBoard(node: NodeClient, cfg: Config, slug: string): Promise<Board | null> {
   const hash = schemaHashFor("board", cfg);
   const res = await node.queryAll({

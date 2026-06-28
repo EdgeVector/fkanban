@@ -13,11 +13,11 @@ import {
   depStatus,
   ensureColumn,
   findBoard,
-  findCard,
   isDepEnforcedColumn,
   listBoards,
   listCardStatuses,
   nowIso,
+  requireCard,
   type Card,
 } from "../record.ts";
 
@@ -34,10 +34,7 @@ export type MoveOptions = {
 export type MoveResult = { slug: string; from: string; to: string };
 
 export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
-  const card = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!card) {
-    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
-  }
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   const board = await findBoard(opts.node, opts.cfg, card.board);
   const columns = board?.columns ?? [];
   ensureColumn(opts.column, columns);

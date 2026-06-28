@@ -6,11 +6,11 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   cardToFields,
-  findCard,
   forwardDepWarning,
   listCardStatuses,
   normalizeDeps,
   nowIso,
+  requireCard,
   validateSlug,
   wouldCreateCycle,
   type Card,
@@ -35,10 +35,7 @@ export async function depAddCmd(opts: {
   dep: string;
 }): Promise<DepResult> {
   validateSlug(opts.dep);
-  const card = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!card) {
-    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
-  }
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   if (opts.dep === opts.slug) {
     throw new FkanbanError({ code: "invalid_dep", message: "A card cannot depend on itself." });
   }
@@ -69,10 +66,7 @@ export async function depRmCmd(opts: {
   slug: string;
   dep: string;
 }): Promise<DepResult> {
-  const card = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!card) {
-    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
-  }
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   if (!card.deps.includes(opts.dep)) {
     throw new FkanbanError({
       code: "dep_not_found",

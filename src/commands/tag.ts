@@ -8,10 +8,10 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   cardToFields,
-  findCard,
   isDepTag,
   nowIso,
   normalizeTags,
+  requireCard,
   TOMBSTONE_TAG,
   type Card,
 } from "../record.ts";
@@ -59,10 +59,7 @@ export async function tagAddCmd(opts: {
   // no-op, and reject the reserved ones before any read/write.
   const incoming = normalizeTags(opts.tag);
   for (const t of incoming) rejectReservedTag(t);
-  const card = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!card) {
-    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
-  }
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Union: adding a tag the card already carries is idempotent (no duplicate).
   const tags = normalizeTags([...card.tags, ...incoming]);
   await writeTags(opts, card, tags);
@@ -76,10 +73,7 @@ export async function tagRmCmd(opts: {
   tag: string[];
 }): Promise<TagResult> {
   const incoming = normalizeTags(opts.tag);
-  const card = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!card) {
-    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
-  }
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Removing a tag the card doesn't carry is a no-op (matches how `dep rm`'s
   // mirror — `rm` of a missing edge — is non-fatal), but warn so a typo isn't
   // silently swallowed. Never let the tombstone slip out via a tag edit.
