@@ -70,13 +70,13 @@ bun run src/cli.ts init --node-url http://127.0.0.1:9105 \
 
 ## PR workflow + gotchas
 
-- **Repo-level auto-merge is DISABLED.** `gh pr merge --auto` errors *"Auto
-  merge is not allowed"* — do **not** use it. The working flow is:
+- **PRs land through the merge queue.** Let the queue choose the merge strategy;
+  do not pass `--squash`, `--merge`, or `--rebase`. The working flow is:
   ```bash
   git push -u origin HEAD
   gh pr create --fill --base main
   gh pr checks <n> --watch      # block (sleeplessly) until CI is green
-  gh pr merge <n> --squash      # land it
+  gh pr merge <n> --auto        # queue it; no strategy flag
   ```
 - **Worktrees have no `node_modules`.** `git worktree add` doesn't copy them —
   run `bun install` before `bun test` / `bun run typecheck` / running the CLI.
