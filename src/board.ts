@@ -44,6 +44,13 @@ function paint(on: boolean, code: string, s: string): string {
   return `${COLORS[code] ?? ""}${s}${COLORS.reset}`;
 }
 
+// The shared "colour on by default?" decision: ANSI is enabled when stdout is a
+// TTY (and disabled when piped/redirected). Centralized so every renderer's
+// `opts.color ?? …` fallback resolves identically.
+function defaultColor(): boolean {
+  return Boolean(process.stdout.isTTY);
+}
+
 const COLUMN_COLOR: Record<string, string> = {
   backlog: "dim",
   todo: "blue",
@@ -57,7 +64,7 @@ export function renderBoard(
   cards: Card[],
   opts: RenderOptions = {},
 ): string {
-  const color = opts.color ?? Boolean(process.stdout.isTTY);
+  const color = opts.color ?? defaultColor();
   const allColumns = board.columns.length > 0 ? board.columns : [...DEFAULT_COLUMNS];
   // The terminal column (conventionally `done`) grows without bound, so it
   // gets tail-truncation; identify it from the full column order before any
@@ -198,7 +205,7 @@ export function renderSearchResults(
   query: string,
   opts: { color?: boolean; blocked?: Set<string>; limit?: number } = {},
 ): string {
-  const color = opts.color ?? Boolean(process.stdout.isTTY);
+  const color = opts.color ?? defaultColor();
   if (cards.length === 0) return paint(color, "dim", `No cards match "${query}".`);
 
   const cap = opts.limit ?? DEFAULT_SEARCH_LIMIT;
@@ -224,7 +231,7 @@ export function renderSearchResults(
 
 export function renderCardDetail(
   c: Card,
-  color = Boolean(process.stdout.isTTY),
+  color = defaultColor(),
   status?: DepStatus,
 ): string {
   const lines: string[] = [];
