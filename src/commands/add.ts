@@ -242,6 +242,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       applyHeaderDerivation(
         { slug: opts.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
         console.error,
+        { forcedRepo: opts.repo },
       ),
     );
     // Apply any explicit --field opts, then backfill still-empty structured
@@ -271,6 +272,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     applyHeaderDerivation(
       { slug: card.slug, body: card.body, tags: card.tags, title: card.title, column: card.column },
       console.error,
+      { forcedRepo: opts.repo },
     ),
   );
   applyStructuredFields(card, opts);
