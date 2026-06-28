@@ -344,9 +344,15 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     // an enriched-card-shape mismatch would fail this callTool, not just assert.
     // The structured array now carries a truncation signal; the small fixture is
     // under the default cap, so `truncated` is false and `cards` is the full set.
-    // Each card also now ships a single-line body PREVIEW + `bodyTruncated`; the
-    // fixture bodies are short so they're previewed unchanged with bodyTruncated:false.
-    const cliCardsPreviewed = cliCards.map((c: Record<string, unknown>) => ({ ...c, bodyTruncated: false }));
+    // Each card also now ships a single-line body PREVIEW + `bodyTruncated`. The
+    // fixture bodies are short (never truncated), but `api` sits in `todo` and so
+    // carries an auto-stamped multi-line `Repo:`/`Base:` header — the preview
+    // flattens whitespace to one line, so flatten the expected bodies to match.
+    const cliCardsPreviewed = cliCards.map((c: Record<string, unknown>) => ({
+      ...c,
+      body: (c.body as string).replace(/\s+/g, " ").trim(),
+      bodyTruncated: false,
+    }));
     expect(res.structuredContent).toEqual({ cards: cliCardsPreviewed, total: cliCards.length, truncated: false });
     // Each list card now carries the same resolved dep status `show` returns:
     // `ui` is blocked by the unfinished `api` and reports the dangling `ghost`
@@ -611,9 +617,12 @@ describe("MCP read tools preview card bodies by default, full under full_body / 
     node = fakeNode();
     await seedDefaultBoard(node);
     client = await connectedClient(node);
+    // Seed in a working column (`doing`): these tests are about body PREVIEW, not
+    // repo derivation, and working columns skip the Repo:/Base: auto-stamp — so the
+    // body stays exactly BIG_BODY and the preview assertions test only previewing.
     await client.callTool({
       name: "fkanban_add",
-      arguments: { slug: "huge", title: "Huge card", body: BIG_BODY, column: "todo" },
+      arguments: { slug: "huge", title: "Huge card", body: BIG_BODY, column: "doing" },
     });
   });
 
@@ -623,8 +632,8 @@ describe("MCP read tools preview card bodies by default, full under full_body / 
   }
 
   test("fkanban_list previews the body by default (≤200 chars, bodyTruncated:true) and shrinks the payload ~8x+", async () => {
-    const def = await client.callTool({ name: "fkanban_list", arguments: { column: "todo" } });
-    const full = await client.callTool({ name: "fkanban_list", arguments: { column: "todo", full_body: true } });
+    const def = await client.callTool({ name: "fkanban_list", arguments: { column: "doing" } });
+    const full = await client.callTool({ name: "fkanban_list", arguments: { column: "doing", full_body: true } });
     const huge = cardsOf(def).find((c) => c.slug === "huge")!;
     expect(huge.body.length).toBe(PREVIEW_LEN);
     expect(huge.bodyTruncated).toBe(true);
@@ -663,9 +672,9 @@ describe("MCP read tools preview card bodies by default, full under full_body / 
   test("a multi-line body is flattened to a single line in the preview", async () => {
     await client.callTool({
       name: "fkanban_add",
-      arguments: { slug: "multiline", title: "ML", body: "line one\n\nline two\tline three", column: "todo" },
+      arguments: { slug: "multiline", title: "ML", body: "line one\n\nline two\tline three", column: "doing" },
     });
-    const res = await client.callTool({ name: "fkanban_list", arguments: { column: "todo" } });
+    const res = await client.callTool({ name: "fkanban_list", arguments: { column: "doing" } });
     const ml = cardsOf(res).find((c) => c.slug === "multiline")!;
     expect(ml.body).toBe("line one line two line three");
     expect(ml.body).not.toContain("\n");
