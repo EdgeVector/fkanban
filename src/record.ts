@@ -150,11 +150,15 @@ export function isWorkingColumn(column: string): boolean {
 // done UNAMBIGUOUSLY. Every filer — CLI, MCP, scheduled routine, or human — goes
 // through those two code paths, so this is the one durable chokepoint; the prose
 // in the groom/program-driver routines is a backstop, not the guarantee.
-// Ambiguous/unknown tags are NOT guessed — they're left alone and surfaced as a
-// loud warning instead of disappearing silently.
+// A card with NO subsystem signal at all (zero tags map to a repo) is stamped
+// with DEFAULT_REPO so it stays pickup-eligible instead of stranding. A card
+// whose tags map to TWO+ DIFFERENT repos is a real conflict we refuse to guess —
+// it is surfaced LOUDLY (block_status=needs_human) so morning-sync/program-rollup
+// see it, rather than disappearing silently.
 
 // Single source of truth: subsystem tag → repo. A tag set that resolves to
-// exactly one repo is stamped; zero or >1 distinct repos is "ambiguous".
+// exactly one repo is stamped; >1 distinct repos is a "conflict"; zero matches
+// falls back to DEFAULT_REPO.
 export const TAG_TO_REPO: Readonly<Record<string, string>> = {
   fold: "EdgeVector/fold",
   fold_db: "EdgeVector/fold",
@@ -175,6 +179,13 @@ export const TAG_TO_REPO: Readonly<Record<string, string>> = {
 
 export const DEFAULT_BASE = "main";
 
+// Catch-all repo for a card carrying NO subsystem signal (zero tags map to a
+// repo). The overwhelming majority of work lands in the monorepo, so a no-signal
+// card is far more useful stamped-and-pickup-eligible (the build agent kicks it
+// back to `review` if it's genuinely the wrong repo) than silently stranded in
+// `todo` forever. Single source of truth, mirroring the hardcoded TAG_TO_REPO.
+export const DEFAULT_REPO = "EdgeVector/fold";
+
 // True iff the body already carries both pickup headers (line-anchored so a
 // passing mention in prose doesn't count). Idempotency guard for re-`add`s.
 export function hasRepoHeaders(body: string): boolean {
@@ -191,30 +202,64 @@ export function isRegistryCard(body: string, title: string): boolean {
   );
 }
 
-// The single repo a tag set unambiguously maps to, or null (zero or >1 match).
-export function inferRepoFromTags(tags: string[]): string | null {
+// The distinct repos a tag set maps to (deduped). size 0 = no signal; size 1 =
+// unambiguous; size >1 = conflict.
+export function repoMatchesFromTags(tags: string[]): Set<string> {
   const repos = new Set<string>();
   for (const t of tags) {
     const repo = TAG_TO_REPO[t.replace(/^#/, "").trim().toLowerCase()];
     if (repo) repos.add(repo);
   }
+  return repos;
+}
+
+// The single repo a tag set unambiguously maps to, or null (zero or >1 match).
+export function inferRepoFromTags(tags: string[]): string | null {
+  const repos = repoMatchesFromTags(tags);
   return repos.size === 1 ? [...repos][0]! : null;
 }
 
 export type HeaderDerivation =
   | { kind: "present" } // already had Repo:/Base:
   | { kind: "skip-registry" } // recipe/registry card — never stamp
-  | { kind: "ambiguous" } // tags don't map to a single repo — don't guess
-  | { kind: "stamped"; repo: string; base: string; body: string };
+  | { kind: "conflict"; repos: string[] } // tags map to >1 repo — surface, don't guess
+  | { kind: "ambiguous" } // no signal AND defaulting disabled — surface, don't guess
+  | { kind: "defaulted"; repo: string; base: string; body: string } // no signal → DEFAULT_REPO
+  | { kind: "stamped"; repo: string; base: string; body: string }; // unambiguous tag inference
 
-// Pure decision + transform. Callers stamp the returned `body` when the result
-// is "stamped", and emit `missingHeaderWarning` when it's "ambiguous".
-export function deriveRepoHeaders(body: string, tags: string[], title: string): HeaderDerivation {
+function stampHeader(repo: string, base: string, body: string, comment?: string): string {
+  // `parseBodyHeader` captures the first \S+ after the colon, so a trailing
+  // "  # comment" annotates the line without polluting the structured repo field.
+  const repoLine = comment ? `Repo: ${repo}  # ${comment}` : `Repo: ${repo}`;
+  return `${repoLine}\nBase: ${base}\n\n${body}`;
+}
+
+// Pure decision + transform. Callers stamp the returned `body` for "stamped" /
+// "defaulted"; surface "conflict" loudly (needs_human) and "ambiguous" as a
+// warning. `defaultRepo` is the no-signal fallback (DEFAULT_REPO; pass "" to
+// disable defaulting and get "ambiguous" instead).
+export function deriveRepoHeaders(
+  body: string,
+  tags: string[],
+  title: string,
+  opts: { defaultRepo?: string } = {},
+): HeaderDerivation {
   if (hasRepoHeaders(body)) return { kind: "present" };
   if (isRegistryCard(body, title)) return { kind: "skip-registry" };
-  const repo = inferRepoFromTags(tags);
-  if (!repo) return { kind: "ambiguous" };
-  return { kind: "stamped", repo, base: DEFAULT_BASE, body: `Repo: ${repo}\nBase: ${DEFAULT_BASE}\n\n${body}` };
+  const repos = repoMatchesFromTags(tags);
+  if (repos.size === 1) {
+    const repo = [...repos][0]!;
+    return { kind: "stamped", repo, base: DEFAULT_BASE, body: stampHeader(repo, DEFAULT_BASE, body) };
+  }
+  if (repos.size > 1) return { kind: "conflict", repos: [...repos].sort() };
+  // size === 0: no subsystem signal at all. Fall back to the default repo unless
+  // defaulting was explicitly disabled.
+  const defaultRepo = (opts.defaultRepo ?? DEFAULT_REPO).trim();
+  if (defaultRepo) {
+    const comment = "defaulted — no subsystem tag mapped; correct the Repo: line if wrong";
+    return { kind: "defaulted", repo: defaultRepo, base: DEFAULT_BASE, body: stampHeader(defaultRepo, DEFAULT_BASE, body, comment) };
+  }
+  return { kind: "ambiguous" };
 }
 
 export function missingHeaderWarning(slug: string): string {
@@ -225,20 +270,82 @@ export function missingHeaderWarning(slug: string): string {
   );
 }
 
+export function conflictRepoWarning(slug: string, repos: string[]): string {
+  return (
+    `warning: card "${slug}" is in todo but its tags map to ${repos.length} repos ` +
+    `(${repos.join(", ")}) — refusing to guess. Marked block_status=needs_human; set a single ` +
+    `"Repo: <owner>/<name>" header (or drop the cross-repo tag) to make it pickup-eligible.`
+  );
+}
+
+export function defaultedRepoNotice(slug: string, repo: string): string {
+  return (
+    `note: card "${slug}" had no subsystem tag — defaulted Repo: ${repo}. ` +
+    `Correct the Repo:/Base: header if that's wrong.`
+  );
+}
+
+// Marker prefix for the auto-set cross-repo-conflict hold, so `applyDerivedHeader`
+// can recognize (and self-heal) ITS OWN hold without clobbering a human's.
+export const REPO_CONFLICT_BLOCK_PREFIX = "Repo ambiguous:";
+
+// What `applyHeaderDerivation` decided: the (possibly header-prefixed) body, plus
+// an optional intentional hold to set when we refuse to guess a conflicting repo.
+export type HeaderDerivationResult = {
+  body: string;
+  blockStatus?: BlockStatus;
+  blockReason?: string;
+};
+
 // Orchestration shared by `add` and `move`: in a pre-execution column
-// (backlog/todo) auto-stamp the header when derivable, and warn (only in `todo`,
-// where it actually blocks pickup) when it's missing-and-ambiguous. Working
-// columns (doing/review/done) are left untouched. Returns the (possibly
-// header-prefixed) body. `warn` is injected so it's testable / silenceable.
+// (backlog/todo) auto-stamp the header when derivable (or default it when there's
+// no signal), and — only in `todo`, where it blocks pickup — surface a real
+// cross-repo conflict as a needs_human hold (so it's loud, not silently skipped).
+// Working columns (doing/review/done) are left untouched. `warn` is injected so
+// it's testable / silenceable.
 export function applyHeaderDerivation(
   card: { slug: string; body: string; tags: string[]; title: string; column: string },
   warn: (msg: string) => void,
-): string {
-  if (isWorkingColumn(card.column)) return card.body;
-  const d = deriveRepoHeaders(card.body, card.tags, card.title);
-  if (d.kind === "stamped") return d.body;
+  opts: { defaultRepo?: string } = {},
+): HeaderDerivationResult {
+  if (isWorkingColumn(card.column)) return { body: card.body };
+  const d = deriveRepoHeaders(card.body, card.tags, card.title, opts);
+  if (d.kind === "stamped") return { body: d.body };
+  if (d.kind === "defaulted") {
+    if (card.column === "todo") warn(defaultedRepoNotice(card.slug, d.repo));
+    return { body: d.body };
+  }
+  if (d.kind === "conflict" && card.column === "todo") {
+    warn(conflictRepoWarning(card.slug, d.repos));
+    return {
+      body: card.body,
+      blockStatus: "needs_human",
+      blockReason: `${REPO_CONFLICT_BLOCK_PREFIX} tags map to ${d.repos.join(" + ")}. Set a single Repo:/Base: header to unblock.`,
+    };
+  }
   if (d.kind === "ambiguous" && card.column === "todo") warn(missingHeaderWarning(card.slug));
-  return card.body;
+  return { body: card.body };
+}
+
+// Apply a `HeaderDerivationResult` onto a card (mutates): always take the new
+// body; set the auto needs_human hold ONLY when the card isn't already
+// intentionally held (don't clobber a human's design_first/deferred); and
+// self-heal — when a previously-conflicting card now resolves (stamped/defaulted),
+// clear OUR OWN auto-hold (recognized by REPO_CONFLICT_BLOCK_PREFIX). Returns the
+// card. Shared by `add` and `move` so both paths behave identically.
+export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): Card {
+  card.body = result.body;
+  const current = normalizeBlockStatus(card.block_status);
+  if (result.blockStatus) {
+    if (current === "none") {
+      card.block_status = result.blockStatus;
+      card.block_reason = result.blockReason ?? "";
+    }
+  } else if (current === "needs_human" && card.block_reason.startsWith(REPO_CONFLICT_BLOCK_PREFIX)) {
+    card.block_status = "none";
+    card.block_reason = "";
+  }
+  return card;
 }
 
 // ── Structured card fields: enums, normalizers, eligibility, backfill ───────

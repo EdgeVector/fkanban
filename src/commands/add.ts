@@ -7,6 +7,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  applyDerivedHeader,
   applyHeaderDerivation,
   BLOCK_STATUSES,
   blockedByHint,
@@ -233,11 +234,15 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       updated_at: now,
     };
     if (opts.column) ensureColumn(updated.column, columns);
-    // Auto-derive the pickup Repo:/Base: header from tags (or warn if it can't),
-    // so a promoted/edited card never silently strands in `todo`.
-    updated.body = applyHeaderDerivation(
-      { slug: opts.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
-      console.error,
+    // Auto-derive the pickup Repo:/Base: header from tags (default it when there's
+    // no signal, flag a cross-repo conflict as needs_human), so a promoted/edited
+    // card never silently strands in `todo`.
+    applyDerivedHeader(
+      updated,
+      applyHeaderDerivation(
+        { slug: opts.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
+        console.error,
+      ),
     );
     // Apply any explicit --field opts, then backfill still-empty structured
     // fields from the body/tags.
@@ -261,9 +266,12 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     updated_at: now,
     ...emptyStructuredFields(),
   };
-  card.body = applyHeaderDerivation(
-    { slug: card.slug, body: card.body, tags: card.tags, title: card.title, column: card.column },
-    console.error,
+  applyDerivedHeader(
+    card,
+    applyHeaderDerivation(
+      { slug: card.slug, body: card.body, tags: card.tags, title: card.title, column: card.column },
+      console.error,
+    ),
   );
   applyStructuredFields(card, opts);
   await enforceDepBlock(opts, opts.slug, boardSlug, card.column, card.deps);
