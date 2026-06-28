@@ -573,10 +573,17 @@ export function rowToBoard(row: QueryRow): Board {
   };
 }
 
-export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
+// Shared body of the three card list paths below: query the card schema for the
+// given field subset, map rows to Cards, and drop tombstoned cards. The public
+// variants differ ONLY in which fields they fetch over the wire.
+async function listCardsWithFields(node: NodeClient, cfg: Config, fields: string[]): Promise<Card[]> {
   const hash = schemaHashFor("card", cfg);
-  const res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("card") });
+  const res = await node.queryAll({ schemaHash: hash, fields });
   return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
+}
+
+export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
+  return listCardsWithFields(node, cfg, fieldsFor("card"));
 }
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
@@ -594,9 +601,7 @@ export const CARD_STATUS_FIELDS = ["slug", "board", "column", "position", "tags"
 // Like listCards but fetches only CARD_STATUS_FIELDS; absent fields come back
 // as "" on the Card. Enough for depStatus / blockedSlugSet / existence checks.
 export async function listCardStatuses(node: NodeClient, cfg: Config): Promise<Card[]> {
-  const hash = schemaHashFor("card", cfg);
-  const res = await node.queryAll({ schemaHash: hash, fields: CARD_STATUS_FIELDS });
-  return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
+  return listCardsWithFields(node, cfg, CARD_STATUS_FIELDS);
 }
 
 // Fields the TEXT board render (`renderBoard`) + its filters actually display:
@@ -613,9 +618,7 @@ export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "positio
 // the board/column/tag/assignee filters, and the dep/blocked fan-out — but NOT
 // for any path that must show a card's body. Mirrors listCardStatuses.
 export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promise<Card[]> {
-  const hash = schemaHashFor("card", cfg);
-  const res = await node.queryAll({ schemaHash: hash, fields: CARD_DISPLAY_FIELDS });
-  return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
+  return listCardsWithFields(node, cfg, CARD_DISPLAY_FIELDS);
 }
 
 // Point read by slug — the node resolves a HashKey filter as an indexed key
