@@ -2,13 +2,13 @@
 // overwrites the card's fields and stamps the tombstone tag; every read path
 // filters tombstoned cards out.
 
-import { FkanbanError, type NodeClient } from "../client.ts";
+import { type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   cardToFields,
-  findCard,
   listCardStatuses,
   nowIso,
+  requireCard,
   TOMBSTONE_TAG,
   type Card,
 } from "../record.ts";
@@ -18,10 +18,7 @@ export async function rmCmd(opts: {
   node: NodeClient;
   slug: string;
 }): Promise<{ slug: string; orphanedDependents: string[] }> {
-  const card = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!card) {
-    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
-  }
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Before tombstoning, scan the live board for cards that still list this slug
   // in their deps. Deleting the card leaves those edges dangling — the mirror of
   // the `add --deps <missing>` warning. We surface them but do NOT auto-edit the

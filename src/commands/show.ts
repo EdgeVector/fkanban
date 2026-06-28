@@ -1,13 +1,13 @@
 // `fkanban show <slug>` — print one card in detail.
 
-import { FkanbanError, type NodeClient } from "../client.ts";
+import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   boardTerminalMap,
   depStatus,
-  findCard,
   listBoards,
   listCardStatuses,
+  requireCard,
   type Card,
 } from "../record.ts";
 import { renderCardDetail } from "../board.ts";
@@ -26,10 +26,7 @@ export async function showResult(opts: {
   node: NodeClient;
   slug: string;
 }): Promise<{ text: string; card: CardDetail }> {
-  const card = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!card) {
-    throw new FkanbanError({ code: "card_not_found", message: `No card with slug "${opts.slug}".` });
-  }
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Resolve dep done-ness against each dep board's terminal column (a dep may
   // live on a different board than this card), falling back to `done`.
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
