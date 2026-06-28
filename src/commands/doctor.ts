@@ -90,6 +90,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // to TCP). Printed BEFORE the reachability probe so the transport is named
   // even if that probe then fails.
   const transport = node.nodeTransport();
+  const socketDataPlane = transport.transport === "socket";
   if (transport.transport === "socket") {
     const detail = `Unix socket — ${transport.socketPath} (TCP ${cfg.nodeUrl} is fallback)`;
     print(`✓ node transport: socket — ${detail}`);
@@ -102,27 +103,34 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     onCheck?.({ name: "node transport", status: "info", detail });
   }
 
+  check(Boolean(cfg.schemaHashes.card), "card schema hash in config", cfg.schemaHashes.card);
+  check(Boolean(cfg.schemaHashes.board), "board schema hash in config", cfg.schemaHashes.board);
+
+  let queryRoundTrip: { cards: number; boards: number } | null = null;
+  if (socketDataPlane) {
+    try {
+      const cards = await listCards(node, cfg);
+      const boards = await listBoards(node, cfg);
+      queryRoundTrip = { cards: cards.length, boards: boards.length };
+      check(true, "node reachable via socket", `${transport.socketPath} — query round-trip: ${cards.length} cards, ${boards.length} boards`);
+    } catch (err) {
+      check(false, "node reachable via socket", formatDoctorError(err));
+    }
+  }
+
   try {
     const id = await node.autoIdentity();
     check(id.provisioned, "node reachable + provisioned", id.provisioned ? undefined : id.reason);
   } catch (err) {
-    // We ARE doctor, so strip the shared error's circular "run `fkanban doctor`
-    // for a diagnosis." suffix and surface its `hint` (the start-folddb
-    // guidance) instead — for both the printed line and the structured
-    // `detail` the MCP `fkanban_doctor` tool consumes.
-    let detail: string;
-    if (err instanceof FkanbanError) {
-      detail = err.message.replace(/ — run `fkanban doctor` for a diagnosis\.$/, "");
-      if (err.hint) detail += ` — ${err.hint}`;
-    } else {
-      detail = err instanceof Error ? err.message : String(err);
+    const detail = formatDoctorError(err);
+    if (!socketDataPlane || queryRoundTrip === null) {
+      check(false, "node reachable", detail);
+      return false;
     }
-    check(false, "node reachable", detail);
-    return false;
+    const tcpDetail = `${detail} (socket data-plane is reachable; TCP control-plane is unavailable)`;
+    print(`· node TCP control-plane unavailable (socket mode) — ${tcpDetail}`);
+    onCheck?.({ name: "node TCP control-plane unavailable", status: "info", detail: tcpDetail });
   }
-
-  check(Boolean(cfg.schemaHashes.card), "card schema hash in config", cfg.schemaHashes.card);
-  check(Boolean(cfg.schemaHashes.board), "board schema hash in config", cfg.schemaHashes.board);
 
   // Cross-check the config hashes against the node's loaded schema set, and
   // WRITE-PROBE the configured hash. A bare "config hash == a loaded hash"
@@ -170,15 +178,26 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       );
     }
   } catch (err) {
-    check(false, "node schema list", err instanceof Error ? err.message : String(err));
+    const detail = formatDoctorError(err);
+    if (socketDataPlane && queryRoundTrip !== null) {
+      const schemaDetail = `${detail} (socket data-plane is reachable; schema route requires TCP)`;
+      print(`· node schema list unavailable over TCP (socket mode) — ${schemaDetail}`);
+      onCheck?.({ name: "node schema list unavailable over TCP", status: "info", detail: schemaDetail });
+    } else {
+      check(false, "node schema list", detail);
+    }
   }
 
-  try {
-    const cards = await listCards(node, cfg);
-    const boards = await listBoards(node, cfg);
-    check(true, "query round-trip", `${cards.length} cards, ${boards.length} boards`);
-  } catch (err) {
-    check(false, "query round-trip", err instanceof Error ? err.message : String(err));
+  if (queryRoundTrip !== null) {
+    check(true, "query round-trip", `${queryRoundTrip.cards} cards, ${queryRoundTrip.boards} boards`);
+  } else {
+    try {
+      const cards = await listCards(node, cfg);
+      const boards = await listBoards(node, cfg);
+      check(true, "query round-trip", `${cards.length} cards, ${boards.length} boards`);
+    } catch (err) {
+      check(false, "query round-trip", formatDoctorError(err));
+    }
   }
 
   // Informational only — surface the MCP entrypoint + the exact, shim-aware
@@ -188,6 +207,15 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   reportMcpEntrypoint(print, onCheck);
 
   return ok;
+}
+
+function formatDoctorError(err: unknown): string {
+  if (err instanceof FkanbanError) {
+    let detail = err.message.replace(/ — run `fkanban doctor` for a diagnosis\.$/, "");
+    if (err.hint) detail += ` — ${err.hint}`;
+    return detail;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 // Resolve the MCP entrypoint `claude mcp add` would target and print it plus

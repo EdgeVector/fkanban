@@ -106,19 +106,30 @@ afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 const NO_SOCKET = join(tmp, "no-such.sock");
 
 function writeCfg(name: string, cardHash: string, port: number): string {
+  return writeCfgWithNode(name, cardHash, `http://127.0.0.1:${port}`, NO_SOCKET);
+}
+
+function writeCfgWithNode(name: string, cardHash: string, nodeUrl: string, nodeSocketPath: string): string {
   const p = join(tmp, name);
   writeFileSync(
     p,
     JSON.stringify({
       configVersion: 1,
-      nodeUrl: `http://127.0.0.1:${port}`,
+      nodeUrl,
       schemaServiceUrl: "http://unused.invalid",
       userHash: "u",
       schemaHashes: { card: cardHash, board: BOARD_HASH },
-      nodeSocketPath: NO_SOCKET,
+      nodeSocketPath,
     }),
   );
   return p;
+}
+
+function closedTcpUrl(): string {
+  const server = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+  const url = `http://127.0.0.1:${server.port}`;
+  server.stop(true);
+  return url;
 }
 
 describe("doctor write-probe", () => {
@@ -187,5 +198,50 @@ describe("doctor write-probe", () => {
     } finally {
       node.stop(true);
     }
+  });
+
+  test("green: socket data-plane reachability is authoritative when TCP is down", async () => {
+    const socketPath = join(tmp, "socket-only.sock");
+    const socketSeen: string[] = [];
+    const socketNode = Bun.serve({
+      unix: socketPath,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        socketSeen.push(path);
+        if (path === "/control/browser-pairing-code") return Response.json({ pairing_code: "socket-only" });
+        if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
+        if (path === "/api/mutation") return Response.json({ ok: true });
+        return Response.json({ error: "unexpected_socket_path" }, { status: 500 });
+      },
+    });
+    const cfgPath = writeCfgWithNode("socket-only.json", FULL_CARD_HASH, closedTcpUrl(), socketPath);
+    const lines: string[] = [];
+    try {
+      const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
+      const report = lines.join("\n");
+      expect(ok).toBe(true);
+      expect(report).toContain("✓ node transport: socket");
+      expect(report).toContain("✓ node reachable via socket");
+      expect(report).toContain("✓ query round-trip");
+      expect(report).toContain("node TCP control-plane unavailable");
+      expect(report).toContain("node schema list unavailable over TCP");
+      expect(socketSeen).toContain("/api/query");
+    } finally {
+      socketNode.stop(true);
+    }
+  });
+
+  test("red: socket mode still fails when neither socket nor TCP can answer data-plane reads", async () => {
+    const socketPath = join(tmp, "unusable-socket.sock");
+    writeFileSync(socketPath, "");
+    const cfgPath = writeCfgWithNode("socket-and-tcp-down.json", FULL_CARD_HASH, closedTcpUrl(), socketPath);
+    const lines: string[] = [];
+
+    const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
+    const report = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(report).toContain("✓ node transport: socket");
+    expect(report).toContain("✗ node reachable via socket");
+    expect(report).toContain("Is a folddb node running?");
   });
 });
