@@ -1,7 +1,7 @@
 // Render a kanban board to the terminal: one section per column, cards
 // listed under their column in position order.
 
-import { DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "./schemas.ts";
+import { DEFAULT_BOARD_SLUG, resolveColumns } from "./schemas.ts";
 import { sortCards, type Board, type Card, type DepStatus } from "./record.ts";
 
 export type RenderOptions = {
@@ -65,7 +65,7 @@ export function renderBoard(
   opts: RenderOptions = {},
 ): string {
   const color = opts.color ?? defaultColor();
-  const allColumns = board.columns.length > 0 ? board.columns : [...DEFAULT_COLUMNS];
+  const allColumns = resolveColumns(board.columns);
   // The terminal column (conventionally `done`) grows without bound, so it
   // gets tail-truncation; identify it from the full column order before any
   // single-column filter narrows the view.
@@ -149,7 +149,7 @@ export function capPerColumn<T extends Card>(
   column?: string,
 ): T[] {
   if (!(limit > 0)) return cards;
-  const allColumns = board.columns.length > 0 ? board.columns : [...DEFAULT_COLUMNS];
+  const allColumns = resolveColumns(board.columns);
   const terminalCol = allColumns[allColumns.length - 1];
   const columns = allColumns.filter((c) => !column || c === column);
   const out: T[] = [];

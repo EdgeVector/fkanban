@@ -63,6 +63,14 @@ export type Column = (typeof DEFAULT_COLUMNS)[number];
 
 export const DEFAULT_BOARD_SLUG = "default";
 
+// A board's effective ordered column list: its own `columns` when it defines
+// any, else the canonical `DEFAULT_COLUMNS`. Centralizes the
+// `columns.length > 0 ? columns : [...DEFAULT_COLUMNS]` fallback that the board
+// renderer and column validation otherwise each re-spell.
+export function resolveColumns(boardColumns: readonly string[]): string[] {
+  return boardColumns.length > 0 ? [...boardColumns] : [...DEFAULT_COLUMNS];
+}
+
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };
 
 export const cardSchema: AddSchemaRequest = {
