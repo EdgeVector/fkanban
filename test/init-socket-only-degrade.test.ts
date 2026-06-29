@@ -1,8 +1,8 @@
-// On a socket-only node (legacy TCP `:9001` retired / connection refused) the
-// node serves the data plane over its Unix socket but every TCP-only SYSTEM/
-// schema route (identity probe, bootstrap, schema load/list) is unreachable.
-// `fkanban init`'s step-1 identity probe used to hard-fail there with
-// `node not reachable at http://127.0.0.1:9001`, even though the node is UP.
+// On a socket-only node (legacy TCP `:9001` retired / connection refused), the
+// owner data socket serves board data-plane routes plus identity/schema reads,
+// but narrower sockets still cannot serve setup writes such as schema load.
+// `fkanban init` used to hard-fail there with `node not reachable at
+// http://127.0.0.1:9001`, even though the node is UP.
 //
 // Symmetric to the doctor degrade (#101): when the TCP control-plane is
 // unreachable BUT the data-plane socket round-trips against an EXISTING config,
@@ -34,10 +34,11 @@ function closedTcpUrl(): string {
   return url;
 }
 
-// A data-plane-only Unix-socket node: serves `/api/query` + `/api/mutation`
-// (and the pairing-code mint), 500s every system/schema route — exactly like
-// the fold#1004 socket. `seedBoard` controls whether a `default` board already
-// exists so we can exercise both the create and the already-exists legs.
+// A narrow Unix-socket node: serves `/api/query`, `/api/mutation`, and
+// `/api/system/auto-identity` (plus the pairing-code mint), but not setup
+// writes like `/api/schemas/load`. `seedBoard` controls whether a `default`
+// board already exists so we can exercise both the create and the already-exists
+// legs.
 function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean } = {}) {
   const store = new Map<string, Record<string, unknown>>();
   if (opts.seedBoard) {
@@ -57,6 +58,9 @@ function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean } = {}) 
       if (url.pathname === "/control/browser-pairing-code") {
         return Response.json({ pairing_code: "socket-only" });
       }
+      if (url.pathname === "/api/system/auto-identity") {
+        return Response.json({ user_hash: "stub-user" });
+      }
       if (url.pathname === "/api/mutation") {
         const schema = body!.schema as string;
         const fields = (body!.fields_and_values ?? {}) as Record<string, unknown>;
@@ -75,7 +79,7 @@ function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean } = {}) 
           .filter((r) => filter?.HashKey === undefined || r.key.hash === filter.HashKey);
         return Response.json({ ok: true, results: rows, has_more: false });
       }
-      // Every SYSTEM/schema route 404s on the data-plane socket.
+      // Setup/control writes still 404 on this narrower socket.
       return Response.json({ error: "unexpected_socket_path" }, { status: 404 });
     },
   });

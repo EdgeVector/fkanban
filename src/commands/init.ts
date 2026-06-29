@@ -92,20 +92,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   try {
     identity = await probe.autoIdentity();
   } catch (err) {
-    // The identity probe (and every step that follows it: bootstrap, schema
-    // load, schema list) is a TCP-only SYSTEM/schema route — the fold#1004
-    // data-plane socket 404s those, so the client always dials loopback TCP for
-    // them. On a socket-only node (legacy TCP `:9001` retired, connection
-    // refused) that TCP dial fails with `service_unreachable`, even though the
-    // node is UP and serving the data plane over its Unix socket.
-    //
-    // Symmetric to doctor's already-shipped degrade (#101): when the TCP
-    // control-plane is unreachable BUT the socket data-plane round-trips against
-    // an EXISTING config, the node is already provisioned + has the fkanban/*
-    // schemas loaded (it couldn't serve cards otherwise), so init's TCP-only
-    // bootstrap/load/resolve work is moot. Degrade gracefully: reuse the
-    // existing config, re-seed the board over the socket, and report the node
-    // UP via the socket — instead of the misleading "start a node" error.
+    // Older socket configurations may still be unable to answer this setup
+    // probe. When TCP is gone but an existing config can prove the board's data
+    // plane over the socket, reuse that config instead of printing a stale
+    // start-a-TCP-node diagnosis.
     const degraded = await tryInitSocketOnly({
       err,
       existing,
@@ -143,7 +133,24 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Step 2: load schemas into the node (it pulls everything published in the
   // schema_service, including the `fkanban/*` schemas).
   print(`[2/${STEPS}] loading schemas into the node`);
-  const loadResult = await node.loadSchemas();
+  let loadResult: Awaited<ReturnType<NodeClient["loadSchemas"]>>;
+  try {
+    loadResult = await node.loadSchemas();
+  } catch (err) {
+    const degraded = await tryInitSocketOnly({
+      err,
+      existing,
+      nodeUrl,
+      schemaServiceUrl,
+      nodeSocketPath,
+      socketPath,
+      configPath,
+      verbose,
+      print,
+    });
+    if (degraded) return degraded;
+    throw err;
+  }
   if (loadResult.failed_schemas.length > 0) {
     throw new Error(`partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`);
   }
@@ -156,7 +163,24 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // candidate whose FIELDS superset the local definition, so we never pin config
   // to a narrower version the node would reject every write against.
   print(`[3/${STEPS}] resolving ${UNIQUE_SCHEMAS.length} schema hashes for app "${OWNER_APP_ID}"`);
-  const loaded = await node.listSchemas();
+  let loaded: Awaited<ReturnType<NodeClient["listSchemas"]>>;
+  try {
+    loaded = await node.listSchemas();
+  } catch (err) {
+    const degraded = await tryInitSocketOnly({
+      err,
+      existing,
+      nodeUrl,
+      schemaServiceUrl,
+      nodeSocketPath,
+      socketPath,
+      configPath,
+      verbose,
+      print,
+    });
+    if (degraded) return degraded;
+    throw err;
+  }
   const schemaHashes: Record<string, string> = {};
   const missing: string[] = [];
   const narrower: string[] = [];

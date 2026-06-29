@@ -17,6 +17,7 @@
 // fully backward-compatible.
 
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
 
 import type { AddSchemaRequest } from "./schemas.ts";
 
@@ -192,15 +193,13 @@ export type NodeClient = {
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
-  // Which transport node DATA-PLANE requests take RIGHT NOW: `socket` when a
-  // control socket was threaded in and the file currently exists (socket-first
-  // is live for `/api/query`+`/api/mutation`, TCP is fallback-only), else `tcp`.
-  // Reports `socket` whenever the socket exists because it IS the live
-  // data-plane transport (and the doctor "transport" line should say so) — even
-  // though system/identity/schema routes always use TCP (the fold#1004 socket
-  // is data-plane-only and 404s them). `socketPath` echoes the path consulted
-  // (so `fkanban doctor` can name it). Re-evaluates `existsSync` on each call so
-  // a socket that appears/vanishes between calls is reported accurately.
+  // Which transport local node requests take RIGHT NOW: `socket` when an owner
+  // socket was threaded in and the file currently exists (socket-first is live
+  // for board data-plane routes and the schema/identity checks doctor needs;
+  // `folddb-full.sock` carries every node route), else `tcp`. `socketPath`
+  // echoes the path consulted (so `fkanban doctor` can name it). Re-evaluates
+  // `existsSync` on each call so a socket that appears/vanishes between calls is
+  // reported accurately.
   nodeTransport(): { transport: "socket" | "tcp"; socketPath?: string };
 };
 
@@ -266,8 +265,8 @@ export type AttestationOutcome =
   | { ok: false; socketPath: string; socketExists: boolean; reason: string };
 
 // Mint a one-time pairing code over the node's Unix-domain control socket and
-// exchange it over TCP for an owner-session token — the TypeScript twin of the
-// CLI's `attest_owner_session` (fold_db_node/src/bin/folddb/commands/ui.rs).
+// exchange it for an owner-session token. `folddb-full.sock` can serve the
+// exchange over UDS too; narrower sockets keep the historical TCP exchange.
 //
 // Returns a structured outcome: `{ ok: true, token }` on success, or
 // `{ ok: false, ... }` on ANY failure (socket missing, mint or exchange
@@ -325,17 +324,24 @@ export async function attestOwnerSessionDetailed(
     }
   }
 
-  // Exchange the code over TCP for a session token.
+  // Exchange the code for a session token. A full-surface socket serves this
+  // route directly; narrower sockets fall back to the historical TCP exchange.
   try {
-    const exchangeRes = await fetch(`${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`, {
+    const exchangeOverSocket = isFullSurfaceSocket(socketPath);
+    const exchangeUrl = exchangeOverSocket
+      ? "http://localhost/api/session/browser-pair"
+      : `${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`;
+    const exchangeInit: RequestInit & { unix?: string } = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code: pairingCode }),
       signal: AbortSignal.timeout(5_000),
-    });
+    };
+    if (exchangeOverSocket) exchangeInit.unix = socketPath;
+    const exchangeRes = await fetch(exchangeUrl, exchangeInit);
     if (!exchangeRes.ok) {
       verbose(`attest: exchange refused (HTTP ${exchangeRes.status}) — proceeding unattested`);
-      return fail(`the pairing-code exchange over TCP was refused (HTTP ${exchangeRes.status})`);
+      return fail(`the pairing-code exchange was refused (HTTP ${exchangeRes.status})`);
     }
     const exchanged = (await exchangeRes.json()) as Record<string, unknown>;
     const token = exchanged.session_token;
@@ -348,7 +354,7 @@ export async function attestOwnerSessionDetailed(
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     verbose(`attest: exchange failed (${detail}) — proceeding unattested`);
-    return fail(`the pairing-code exchange over TCP failed (${detail})`);
+    return fail(`the pairing-code exchange failed (${detail})`);
   }
 }
 
@@ -780,14 +786,26 @@ function isConnectError(err: unknown): boolean {
   );
 }
 
-// The node routes the fold#1004-discovered Unix socket actually serves. The
-// socket is a *data-plane* socket: only `/api/query` + `/api/mutation` exist on
-// it; every system/identity/schema route 404s. Socket-first is therefore
-// restricted to this allowlist (default-deny) so doctor's reachability probe
-// and init's bootstrap/schema-load never hit a false 404 over the socket — they
-// go TCP, where those routes live. Card ops (`fkanban list/add/move`) are pure
-// `/api/query`+`/api/mutation`, so they still get the socket fast-path.
-const SOCKET_DATA_PLANE_PATHS = ["/api/query", "/api/mutation"];
+// Routes served by the node's owner data socket (`folddb.sock`). The full
+// surface socket (`folddb-full.sock`) serves the whole HTTP app, and is handled
+// below by `isSocketRoute`. Keeping this allowlist method-aware prevents a
+// narrower data socket from receiving owner/control routes it cannot serve,
+// while still letting doctor prove schema + identity without retired TCP :9001.
+const SOCKET_OWNER_ROUTES = [
+  { method: "POST", path: "/api/query" },
+  { method: "POST", path: "/api/mutation" },
+  { method: "GET", path: "/api/schemas" },
+  { method: "GET", path: "/api/system/auto-identity" },
+] as const;
+
+function isFullSurfaceSocket(socketPath: string): boolean {
+  return basename(socketPath) === "folddb-full.sock";
+}
+
+function isSocketRoute(method: string, path: string, socketPath: string): boolean {
+  if (isFullSurfaceSocket(socketPath)) return true;
+  return SOCKET_OWNER_ROUTES.some((r) => r.method === method && r.path === path);
+}
 
 async function verboseFetch(opts: {
   baseUrl: string;
@@ -799,11 +817,10 @@ async function verboseFetch(opts: {
   headers: Record<string, string>;
   timeoutMs?: number;
   // The node's Unix-domain socket. When set AND the service is `node` AND the
-  // path is a DATA-PLANE route (`/api/query`/`/api/mutation` — the only routes
-  // the fold#1004 socket serves) AND the socket file exists, the request goes
-  // over the UDS (socket-first, mirroring fold#1004's transport discovery) with
-  // a single automatic fall-back to TCP `baseUrl` if the socket connect fails.
-  // System/identity/schema routes always go TCP (the socket 404s them). NEVER
+  // route is served by that socket AND the socket file exists, the request goes
+  // over UDS (socket-first) with a single automatic fallback to TCP `baseUrl` if
+  // the socket connect fails. `folddb.sock` is deliberately allowlisted; the
+  // full surface socket (`folddb-full.sock`) may carry every node route. NEVER
   // consulted for `service: schema` — the schema service is the remote HTTPS
   // Lambda, which has no local socket.
   socketPath?: string;
@@ -820,25 +837,19 @@ async function verboseFetch(opts: {
         : JSON.stringify(opts.body);
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
 
-  // Socket-first selection — DATA-PLANE ROUTES ONLY. The fold#1004-discovered
-  // node socket (`~/.folddb/data/folddb.sock`) is a *data-plane* socket: it
-  // serves `/api/query` + `/api/mutation` (card reads/writes) but 404s every
-  // SYSTEM/identity/schema route (`/api/system/*`, `/api/setup/*`,
-  // `/api/schemas`, `/api/schemas/load`, `/api/health`). Those 404s are genuine
-  // answers, so `isConnectError` correctly does NOT fall back to TCP — which is
-  // why a system route mistakenly sent over the socket would surface a false
-  // "node unreachable". So we use the socket ONLY for the data-plane routes it
-  // actually serves; everything else (default-deny) goes TCP. Beyond the path
-  // allowlist the usual guards apply: only `service: node`, only when a
+  // Socket-first selection. `folddb.sock` carries board data-plane requests plus
+  // the schema and auto-identity reads doctor needs. `folddb-full.sock` carries
+  // the whole node HTTP app, so it uses UDS for every node route. Beyond the
+  // route predicate the usual guards apply: only `service: node`, only when a
   // socketPath was threaded in and the file exists (a node without a socket, or
   // the schema service, transparently uses TCP). Bun's UDS fetch keeps the URL
   // as `http://localhost<path>` and routes the connection over `{ unix }`.
   const useSocket =
     opts.service === "node" &&
-    SOCKET_DATA_PLANE_PATHS.includes(opts.path) &&
     opts.socketPath !== undefined &&
     opts.socketPath.length > 0 &&
-    existsSync(opts.socketPath);
+    existsSync(opts.socketPath) &&
+    isSocketRoute(opts.method, opts.path, opts.socketPath);
 
   // One controller for the whole request lifecycle (headers + body). The timer
   // keeps running after the fetch resolves, so if the body read stalls past the
