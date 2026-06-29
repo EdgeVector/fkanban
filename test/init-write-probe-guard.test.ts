@@ -34,10 +34,16 @@ const OLD_CARD_FIELDS = [
 
 // A stub node parameterised by which Card schemas it has loaded. Models the #94
 // write split: writes against the stale Card 400 when they carry new fields.
+// Serves over a full-surface UNIX SOCKET (folddb-full.sock) — the only
+// transport a local node speaks now that the client is socket-only and the
+// loopback TCP listener is retired. A full-surface socket carries EVERY node
+// route (incl. /api/schemas/load), so init's control + data calls all land here.
 function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
   const store = new Map<string, Record<string, unknown>>();
-  return Bun.serve({
-    port: 0,
+  const dir = mkdtempSync(join(tmpdir(), "fkanban-init-node-"));
+  const socketPath = join(dir, "folddb-full.sock");
+  const server = Bun.serve({
+    unix: socketPath,
     async fetch(req) {
       const url = new URL(req.url);
       // Parse a JSON body only when one is actually present — `/api/schemas/load`
@@ -111,6 +117,13 @@ function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
       return Response.json({ error: "unexpected", path: url.pathname }, { status: 500 });
     },
   });
+  return {
+    socketPath,
+    stop: () => {
+      server.stop(true);
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 const tmp = mkdtempSync(join(tmpdir(), "fkanban-init-probe-"));
@@ -126,19 +139,18 @@ describe("runInit write-probe guard", () => {
     const configPath = join(tmp, "happy.json");
     try {
       const { config } = await runInit({
-        nodeUrl: `http://127.0.0.1:${node.port}`,
+        nodeUrl: `http://127.0.0.1:1`,
         configPath,
-        // Force TCP to the stub: a bogus socket path doesn't exist, so the
-        // data-plane socket fast-path is skipped (otherwise probe writes would
-        // hit the real :9001 control socket if one is present on this machine).
-        nodeSocketPath: join(tmp, "no-such.sock"),
+        // Point at the fixture's full-surface socket — socket-only routes every
+        // call there; nodeUrl is just a loopback placeholder that's never dialed.
+        nodeSocketPath: node.socketPath,
         print: () => {},
       });
       expect(config.schemaHashes.card).toBe(FULL_CARD_HASH);
       const written = JSON.parse(readFileSync(configPath, "utf8"));
       expect(written.schemaHashes.card).toBe(FULL_CARD_HASH);
     } finally {
-      node.stop(true);
+      node.stop();
     }
   });
 
@@ -149,20 +161,20 @@ describe("runInit write-probe guard", () => {
     // must not clobber it when it refuses.
     const prior = {
       configVersion: 1,
-      nodeUrl: `http://127.0.0.1:${node.port}`,
+      nodeUrl: `http://127.0.0.1:1`,
       schemaServiceUrl: "http://unused.invalid",
       userHash: "stub-user",
       schemaHashes: { card: FULL_CARD_HASH, board: BOARD_HASH },
-      nodeSocketPath: join(tmp, "no-such.sock"),
+      nodeSocketPath: node.socketPath,
     };
     writeFileSync(configPath, JSON.stringify(prior, null, 2));
     try {
       let err: unknown;
       try {
         await runInit({
-          nodeUrl: `http://127.0.0.1:${node.port}`,
+          nodeUrl: `http://127.0.0.1:1`,
           configPath,
-          nodeSocketPath: join(tmp, "no-such.sock"),
+          nodeSocketPath: node.socketPath,
           print: () => {},
         });
       } catch (e) {
@@ -176,7 +188,7 @@ describe("runInit write-probe guard", () => {
       const after = JSON.parse(readFileSync(configPath, "utf8"));
       expect(after.schemaHashes.card).toBe(FULL_CARD_HASH);
     } finally {
-      node.stop(true);
+      node.stop();
     }
   });
 });

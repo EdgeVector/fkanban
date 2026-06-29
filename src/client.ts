@@ -17,7 +17,7 @@
 // fully backward-compatible.
 
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import type { AddSchemaRequest } from "./schemas.ts";
 
@@ -807,6 +807,33 @@ function isSocketRoute(method: string, path: string, socketPath: string): boolea
   return SOCKET_OWNER_ROUTES.some((r) => r.method === method && r.path === path);
 }
 
+// A LOCAL node is reached only over its Unix socket — the loopback TCP listener
+// is retired (fold `fold-retire-tcp-listener`), so there is no TCP fallback.
+function isLoopbackNodeUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.hostname === "127.0.0.1" ||
+      u.hostname === "localhost" ||
+      u.hostname === "::1" ||
+      u.hostname === "[::1]"
+    );
+  } catch {
+    return false;
+  }
+}
+
+// The socket a given route must use under socket-only, computed regardless of
+// whether the file exists (a down node simply fails the connect, which the catch
+// maps to a node-not-running diagnostic instead of dialing :9001). A configured
+// full-surface socket carries every route; a data socket carries the allowlisted
+// data-plane routes and derives its sibling folddb-full.sock for the rest.
+function routeSocketPathFor(method: string, path: string, socketPath: string): string {
+  if (isFullSurfaceSocket(socketPath)) return socketPath;
+  if (SOCKET_OWNER_ROUTES.some((r) => r.method === method && r.path === path)) return socketPath;
+  return join(dirname(socketPath), "folddb-full.sock");
+}
+
 async function verboseFetch(opts: {
   baseUrl: string;
   path: string;
@@ -844,12 +871,31 @@ async function verboseFetch(opts: {
   // socketPath was threaded in and the file exists (a node without a socket, or
   // the schema service, transparently uses TCP). Bun's UDS fetch keeps the URL
   // as `http://localhost<path>` and routes the connection over `{ unix }`.
+  // A LOCAL (loopback) node is socket-only: pick the route's socket
+  // UNCONDITIONALLY and never dial the retired loopback TCP port — a connect
+  // failure is mapped to a node-not-running diagnostic, not a :9001 error.
+  const socketOnly =
+    opts.service === "node" &&
+    isLoopbackNodeUrl(opts.baseUrl) &&
+    opts.socketPath !== undefined &&
+    opts.socketPath.length > 0;
+  const socketOnlyPath = socketOnly
+    ? routeSocketPathFor(opts.method, opts.path, opts.socketPath as string)
+    : null;
+  // Legacy socket-first WITH a TCP fallback, retained only for a NON-loopback
+  // (remote) node that exposes a local socket file for an allowlisted route.
   const useSocket =
+    !socketOnly &&
     opts.service === "node" &&
     opts.socketPath !== undefined &&
     opts.socketPath.length > 0 &&
     existsSync(opts.socketPath) &&
     isSocketRoute(opts.method, opts.path, opts.socketPath);
+  const errorSocketPath = socketOnly
+    ? (socketOnlyPath as string)
+    : useSocket
+      ? opts.socketPath
+      : undefined;
 
   // One controller for the whole request lifecycle (headers + body). The timer
   // keeps running after the fetch resolves, so if the body read stalls past the
@@ -862,11 +908,11 @@ async function verboseFetch(opts: {
     if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
   }, timeoutMs);
 
-  // Issue the request over a given transport. `viaSocket` selects the UDS
-  // (Bun's `{ unix }` option) vs the plain TCP url; the verbose log names which.
-  const attempt = async (viaSocket: boolean): Promise<Response> => {
-    const url = viaSocket ? `http://localhost${opts.path}` : tcpUrl;
-    const transport = viaSocket ? `unix:${opts.socketPath}` : "tcp";
+  // Issue the request over a given transport: a socket path routes over Bun's
+  // `{ unix }` option (URL stays `http://localhost<path>`); null uses plain TCP.
+  const attempt = async (sock: string | null): Promise<Response> => {
+    const url = sock ? `http://localhost${opts.path}` : tcpUrl;
+    const transport = sock ? `unix:${sock}` : "tcp";
     opts.verbose(
       `→ ${tag} ${opts.method} ${url} [${transport}]` +
         (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
@@ -877,45 +923,54 @@ async function verboseFetch(opts: {
       body: bodyStr,
       signal: controller.signal,
     };
-    if (viaSocket) init.unix = opts.socketPath;
+    if (sock) init.unix = sock;
     const r = await fetch(url, init);
     opts.verbose(`← ${tag} ${opts.method} ${url} [${transport}] status=${r.status}`);
     return r;
   };
 
-  let res: Response | undefined;
-  try {
-    if (useSocket) {
-      let socketErr: unknown = null;
-      for (let attemptNo = 1; attemptNo <= SOCKET_CONNECT_RETRY_MAX; attemptNo++) {
-        try {
-          res = await attempt(true);
-          socketErr = null;
-          break;
-        } catch (err) {
-          socketErr = err;
-          if (!isConnectError(err) || isTimeoutError(err)) throw err;
-          if (attemptNo < SOCKET_CONNECT_RETRY_MAX) {
-            const wait = SOCKET_CONNECT_BACKOFF_MS[attemptNo - 1]!;
-            opts.verbose(
-              `node: socket ${opts.socketPath} connect failed (${
-                err instanceof Error ? err.message : String(err)
-              }) — retry ${attemptNo}/${SOCKET_CONNECT_RETRY_MAX - 1} after ${wait}ms`,
-            );
-            await sleep(wait);
-          }
+  // Retry a socket connect a few times (it may be mid-startup), then give up.
+  const attemptSocketWithRetries = async (sock: string): Promise<Response> => {
+    let socketErr: unknown = null;
+    for (let attemptNo = 1; attemptNo <= SOCKET_CONNECT_RETRY_MAX; attemptNo++) {
+      try {
+        return await attempt(sock);
+      } catch (err) {
+        socketErr = err;
+        if (!isConnectError(err) || isTimeoutError(err)) throw err;
+        if (attemptNo < SOCKET_CONNECT_RETRY_MAX) {
+          const wait = SOCKET_CONNECT_BACKOFF_MS[attemptNo - 1]!;
+          opts.verbose(
+            `node: socket ${sock} connect failed (${
+              err instanceof Error ? err.message : String(err)
+            }) — retry ${attemptNo}/${SOCKET_CONNECT_RETRY_MAX - 1} after ${wait}ms`,
+          );
+          await sleep(wait);
         }
       }
-      if (socketErr !== null) {
+    }
+    throw socketErr;
+  };
+
+  let res: Response | undefined;
+  try {
+    if (socketOnly) {
+      // Socket-only: never dial the retired loopback TCP port.
+      res = await attemptSocketWithRetries(socketOnlyPath as string);
+    } else if (useSocket) {
+      try {
+        res = await attemptSocketWithRetries(opts.socketPath as string);
+      } catch (socketErr) {
+        if (!isConnectError(socketErr) || isTimeoutError(socketErr)) throw socketErr;
         opts.verbose(
           `node: socket ${opts.socketPath} unreachable (${
             socketErr instanceof Error ? socketErr.message : String(socketErr)
           }) — falling back to TCP ${opts.baseUrl}`,
         );
-        res = await attempt(false);
+        res = await attempt(null);
       }
     } else {
-      res = await attempt(false);
+      res = await attempt(null);
     }
   } catch (err) {
     done = true;
@@ -923,10 +978,10 @@ async function verboseFetch(opts: {
     if (isTimeoutError(err)) {
       throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
     }
-    throw connectionError(opts.baseUrl, opts.service, err, useSocket ? opts.socketPath : undefined);
+    throw connectionError(opts.baseUrl, opts.service, err, errorSocketPath);
   }
   if (res === undefined) {
-    throw connectionError(opts.baseUrl, opts.service, new Error("no response"), useSocket ? opts.socketPath : undefined);
+    throw connectionError(opts.baseUrl, opts.service, new Error("no response"), errorSocketPath);
   }
 
   const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
@@ -942,7 +997,7 @@ async function verboseFetch(opts: {
       if (isTimeoutError(err)) {
         throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
       }
-      throw connectionError(opts.baseUrl, opts.service, err, useSocket ? opts.socketPath : undefined);
+      throw connectionError(opts.baseUrl, opts.service, err, errorSocketPath);
     }
   }) as ReadBody;
 
@@ -1001,16 +1056,16 @@ function connectionError(
   socketPath?: string,
 ): FkanbanError {
   const which = service === "node" ? "node" : "schema service";
-  // When socket-first was active, both the UDS and the TCP fallback failed —
-  // name BOTH so `fkanban doctor` output stays actionable about which transports
-  // were tried.
-  const where = socketPath ? `over the socket ${socketPath} or at ${baseUrl}` : `at ${baseUrl}`;
+  // A local node is socket-only (the loopback TCP listener is retired), so name
+  // the socket — not :9001 — when one was configured; only a remote/non-socket
+  // target reports the base URL.
+  const where = socketPath ? `over its Unix socket ${socketPath}` : `at ${baseUrl}`;
   return new FkanbanError({
     code: "service_unreachable",
     message: `${which} not reachable ${where} — run \`fkanban doctor\` for a diagnosis.`,
     hint:
       service === "node"
-        ? "Is a folddb node running? Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `fkanban init`."
+        ? "Is a folddb node running? The local node is reached only over its Unix socket (the legacy loopback TCP port is retired), so an absent or unresponsive socket means it isn't up. Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `fkanban init`."
         : "Check the schema-service URL in ~/.fkanban/config.json.",
     cause,
   });
