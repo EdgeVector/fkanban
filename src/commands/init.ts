@@ -15,7 +15,7 @@
 // publish --app fkanban`; see README "Republishing the schemas"). After that, every
 // `fkanban init` just loads + resolves the already-published schemas.
 
-import { newNodeClient, FkanbanError, type Verbose } from "../client.ts";
+import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
 import { fkanbanInvocation, mcpAddCommand } from "../mcp/register.ts";
 import {
   UNIQUE_SCHEMAS,
@@ -36,6 +36,7 @@ import {
 import {
   boardToFields,
   findBoard,
+  listBoards,
   nowIso,
   probeSchemaWritable,
   type Board,
@@ -86,7 +87,39 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // (no-op fallback when the node serves no socket — see attestOwnerSession).
   print(`[1/${STEPS}] probing node identity at ${nodeUrl}`);
   const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe", verbose, warn: print, socketPath });
-  const identity = await probe.autoIdentity();
+
+  let identity: Awaited<ReturnType<NodeClient["autoIdentity"]>>;
+  try {
+    identity = await probe.autoIdentity();
+  } catch (err) {
+    // The identity probe (and every step that follows it: bootstrap, schema
+    // load, schema list) is a TCP-only SYSTEM/schema route — the fold#1004
+    // data-plane socket 404s those, so the client always dials loopback TCP for
+    // them. On a socket-only node (legacy TCP `:9001` retired, connection
+    // refused) that TCP dial fails with `service_unreachable`, even though the
+    // node is UP and serving the data plane over its Unix socket.
+    //
+    // Symmetric to doctor's already-shipped degrade (#101): when the TCP
+    // control-plane is unreachable BUT the socket data-plane round-trips against
+    // an EXISTING config, the node is already provisioned + has the fkanban/*
+    // schemas loaded (it couldn't serve cards otherwise), so init's TCP-only
+    // bootstrap/load/resolve work is moot. Degrade gracefully: reuse the
+    // existing config, re-seed the board over the socket, and report the node
+    // UP via the socket — instead of the misleading "start a node" error.
+    const degraded = await tryInitSocketOnly({
+      err,
+      existing,
+      nodeUrl,
+      schemaServiceUrl,
+      nodeSocketPath,
+      socketPath,
+      configPath,
+      verbose,
+      print,
+    });
+    if (degraded) return degraded;
+    throw err;
+  }
 
   let userHash: string;
   let bootstrapped = false;
@@ -265,6 +298,104 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   printNextSteps(print, bootstrapped || freshFkanbanConfig);
 
   return { config, bootstrapped };
+}
+
+// Graceful degradation for a socket-only node: the TCP control-plane is
+// unreachable (legacy `:9001` retired / refused) but the node serves the data
+// plane over its Unix socket. Returns an `InitResult` when init can complete
+// over the socket alone, or `null` when it cannot (so the caller re-throws the
+// original TCP error). Completing over the socket requires:
+//   1. the TCP failure was a genuine *unreachable* (connection refused), not a
+//      different node error — a 401/500 etc. is a real answer to re-surface;
+//   2. an EXISTING valid config (init can't resolve schema hashes without TCP,
+//      so a first-ever init on a socket-only node still can't proceed — but it
+//      gets a socket-aware error from the caller's re-throw path);
+//   3. the socket data-plane actually round-trips a board query (proves the
+//      node is UP + the pinned schemas are loaded), confirming the TCP-only
+//      bootstrap/load/resolve steps are moot.
+// When all hold, it re-seeds the default board over the socket (idempotent) and
+// reports the node UP via the socket.
+async function tryInitSocketOnly(args: {
+  err: unknown;
+  existing: Config | null;
+  nodeUrl: string;
+  schemaServiceUrl: string;
+  nodeSocketPath: string | undefined;
+  socketPath: string;
+  configPath: string;
+  verbose: Verbose | undefined;
+  print: (line: string) => void;
+}): Promise<InitResult | null> {
+  const { err, existing, nodeUrl, schemaServiceUrl, nodeSocketPath, socketPath, configPath, verbose, print } = args;
+
+  // Only degrade for a genuine "TCP unreachable" — not a real node-side error
+  // (401/500/etc.), which must surface as-is.
+  if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") return null;
+
+  // Without a prior config we have no pinned schema hashes, and the only way to
+  // resolve them (the TCP schema-list route) is exactly what's down. Can't
+  // complete a first-ever init over the socket — let the caller re-throw the
+  // (socket-aware) unreachable error.
+  if (!existing) return null;
+
+  // Prove the socket data-plane is live: round-trip a board query over it. If
+  // this also fails the node is genuinely down (or there's no socket) — bail so
+  // the original TCP-unreachable error stands.
+  const node = newNodeClient({ baseUrl: nodeUrl, userHash: existing.userHash, verbose, socketPath });
+  const transport = node.nodeTransport();
+  if (transport.transport !== "socket") return null;
+  try {
+    await listBoards(node, existing);
+  } catch {
+    return null;
+  }
+
+  print(
+    `        node TCP control-plane unreachable, but the data-plane socket ` +
+      `${transport.socketPath} is live — degrading to a socket-only re-init`,
+  );
+  print(`        (bootstrap + schema load/resolve are TCP-only system routes; ` + `skipping — the node is already provisioned with the fkanban/* schemas loaded)`);
+
+  // Persist config unchanged (re-affirm the existing pins). Carry the socket
+  // path through if it was explicitly given, mirroring the TCP path.
+  const config: Config = {
+    configVersion: CONFIG_VERSION,
+    nodeUrl,
+    schemaServiceUrl,
+    userHash: existing.userHash,
+    schemaHashes: existing.schemaHashes,
+    ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
+  };
+  print(`[4/${STEPS}] writing config to ${configPath}`);
+  writeConfig(config, configPath);
+
+  // Seed the default board over the socket (idempotent) — `/api/mutation` +
+  // `/api/query` are exactly the routes the data-plane socket serves.
+  print(`[5/${STEPS}] seeding default board "${DEFAULT_BOARD_SLUG}" (over the socket)`);
+  const boardHash = schemaHashFor("board", config);
+  const existingBoard = await findBoard(node, config, DEFAULT_BOARD_SLUG);
+  if (!existingBoard) {
+    const now = nowIso();
+    const board: Board = {
+      slug: DEFAULT_BOARD_SLUG,
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: now,
+      updated_at: now,
+    };
+    await node.createRecord({ schemaHash: boardHash, fields: boardToFields(board), keyHash: board.slug });
+    print(`        created board "${DEFAULT_BOARD_SLUG}" with columns ${DEFAULT_COLUMNS.join(", ")}`);
+  } else {
+    print(`        board "${DEFAULT_BOARD_SLUG}" already exists — leaving as-is`);
+  }
+
+  print(`[init] ok (socket-only — TCP control-plane unavailable)`);
+  // A degraded re-init over an existing config is, by definition, not a
+  // first-time setup, so emit the quiet one-line hint.
+  printNextSteps(print, false);
+
+  return { config, bootstrapped: false };
 }
 
 // Guide the next action. On a genuine first-time fkanban setup — no prior
