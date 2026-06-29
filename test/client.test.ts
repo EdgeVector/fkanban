@@ -352,8 +352,11 @@ describe("folddb-full socket routes every node path over UDS", () => {
   });
 });
 
-describe("socket-first TCP fallback", () => {
-  test("data-plane query falls back to TCP when the configured socket cannot connect", async () => {
+describe("socket-only: no TCP fallback for a local node", () => {
+  test("a loopback node whose socket cannot connect FAILS — it never dials TCP", async () => {
+    // The loopback TCP listener is retired; a local node is socket-only. A
+    // configured-but-dead socket must surface a node-not-running error, NOT a
+    // silent fall-through to a TCP server listening on the same loopback host.
     const sockDir = mkdtempSync(join(tmpdir(), "fkanban-bad-sock-"));
     const badSocket = join(sockDir, "folddb.sock");
     writeFileSync(badSocket, "");
@@ -361,10 +364,8 @@ describe("socket-first TCP fallback", () => {
     const tcpServer = Bun.serve({
       port: 0,
       async fetch(req) {
-        const path = new URL(req.url).pathname;
-        tcpSeen.push(path);
-        if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
-        return Response.json({ error: "unexpected_tcp_path" }, { status: 500 });
+        tcpSeen.push(new URL(req.url).pathname);
+        return Response.json({ ok: true, results: [], has_more: false });
       },
     });
 
@@ -374,9 +375,16 @@ describe("socket-first TCP fallback", () => {
         userHash: "test-user",
         socketPath: badSocket,
       });
-      const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
-      expect(res.results).toEqual([]);
-      expect(tcpSeen).toEqual(["/api/query"]);
+      let caught: unknown;
+      try {
+        await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+      } catch (e) {
+        caught = e;
+      }
+      // It errored over the socket, and the TCP server was NEVER contacted.
+      expect(caught).toBeInstanceOf(FkanbanError);
+      expect((caught as FkanbanError).code).toBe("service_unreachable");
+      expect(tcpSeen).toEqual([]);
     } finally {
       tcpServer.stop(true);
       rmSync(sockDir, { recursive: true, force: true });

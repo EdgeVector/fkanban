@@ -201,20 +201,27 @@ describe("newNodeClient attestation wiring", () => {
     expect(mintCount).toBe(2);
   });
 
-  test("actionable error (not raw 403) when an owner verb 403s un-attested", async () => {
-    // App-isolation node: the socket path doesn't exist, so attestation can't
-    // mint, and the owner verb keeps returning transport_not_attested.
-    const tcp = Bun.serve({
-      port: 0,
+  test("actionable error (not raw 403) when an owner verb 403s un-attested over the socket", async () => {
+    // App-isolation node: it serves over its control socket but rejects every
+    // request with transport_not_attested (and refuses the pairing mint), so
+    // fkanban can't establish a session and the owner verb keeps 403ing. The
+    // socket IS reachable — there is no TCP path (the loopback listener is
+    // retired) — so the error must be the actionable attestation message.
+    // Full-surface socket so EVERY owner verb (incl. the POST /api/schemas/load
+    // control route) lands on it — there is no TCP path to fall through to.
+    const sockDir = mkdtempSync(join(tmpdir(), "fkanban-attest-403-"));
+    const sock = join(sockDir, "folddb-full.sock");
+    cleanups.push(() => rmSync(sockDir, { recursive: true, force: true }));
+    const uds = Bun.serve({
+      unix: sock,
       fetch: () => Response.json({ error: "transport_not_attested" }, { status: 403 }),
     });
-    track(tcp);
+    track(uds);
 
-    const missingSock = socketPath();
     const node = newNodeClient({
-      baseUrl: `http://127.0.0.1:${tcp.port}`,
+      baseUrl: "http://127.0.0.1:1", // loopback placeholder; socket-only never dials it
       userHash: "uh",
-      socketPath: missingSock,
+      socketPath: sock,
     });
 
     let caught: unknown;
@@ -228,36 +235,36 @@ describe("newNodeClient attestation wiring", () => {
     expect(fk.code).toBe("node_attestation_unavailable");
     // The raw folddb token must NOT leak in the message.
     expect(fk.message).not.toContain("transport_not_attested");
-    // Names the socket it tried and that no socket exists.
-    expect(fk.message).toContain(missingSock);
+    // Names the socket it tried.
+    expect(fk.message).toContain(sock);
     expect(fk.message.toLowerCase()).toContain("app-isolation");
     // Hint names both remedies.
     expect(fk.hint).toContain("--node-socket-path");
     expect(fk.hint).toContain("FOLDDB_SOCKET_PATH");
   });
 
-  test("emits a non-verbose warn when the control socket is missing", async () => {
-    const tcp = Bun.serve({
-      port: 0,
-      fetch: () => Response.json({ ok: true, results: [], has_more: false }),
-    });
-    track(tcp);
-
-    const missingSock = socketPath();
+  test("missing control socket → node-not-running error (socket-only: no TCP fallback)", async () => {
+    // The loopback TCP listener is retired: a local node is reached ONLY over
+    // its Unix socket. An absent socket therefore means the node isn't running —
+    // the request fails closed rather than falling back to TCP, and the
+    // missing-socket hint is surfaced.
+    const missingSock = socketPath(); // never created
     const warnings: string[] = [];
     const node = newNodeClient({
-      baseUrl: `http://127.0.0.1:${tcp.port}`,
+      baseUrl: "http://127.0.0.1:1", // loopback placeholder; never dialed
       userHash: "uh",
       socketPath: missingSock,
       warn: (m) => warnings.push(m),
     });
-    // Two calls: the skip warning must fire exactly once, not per request.
-    await node.queryAll({ schemaHash: "s", fields: ["slug"] });
-    await node.queryAll({ schemaHash: "s", fields: ["slug"] });
-    expect(warnings.length).toBe(1);
-    expect(warnings[0]).toContain(missingSock);
-    expect(warnings[0]).toContain("--node-socket-path");
-    expect(warnings[0]).toContain("proceeding");
+    let caught: unknown;
+    try {
+      await node.queryAll({ schemaHash: "s", fields: ["slug"] });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(FkanbanError);
+    expect((caught as FkanbanError).code).toBe("service_unreachable");
+    expect(warnings.some((w) => w.includes(missingSock))).toBe(true);
   });
 
   test("no socket → no token → no session header (unattested, unchanged behavior)", async () => {

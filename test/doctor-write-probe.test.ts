@@ -35,10 +35,16 @@ const OLD_CARD_FIELDS = [
   "updated_at",
 ];
 
+// A node fixture that serves over a UNIX SOCKET (folddb.sock) — the only
+// transport a local node speaks now that the loopback TCP listener is retired
+// and the client is socket-only. Returns the socket path + a stop() that also
+// cleans the temp dir.
 function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
   const store = new Map<string, Record<string, unknown>>();
-  return Bun.serve({
-    port: 0,
+  const dir = mkdtempSync(join(tmpdir(), "fkanban-probe-node-"));
+  const socketPath = join(dir, "folddb.sock");
+  const server = Bun.serve({
+    unix: socketPath,
     async fetch(req) {
       const url = new URL(req.url);
       let body: Record<string, unknown> | undefined;
@@ -96,17 +102,22 @@ function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
       return Response.json({ error: "unexpected", path: url.pathname }, { status: 500 });
     },
   });
+  return {
+    socketPath,
+    stop: () => {
+      server.stop(true);
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 const tmp = mkdtempSync(join(tmpdir(), "fkanban-doctor-probe-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
-// A bogus socket path so doctor's data-plane ops go TCP to the stub, not over a
-// real :9001 control socket that might exist on the test machine.
-const NO_SOCKET = join(tmp, "no-such.sock");
-
-function writeCfg(name: string, cardHash: string, port: number): string {
-  return writeCfgWithNode(name, cardHash, `http://127.0.0.1:${port}`, NO_SOCKET);
+// The node fixture serves over its Unix socket; nodeUrl is a closed loopback
+// placeholder (socket-only never dials it). Point the cfg at the live socket.
+function writeCfg(name: string, cardHash: string, socketPath: string): string {
+  return writeCfgWithNode(name, cardHash, closedTcpUrl(), socketPath);
 }
 
 function writeCfgWithNode(name: string, cardHash: string, nodeUrl: string, nodeSocketPath: string): string {
@@ -135,7 +146,7 @@ function closedTcpUrl(): string {
 describe("doctor write-probe", () => {
   test("green: config pinned to the writable full-18-field hash passes the write probe", async () => {
     const node = makeNode([{ name: FULL_CARD_HASH, fields: fieldsFor("card") }]);
-    const cfgPath = writeCfg("ok.json", FULL_CARD_HASH, node.port!);
+    const cfgPath = writeCfg("ok.json", FULL_CARD_HASH, node.socketPath);
     const lines: string[] = [];
     try {
       const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
@@ -143,7 +154,7 @@ describe("doctor write-probe", () => {
       expect(report).toContain("✓ fkanban/Card write-probe");
       expect(ok).toBe(true);
     } finally {
-      node.stop(true);
+      node.stop();
     }
   });
 
@@ -152,7 +163,7 @@ describe("doctor write-probe", () => {
       { name: STALE_CARD_HASH, fields: OLD_CARD_FIELDS },
       { name: FULL_CARD_HASH, fields: fieldsFor("card") },
     ]);
-    const cfgPath = writeCfg("ok-with-stale-duplicate.json", FULL_CARD_HASH, node.port!);
+    const cfgPath = writeCfg("ok-with-stale-duplicate.json", FULL_CARD_HASH, node.socketPath);
     const lines: string[] = [];
     try {
       const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
@@ -162,14 +173,14 @@ describe("doctor write-probe", () => {
       expect(report).toContain("✓ fkanban/Card write-probe");
       expect(report).not.toContain(`✗ fkanban/Card loaded + matches config — ${STALE_CARD_HASH}`);
     } finally {
-      node.stop(true);
+      node.stop();
     }
   });
 
   test("red: config pinned to the stale 10-field hash FAILS the write probe", async () => {
     // Only the stale schema loaded → config can only point at it.
     const node = makeNode([{ name: STALE_CARD_HASH, fields: OLD_CARD_FIELDS }]);
-    const cfgPath = writeCfg("stale.json", STALE_CARD_HASH, node.port!);
+    const cfgPath = writeCfg("stale.json", STALE_CARD_HASH, node.socketPath);
     const lines: string[] = [];
     try {
       const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
@@ -178,7 +189,7 @@ describe("doctor write-probe", () => {
       expect(report).toContain("✗ fkanban/Card write-probe");
       expect(report).toContain("not writable on schema");
     } finally {
-      node.stop(true);
+      node.stop();
     }
   });
 
@@ -187,7 +198,7 @@ describe("doctor write-probe", () => {
       { name: STALE_CARD_HASH, fields: OLD_CARD_FIELDS },
       { name: FULL_CARD_HASH, fields: fieldsFor("card") },
     ]);
-    const cfgPath = writeCfg("wrongpin.json", STALE_CARD_HASH, node.port!);
+    const cfgPath = writeCfg("wrongpin.json", STALE_CARD_HASH, node.socketPath);
     const lines: string[] = [];
     try {
       const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
@@ -196,7 +207,7 @@ describe("doctor write-probe", () => {
       expect(report).toContain("✗ fkanban/Card config hash is the writable version");
       expect(report).toContain(FULL_CARD_HASH);
     } finally {
-      node.stop(true);
+      node.stop();
     }
   });
 
