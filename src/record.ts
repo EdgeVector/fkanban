@@ -719,8 +719,8 @@ export async function listCardStatuses(node: NodeClient, cfg: Config): Promise<C
 // `assignee` filter target. Crucially this OMITS the heavy multi-paragraph
 // `body`, which the text list path never renders — so a one-screen `fkanban list`
 // no longer drags every card's full spec over the wire (the first thing to time
-// out when the node is busy). `--json`/`search`/MCP still use the full-body
-// `listCards` because they genuinely surface bodies.
+// out when the node is busy). `--json`/`--wide`/`search`/MCP still use the
+// full-body `listCards` because they genuinely surface structured/body fields.
 export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "assignee", "created_at"];
 
 // Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields

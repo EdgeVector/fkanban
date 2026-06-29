@@ -166,6 +166,35 @@ export function capPerColumn<T extends Card>(
   return out;
 }
 
+function cell(value: string | undefined): string {
+  const s = value?.trim() ?? "";
+  return s.length > 0 ? s : "-";
+}
+
+function pad(value: string, width: number): string {
+  return value.padEnd(width, " ");
+}
+
+// Render a flat, fixed-width list for reconcile/pickup agents that need the
+// structured fields without hand-formatting `list --json`.
+export function renderWideTable(cards: Card[]): string {
+  const headers = ["COLUMN", "SLUG", "REPO", "BASE", "PR", "UPDATED", "TITLE"];
+  const rows = cards.map((c) => [
+    cell(c.column),
+    cell(c.slug),
+    cell(c.repo),
+    cell(c.base),
+    cell(c.pr_url),
+    cell(c.updated_at),
+    cell(c.title || c.slug),
+  ]);
+  const widths = headers.map((header, i) =>
+    Math.max(header.length, ...rows.map((row) => row[i]?.length ?? 0)),
+  );
+  const renderRow = (row: string[]) => row.map((v, i) => pad(v, widths[i] ?? v.length)).join("  ").trimEnd();
+  return [renderRow(headers), ...rows.map(renderRow)].join("\n");
+}
+
 function cardMetaSuffix(c: Card, color: boolean): string {
   const meta: string[] = [];
   if (c.assignee) meta.push(`@${c.assignee}`);

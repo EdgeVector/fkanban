@@ -171,7 +171,7 @@ DONE  (0)
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
-| `fkanban list` | render a board as columns (`--board --column --tag --assignee --json --limit N --all`); blocked cards show 🔒 |
+| `fkanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --limit N --all`); blocked cards show 🔒 |
 | `fkanban rank` | reorder a column by card priority so pickup works urgent cards first (`--board --column`, default `todo`) |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
@@ -194,9 +194,10 @@ can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
 everything and `--limit N` sets a custom per-column cap — both apply to text
 **and** `--json`. The 12-card default is a *text display* affordance only:
-`--json` returns the complete filtered board by default, and honors an explicit
-`--limit N`/`--all` to mean the same bounded (or unbounded) set the text view
-shows.
+`--json` and `--wide` return the complete filtered board by default, and honor
+an explicit `--limit N`/`--all` to mean the same bounded (or unbounded) set the
+text view shows. `--wide` prints one fixed-width row per card with
+`COLUMN SLUG REPO BASE PR UPDATED TITLE` for agent/reconcile scans.
 
 `--tag <tag>` and `--assignee <name>` apply **exact-match** filters to the
 listing (contrast the fuzzy substring `search` below), e.g.
