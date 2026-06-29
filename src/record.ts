@@ -4,9 +4,9 @@
 import { FkanbanError, type NodeClient, type QueryRow } from "./client.ts";
 import { schemaHashFor, type Config } from "./config.ts";
 import {
-  DEFAULT_COLUMNS,
   fieldsFor,
   isDefaultColumn,
+  resolveColumns,
   schemaFor,
   type Column,
   type RecordType,
@@ -911,7 +911,7 @@ export function validateSlug(slug: string): void {
 // A card's column must be one of the board's columns (or, when the board has
 // no explicit column list, one of the default columns).
 export function ensureColumn(column: string, boardColumns: string[]): void {
-  const valid = boardColumns.length > 0 ? boardColumns : [...DEFAULT_COLUMNS];
+  const valid = resolveColumns(boardColumns);
   if (!valid.includes(column)) {
     throw new FkanbanError({
       code: "invalid_column",
