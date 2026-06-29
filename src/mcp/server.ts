@@ -825,10 +825,51 @@ export function createFkanbanMcpServer(
 // to a clean `isError` "Run `fkanban init` first." per call (see
 // `createFkanbanMcpServer`), matching the bin's behavior.
 //
+// Default idle-reap window: exit an MCP server that has received NO request for
+// 30 minutes. WHY: `startMcpServer` already exits on `transport.onclose` (stdin
+// EOF) — the clean disconnect. But a host can spawn a server, stop using it, and
+// keep the stdio pipe OPEN (observed: Codex's app-server leaked 501 fkanban MCP
+// servers this way — onclose never fired, so they lingered for days). An idle
+// reap bounds that: on the next tool call the host transparently respawns a
+// fresh server, so reaping an idle one is invisible. Override via
+// FKANBAN_MCP_IDLE_TIMEOUT_MS; set it <= 0 to disable.
+export const DEFAULT_MCP_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+export function mcpIdleTimeoutMs(): number {
+  const raw = process.env.FKANBAN_MCP_IDLE_TIMEOUT_MS;
+  const n = raw === undefined ? NaN : parseInt(raw, 10);
+  return Number.isFinite(n) ? n : DEFAULT_MCP_IDLE_TIMEOUT_MS;
+}
+
+// A transport-agnostic idle reaper: `touch()` (re)starts the clock; if it ever
+// elapses without a touch, `onIdle` fires (default: clean process exit). Pure +
+// injectable so it's unit-testable without a real stdio transport or
+// `process.exit`. A non-positive `idleMs` disables it (enabled=false).
+export function makeIdleReaper(opts: { idleMs: number; onIdle?: () => void }): {
+  enabled: boolean;
+  touch: () => void;
+  stop: () => void;
+} {
+  const onIdle = opts.onIdle ?? ((): void => process.exit(0));
+  const enabled = Number.isFinite(opts.idleMs) && opts.idleMs > 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    enabled,
+    touch() {
+      if (!enabled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(onIdle, opts.idleMs);
+    },
+    stop() {
+      if (timer) clearTimeout(timer);
+    },
+  };
+}
+
 // `server.connect` resolves as soon as the transport is wired up, so we must
 // not let the caller return (and `process.exit`) before the server has served
 // anything — keep the call pending until the stdio transport closes (client
-// disconnects / stdin EOF).
+// disconnects / stdin EOF) OR the idle reaper fires.
 export async function startMcpServer(opts: { verbose?: Verbose } = {}): Promise<void> {
   let server: McpServer;
   try {
@@ -845,9 +886,21 @@ export async function startMcpServer(opts: { verbose?: Verbose } = {}): Promise<
     }
   }
   const transport = new StdioServerTransport();
+  const reaper = makeIdleReaper({ idleMs: mcpIdleTimeoutMs() });
   const closed = new Promise<void>((resolve) => {
     transport.onclose = () => resolve();
   });
   await server.connect(transport);
+  // Reset the idle clock on every inbound MCP message. `server.connect` has
+  // installed the protocol's own `onmessage`; chain it so we observe traffic
+  // without swallowing it. If the host abandons us with the pipe held open (no
+  // stdin EOF), the reaper exits the process instead of leaking forever.
+  const protocolOnMessage = transport.onmessage?.bind(transport);
+  transport.onmessage = (message) => {
+    reaper.touch();
+    protocolOnMessage?.(message);
+  };
+  reaper.touch(); // start the clock at connect time
   await closed;
+  reaper.stop();
 }
