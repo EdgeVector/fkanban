@@ -241,6 +241,8 @@ describe("doctor write-probe", () => {
       const report = lines.join("\n");
       expect(ok).toBe(true);
       expect(report).toContain("✓ node transport: socket");
+      expect(report).toContain("socket-only; no TCP fallback");
+      expect(report).not.toContain("loopback TCP fallback configured");
       expect(report).toContain("✓ node reachable via socket");
       expect(report).toContain("✓ node reachable + provisioned");
       expect(report).toContain("✓ fkanban/Card loaded + matches config");
@@ -255,6 +257,22 @@ describe("doctor write-probe", () => {
       expect(socketSeen).toContain("/api/schemas");
     } finally {
       socketNode.stop(true);
+    }
+  });
+
+  test("green: socket transport keeps TCP fallback wording for remote nodeUrl", async () => {
+    const node = makeNode([{ name: FULL_CARD_HASH, fields: fieldsFor("card") }]);
+    const cfgPath = writeCfgWithNode("remote-socket-fallback.json", FULL_CARD_HASH, "https://node.example", node.socketPath);
+    const lines: string[] = [];
+    try {
+      const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
+      const report = lines.join("\n");
+      expect(ok).toBe(true);
+      expect(report).toContain("✓ node transport: socket");
+      expect(report).toContain("TCP fallback configured");
+      expect(report).not.toContain("socket-only; no TCP fallback");
+    } finally {
+      node.stop();
     }
   });
 
