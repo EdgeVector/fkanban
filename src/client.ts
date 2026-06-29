@@ -809,7 +809,7 @@ function isSocketRoute(method: string, path: string, socketPath: string): boolea
 
 // A LOCAL node is reached only over its Unix socket — the loopback TCP listener
 // is retired (fold `fold-retire-tcp-listener`), so there is no TCP fallback.
-function isLoopbackNodeUrl(url: string): boolean {
+export function isLoopbackNodeUrl(url: string): boolean {
   try {
     const u = new URL(url);
     return (

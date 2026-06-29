@@ -5,7 +5,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
-import { FkanbanError, newNodeClient, type Verbose } from "../client.ts";
+import { FkanbanError, isLoopbackNodeUrl, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
 import { listBoards, listCards, probeSchemaWritable } from "../record.ts";
@@ -94,7 +94,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   print(`  schema (config): ${cfg.schemaServiceUrl}  (informational — the node loads schemas, not the CLI)`);
 
   if (transport.transport === "socket") {
-    const detail = `Unix socket — ${transport.socketPath} (loopback TCP fallback configured)`;
+    const fallback = isLoopbackNodeUrl(cfg.nodeUrl)
+      ? "socket-only; no TCP fallback"
+      : "TCP fallback configured";
+    const detail = `Unix socket — ${transport.socketPath} (${fallback})`;
     print(`✓ node transport: socket — ${detail}`);
     onCheck?.({ name: "node transport", status: "info", detail });
   } else {
