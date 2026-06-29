@@ -153,6 +153,7 @@ describe("runInit write-probe guard", () => {
       schemaServiceUrl: "http://unused.invalid",
       userHash: "stub-user",
       schemaHashes: { card: FULL_CARD_HASH, board: BOARD_HASH },
+      nodeSocketPath: join(tmp, "no-such.sock"),
     };
     writeFileSync(configPath, JSON.stringify(prior, null, 2));
     try {
@@ -161,6 +162,7 @@ describe("runInit write-probe guard", () => {
         await runInit({
           nodeUrl: `http://127.0.0.1:${node.port}`,
           configPath,
+          nodeSocketPath: join(tmp, "no-such.sock"),
           print: () => {},
         });
       } catch (e) {

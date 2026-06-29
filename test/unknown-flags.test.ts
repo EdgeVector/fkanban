@@ -7,12 +7,17 @@
 // node/config access, so these need no running folddb node.
 
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const NO_CONFIG = join(tmpdir(), `fkanban-unknown-flags-no-config-${process.pid}.json`);
+const NO_SOCKET = join(tmpdir(), `fkanban-unknown-flags-no-socket-${process.pid}.sock`);
 
 async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(["bun", "run", CLI, ...args], {
+    env: { ...process.env, FKANBAN_CONFIG: NO_CONFIG, FOLDDB_SOCKET_PATH: NO_SOCKET },
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",

@@ -209,6 +209,15 @@ describe("doctor write-probe", () => {
         const path = new URL(req.url).pathname;
         socketSeen.push(path);
         if (path === "/control/browser-pairing-code") return Response.json({ pairing_code: "socket-only" });
+        if (path === "/api/system/auto-identity") return Response.json({ user_hash: "u" });
+        if (path === "/api/schemas") {
+          return Response.json({
+            schemas: [
+              { name: FULL_CARD_HASH, descriptive_name: "Card", owner_app_id: "fkanban", fields: fieldsFor("card") },
+              { name: BOARD_HASH, descriptive_name: "Board", owner_app_id: "fkanban", fields: fieldsFor("board") },
+            ],
+          });
+        }
         if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
         if (path === "/api/mutation") return Response.json({ ok: true });
         return Response.json({ error: "unexpected_socket_path" }, { status: 500 });
@@ -222,10 +231,17 @@ describe("doctor write-probe", () => {
       expect(ok).toBe(true);
       expect(report).toContain("✓ node transport: socket");
       expect(report).toContain("✓ node reachable via socket");
+      expect(report).toContain("✓ node reachable + provisioned");
+      expect(report).toContain("✓ fkanban/Card loaded + matches config");
+      expect(report).toContain("✓ fkanban/Board loaded + matches config");
       expect(report).toContain("✓ query round-trip");
-      expect(report).toContain("node TCP control-plane unavailable");
-      expect(report).toContain("node schema list unavailable over TCP");
+      expect(report).not.toContain("node TCP control-plane unavailable");
+      expect(report).not.toContain("node schema list unavailable over TCP");
+      expect(report).not.toContain("Start one");
+      expect(report).not.toContain("re-run `fkanban init`");
       expect(socketSeen).toContain("/api/query");
+      expect(socketSeen).toContain("/api/system/auto-identity");
+      expect(socketSeen).toContain("/api/schemas");
     } finally {
       socketNode.stop(true);
     }

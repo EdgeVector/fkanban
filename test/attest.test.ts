@@ -1,9 +1,10 @@
 // Owner-session attestation tests: mint over a Unix-domain control socket,
-// exchange over TCP for a session token, attach X-Folddb-Session to every node
-// request, and re-pair once on a 403 transport_not_attested. The unattested
-// fallback (no socket) is covered too — that's the device-trust :9001 path.
+// exchange for a session token, attach X-Folddb-Session to every node request,
+// and re-pair once on a 403 transport_not_attested. The full-surface socket can
+// serve the exchange directly; narrower sockets retain the TCP exchange fallback.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -51,6 +52,36 @@ describe("attestOwnerSession", () => {
     const token = await attestOwnerSession(`http://127.0.0.1:${tcp.port}`, sock);
     expect(token).toBe("tok-123");
     expect(exchangedCode).toBe("code-xyz");
+  });
+
+  test("full-surface socket exchanges the pairing code over UDS without TCP", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fkanban-attest-full-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const sock = join(dir, "folddb-full.sock");
+    const seen: string[] = [];
+    let exchangedCode: string | undefined;
+    const uds = Bun.serve({
+      unix: sock,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        seen.push(path);
+        if (path === "/control/browser-pairing-code") {
+          return Response.json({ pairing_code: "code-full" });
+        }
+        if (path === "/api/session/browser-pair") {
+          const body = (await req.json()) as Record<string, unknown>;
+          exchangedCode = body.code as string;
+          return Response.json({ session_token: "tok-full" });
+        }
+        return Response.json({ error: "unexpected_path", path }, { status: 500 });
+      },
+    });
+    track(uds);
+
+    const token = await attestOwnerSession("http://127.0.0.1:1", sock);
+    expect(token).toBe("tok-full");
+    expect(exchangedCode).toBe("code-full");
+    expect(seen).toEqual(["/control/browser-pairing-code", "/api/session/browser-pair"]);
   });
 
   test("returns null when the socket does not exist (device-trust fallback)", async () => {

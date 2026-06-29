@@ -204,13 +204,11 @@ describe("findCard", () => {
   });
 });
 
-// Socket-first is DATA-PLANE-ONLY: the fold#1004-discovered node socket serves
-// `/api/query`+`/api/mutation` but 404s every system/identity/schema route, so
-// the client must route data-plane calls over the socket and ALL other
-// `service: node` routes over TCP — even though the socket file exists. We prove
-// the selection by which transport (UDS server vs TCP server) actually receives
-// each request.
-describe("socket-first is data-plane-only", () => {
+// Socket-first covers the node routes served by the owner data socket:
+// `/api/query`, `/api/mutation`, `/api/system/auto-identity`, and
+// `/api/schemas`. Routes outside that allowlist still go TCP unless the
+// configured socket is the full-surface `folddb-full.sock`.
+describe("socket-first covers owner data socket routes", () => {
   const sockDir = mkdtempSync(join(tmpdir(), "fkanban-sock-"));
   const socketPath = join(sockDir, "folddb.sock");
 
@@ -221,9 +219,8 @@ describe("socket-first is data-plane-only", () => {
   const tcpSeen: string[] = [];
 
   // UDS listener: serves the owner-session mint (so attestation succeeds over
-  // the socket) and the data-plane routes. If a system route ever reaches it,
-  // it answers 404 (mirroring the real data-plane socket) so the test would
-  // observe the wrong-transport hit rather than silently passing.
+  // the socket), data-plane routes, and the schema/identity reads that the node
+  // exposes on the owner data socket.
   const socketServer = Bun.serve({
     unix: socketPath,
     async fetch(req) {
@@ -234,12 +231,16 @@ describe("socket-first is data-plane-only", () => {
       }
       if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
       if (path === "/api/mutation") return Response.json({ ok: true });
+      if (path === "/api/system/auto-identity") {
+        return Response.json({ user_hash: "test-user" });
+      }
+      if (path === "/api/schemas") return Response.json({ ok: true, schemas: [] });
       return Response.json({ error: "not_found_on_data_plane_socket" }, { status: 404 });
     },
   });
 
-  // TCP listener: serves the pairing-code exchange and the SYSTEM/identity/schema
-  // routes that must NOT use the socket.
+  // TCP listener: serves the pairing-code exchange. Owner data socket routes
+  // should not reach it when the socket exists.
   const tcpServer = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -248,13 +249,9 @@ describe("socket-first is data-plane-only", () => {
       if (path === "/api/session/browser-pair") {
         return Response.json({ session_token: "test-session-token" });
       }
-      if (path === "/api/system/auto-identity") {
-        return Response.json({ user_hash: "test-user" });
-      }
-      if (path === "/api/schemas") return Response.json({ ok: true, schemas: [] });
       if (path === "/api/mutation" || path === "/api/query") {
-        // Data-plane over TCP would be the bug; answer so the assertion can fail
-        // loudly on tcpSeen rather than on a thrown error.
+        // Socket-eligible routes over TCP would be the bug; answer so the
+        // assertion can fail loudly on tcpSeen rather than on a thrown error.
         return Response.json({ ok: true, results: [], has_more: false });
       }
       return Response.json({ error: "unexpected_tcp_path" }, { status: 500 });
@@ -290,20 +287,23 @@ describe("socket-first is data-plane-only", () => {
     expect(tcpSeen.slice(before)).not.toContain("/api/mutation");
   });
 
-  test("system /api/system/auto-identity goes over TCP even though the socket exists", async () => {
+  test("system /api/system/auto-identity goes over the socket, not TCP", async () => {
     const node = newNodeClient({ baseUrl: tcpUrl, userHash: "test-user", socketPath });
+    const beforeSocket = socketSeen.length;
+    const beforeTcp = tcpSeen.length;
     const res = await node.autoIdentity();
     expect(res.provisioned).toBe(true);
-    expect(tcpSeen).toContain("/api/system/auto-identity");
-    // The system route must NEVER have been sent to the data-plane socket.
-    expect(socketSeen).not.toContain("/api/system/auto-identity");
+    expect(socketSeen.slice(beforeSocket)).toContain("/api/system/auto-identity");
+    expect(tcpSeen.slice(beforeTcp)).not.toContain("/api/system/auto-identity");
   });
 
-  test("schema route /api/schemas goes over TCP even though the socket exists", async () => {
+  test("schema route /api/schemas goes over the socket, not TCP", async () => {
     const node = newNodeClient({ baseUrl: tcpUrl, userHash: "test-user", socketPath });
+    const beforeSocket = socketSeen.length;
+    const beforeTcp = tcpSeen.length;
     await node.listSchemas();
-    expect(tcpSeen).toContain("/api/schemas");
-    expect(socketSeen).not.toContain("/api/schemas");
+    expect(socketSeen.slice(beforeSocket)).toContain("/api/schemas");
+    expect(tcpSeen.slice(beforeTcp)).not.toContain("/api/schemas");
   });
 
   test("nodeTransport() still reports socket when the socket exists", () => {
@@ -311,6 +311,44 @@ describe("socket-first is data-plane-only", () => {
     const t = node.nodeTransport();
     expect(t.transport).toBe("socket");
     expect(t.socketPath).toBe(socketPath);
+  });
+});
+
+describe("folddb-full socket routes every node path over UDS", () => {
+  test("non-allowlisted node routes use the full-surface socket instead of TCP", async () => {
+    const sockDir = mkdtempSync(join(tmpdir(), "fkanban-full-sock-"));
+    const socketPath = join(sockDir, "folddb-full.sock");
+    const socketSeen: string[] = [];
+    const tcpSeen: string[] = [];
+    const socketServer = Bun.serve({
+      unix: socketPath,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        socketSeen.push(path);
+        if (path === "/control/browser-pairing-code") return Response.json({ pairing_code: "full-socket" });
+        if (path === "/api/setup/bootstrap") return Response.json({ user_hash: "bootstrapped-user" });
+        return Response.json({ error: "unexpected_socket_path", path }, { status: 500 });
+      },
+    });
+    const tcpServer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        tcpSeen.push(path);
+        if (path === "/api/session/browser-pair") return Response.json({ session_token: "test-session-token" });
+        return Response.json({ error: "unexpected_tcp_path", path }, { status: 500 });
+      },
+    });
+    try {
+      const node = newNodeClient({ baseUrl: `http://127.0.0.1:${tcpServer.port}`, userHash: "test-user", socketPath });
+      await expect(node.bootstrap("Test User")).resolves.toEqual({ userHash: "bootstrapped-user" });
+      expect(socketSeen).toContain("/api/setup/bootstrap");
+      expect(tcpSeen).not.toContain("/api/setup/bootstrap");
+    } finally {
+      socketServer.stop(true);
+      tcpServer.stop(true);
+      rmSync(sockDir, { recursive: true, force: true });
+    }
   });
 });
 

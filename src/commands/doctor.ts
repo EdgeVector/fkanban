@@ -70,29 +70,31 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   check(cfg !== null, "config present", cfg ? undefined : "run `fkanban init`");
   if (!cfg) return false;
 
-  print(`  node:            ${cfg.nodeUrl}`);
+  const socketPath = resolveSocketPath(cfg);
+  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath });
+
+  // Which transport the node calls take. Socket-first is live for board
+  // data-plane routes plus the schema/identity reads doctor needs; when
+  // configured with `folddb-full.sock`, the socket carries the whole node HTTP
+  // app. This line is informational only — never flips `ok`; it just lets a
+  // user confirm socket-first is active (or see why it fell back to TCP).
+  // Printed BEFORE the reachability probe so the transport is named even if
+  // that probe then fails.
+  const transport = node.nodeTransport();
+  const socketDataPlane = transport.transport === "socket";
+  if (transport.transport === "socket") {
+    print(`  node socket:     ${transport.socketPath}`);
+  } else {
+    print(`  node:            ${cfg.nodeUrl}`);
+  }
   // The schema_service URL is recorded in config for diagnostics only — unlike
   // `node:` (reachability-probed below), the CLI never contacts it. The NODE
   // loads schemas from its own configured schema_service, so don't print this
   // as if it were a checked/authoritative endpoint.
   print(`  schema (config): ${cfg.schemaServiceUrl}  (informational — the node loads schemas, not the CLI)`);
 
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
-
-  // Which transport the node DATA-PLANE ops (`fkanban list/add/move`, i.e.
-  // `/api/query`+`/api/mutation`) take. Socket-first is live for those when the
-  // control socket exists; otherwise they go over loopback TCP. The reachability
-  // probe below hits a SYSTEM route (`/api/system/auto-identity`), which always
-  // goes TCP — the fold#1004-discovered socket is data-plane-only and 404s
-  // system/identity/schema routes, so socket-first deliberately excludes them.
-  // This line is informational only — never flips `ok`; it just lets a user
-  // confirm socket-first is active for the data plane (or see why it fell back
-  // to TCP). Printed BEFORE the reachability probe so the transport is named
-  // even if that probe then fails.
-  const transport = node.nodeTransport();
-  const socketDataPlane = transport.transport === "socket";
   if (transport.transport === "socket") {
-    const detail = `Unix socket — ${transport.socketPath} (TCP ${cfg.nodeUrl} is fallback)`;
+    const detail = `Unix socket — ${transport.socketPath} (loopback TCP fallback configured)`;
     print(`✓ node transport: socket — ${detail}`);
     onCheck?.({ name: "node transport", status: "info", detail });
   } else {
@@ -123,13 +125,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     check(id.provisioned, "node reachable + provisioned", id.provisioned ? undefined : id.reason);
   } catch (err) {
     const detail = formatDoctorError(err);
-    if (!socketDataPlane || queryRoundTrip === null) {
-      check(false, "node reachable", detail);
-      return false;
-    }
-    const tcpDetail = `${detail} (socket data-plane is reachable; TCP control-plane is unavailable)`;
-    print(`· node TCP control-plane unavailable (socket mode) — ${tcpDetail}`);
-    onCheck?.({ name: "node TCP control-plane unavailable", status: "info", detail: tcpDetail });
+    check(false, "node reachable + provisioned", detail);
+    return false;
   }
 
   // Cross-check the config hashes against the node's loaded schema set, and
@@ -179,13 +176,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     }
   } catch (err) {
     const detail = formatDoctorError(err);
-    if (socketDataPlane && queryRoundTrip !== null) {
-      const schemaDetail = `${detail} (socket data-plane is reachable; schema route requires TCP)`;
-      print(`· node schema list unavailable over TCP (socket mode) — ${schemaDetail}`);
-      onCheck?.({ name: "node schema list unavailable over TCP", status: "info", detail: schemaDetail });
-    } else {
-      check(false, "node schema list", detail);
-    }
+    check(false, "node schema list", detail);
   }
 
   if (queryRoundTrip !== null) {
