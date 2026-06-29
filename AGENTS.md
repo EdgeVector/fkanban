@@ -1,101 +1,63 @@
-# AGENTS.md — orientation for contributors working on fkanban itself
+# AGENTS.md — developing fkanban itself
 
-This file orients a coding agent (or human) who opens this repo to **develop
-fkanban**. For *using* fkanban (install, the full command catalog, dependencies,
-MCP setup) see `README.md`. This file is the build/test/run/dogfood/PR workflow
-plus the non-obvious gotchas.
+For *using* fkanban (install, command catalog, MCP setup) see `README.md`. This
+file is the build/test/run/PR workflow plus the gotchas that bite. `CLAUDE.md`
+is a symlink to this file (shared by Claude Code, Cursor, Codex, …).
 
-`CLAUDE.md` is a symlink to this file, so Claude Code, Cursor, Codex, and any
-other AGENTS.md-aware tool all read the same orientation.
+Orientation, architecture, history, and the CLI/MCP-only form-factor decision
+(no desktop GUI — settled, don't re-raise) live in fbrain:
 
-## What this is
+```bash
+fbrain get projects-fkanban       # or: fbrain ask "<question about fkanban>"
+```
 
-fkanban is a kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db) — a thin **Bun + TypeScript**
-client of `fold_db_node` (`/api/mutation` + `/api/query`) and the
-`schema_service` (`POST /v1/schemas`). It ships as a **CLI** (`src/cli.ts`) and
-an **MCP server** (`src/mcp/`) so agents can drive the board. Modeled on
-`fbrain`. There is **no desktop GUI** — that's deliberate (decided 2026-06-15);
-the surface is CLI + MCP only.
-
-Cards live in two schemas published under the `fkanban/*` app namespace
-(`fkanban/Card`, `fkanban/Board`); they persist in folddb. Default columns:
-`backlog → todo → doing → review → done`.
-
-## Layout
-
-| Path | What |
-|---|---|
-| `src/cli.ts` | CLI entry — arg parsing + command dispatch |
-| `src/commands/` | one module per command (add, move, list, search, …) |
-| `src/mcp/main.ts` | MCP server entry (stdio) |
-| `src/mcp/server.ts` | MCP tool definitions over the same client |
-| `src/record.ts` | card/board model + dependency + soft-delete (tombstone) logic |
-| `src/client.ts` | folddb HTTP client (`/api/mutation`, `/api/query`) |
-| `src/schemas.ts` | single source of truth for the Card/Board schemas |
-| `src/config.ts` | `~/.fkanban/config.json` (override via `$FKANBAN_CONFIG`) |
-| `bin/fkanban`, `bin/fkanban-mcp` | PATH shims (`bun run src/cli.ts` / `src/mcp/main.ts`) |
-| `bin/install.sh` | `bun run install-cli` — symlinks both shims onto PATH |
-| `README.md` | full command + install reference (user-facing) |
-| `.github/workflows/ci.yml` | CI: Typecheck + Tests + `ci-required` umbrella |
+TL;DR: a kanban board that's a thin Bun + TypeScript client of `fold_db_node`
+(`/api/mutation`, `/api/query`) + `schema_service`. Ships as a CLI (`src/cli.ts`)
+and MCP server (`src/mcp/`). Cards persist in folddb under the `fkanban/*` app
+namespace (`fkanban/Card`, `fkanban/Board`). Source map: `src/commands/` (one
+module per command), `src/record.ts` (card model, deps, soft-delete),
+`src/client.ts`, `src/schemas.ts`, `src/config.ts` (`$FKANBAN_CONFIG`).
 
 ## Build / test
 
 ```bash
-bun install            # worktrees start with NO node_modules — do this first
+bun install            # worktrees start with NO node_modules — do this FIRST
 bun test               # bun's test runner over test/
-bun run typecheck      # tsc --noEmit (tsc resolves types from node_modules)
+bun run typecheck      # tsc --noEmit
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same two checks (job "Typecheck +
-Tests") plus a `ci-required` umbrella and CodeQL, in ~1 min. `bun install
---frozen-lockfile` in CI, so keep `bun.lock` in sync.
+CI runs the same two checks plus a `ci-required` umbrella and CodeQL (~1 min,
+`--frozen-lockfile` — keep `bun.lock` in sync).
 
 ## Run / dogfood
 
 ```bash
-bun run src/cli.ts <cmd>     # or the bin/fkanban shim once it's on PATH
+bun run src/cli.ts <cmd>     # or the bin/fkanban shim once on PATH
 bun run src/cli.ts doctor    # health-check config + node + schemas + round-trip
 ```
 
-The CLI is a thin client — it needs a running folddb node. Tom's primary daily
-driver runs on **:9001**. Dogfood against it by reading/writing **through the
-app** (the CLI/MCP) — **never** `kill`/`kill -9`/reset/`brew restart` it, and
-never wipe its data. For destructive or migration tests, spin up an **ephemeral
-folddb node on another port** and point `init` at it:
-
-```bash
-bun run src/cli.ts init --node-url http://127.0.0.1:9105 \
-  --schema-service-url <dev-schema-service-url>
-```
+The CLI needs a running folddb node. Tom's primary brain runs on **:9001** —
+dogfood by reading/writing **through the CLI/MCP**; NEVER `kill`/reset/`brew
+restart` it or wipe its data. For destructive/migration tests spin up an
+ephemeral node on another port and `init --node-url http://127.0.0.1:9105
+--schema-service-url <dev-url>`.
 
 ## PR workflow + gotchas
 
-- **PRs land through the merge queue.** Let the queue choose the merge strategy;
-  do not pass `--squash`, `--merge`, or `--rebase`. The working flow is:
-  ```bash
-  git push -u origin HEAD
-  gh pr create --fill --base main
-  gh pr checks <n> --watch      # block (sleeplessly) until CI is green
-  gh pr merge <n> --auto        # queue it; no strategy flag
-  ```
-- **Worktrees have no `node_modules`.** `git worktree add` doesn't copy them —
-  run `bun install` before `bun test` / `bun run typecheck` / running the CLI.
-- **`add <slug>` is create-OR-update.** It merges: unset flags keep the card's
-  existing values, so a partial `add` won't clobber other fields. But `--body`
-  **replaces** the whole body (it does not append) — dump + concatenate first if
-  you mean to add to it.
-- **Dependencies are tag-encoded.** Edges are stored as reserved `dep:<slug>`
-  entries in the card's `tags` array (no schema change) — same trick as the
-  soft-delete tombstone. A dep on a card that doesn't exist is "missing": it's
-  surfaced as a warning but does **not** block (it could never reach `done`).
-  See `depStatus` in `src/record.ts`.
-- **Soft-delete is a tombstone.** fold_db is append-only, so `rm` overwrites the
-  card with a `__fkanban_deleted__` tag and read paths filter it — records are
-  never physically removed.
-- **Schemas are published once, out of band.** Under app_identity v3.1 a schema
-  claim under `fkanban/*` must be signed by an enrolled developer's DevCert, so
-  the schemas are published to the schema_service **once** (see README →
-  "Republishing the schemas"). `init` only **loads + resolves** them — a
-  contributor does **not** republish on every change.
+- **Merge queue.** Let the queue pick the strategy — bare `gh pr merge <n>
+  --auto`, never `--squash`/`--merge`/`--rebase`. Flow: `git push -u origin
+  HEAD` → `gh pr create --fill --base main` → `gh pr checks <n> --watch` → `gh
+  pr merge <n> --auto`.
+- **Worktrees have no `node_modules`** — `bun install` before test/typecheck/run.
+- **`add <slug>` is create-OR-update** and merges (unset flags keep existing
+  values) — but `--body` **replaces** the whole body, so dump + concat to append.
+- **Dependencies are tag-encoded** as reserved `dep:<slug>` entries in `tags`
+  (no schema change). A dep on a missing card warns but doesn't block. See
+  `depStatus` in `src/record.ts`.
+- **Soft-delete is a tombstone** — fold_db is append-only, so `rm` overwrites
+  with `__fkanban_deleted__` and read paths filter it; nothing is physically removed.
+- **Schemas are published once, out of band** (app_identity v3.1: a `fkanban/*`
+  claim needs an enrolled DevCert). `init` only loads + resolves — don't
+  republish per change. See README → "Republishing the schemas".
 
-Keep PRs atomic. When in doubt about a command, the README has the full catalog.
+Keep PRs atomic. README has the full command catalog.
