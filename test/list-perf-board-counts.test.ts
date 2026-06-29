@@ -4,7 +4,8 @@
 //     `(N cards)` / `(empty)`, `--json` carries an additive `cardCount`, and a
 //     failed count scan degrades gracefully (board list still renders, no count).
 //  2. `list` text-path body-free fetch (list.ts + record.ts): the TEXT render
-//     fetches CARD_DISPLAY_FIELDS (no `body`) while `--json` keeps full bodies.
+//     fetches CARD_DISPLAY_FIELDS (no `body`) while `--json`/`--wide` keep full
+//     fields.
 //
 // No live :9001 brain — the fake node honours the HashKey point-read filter and
 // records the `fields` each query asks for, so we can assert what went over the
@@ -174,7 +175,7 @@ describe("board list — per-board live-card counts", () => {
   });
 });
 
-describe("list — text path fetches body-free fields, --json keeps bodies", () => {
+describe("list — text path fetches body-free fields, structured views keep full fields", () => {
   test("text render queries CARD_DISPLAY_FIELDS (no body)", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
@@ -200,5 +201,30 @@ describe("list — text path fetches body-free fields, --json keeps bodies", () 
     // The full-board card scan for --json fetched `body`.
     const scan = node.cardScanFields.at(-1)!;
     expect(scan).toContain("body");
+  });
+
+  test("--wide queries full fields so repo/base/pr/updated are available", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({
+          slug: "a",
+          board: "default",
+          title: "Card A",
+          repo: "EdgeVector/fkanban",
+          base: "main",
+          pr_url: "https://github.com/EdgeVector/fkanban/pull/1",
+        }),
+      ],
+    });
+    const out = await listCmd({ cfg, node, wide: true });
+    expect(out).toContain("EdgeVector/fkanban");
+    expect(out).toContain("https://github.com/EdgeVector/fkanban/pull/1");
+    const scan = node.cardScanFields.at(-1)!;
+    expect(scan).toContain("body");
+    expect(scan).toContain("repo");
+    expect(scan).toContain("base");
+    expect(scan).toContain("pr_url");
+    expect(scan).toContain("updated_at");
   });
 });

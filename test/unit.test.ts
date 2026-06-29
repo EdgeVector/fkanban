@@ -47,7 +47,7 @@ import {
   formatBoardCreate,
   formatError,
 } from "../src/format.ts";
-import { renderBoard, renderSearchResults } from "../src/board.ts";
+import { renderBoard, renderSearchResults, renderWideTable } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
 import { TOP_HELP, COMMAND_HELP, resolveHelp, suggestFlag } from "../src/cli.ts";
@@ -422,6 +422,26 @@ describe("render", () => {
     expect(out).toContain("BACKLOG  (0)");
   });
 
+  test("renderWideTable prints the structured card fields in aligned columns", () => {
+    const out = renderWideTable([
+      card({
+        slug: "ship",
+        title: "Ship it",
+        column: "doing",
+        repo: "EdgeVector/fkanban",
+        base: "main",
+        pr_url: "https://github.com/EdgeVector/fkanban/pull/123",
+        updated_at: "2026-06-29T12:34:56.000Z",
+      }),
+    ]);
+    const lines = out.split("\n");
+    expect(lines[0]).toMatch(/^COLUMN\s+SLUG\s+REPO\s+BASE\s+PR\s+UPDATED\s+TITLE$/);
+    expect(lines[1]).toContain("doing   ship  EdgeVector/fkanban");
+    expect(lines[1]).toContain("https://github.com/EdgeVector/fkanban/pull/123");
+    expect(lines[1]).toContain("2026-06-29T12:34:56.000Z");
+    expect(lines[1]).toContain("Ship it");
+  });
+
   test("limit caps a column and shows the overflow count", () => {
     const board = {
       slug: "default",
@@ -731,6 +751,12 @@ describe("per-command help", () => {
     expect(TOP_HELP).toContain("fkanban help <command>");
     expect(TOP_HELP).toContain("fkanban <command> --help");
   });
+
+  test("list help advertises the wide table view", () => {
+    expect(TOP_HELP).toContain("--wide");
+    expect(COMMAND_HELP.list!).toContain("--wide");
+    expect(COMMAND_HELP.list!).toContain("column/slug/repo/base/pr/updated/title");
+  });
 });
 
 describe("mutation result formatting (--json)", () => {
@@ -865,6 +891,9 @@ describe("listCmd --tag / --assignee filters", () => {
         tags: c.tags,
         created_at: c.created_at,
         updated_at: c.updated_at,
+        repo: c.repo,
+        base: c.base,
+        pr_url: c.pr_url,
       },
     } as unknown as QueryRow;
   }
@@ -890,8 +919,24 @@ describe("listCmd --tag / --assignee filters", () => {
   }
 
   const corpus = [
-    card({ slug: "a", column: "todo", tags: ["fkanban", "dx"], assignee: "tom" }),
-    card({ slug: "b", column: "doing", tags: ["fkanban"], assignee: "ann" }),
+    card({
+      slug: "a",
+      column: "todo",
+      tags: ["fkanban", "dx"],
+      assignee: "tom",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      pr_url: "https://github.com/EdgeVector/fkanban/pull/1",
+    }),
+    card({
+      slug: "b",
+      column: "doing",
+      tags: ["fkanban"],
+      assignee: "ann",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      pr_url: "https://github.com/EdgeVector/fkanban/pull/2",
+    }),
     card({ slug: "c", column: "todo", tags: ["infra"], assignee: "tom" }),
   ];
 
@@ -927,6 +972,28 @@ describe("listCmd --tag / --assignee filters", () => {
 
   test("--column and --tag compose (both applied)", async () => {
     expect(await slugs({ column: "todo", tag: "fkanban" })).toEqual(["a"]);
+  });
+
+  test("--wide reuses list filters and includes repo/base/pr/updated columns", async () => {
+    const out = await listCmd({
+      cfg,
+      node: populatedNode(corpus),
+      wide: true,
+      column: "doing",
+      tag: "fkanban",
+    });
+    expect(out.split("\n")[0]).toContain("COLUMN");
+    expect(out.split("\n")[0]).toContain("REPO");
+    expect(out.split("\n")[0]).toContain("BASE");
+    expect(out.split("\n")[0]).toContain("PR");
+    expect(out.split("\n")[0]).toContain("UPDATED");
+    expect(out).toContain("doing");
+    expect(out).toContain("b");
+    expect(out).toContain("EdgeVector/fkanban");
+    expect(out).toContain("https://github.com/EdgeVector/fkanban/pull/2");
+    expect(out).not.toContain(" a ");
+    expect(out).not.toContain(" c ");
+    expect(out).not.toContain("Default board");
   });
 
   test("--tag and --assignee compose (both applied)", async () => {

@@ -50,7 +50,7 @@ Commands:
   dep rm <slug> <dep>  remove a dependency edge
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
-  list                 render a board as columns of cards (--board --column --tag --assignee --json --limit N --all)
+  list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --json --limit N --all)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
@@ -213,13 +213,15 @@ Options:
   --tag <tag>           only cards carrying this tag (EXACT membership, not
                         the fuzzy text match of \`search\`)
   --assignee <name>     only cards assigned to this person (exact match)
+  --wide                fixed-width table: column/slug/repo/base/pr/updated/title
   --limit <N>           cap cards per column (applies to text AND --json)
   --all                 show every card (no per-column cap; --json default)
   --json                machine-readable output (unlimited unless --limit set)
 
 Example:
   fkanban list --board default --limit 10
-  fkanban list --tag fkanban --column doing`),
+  fkanban list --tag fkanban --column doing
+  fkanban list --wide --column doing`),
 
   rank: withFooter(`fkanban rank — reorder a column by card priority
 
@@ -531,7 +533,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
-  list: new Set(["board", "column", "tag", "assignee", "limit", "all"]),
+  list: new Set(["board", "column", "tag", "assignee", "wide", "limit", "all"]),
   rank: new Set(["board", "column"]),
   search: new Set(["board", "column", "limit", "all"]),
   // board's subcommands read title/columns/body (create) and force (rm).
@@ -604,6 +606,7 @@ async function main(argv: string[]): Promise<number> {
         columns: { type: "string" },
         position: { type: "string" },
         limit: { type: "string" },
+        wide: { type: "boolean" },
         all: { type: "boolean" },
         "node-url": { type: "string" },
         "schema-service-url": { type: "string" },
@@ -916,6 +919,7 @@ async function dispatch(
         tag: values.tag as string | undefined,
         assignee: values.assignee as string | undefined,
         json: values.json as boolean | undefined,
+        wide: values.wide as boolean | undefined,
         limit,
         all: values.all as boolean | undefined,
       });

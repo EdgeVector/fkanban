@@ -4,7 +4,7 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { blockedSlugSet, boardTerminalMap, depStatus, ensureColumn, findBoard, listBoards, listCards, listCardsForDisplay, requireBoard, sortCards, type Card, type Board } from "../record.ts";
-import { capPerColumn, renderBoard, type RenderOptions } from "../board.ts";
+import { capPerColumn, renderBoard, renderWideTable, type RenderOptions } from "../board.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 import { type CardDetail } from "./show.ts";
@@ -65,6 +65,7 @@ export type ListOptions = {
   tag?: string;
   assignee?: string;
   json?: boolean;
+  wide?: boolean;
   // Per-column cap (defaults to DEFAULT_COLUMN_LIMIT). `all` removes the cap.
   limit?: number;
   all?: boolean;
@@ -191,10 +192,19 @@ export async function listResult(
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
-  // The text path never renders card bodies, so fetch the body-free display set
-  // (unless `--json`, which serializes full bodies). `displayOnly` is a property
-  // of THIS render request, so set it here rather than burdening every caller.
-  const { text, cards, board, jsonLimit } = await listResult({ ...opts, displayOnly: !opts.json });
+  // The default text path never renders card bodies, so fetch the body-free
+  // display set there. `--json` and `--wide` both expose structured fields, so
+  // they intentionally use the full card fetch path.
+  const { text, cards, board, jsonLimit } = await listResult({ ...opts, displayOnly: !opts.json && !opts.wide });
+  if (!opts.json && opts.wide) {
+    const out = capPerColumn(
+      board,
+      cards,
+      jsonLimit > 0 ? jsonLimit : Number.MAX_SAFE_INTEGER,
+      opts.column,
+    );
+    return renderWideTable(out);
+  }
   if (!opts.json) return text;
   // Honor an explicit `--limit` on the machine-readable surface too: cap each
   // column to the same cards the text view shows. No explicit limit (jsonLimit
