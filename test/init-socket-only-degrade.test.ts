@@ -8,8 +8,8 @@
 // unreachable BUT the data-plane socket round-trips against an EXISTING config,
 // init degrades gracefully — reuses the config, re-seeds the board over the
 // socket, and reports the node UP — instead of telling the user to start a node.
-// These drive the real `runInit` and assert both the degrade and that the real
-// failure path (socket ALSO unreachable, or no prior config) still errors.
+// These drive the real `runInit` and assert both the degrade and that fresh
+// setup over a narrow-only socket gets a targeted full-surface-socket error.
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -39,7 +39,7 @@ function closedTcpUrl(): string {
 // writes like `/api/schemas/load`. `seedBoard` controls whether a `default`
 // board already exists so we can exercise both the create and the already-exists
 // legs.
-function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean } = {}) {
+function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean; provisioned?: boolean } = {}) {
   const store = new Map<string, Record<string, unknown>>();
   if (opts.seedBoard) {
     store.set(`${BOARD_HASH}::default`, { slug: "default", title: "Default board", columns: [] });
@@ -59,6 +59,9 @@ function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean } = {}) 
         return Response.json({ pairing_code: "socket-only" });
       }
       if (url.pathname === "/api/system/auto-identity") {
+        if (opts.provisioned === false) {
+          return Response.json({ error: "node_not_provisioned" }, { status: 503 });
+        }
         return Response.json({ user_hash: "stub-user" });
       }
       if (url.pathname === "/api/mutation") {
@@ -168,7 +171,7 @@ describe("runInit socket-only graceful degrade", () => {
     expect((err as FkanbanError).code).toBe("service_unreachable");
   });
 
-  test("no prior config: first-ever init on a socket-only node still errors (can't resolve schemas)", async () => {
+  test("no prior config: first-ever init on provisioned narrow socket names the missing full-surface socket", async () => {
     const socketPath = join(tmp, "first.sock");
     const { server } = makeSocketNode(socketPath);
     const tcpUrl = closedTcpUrl();
@@ -182,7 +185,34 @@ describe("runInit socket-only graceful degrade", () => {
     }
     try {
       expect(err).toBeInstanceOf(FkanbanError);
-      expect((err as FkanbanError).code).toBe("service_unreachable");
+      const fe = err as FkanbanError;
+      expect(fe.code).toBe("full_surface_socket_unavailable");
+      expect(fe.message).toContain("full-surface owner socket");
+      expect(fe.message).toContain("folddb-full.sock");
+      expect(fe.hint).toContain("narrow data/attestation socket");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("fresh unprovisioned narrow socket reports full-surface owner socket before bootstrap", async () => {
+    const socketPath = join(tmp, "unprovisioned.sock");
+    const { server } = makeSocketNode(socketPath, { provisioned: false });
+    const tcpUrl = closedTcpUrl();
+    const configPath = join(tmp, "unprovisioned-init.json");
+    let err: unknown;
+    try {
+      await runInit({ nodeUrl: tcpUrl, nodeSocketPath: socketPath, configPath, print: () => {} });
+    } catch (e) {
+      err = e;
+    }
+    try {
+      expect(err).toBeInstanceOf(FkanbanError);
+      const fe = err as FkanbanError;
+      expect(fe.code).toBe("full_surface_socket_unavailable");
+      expect(fe.message).toContain("/api/setup/bootstrap");
+      expect(fe.message).toContain("folddb-full.sock");
+      expect(fe.hint).toContain("fresh bootstrap/schema-load needs the full surface");
     } finally {
       server.stop(true);
     }

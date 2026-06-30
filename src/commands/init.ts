@@ -16,6 +16,8 @@
 // `fkanban init` just loads + resolves the already-published schemas.
 
 import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
+import { existsSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fkanbanInvocation, mcpAddCommand } from "../mcp/register.ts";
 import {
   UNIQUE_SCHEMAS,
@@ -118,7 +120,12 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`        node already provisioned (user_hash=${userHash.slice(0, 8)}…)`);
   } else {
     print(`        node not provisioned (${identity.reason}); running bootstrap`);
-    const res = await probe.bootstrap(bootstrapName);
+    let res: Awaited<ReturnType<NodeClient["bootstrap"]>>;
+    try {
+      res = await probe.bootstrap(bootstrapName);
+    } catch (err) {
+      throw freshSetupSocketError(err, socketPath, "/api/setup/bootstrap") ?? err;
+    }
     userHash = res.userHash;
     bootstrapped = true;
     print(`        bootstrap ok (user_hash=${userHash.slice(0, 8)}…)`);
@@ -149,7 +156,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       print,
     });
     if (degraded) return degraded;
-    throw err;
+    throw freshSetupSocketError(err, socketPath, "/api/schemas/load") ?? err;
   }
   if (loadResult.failed_schemas.length > 0) {
     throw new Error(`partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`);
@@ -322,6 +329,26 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   printNextSteps(print, bootstrapped || freshFkanbanConfig);
 
   return { config, bootstrapped };
+}
+
+function freshSetupSocketError(err: unknown, socketPath: string, route: string): FkanbanError | null {
+  if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") return null;
+  const fullSocketPath = basename(socketPath) === "folddb-full.sock"
+    ? socketPath
+    : join(dirname(socketPath), "folddb-full.sock");
+  if (existsSync(fullSocketPath)) return null;
+  return new FkanbanError({
+    code: "full_surface_socket_unavailable",
+    message:
+      `Cannot complete first-time fkanban setup over ${socketPath}: ${route} needs the ` +
+      `node's full-surface owner socket, but ${fullSocketPath} does not exist.`,
+    hint:
+      "This node appears to expose only the narrow data/attestation socket. Use a node build " +
+      "or startup mode that creates <data>/folddb-full.sock for setup writes, then re-run " +
+      "`fkanban init --node-socket-path <data>/folddb.sock`. Existing provisioned nodes can " +
+      "still be used over the narrow socket; fresh bootstrap/schema-load needs the full surface.",
+    cause: err,
+  });
 }
 
 // Graceful degradation for a socket-only node: the TCP control-plane is
