@@ -11,7 +11,7 @@ import { findCard } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
 import { addCmd } from "../src/commands/add.ts";
 
-type SeenRequest = { path: string; body: unknown };
+type SeenRequest = { path: string; body: unknown; headers: Headers };
 
 const seen: SeenRequest[] = [];
 
@@ -28,7 +28,7 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const body = req.method === "POST" ? await req.json() : undefined;
-    seen.push({ path: url.pathname, body });
+    seen.push({ path: url.pathname, body, headers: req.headers });
     if (url.pathname === "/slow/api/query") {
       await new Promise((r) => setTimeout(r, 5_000));
       return Response.json({ ok: true, results: [] });
@@ -152,6 +152,18 @@ describe("queryAll filter", () => {
     await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
     const last = seen.at(-1)!;
     expect("filter" in (last.body as Record<string, unknown>)).toBe(false);
+  });
+
+  test("appId sends an app capability header so schema LINK mappings apply", async () => {
+    const node = newNodeClient({ baseUrl, userHash: "test-user", appId: "fkanban" });
+    await node.queryAll({ schemaHash: "Reference", fields: ["slug"] });
+    const last = seen.at(-1)!;
+    const header = last.headers.get("x-app-capability");
+    expect(header).toBeTruthy();
+    expect(last.headers.get("x-capability-ts")).toBeTruthy();
+    const token = JSON.parse(Buffer.from(header!, "base64").toString("utf8")) as Record<string, unknown>;
+    expect(token.app_id).toBe("fkanban");
+    expect(token.scope).toEqual({ wildcard: "fkanban/*" });
   });
 });
 
