@@ -56,6 +56,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     print(`${pass ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}`);
     onCheck?.({ name: label, status: pass ? "pass" : "fail", detail });
   };
+  const info = (label: string, detail?: string) => {
+    print(`· ${label}${detail ? ` — ${detail}` : ""}`);
+    onCheck?.({ name: label, status: "info", detail });
+  };
 
   // Report the installed fkanban version up front — the one fact a bug report
   // most needs. Sourced from package.json (same as `fkanban --version`), it's a
@@ -178,8 +182,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       );
     }
   } catch (err) {
-    const detail = formatDoctorError(err);
-    check(false, "node schema list", detail);
+    if (queryRoundTrip !== null && isSocketModeSchemaListMiss(err)) {
+      info("schema list control-plane unavailable (socket mode)", socketModeSchemaListDetail(queryRoundTrip));
+    } else {
+      const detail = formatDoctorError(err);
+      check(false, "node schema list", detail);
+    }
   }
 
   if (queryRoundTrip !== null) {
@@ -210,6 +218,22 @@ function formatDoctorError(err: unknown): string {
     return detail;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+function isSocketModeSchemaListMiss(err: unknown): boolean {
+  if (!(err instanceof FkanbanError)) return false;
+  if (err.code === "service_unreachable") return true;
+  return (
+    (err.code === "node_http_404" || err.code === "node_http_405") &&
+    err.message.includes("/api/schemas")
+  );
+}
+
+function socketModeSchemaListDetail(queryRoundTrip: { cards: number; boards: number }): string {
+  return (
+    "schema list requires the retired loopback TCP control-plane; unavailable in socket mode " +
+    `(expected: node is healthy; data-plane round-tripped ${queryRoundTrip.cards} cards, ${queryRoundTrip.boards} boards)`
+  );
 }
 
 // Resolve the MCP entrypoint `claude mcp add` would target and print it plus

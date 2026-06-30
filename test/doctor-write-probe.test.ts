@@ -260,6 +260,43 @@ describe("doctor write-probe", () => {
     }
   });
 
+  test("green: socket data-plane stays authoritative when schema control-plane is unavailable", async () => {
+    const socketPath = join(tmp, "schema-miss.sock");
+    const socketSeen: string[] = [];
+    const socketNode = Bun.serve({
+      unix: socketPath,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        socketSeen.push(path);
+        if (path === "/api/system/auto-identity") return Response.json({ user_hash: "u" });
+        if (path === "/api/schemas") {
+          return Response.json({ error: "unexpected_socket_path", path }, { status: 404 });
+        }
+        if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
+        return Response.json({ error: "unexpected_socket_path", path }, { status: 500 });
+      },
+    });
+    const cfgPath = writeCfgWithNode("schema-control-plane-missing.json", FULL_CARD_HASH, closedTcpUrl(), socketPath);
+    const lines: string[] = [];
+    try {
+      const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
+      const report = lines.join("\n");
+      expect(ok).toBe(true);
+      expect(report).toContain("✓ node reachable via socket");
+      expect(report).toContain("✓ query round-trip");
+      expect(report).toContain("· schema list control-plane unavailable (socket mode)");
+      expect(report).toContain("data-plane round-tripped");
+      expect(report).not.toContain("node not reachable");
+      expect(report).not.toContain("brew services start folddb");
+      expect(report).not.toContain("Is a folddb node running?");
+      expect(socketSeen).toContain("/api/query");
+      expect(socketSeen).toContain("/api/system/auto-identity");
+      expect(socketSeen).toContain("/api/schemas");
+    } finally {
+      socketNode.stop(true);
+    }
+  });
+
   test("green: socket transport keeps TCP fallback wording for remote nodeUrl", async () => {
     const node = makeNode([{ name: FULL_CARD_HASH, fields: fieldsFor("card") }]);
     const cfgPath = writeCfgWithNode("remote-socket-fallback.json", FULL_CARD_HASH, "https://node.example", node.socketPath);
