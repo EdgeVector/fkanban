@@ -373,7 +373,12 @@ export function createFkanbanMcpServer(
         board: z.string().optional().describe("Board slug (default: `default`)."),
         column: z.string().optional().describe("Column to place the card in."),
         assignee: z.string().optional().describe("Who owns the card."),
-        tags: z.array(z.string()).optional().describe("Freeform labels."),
+        tags: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Freeform labels (replaces the existing tag list; any priority tag not re-included is dropped). For incremental edits, use `fkanban_tag_add`/`fkanban_tag_rm`.",
+          ),
         deps: z
           .array(z.string())
           .optional()

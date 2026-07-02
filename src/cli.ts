@@ -278,7 +278,7 @@ Options:
 Example:
   fkanban show ship-login`),
 
-  rm: withFooter(`fkanban rm — soft-delete a card (tombstone; recoverable)
+  rm: withFooter(`fkanban rm — soft-delete a card (tombstoned and hidden; no restore command; recovery requires hand-editing the record)
 
 Usage:
   fkanban rm <slug> [options]
