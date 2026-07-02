@@ -9,10 +9,14 @@ import {
   cardToFields,
   deriveStructuredFields,
   emptyStructuredFields,
+  applyPickupAreaDerivation,
+  findPickupAreaOverlap,
   isPickupEligible,
+  pickupAreaTagsForCard,
   normalizeBlockStatus,
   normalizeKind,
   parseBodyHeader,
+  PICKUP_AREA_BLOCK_PREFIX,
   resolvePickupRepo,
   rowToCard,
   type Card,
@@ -156,6 +160,105 @@ describe("resolvePickupRepo", () => {
   test("rejects an invalid repo after comment stripping", () => {
     const resolved = resolvePickupRepo(card({ repo: "", body: "Repo: EdgeVector/fold/extra  # bad\nBase: main" }));
     expect(resolved.ok).toBe(false);
+  });
+});
+
+describe("pickup area overlap", () => {
+  test("normalizes CLI and MCP spellings into the same area tag", () => {
+    const areas = pickupAreaTagsForCard(
+      card({
+        title: "Add list paging",
+        body: "Touches `fbrain list --offset` and the `fbrain_list` MCP tool.\nPickup Area: fbrain-list",
+      }),
+    );
+    expect(areas).toEqual(["area:fbrain-list"]);
+  });
+
+  test("holds a todo PR card that overlaps an active card in the same repo", () => {
+    const first = card({
+      slug: "fbrain-list-updated-since-offset-count",
+      title: "Add list paging",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nAdd `fbrain list --offset` and `fbrain_list` support.",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+    });
+    const second = card({
+      slug: "fbrain-tag-secondary-index",
+      title: "Add tag index",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nSpeed up tag filtering in `fbrain list --tag` and `fbrain_list`.",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+    });
+
+    applyPickupAreaDerivation(second, [first]);
+
+    expect(second.tags).toContain("area:fbrain-list");
+    expect(second.block_status).toBe("needs_human");
+    expect(second.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
+    expect(second.block_reason).toContain("fbrain-list-updated-since-offset-count");
+  });
+
+  test("does not treat the same area in a different repo as an overlap", () => {
+    const first = card({
+      slug: "fold-list",
+      title: "List fold data",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nTouch `fbrain list` docs.",
+      repo: "EdgeVector/fold",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+    });
+    const second = card({
+      slug: "fbrain-list",
+      title: "List fbrain data",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nTouch `fbrain list`.",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+    });
+
+    expect(findPickupAreaOverlap(second, [first])).toBeNull();
+  });
+
+  test("self-heals its own overlap hold but preserves unrelated human holds", () => {
+    const first = card({
+      slug: "active",
+      title: "Active",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+    });
+    const held = card({
+      slug: "held",
+      title: "Held",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      block_status: "needs_human",
+      block_reason: `${PICKUP_AREA_BLOCK_PREFIX} shares area:fbrain-list with active in doing; serialize or retag one card.`,
+    });
+    applyPickupAreaDerivation(held, [first]);
+    expect(held.block_status).toBe("needs_human");
+
+    held.body = "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain search`";
+    applyPickupAreaDerivation(held, [first]);
+    expect(held.block_status).toBe("none");
+    expect(held.block_reason).toBe("");
+
+    held.block_status = "needs_human";
+    held.block_reason = "waiting on Tom";
+    held.body = "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain list`";
+    applyPickupAreaDerivation(held, [first]);
+    expect(held.block_status).toBe("needs_human");
+    expect(held.block_reason).toBe("waiting on Tom");
   });
 });
 

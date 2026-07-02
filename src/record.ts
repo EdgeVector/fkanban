@@ -351,6 +351,113 @@ export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): 
   return card;
 }
 
+// ── Pickup-area overlap hints ───────────────────────────────────────────────
+// File-overlap alone misses work that touches the same product/source region
+// after an agent expands scope. Keep a schema-free coordination hint in tags:
+// `area:<tool>-<command>` (for example `area:fbrain-list`) is derived from
+// explicit Area:/Pickup Area: body lines and from common CLI/MCP command names
+// in card specs (`fbrain list`, `fbrain_list`). When a ready todo card shares a
+// pickup area with another unblocked active card in the same repo, put the new
+// card on a reversible needs_human hold so pickup serializes or re-grooms it.
+export const PICKUP_AREA_TAG_PREFIX = "area:";
+export const PICKUP_AREA_BLOCK_PREFIX = "Pickup area overlap:";
+const PICKUP_AREA_ACTIVE_COLUMNS = new Set(["todo", "doing", "review"]);
+
+function normalizePickupArea(value: string): string | null {
+  const raw = value
+    .trim()
+    .replace(/^#/, "")
+    .replace(new RegExp(`^${PICKUP_AREA_TAG_PREFIX}`, "i"), "")
+    .replace(/_/g, "-")
+    .toLowerCase();
+  const slug = raw.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug.length > 0 ? `${PICKUP_AREA_TAG_PREFIX}${slug}` : null;
+}
+
+export function isPickupAreaTag(tag: string): boolean {
+  return tag.trim().replace(/^#/, "").toLowerCase().startsWith(PICKUP_AREA_TAG_PREFIX);
+}
+
+export function pickupAreaTagsForCard(card: Pick<Card, "title" | "body" | "tags">): string[] {
+  const areas = new Set<string>();
+  const add = (value: string) => {
+    const normalized = normalizePickupArea(value);
+    if (normalized) areas.add(normalized);
+  };
+
+  for (const tag of card.tags) {
+    if (isPickupAreaTag(tag)) add(tag);
+  }
+
+  const text = `${card.title}\n${card.body}`;
+  const explicitAreaRe = /^[ \t]*(?:Feature[ \t]+Area|Pickup[ \t]+Area|Area):[ \t]*(.+)$/gim;
+  for (const m of text.matchAll(explicitAreaRe)) {
+    for (const part of (m[1] ?? "").split(/[,\s]+/)) add(part);
+  }
+
+  const commandRe = /\b(fbrain|fkanban)(?:[ \t]+|[_-]+)([a-z][a-z0-9-]*)\b/gi;
+  for (const m of text.matchAll(commandRe)) {
+    add(`${m[1]}-${m[2]}`);
+  }
+
+  return [...areas].sort();
+}
+
+export function withPickupAreaTags(tags: string[], card: Pick<Card, "title" | "body" | "tags">): string[] {
+  const visibleTags = tags.filter((t) => !isPickupAreaTag(t));
+  return normalizeTags([...visibleTags, ...pickupAreaTagsForCard({ ...card, tags: [] })]);
+}
+
+export type PickupAreaOverlap = {
+  other: Card;
+  areas: string[];
+};
+
+function pickupRepo(card: Pick<Card, "repo" | "body">): string {
+  const resolved = resolvePickupRepo(card);
+  return resolved.ok ? resolved.repo : "";
+}
+
+export function findPickupAreaOverlap(card: Card, allCards: Card[]): PickupAreaOverlap | null {
+  if (card.column !== "todo") return null;
+  if (normalizeKind(card.kind) !== "pr" || isRegistryCard(card.body, card.title)) return null;
+
+  const repo = pickupRepo(card);
+  if (!repo) return null;
+  const areas = new Set(pickupAreaTagsForCard(card));
+  if (areas.size === 0) return null;
+
+  for (const other of sortCards(allCards)) {
+    if (other.slug === card.slug) continue;
+    if (!PICKUP_AREA_ACTIVE_COLUMNS.has(other.column)) continue;
+    if (normalizeKind(other.kind) !== "pr" || normalizeBlockStatus(other.block_status) !== "none") continue;
+    if (pickupRepo(other) !== repo) continue;
+    const overlap = pickupAreaTagsForCard(other).filter((area) => areas.has(area));
+    if (overlap.length > 0) return { other, areas: overlap };
+  }
+  return null;
+}
+
+export function applyPickupAreaDerivation(card: Card, allCards: Card[]): Card {
+  card.tags = withPickupAreaTags(card.tags, card);
+  const current = normalizeBlockStatus(card.block_status);
+  const overlap = findPickupAreaOverlap(card, allCards);
+
+  if (overlap) {
+    const reason =
+      `${PICKUP_AREA_BLOCK_PREFIX} shares ${overlap.areas.join(", ")} with ` +
+      `${overlap.other.slug} in ${overlap.other.column}; serialize or retag one card.`;
+    if (current === "none" || (current === "needs_human" && card.block_reason.startsWith(PICKUP_AREA_BLOCK_PREFIX))) {
+      card.block_status = "needs_human";
+      card.block_reason = reason;
+    }
+  } else if (current === "needs_human" && card.block_reason.startsWith(PICKUP_AREA_BLOCK_PREFIX)) {
+    card.block_status = "none";
+    card.block_reason = "";
+  }
+  return card;
+}
+
 // ── Structured card fields: enums, normalizers, eligibility, backfill ───────
 // (fbrain design `fkanban-card-structured-fields`.) These promote the signals a
 // fresh agent needs to decide "what do I pick up?" out of body prose into real
