@@ -50,9 +50,9 @@ Commands:
   dep rm <slug> <dep>  remove a dependency edge
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
-  list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --json --limit N --all)
+  list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --limit N --all)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
-  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --limit --all --json)
+  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
@@ -214,6 +214,8 @@ Options:
                         the fuzzy text match of \`search\`)
   --assignee <name>     only cards assigned to this person (exact match)
   --wide                fixed-width table: column/slug/repo/base/pr/updated/title
+  --field <name>        project one field as TSV; repeat for multiple fields
+                        (e.g. --field slug --field pr)
   --limit <N>           cap cards per column (applies to text AND --json)
   --all                 show every card (no per-column cap; --json default)
   --json                machine-readable output (unlimited unless --limit set)
@@ -221,6 +223,7 @@ Options:
 Example:
   fkanban list --board default --limit 10
   fkanban list --tag fkanban --column doing
+  fkanban list --column todo --field slug
   fkanban list --wide --column doing`),
 
   rank: withFooter(`fkanban rank — reorder a column by card priority
@@ -253,6 +256,8 @@ Usage:
 Options:
   --board <slug>        restrict to one board
   --column <col>        restrict to one column
+  --field <name>        project one field as TSV; repeat for multiple fields
+                        (e.g. --field slug --field pr)
   --limit <N>           cap rendered matches (applies to text AND --json)
   --all                 show every match (no cap; --json default)
   --json                machine-readable output (complete unless --limit set)
@@ -427,6 +432,14 @@ function parseTags(raw: string | undefined): string[] | undefined {
   return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
+function parseFields(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  return (Array.isArray(raw) ? raw : [raw])
+    .filter((v): v is string => typeof v === "string")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 // Thrown when a numeric flag (`--limit`, `--position`) is given a value that
 // isn't a clean integer at or above its minimum. The message is already
 // printed to stderr by parseIntFlag; the dispatch catches this to return the
@@ -533,9 +546,9 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
-  list: new Set(["board", "column", "tag", "assignee", "wide", "limit", "all"]),
+  list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all"]),
   rank: new Set(["board", "column"]),
-  search: new Set(["board", "column", "limit", "all"]),
+  search: new Set(["board", "column", "field", "limit", "all"]),
   // board's subcommands read title/columns/body (create) and force (rm).
   board: new Set(["title", "columns", "body", "force"]),
 };
@@ -606,6 +619,7 @@ async function main(argv: string[]): Promise<number> {
         columns: { type: "string" },
         position: { type: "string" },
         limit: { type: "string" },
+        field: { type: "string", multiple: true },
         wide: { type: "boolean" },
         all: { type: "boolean" },
         "node-url": { type: "string" },
@@ -920,6 +934,7 @@ async function dispatch(
         assignee: values.assignee as string | undefined,
         json: values.json as boolean | undefined,
         wide: values.wide as boolean | undefined,
+        fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
       });
@@ -956,6 +971,7 @@ async function dispatch(
         board: values.board as string | undefined,
         column: values.column as string | undefined,
         json: values.json as boolean | undefined,
+        fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
       });
