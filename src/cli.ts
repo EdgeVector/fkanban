@@ -134,7 +134,7 @@ Options:
 
 Structured fields (auto-derived from the body/tags when omitted):
   --repo <owner/name>   repo a build agent clones (else: inferred from a subsystem
-                        tag, else defaulted to EdgeVector/fold; >1-repo tags hold needs_human)
+                        tag; >1-repo tags hold needs_human, no-signal cards stay headerless)
   --base <branch>       base branch a PR targets (default: main)
   --kind <k>            pr|registry|tracker (registry cards are never picked up)
   --block-status <s>    none|needs_human|design_first|deferred (intentional holds)

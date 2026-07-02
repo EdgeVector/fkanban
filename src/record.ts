@@ -150,15 +150,15 @@ export function isWorkingColumn(column: string): boolean {
 // done UNAMBIGUOUSLY. Every filer — CLI, MCP, scheduled routine, or human — goes
 // through those two code paths, so this is the one durable chokepoint; the prose
 // in the groom/program-driver routines is a backstop, not the guarantee.
-// A card with NO subsystem signal at all (zero tags map to a repo) is stamped
-// with DEFAULT_REPO so it stays pickup-eligible instead of stranding. A card
-// whose tags map to TWO+ DIFFERENT repos is a real conflict we refuse to guess —
-// it is surfaced LOUDLY (block_status=needs_human) so morning-sync/program-rollup
-// see it, rather than disappearing silently.
+// A card whose tags map to TWO+ DIFFERENT repos is a real conflict we refuse to
+// guess — it is surfaced LOUDLY (block_status=needs_human) so
+// morning-sync/program-rollup see it, rather than disappearing silently. A card
+// with NO subsystem signal at all is left headerless unless the caller supplies
+// an explicit defaultRepo override.
 
 // Single source of truth: subsystem tag → repo. A tag set that resolves to
 // exactly one repo is stamped; >1 distinct repos is a "conflict"; zero matches
-// falls back to DEFAULT_REPO.
+// is left ambiguous unless a caller explicitly supplies a default repo.
 export const TAG_TO_REPO: Readonly<Record<string, string>> = {
   fold: "EdgeVector/fold",
   fold_db: "EdgeVector/fold",
@@ -179,11 +179,8 @@ export const TAG_TO_REPO: Readonly<Record<string, string>> = {
 
 export const DEFAULT_BASE = "main";
 
-// Catch-all repo for a card carrying NO subsystem signal (zero tags map to a
-// repo). The overwhelming majority of work lands in the monorepo, so a no-signal
-// card is far more useful stamped-and-pickup-eligible (the build agent kicks it
-// back to `review` if it's genuinely the wrong repo) than silently stranded in
-// `todo` forever. Single source of truth, mirroring the hardcoded TAG_TO_REPO.
+// Catch-all repo kept for callers that explicitly opt into defaulting. Ordinary
+// grooming leaves no-signal cards headerless instead of guessing.
 export const DEFAULT_REPO = "EdgeVector/fold";
 
 // True iff the body already carries both pickup headers (line-anchored so a
@@ -223,23 +220,20 @@ export type HeaderDerivation =
   | { kind: "present" } // already had Repo:/Base:
   | { kind: "skip-registry" } // recipe/registry card — never stamp
   | { kind: "conflict"; repos: string[] } // tags map to >1 repo — surface, don't guess
-  | { kind: "ambiguous" } // no signal AND defaulting disabled — surface, don't guess
-  | { kind: "defaulted"; repo: string; base: string; body: string } // no signal → DEFAULT_REPO
+  | { kind: "ambiguous" } // no signal — surface, don't guess
+  | { kind: "defaulted"; repo: string; base: string; body: string } // caller-supplied no-signal default
   | { kind: "stamped"; repo: string; base: string; body: string }; // unambiguous tag inference
 
 function stampHeader(repo: string, base: string, body: string, comment?: string): string {
-  // `parseBodyHeader` captures the first \S+ after the colon, so a trailing
-  // "  # comment" annotates the line without polluting the structured repo field.
-  const repoLine = comment ? `Repo: ${repo}  # ${comment}` : `Repo: ${repo}`;
-  return `${repoLine}\nBase: ${base}\n\n${body}`;
+  const note = comment ? `\n# ${comment}` : "";
+  return `Repo: ${repo}\nBase: ${base}${note}\n\n${body}`;
 }
 
 // Pure decision + transform. Callers stamp the returned `body` for "stamped" /
 // "defaulted"; surface "conflict" loudly (needs_human) and "ambiguous" as a
-// warning. `defaultRepo` is the no-signal fallback (DEFAULT_REPO; pass "" to
-// disable defaulting and get "ambiguous" instead). `forcedRepo` is an explicit
-// caller-supplied repo (the `--repo` flag) that OVERRIDES tag inference — it
-// stamps that repo's header even when the tags conflict, so resolving a
+// warning. `defaultRepo` is an opt-in no-signal fallback. `forcedRepo` is an
+// explicit caller-supplied repo (the `--repo` flag) that OVERRIDES tag inference
+// — it stamps that repo's header even when the tags conflict, so resolving a
 // conflict is a one-liner (`add <slug> --repo <owner/name>`).
 export function deriveRepoHeaders(
   body: string,
@@ -261,9 +255,9 @@ export function deriveRepoHeaders(
     return { kind: "stamped", repo, base: DEFAULT_BASE, body: stampHeader(repo, DEFAULT_BASE, body) };
   }
   if (repos.size > 1) return { kind: "conflict", repos: [...repos].sort() };
-  // size === 0: no subsystem signal at all. Fall back to the default repo unless
-  // defaulting was explicitly disabled.
-  const defaultRepo = (opts.defaultRepo ?? DEFAULT_REPO).trim();
+  // size === 0: no subsystem signal at all. Leave the card headerless unless a
+  // caller explicitly opts into a default repo.
+  const defaultRepo = (opts.defaultRepo ?? "").trim();
   if (defaultRepo) {
     const comment = "defaulted — no subsystem tag mapped; correct the Repo: line if wrong";
     return { kind: "defaulted", repo: defaultRepo, base: DEFAULT_BASE, body: stampHeader(defaultRepo, DEFAULT_BASE, body, comment) };
@@ -307,8 +301,8 @@ export type HeaderDerivationResult = {
 };
 
 // Orchestration shared by `add` and `move`: in a pre-execution column
-// (backlog/todo) auto-stamp the header when derivable (or default it when there's
-// no signal), and — only in `todo`, where it blocks pickup — surface a real
+// (backlog/todo) auto-stamp the header when derivable, leave no-signal cards
+// headerless, and — only in `todo`, where it blocks pickup — surface a real
 // cross-repo conflict as a needs_human hold (so it's loud, not silently skipped).
 // Working columns (doing/review/done) are left untouched. `warn` is injected so
 // it's testable / silenceable.
@@ -389,6 +383,12 @@ export function normalizeBlockStatus(s: string): BlockStatus {
   return isBlockStatus(s) ? s : "none";
 }
 
+export const OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+export function stripTrailingInlineComment(value: string): string {
+  return value.replace(/[ \t]+#.*$/, "").trim();
+}
+
 // Read a `Name: value` header from a card body, used to backfill the structured
 // fields from the legacy body-header convention. All callers (repo/base/
 // north_star) carry SINGLE-TOKEN values (an owner/name, a branch, a slug), so
@@ -396,13 +396,36 @@ export function normalizeBlockStatus(s: string): BlockStatus {
 // line. This is deliberately strict: some card bodies run the headers together
 // on one physical line ("Repo: o/n   Base: main   Branch: x") or store them with
 // escaped newlines, and a greedy `(.+)$` capture swallowed the following headers
-// into the value (observed corrupting a backfill of existing cards).
+// into the value (observed corrupting a backfill of existing cards). A trailing
+// inline `# ...` comment is stripped before the token is read.
 export function parseBodyHeader(body: string, name: string): string {
-  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(\\S+)`, "im");
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
   const m = body.match(re);
-  // `\S+` stops the value at the next whitespace (the space-joined case). Also
-  // cut at a literal escaped newline ("o/n\nBase:") for bodies stored that way.
-  return m ? m[1]!.split("\\n")[0]!.trim() : "";
+  if (!m) return "";
+  // Cut at a literal escaped newline ("o/n\nBase:") for bodies stored that way,
+  // remove an inline comment, then take the first token so space-joined headers
+  // still don't bleed into one another.
+  const line = stripTrailingInlineComment(m[1]!.split("\\n")[0]!);
+  return line.match(/^(\S+)/)?.[1]?.trim() ?? "";
+}
+
+export type PickupRepoResolution =
+  | { ok: true; repo: string; source: "structured" | "body" }
+  | { ok: false; reason: string };
+
+export function resolvePickupRepo(card: Pick<Card, "repo" | "body">): PickupRepoResolution {
+  const structured = stripTrailingInlineComment(card.repo);
+  if (structured) {
+    return OWNER_REPO_RE.test(structured)
+      ? { ok: true, repo: structured, source: "structured" }
+      : { ok: false, reason: `invalid structured repo: ${structured}` };
+  }
+
+  const fromBody = parseBodyHeader(card.body, "Repo");
+  if (!fromBody) return { ok: false, reason: "missing Repo header" };
+  return OWNER_REPO_RE.test(fromBody)
+    ? { ok: true, repo: fromBody, source: "body" }
+    : { ok: false, reason: `invalid Repo header: ${fromBody}` };
 }
 
 // The card-LOCAL half of "can a build agent pick this up?". Dependency
@@ -413,7 +436,7 @@ export function isPickupEligible(card: Card): boolean {
   return (
     normalizeKind(card.kind) === "pr" &&
     !isRegistryCard(card.body, card.title) && // fallback for un-backfilled cards
-    card.repo.trim().length > 0 &&
+    resolvePickupRepo(card).ok &&
     card.base.trim().length > 0 &&
     normalizeBlockStatus(card.block_status) === "none"
   );

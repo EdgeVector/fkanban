@@ -392,7 +392,7 @@ export function createFkanbanMcpServer(
             "Card priority (P0 = most urgent … P3 = least). Stored as a p0–p3 tag; `fkanban_rank` orders a column by it so fkanban-pickup works urgent cards first.",
           ),
         force: z.boolean().optional().describe("Place the card even if it is blocked by an unfinished dependency."),
-        repo: z.string().optional().describe("Repo a build agent clones (owner/name). When omitted: auto-derived from a subsystem tag, else defaulted to EdgeVector/fold; a card whose tags map to >1 repo is held needs_human instead of guessed."),
+        repo: z.string().optional().describe("Repo a build agent clones (owner/name). When omitted: auto-derived from a subsystem tag; a card whose tags map to >1 repo is held needs_human instead of guessed, and no-signal cards stay headerless."),
         base: z.string().optional().describe("Base branch a PR targets (default: main)."),
         kind: z.enum(["pr", "registry", "tracker"]).optional().describe("pr drives to a merged PR; registry edits an fbrain record (never picked up); tracker is informational."),
         block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional().describe("Intentional hold (NOT dependency-blocked, which is derived from deps)."),
