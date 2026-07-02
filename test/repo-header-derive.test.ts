@@ -2,9 +2,9 @@
 // a `Repo:` and a `Base:` header, and the fkanban-agent skill is told never to
 // guess the repo — so a card filed without them silently strands in `todo`.
 // `add`/`move` close that hole deterministically via `applyHeaderDerivation`:
-// auto-stamp the header when tags map to exactly one repo; DEFAULT it when a card
-// carries no subsystem signal at all; flag a real cross-repo CONFLICT loudly
-// (needs_human) instead of guessing; and never stamp a recipe/registry card.
+// auto-stamp the header when tags map to exactly one repo; leave no-signal cards
+// headerless; flag a real cross-repo CONFLICT loudly (needs_human) instead of
+// guessing; and never stamp a recipe/registry card.
 // These unit-test the pure decision core — the one durable chokepoint every filer
 // (CLI, MCP, routine, human) passes through.
 
@@ -119,22 +119,25 @@ describe("deriveRepoHeaders", () => {
     expect(deriveRepoHeaders("b", ["fold", "exemem"], "t", { forcedRepo: "   " }).kind).toBe("conflict");
   });
 
-  test("no subsystem signal → defaulted to DEFAULT_REPO with a visible marker", () => {
+  test("no subsystem signal → ambiguous by default, not guessed", () => {
     const r = deriveRepoHeaders("## GOAL\nfix it", ["bug"], "t");
-    expect(r.kind).toBe("defaulted");
+    expect(r.kind).toBe("ambiguous");
+  });
+
+  test("an explicit defaultRepo opt-in stamps without an inline Repo comment", () => {
+    const r = deriveRepoHeaders("## GOAL\nfix it", ["bug"], "t", { defaultRepo: DEFAULT_REPO });
     if (r.kind !== "defaulted") throw new Error("unreachable");
     expect(r.repo).toBe(DEFAULT_REPO);
     expect(r.base).toBe("main");
-    expect(r.body.startsWith(`Repo: ${DEFAULT_REPO}  # defaulted`)).toBe(true);
-    // The "# defaulted" annotation must not pollute the parsed repo value.
+    expect(r.body).toBe(`Repo: ${DEFAULT_REPO}\nBase: main\n# defaulted — no subsystem tag mapped; correct the Repo: line if wrong\n\n## GOAL\nfix it`);
     expect(hasRepoHeaders(r.body)).toBe(true);
   });
 
-  test("empty tag set also defaults", () => {
-    expect(deriveRepoHeaders("body", [], "t").kind).toBe("defaulted");
+  test("empty tag set is also ambiguous by default", () => {
+    expect(deriveRepoHeaders("body", [], "t").kind).toBe("ambiguous");
   });
 
-  test("defaulting can be disabled (defaultRepo: '') → ambiguous", () => {
+  test("defaultRepo: '' keeps the no-signal result ambiguous", () => {
     expect(deriveRepoHeaders("body", ["bug"], "t", { defaultRepo: "" }).kind).toBe("ambiguous");
     // A conflict stays a conflict even with defaulting off — never guessed.
     expect(deriveRepoHeaders("body", ["fold", "exemem"], "t", { defaultRepo: "" }).kind).toBe("conflict");
@@ -158,16 +161,16 @@ describe("applyHeaderDerivation", () => {
     expect(warnings).toHaveLength(0);
   });
 
-  test("defaults a no-signal todo card (with a note, no block)", () => {
+  test("leaves a no-signal todo card headerless and warns", () => {
     const { warn, warnings } = collectWarn();
     const r = applyHeaderDerivation(
       { slug: "c", body: "do it", tags: ["bug"], title: "t", column: "todo" },
       warn,
     );
-    expect(r.body.startsWith(`Repo: ${DEFAULT_REPO}  # defaulted`)).toBe(true);
+    expect(r.body).toBe("do it");
     expect(r.blockStatus).toBeUndefined();
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("defaulted Repo:");
+    expect(warnings[0]).toContain("fkanban-pickup will skip it");
   });
 
   test("flags a cross-repo conflict in todo as needs_human (loud, not skipped)", () => {

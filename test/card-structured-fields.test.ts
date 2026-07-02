@@ -13,6 +13,7 @@ import {
   normalizeBlockStatus,
   normalizeKind,
   parseBodyHeader,
+  resolvePickupRepo,
   rowToCard,
   type Card,
 } from "../src/record.ts";
@@ -125,6 +126,37 @@ describe("parseBodyHeader", () => {
     // A line-anchored Base: on its own line still parses normally.
     expect(parseBodyHeader("Repo: EdgeVector/fold\nBase: dev", "Base")).toBe("dev");
   });
+
+  test("strips a trailing inline comment before returning the value", () => {
+    expect(parseBodyHeader("Repo: EdgeVector/fold  # defaulted — fix if wrong\nBase: main", "Repo")).toBe("EdgeVector/fold");
+  });
+});
+
+describe("resolvePickupRepo", () => {
+  test("prefers structured repo over an inline-commented body Repo header", () => {
+    const resolved = resolvePickupRepo(
+      card({
+        repo: "EdgeVector/fold",
+        body: "Repo: EdgeVector/fold  # defaulted — no subsystem tag mapped; correct the Repo: line if wrong\nBase: main\n\nx",
+      }),
+    );
+    expect(resolved).toEqual({ ok: true, repo: "EdgeVector/fold", source: "structured" });
+  });
+
+  test("falls back to an inline-commented body Repo header when structured repo is empty", () => {
+    const resolved = resolvePickupRepo(
+      card({
+        repo: "",
+        body: "Repo: EdgeVector/fkanban  # stale note\nBase: main\n\nx",
+      }),
+    );
+    expect(resolved).toEqual({ ok: true, repo: "EdgeVector/fkanban", source: "body" });
+  });
+
+  test("rejects an invalid repo after comment stripping", () => {
+    const resolved = resolvePickupRepo(card({ repo: "", body: "Repo: EdgeVector/fold/extra  # bad\nBase: main" }));
+    expect(resolved.ok).toBe(false);
+  });
 });
 
 // fkanban #94: the new structured fields must round-trip through a real
@@ -195,7 +227,7 @@ describe("structured fields write+read-back against a node (real wire path)", ()
 
 describe("deriveStructuredFields (backfill)", () => {
   test("fills repo/base from body headers and kind=pr", () => {
-    const c = card({ kind: "", repo: "", base: "", body: "Repo: EdgeVector/fold\nBase: dev\n\nx" });
+    const c = card({ kind: "", repo: "", base: "", body: "Repo: EdgeVector/fold  # defaulted\nBase: dev\n\nx" });
     const d = deriveStructuredFields(c);
     expect(d.repo).toBe("EdgeVector/fold");
     expect(d.base).toBe("dev");
