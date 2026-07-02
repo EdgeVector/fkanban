@@ -7,15 +7,18 @@ import {
   appendPosition,
   applyDerivedHeader,
   applyHeaderDerivation,
+  applyPickupAreaDerivation,
   blockedByHint,
   blockedByMessage,
   boardTerminalMap,
   cardToFields,
   depStatus,
+  deriveStructuredFields,
   ensureColumn,
   findBoard,
   isDepEnforcedColumn,
   listBoards,
+  listCards,
   listCardStatuses,
   nowIso,
   requireCard,
@@ -81,6 +84,8 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
       console.error,
     ),
   );
+  Object.assign(updated, deriveStructuredFields(updated));
+  applyPickupAreaDerivation(updated, await listCards(opts.node, opts.cfg));
   const hash = schemaHashFor("card", opts.cfg);
   await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
   return { slug: card.slug, from, to: opts.column };
