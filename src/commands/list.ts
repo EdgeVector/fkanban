@@ -5,6 +5,7 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { blockedSlugSet, boardTerminalMap, depStatus, ensureColumn, findBoard, listBoards, listCards, listCardsForDisplay, requireBoard, sortCards, type Card, type Board } from "../record.ts";
 import { capPerColumn, renderBoard, renderWideTable, type RenderOptions } from "../board.ts";
+import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 import { type CardDetail } from "./show.ts";
@@ -66,6 +67,7 @@ export type ListOptions = {
   assignee?: string;
   json?: boolean;
   wide?: boolean;
+  fields?: string[];
   // Per-column cap (defaults to DEFAULT_COLUMN_LIMIT). `all` removes the cap.
   limit?: number;
   all?: boolean;
@@ -192,10 +194,19 @@ export async function listResult(
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
+  const projectionFields = opts.fields ?? [];
   // The default text path never renders card bodies, so fetch the body-free
-  // display set there. `--json` and `--wide` both expose structured fields, so
-  // they intentionally use the full card fetch path.
-  const { text, cards, board, jsonLimit } = await listResult({ ...opts, displayOnly: !opts.json && !opts.wide });
+  // display set there. `--json`, `--wide`, and full-field projections expose
+  // structured fields, so they intentionally use the full card fetch path.
+  const displayOnly =
+    !opts.json &&
+    !opts.wide &&
+    (projectionFields.length === 0 || !fieldProjectionNeedsFullCards(projectionFields));
+  const { text, cards, board, jsonLimit } = await listResult({ ...opts, displayOnly });
+  if (projectionFields.length > 0) {
+    const out = jsonLimit > 0 ? capPerColumn(board, cards, jsonLimit, opts.column) : cards;
+    return renderFieldProjection(out, projectionFields);
+  }
   if (!opts.json && opts.wide) {
     const out = capPerColumn(
       board,

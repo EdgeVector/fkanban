@@ -17,6 +17,7 @@ import {
   type Card,
 } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT, renderSearchResults } from "../board.ts";
+import { renderFieldProjection } from "../field_projection.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
 export type SearchOptions = {
@@ -26,6 +27,7 @@ export type SearchOptions = {
   board?: string;
   column?: string;
   json?: boolean;
+  fields?: string[];
   // Flat cap on rendered matches (defaults to DEFAULT_SEARCH_LIMIT for text).
   // `all` removes the cap. Mirrors `list`'s `--limit`/`--all` contract.
   limit?: number;
@@ -111,11 +113,13 @@ export async function searchResult(
 }
 
 export async function searchCmd(opts: SearchOptions): Promise<string> {
+  const projectionFields = opts.fields ?? [];
   const { text, cards, jsonLimit } = await searchResult(opts);
+  const out = jsonLimit > 0 ? capFlat(cards, jsonLimit) : cards;
+  if (projectionFields.length > 0) return renderFieldProjection(out, projectionFields);
   if (!opts.json) return text;
   // Honor an explicit `--limit` on the machine-readable surface too: cap to the
   // same matches the text view shows. No explicit limit (jsonLimit 0) → the
   // full match array, unchanged.
-  const out = jsonLimit > 0 ? capFlat(cards, jsonLimit) : cards;
   return JSON.stringify(out, null, 2);
 }

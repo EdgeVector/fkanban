@@ -203,6 +203,14 @@ text view shows. `--wide` prints one fixed-width row per card with
 listing (contrast the fuzzy substring `search` below), e.g.
 `fkanban list --tag fkanban --column doing`.
 
+For hook-safe scripting, `list` and `search` also accept repeatable
+`--field <name>` projection. It prints TSV with no header and no JSON:
+`fkanban list --column todo --field slug` prints one slug per line, while
+`fkanban list --field slug --field pr` prints `slug<TAB>pr` per card. `pr` is
+the shorthand for the stored `pr_url` field. Existing filters such as
+`--board`, `--column`, `--tag`, `--assignee`, `--limit`, and `--all` still
+apply before projection.
+
 `search <query>` finds cards by a case-insensitive substring across slug,
 title, body, assignee, and tags — handy once a board has more cards than fit on
 screen. Space-separated terms are AND-matched (`fkanban search auth p1` needs
