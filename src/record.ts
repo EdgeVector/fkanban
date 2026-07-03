@@ -418,6 +418,37 @@ function pickupRepo(card: Pick<Card, "repo" | "body">): string {
   return resolved.ok ? resolved.repo : "";
 }
 
+// Does `fromSlug` reach `toSlug` by following `deps` edges? (directed). A
+// dangling dep (no live card) simply has no outgoing edges; `visited` guards
+// against pre-existing cycles in the data.
+function depsReaches(depsBySlug: Map<string, string[]>, fromSlug: string, toSlug: string): boolean {
+  const visited = new Set<string>();
+  const walk = (node: string): boolean => {
+    if (node === toSlug) return true;
+    if (visited.has(node)) return false;
+    visited.add(node);
+    for (const next of depsBySlug.get(node) ?? []) {
+      if (walk(next)) return true;
+    }
+    return false;
+  };
+  for (const next of depsBySlug.get(fromSlug) ?? []) {
+    if (walk(next)) return true;
+  }
+  return false;
+}
+
+// Are two cards connected by a dependency path in EITHER direction (a→…→b or
+// b→…→a)? A dep edge already serializes pickup — the two cards can never be
+// worked concurrently — which is the exact thing the pickup-area overlap block
+// exists to force. So an area overlap between dep-connected cards is a false
+// positive, and the block must be skipped.
+export function depsPathConnects(allCards: Card[], slugA: string, slugB: string): boolean {
+  if (slugA === slugB) return false;
+  const depsBySlug = new Map(allCards.map((c) => [c.slug, c.deps]));
+  return depsReaches(depsBySlug, slugA, slugB) || depsReaches(depsBySlug, slugB, slugA);
+}
+
 export function findPickupAreaOverlap(card: Card, allCards: Card[]): PickupAreaOverlap | null {
   if (card.column !== "todo") return null;
   if (normalizeKind(card.kind) !== "pr" || isRegistryCard(card.body, card.title)) return null;
@@ -427,19 +458,46 @@ export function findPickupAreaOverlap(card: Card, allCards: Card[]): PickupAreaO
   const areas = new Set(pickupAreaTagsForCard(card));
   if (areas.size === 0) return null;
 
+  // The board list passed in may predate this card's write (create/update derive
+  // BEFORE persisting), so its deps aren't in `allCards` yet — splice the live
+  // card in so dep-path connectivity sees the edges it carries on THIS write.
+  const cardsWithSelf = allCards.some((c) => c.slug === card.slug)
+    ? allCards.map((c) => (c.slug === card.slug ? card : c))
+    : [...allCards, card];
+
   for (const other of sortCards(allCards)) {
     if (other.slug === card.slug) continue;
     if (!PICKUP_AREA_ACTIVE_COLUMNS.has(other.column)) continue;
     if (normalizeKind(other.kind) !== "pr" || normalizeBlockStatus(other.block_status) !== "none") continue;
     if (pickupRepo(other) !== repo) continue;
+    // A dep path (either direction) already serializes the two cards, so an area
+    // overlap between them is a false positive — the dep edge provides exactly
+    // the serialization this block would otherwise force. Check connectivity over
+    // a graph that includes THIS card's own (possibly not-yet-persisted) deps:
+    // on a create/update, `card` carries edges `allCards` doesn't have yet.
+    if (depsPathConnects(cardsWithSelf, card.slug, other.slug)) continue;
     const overlap = pickupAreaTagsForCard(other).filter((area) => areas.has(area));
     if (overlap.length > 0) return { other, areas: overlap };
   }
   return null;
 }
 
-export function applyPickupAreaDerivation(card: Card, allCards: Card[]): Card {
+// Apply pickup-area tag derivation, then set/clear the overlap soft-block.
+// `explicitBlockStatus` is true when the caller passed `--block-status` on THIS
+// write: an explicit set/clear is authoritative and must NOT be re-derived over
+// on the same write. The hook may still re-evaluate on a FUTURE write — this
+// only makes the human's explicit intent stick for the write that carried it,
+// which is the sole escape hatch for a false-positive overlap block whose card
+// body still cites the shared fbrain slug.
+export function applyPickupAreaDerivation(
+  card: Card,
+  allCards: Card[],
+  explicitBlockStatus = false,
+): Card {
   card.tags = withPickupAreaTags(card.tags, card);
+  // Honor an explicit --block-status on this write: derive tags but leave the
+  // caller-set block untouched (don't re-block, don't self-heal-clear).
+  if (explicitBlockStatus) return card;
   const current = normalizeBlockStatus(card.block_status);
   const overlap = findPickupAreaOverlap(card, allCards);
 

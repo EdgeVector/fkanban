@@ -10,6 +10,7 @@ import {
   deriveStructuredFields,
   emptyStructuredFields,
   applyPickupAreaDerivation,
+  depsPathConnects,
   findPickupAreaOverlap,
   isPickupEligible,
   pickupAreaTagsForCard,
@@ -259,6 +260,135 @@ describe("pickup area overlap", () => {
     applyPickupAreaDerivation(held, [first]);
     expect(held.block_status).toBe("needs_human");
     expect(held.block_reason).toBe("waiting on Tom");
+  });
+
+  // Regression (fkanban-overlap-block-false-positive-dep-serialized): two cards
+  // that cite the same fbrain slug but are connected by a dep edge must NOT get
+  // the overlap block — the dep already serializes their pickup.
+  test("dep-connected cards sharing an area do not trip the overlap block", () => {
+    const a = card({
+      slug: "delete-dev-node-a",
+      title: "Step A",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nSee fbrain note. `fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+    });
+    const b = card({
+      slug: "delete-dev-node-b",
+      title: "Step B",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nSee fbrain note. `fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      deps: ["delete-dev-node-a"], // B directly deps on A
+    });
+
+    // sanity: they DO share a derived area, so absent the dep edge this would block.
+    expect(pickupAreaTagsForCard(a)).toContain("area:fbrain-list");
+    expect(pickupAreaTagsForCard(b)).toContain("area:fbrain-list");
+
+    // Neither card gets the block, in either evaluation order.
+    expect(findPickupAreaOverlap(b, [a, b])).toBeNull();
+    expect(findPickupAreaOverlap(a, [a, b])).toBeNull();
+
+    applyPickupAreaDerivation(b, [a, b]);
+    expect(normalizeBlockStatus(b.block_status)).toBe("none");
+    applyPickupAreaDerivation(a, [a, b]);
+    expect(normalizeBlockStatus(a.block_status)).toBe("none");
+  });
+
+  test("transitive and reverse dep paths both suppress the overlap block", () => {
+    const a = card({
+      slug: "chain-a",
+      title: "A",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+    });
+    const mid = card({
+      slug: "chain-mid",
+      title: "Mid",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nunrelated",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      deps: ["chain-a"],
+    });
+    const c = card({
+      slug: "chain-c",
+      title: "C",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      deps: ["chain-mid"], // C -> mid -> A : transitive path C..A
+    });
+    const all = [a, mid, c];
+
+    // depsPathConnects is symmetric and transitive.
+    expect(depsPathConnects(all, "chain-c", "chain-a")).toBe(true);
+    expect(depsPathConnects(all, "chain-a", "chain-c")).toBe(true);
+
+    // C shares area:fbrain-list with A but is transitively dep-connected -> no block.
+    expect(findPickupAreaOverlap(c, all)).toBeNull();
+  });
+
+  test("an explicit --block-status none is authoritative on the same write", () => {
+    const active = card({
+      slug: "active",
+      title: "Active",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+    });
+    // A card the hook had blocked for overlap, that still cites the shared area.
+    const held = card({
+      slug: "held",
+      title: "Held",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\n`fbrain list`",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      block_status: "needs_human",
+      block_reason: `${PICKUP_AREA_BLOCK_PREFIX} shares area:fbrain-list with active in doing; serialize or retag one card.`,
+    });
+
+    // Without the explicit flag the hook re-derives the block (proves the setup).
+    const reblocked = { ...held, block_status: "none", block_reason: "" };
+    applyPickupAreaDerivation(reblocked, [active]);
+    expect(reblocked.block_status).toBe("needs_human");
+
+    // Simulate `add held --block-status none`: caller clears the block, then the
+    // hook runs with explicitBlockStatus=true and must leave it cleared.
+    held.block_status = "none";
+    held.block_reason = "";
+    applyPickupAreaDerivation(held, [active], /* explicitBlockStatus */ true);
+    expect(held.block_status).toBe("none");
+    expect(held.block_reason).toBe("");
+    // Tags are still derived even under an explicit block-status.
+    expect(held.tags).toContain("area:fbrain-list");
+  });
+
+  test("depsPathConnects: unrelated cards are not connected", () => {
+    const x = card({ slug: "x", deps: [] });
+    const y = card({ slug: "y", deps: [] });
+    expect(depsPathConnects([x, y], "x", "y")).toBe(false);
+    // Self is never connected to itself.
+    expect(depsPathConnects([x, y], "x", "x")).toBe(false);
+    // A dangling dep (no live card) doesn't create a spurious connection.
+    const z = card({ slug: "z", deps: ["ghost"] });
+    expect(depsPathConnects([z], "z", "ghost")).toBe(true);
+    expect(depsPathConnects([z], "z", "y")).toBe(false);
   });
 });
 
