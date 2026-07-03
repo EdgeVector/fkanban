@@ -3,11 +3,14 @@
 // run doesn't cold-compile the whole dependency graph.
 //
 // These drive the real script against a throwaway git repo in a temp dir:
-//  - a warm clone happens when the parent has a target/ (contents match, and it
-//    is an INDEPENDENT directory, not a symlink or the same inode-shared tree —
-//    concurrent agents must never share cargo's build lock);
-//  - it degrades gracefully (still succeeds, worktree still created) when the
-//    parent has no target/ to warm from.
+//  - a warm clone happens when the parent has a target/ AND the filesystem
+//    supports clonefile(2) (APFS): contents match, and it is an INDEPENDENT
+//    directory, not a symlink or an inode-shared tree — concurrent agents must
+//    never share cargo's build lock;
+//  - on a non-APFS filesystem (e.g. the Linux CI runner) `cp -c` is
+//    unsupported, so the script falls back to a COLD worktree (no target/) and
+//    still succeeds;
+//  - it also degrades gracefully when the parent has no target/ to warm from.
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
@@ -28,15 +31,21 @@ const SCRIPT = fileURLToPath(new URL("../bin/fkanban-worktree", import.meta.url)
 let root: string;
 let repo: string;
 
-async function run(args: string[]): Promise<{ code: number; stderr: string }> {
+async function run(
+  args: string[],
+): Promise<{ code: number; out: string }> {
   const proc = Bun.spawn(["bash", SCRIPT, ...args], {
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
   const code = await proc.exited;
-  const stderr = await new Response(proc.stderr).text();
-  return { code, stderr };
+  // Status lines ("worktree starts WARM" / "clonefile unavailable" / error
+  // messages) may land on either stream — inspect both.
+  const out =
+    (await new Response(proc.stdout).text()) +
+    (await new Response(proc.stderr).text());
+  return { code, out };
 }
 
 async function git(cwd: string, args: string[]) {
@@ -70,22 +79,37 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("warms a fresh worktree by cloning the parent's target/", async () => {
+test("warms a fresh worktree by CoW-cloning the parent's target/ (APFS); falls back cold elsewhere", async () => {
   // Give the parent a target/ with a sentinel file (its "warm" build cache).
   const parentTarget = join(repo, "target");
   mkdirSync(join(parentTarget, "debug"), { recursive: true });
   writeFileSync(join(parentTarget, "debug", "sentinel"), "compiled\n");
 
   const wt = join(root, "wt");
-  const { code, stderr } = await run([repo, wt, "fkanban/probe", "main"]);
+  const { code, out } = await run([repo, wt, "fkanban/probe", "main"]);
   expect(code).toBe(0);
 
-  // Worktree + branch exist.
+  // Worktree + branch always exist regardless of filesystem.
   expect(existsSync(join(wt, "README.md"))).toBe(true);
 
-  // target/ was cloned as a REAL independent directory (not a symlink), with the
-  // parent's contents present.
   const wtTarget = join(wt, "target");
+
+  // `cp -c` (clonefile) is APFS-only. On CI's Linux runner it is unsupported, so
+  // the script correctly falls back to a COLD worktree and says so. The warm
+  // contract only applies where clonefile works — assert the branch the script
+  // actually reported. Exactly one branch must be reported.
+  const warmed = out.includes("worktree starts WARM");
+  const cold = out.includes("clonefile unavailable");
+  expect(warmed !== cold).toBe(true);
+
+  if (cold) {
+    // Non-APFS fallback: no target/ cloned; a later cargo run just builds cold.
+    expect(existsSync(wtTarget)).toBe(false);
+    return;
+  }
+
+  // Warm path (APFS): target/ is a REAL independent directory (not a symlink),
+  // carrying the parent's contents.
   expect(existsSync(wtTarget)).toBe(true);
   expect(lstatSync(wtTarget).isSymbolicLink()).toBe(false);
   expect(lstatSync(wtTarget).isDirectory()).toBe(true);
@@ -100,8 +124,6 @@ test("warms a fresh worktree by cloning the parent's target/", async () => {
   expect(readFileSync(join(parentTarget, "debug", "sentinel"), "utf8")).toBe(
     "compiled\n",
   );
-
-  expect(stderr).not.toContain("clonefile unavailable");
 });
 
 test("succeeds and creates the worktree even when the parent has no target/", async () => {
@@ -116,15 +138,15 @@ test("succeeds and creates the worktree even when the parent has no target/", as
 test("refuses to clobber an existing worktree dir", async () => {
   const wt = join(root, "wt-exists");
   mkdirSync(wt);
-  const { code, stderr } = await run([repo, wt, "fkanban/x", "main"]);
+  const { code, out } = await run([repo, wt, "fkanban/x", "main"]);
   expect(code).not.toBe(0);
-  expect(stderr).toContain("refusing to clobber");
+  expect(out).toContain("refusing to clobber");
 });
 
 test("errors when the repo-root is not a git checkout", async () => {
   const notrepo = join(root, "notrepo");
   mkdirSync(notrepo);
-  const { code, stderr } = await run([notrepo, join(root, "wt2"), "fkanban/y", "main"]);
+  const { code, out } = await run([notrepo, join(root, "wt2"), "fkanban/y", "main"]);
   expect(code).not.toBe(0);
-  expect(stderr).toContain("not a git checkout");
+  expect(out).toContain("not a git checkout");
 });
