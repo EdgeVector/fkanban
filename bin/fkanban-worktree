@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# bin/fkanban-worktree — create an fkanban card worktree that starts its first
+# `cargo build/check/test` WARM.
+#
+# A fresh `git worktree add` gives a worktree an EMPTY `target/`, so the first
+# cargo run in it cold-compiles the whole dependency graph (~30-60 min and
+# 15-30 GB for a fold worktree). On APFS we can avoid that: `cp -c` uses
+# clonefile(2), a copy-on-write clone that is instant, adds ~zero disk until a
+# file diverges, and gives cargo its own independent `target/` (NOT a shared
+# dir or symlink — concurrent agents must never share cargo's build lock).
+#
+# This wraps the `git worktree add` that the fkanban-agent skill runs for a
+# card so the warm-target behavior lives in versioned, testable repo code
+# instead of copy-pasted skill prose.
+#
+# Usage:
+#   fkanban-worktree <repo-root> <worktree-dir> <branch> [base-ref]
+#
+#   repo-root      the parent checkout to branch from (its target/ is the warm
+#                  source). Its target/, if present, is CoW-cloned.
+#   worktree-dir   where to create the worktree (e.g.
+#                  ~/.fkanban/worktrees/<slug>).
+#   branch         new branch name to create (e.g. fkanban/<slug>).
+#   base-ref       base to branch from (default: origin/main).
+#
+# Example (fold card):
+#   fkanban-worktree ~/code/edgevector/fold \
+#     ~/.fkanban/worktrees/my-card fkanban/my-card origin/main
+#
+# The target/ clone is BEST-EFFORT: if the parent has no target/ yet, or the
+# filesystem is not APFS (clonefile unsupported), the worktree simply starts
+# cold like today — the script still succeeds and prints why it skipped.
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: fkanban-worktree <repo-root> <worktree-dir> <branch> [base-ref]
+
+  repo-root      parent checkout to branch from (its target/ is CoW-cloned)
+  worktree-dir   where to create the worktree (e.g. ~/.fkanban/worktrees/<slug>)
+  branch         new branch to create (e.g. fkanban/<slug>)
+  base-ref       base to branch from (default: origin/main)
+EOF
+  exit 2
+}
+
+[ "$#" -ge 3 ] || usage
+
+repo_root="$1"
+worktree_dir="$2"
+branch="$3"
+base_ref="${4:-origin/main}"
+
+[ -d "$repo_root/.git" ] || [ -e "$repo_root/.git" ] || {
+  echo "fkanban-worktree: '$repo_root' is not a git checkout" >&2
+  exit 1
+}
+
+if [ -e "$worktree_dir" ]; then
+  echo "fkanban-worktree: '$worktree_dir' already exists — refusing to clobber" >&2
+  exit 1
+fi
+
+# 1. Create the worktree + branch off the base. Fetch first so base-ref is fresh.
+git -C "$repo_root" fetch origin --quiet || true
+git -C "$repo_root" worktree add "$worktree_dir" -b "$branch" "$base_ref"
+
+# 2. Warm the target/ via an APFS copy-on-write clone (best-effort).
+#    `cp -c` requests clonefile(2); combined with -R it clones the tree. If the
+#    parent has no target/, or clonefile is unsupported (non-APFS), we skip and
+#    leave the worktree cold — never fatal.
+src_target="$repo_root/target"
+dst_target="$worktree_dir/target"
+
+if [ ! -d "$src_target" ]; then
+  echo "fkanban-worktree: no '$src_target' to warm from — worktree starts cold"
+elif [ -e "$dst_target" ]; then
+  # git worktree add never creates target/ (it's gitignored), but be safe.
+  echo "fkanban-worktree: '$dst_target' already exists — leaving it untouched"
+else
+  # -R recurse, -c clonefile(2) (APFS CoW), -p preserve attrs. Best-effort: a
+  # non-APFS filesystem makes `cp -c` fail; fall through to a cold worktree.
+  if cp -Rcp "$src_target" "$dst_target" 2>/dev/null; then
+    echo "fkanban-worktree: CoW-cloned target/ from '$repo_root' — worktree starts WARM"
+  else
+    # Clean up any partial copy so the worktree just builds cold, not broken.
+    rm -rf "$dst_target" 2>/dev/null || true
+    echo "fkanban-worktree: clonefile unavailable (non-APFS?) — worktree starts cold"
+  fi
+fi
+
+echo "fkanban-worktree: ready at $worktree_dir (branch $branch)"
