@@ -1,11 +1,13 @@
 // Regression: `add` doubles as create AND update. Updating a card (e.g. just
-// the title) must NOT silently move it to the `default` board. The bug was that
-// the update path forced `board = opts.board ?? "default"`, clobbering a card
-// that lived on a non-default board to `default` (silent data-integrity loss),
-// and validated `--column` against the wrong board's columns. The fix resolves
-// the existing card BEFORE the board context: `opts.board ?? existing?.board ??
-// "default"`. Explicit `--board` still moves the card; the create path is
-// unchanged.
+// the title/priority) must NOT silently move it to the `default` board OR to a
+// different column. The board bug forced `board = opts.board ?? "default"`,
+// clobbering a card that lived on a non-default board to `default` (silent
+// data-integrity loss), and validated `--column` against the wrong board's
+// columns. The column bug let a metadata-only update behave like a fresh create
+// instead of preserving the existing card's column. The fix resolves the
+// existing card BEFORE the board/column context: `opts.board ?? existing?.board
+// ?? "default"` and `opts.column ?? existing?.column ?? firstColumn`. Explicit
+// `--board` / `--column` still move the card; the create path is unchanged.
 //
 // Backed by the same in-memory fake NodeClient used in mcp.test.ts /
 // read-board-validation.test.ts — exercises the real addCmd with no live node.
@@ -119,6 +121,23 @@ describe("add update preserves the card's board", () => {
     expect(after?.board).toBe("other");
     expect(after?.title).toBe("probe v2 EDITED");
     expect(after?.column).toBe("wip");
+  });
+
+  test("(a') priority-only update with NO --column keeps the card in its current column", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "priority-only",
+      title: "Priority only",
+      column: "todo",
+    });
+
+    const updated = await addCmd({ cfg, node, slug: "priority-only", priority: "P2" });
+    expect(updated).toMatchObject({ action: "updated", board: "default", column: "todo" });
+
+    const after = await findCard(node, cfg, "priority-only");
+    expect(after?.column).toBe("todo");
+    expect(after?.tags).toContain("p2");
   });
 
   test("(b) update --column valid on the card's OWN board succeeds", async () => {

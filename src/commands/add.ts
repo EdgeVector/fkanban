@@ -218,8 +218,8 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   const boardSlug = opts.board ?? existing?.board ?? "default";
   const board = await requireBoard(opts.node, opts.cfg, boardSlug);
   const columns = board.columns;
-  const column = opts.column ?? columns[0] ?? "backlog";
-  ensureColumn(column, columns);
+  const targetColumn = existing ? (opts.column ?? existing.column) : (opts.column ?? columns[0] ?? "backlog");
+  ensureColumn(targetColumn, columns);
 
   const now = nowIso();
 
@@ -229,13 +229,12 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       title: opts.title ?? existing.title,
       body: opts.body ?? existing.body,
       board: boardSlug,
-      column: opts.column ?? existing.column,
+      column: targetColumn,
       assignee: opts.assignee ?? existing.assignee,
       tags: applyPriority(opts.tags ?? existing.tags, opts.priority),
       deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, existing.deps) : existing.deps,
       updated_at: now,
     };
-    if (opts.column) ensureColumn(updated.column, columns);
     // Auto-derive the pickup Repo:/Base: header from tags (default it when there's
     // no signal, flag a cross-repo conflict as needs_human), so a promoted/edited
     // card never silently strands in `todo`.
@@ -261,7 +260,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     title: opts.title ?? opts.slug,
     body: opts.body ?? "",
     board: boardSlug,
-    column,
+    column: targetColumn,
     position: appendPosition(),
     assignee: opts.assignee ?? "",
     tags: applyPriority(opts.tags ?? [], opts.priority),
@@ -282,5 +281,5 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   applyPickupAreaDerivation(card, await listCards(opts.node, opts.cfg));
   await enforceDepBlock(opts, opts.slug, boardSlug, card.column, card.deps);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
-  return { slug: opts.slug, action: "created", board: boardSlug, column };
+  return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };
 }
