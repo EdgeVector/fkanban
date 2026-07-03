@@ -249,7 +249,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     // Apply any explicit --field opts, then backfill still-empty structured
     // fields from the body/tags.
     applyStructuredFields(updated, opts);
-    applyPickupAreaDerivation(updated, await listCards(opts.node, opts.cfg));
+    applyPickupAreaDerivation(updated, await listCards(opts.node, opts.cfg), opts.blockStatus !== undefined);
     await enforceDepBlock(opts, opts.slug, boardSlug, updated.column, updated.deps);
     await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
@@ -278,7 +278,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     ),
   );
   applyStructuredFields(card, opts);
-  applyPickupAreaDerivation(card, await listCards(opts.node, opts.cfg));
+  applyPickupAreaDerivation(card, await listCards(opts.node, opts.cfg), opts.blockStatus !== undefined);
   await enforceDepBlock(opts, opts.slug, boardSlug, card.column, card.deps);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };
