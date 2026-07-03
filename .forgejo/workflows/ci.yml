@@ -1,0 +1,37 @@
+# Forgejo Actions CI for the local EdgeVector forge (http://localhost:3300).
+#
+# This lives in `.forgejo/workflows/` (not `.github/workflows/`) so it runs ONLY
+# on the Forgejo forge, never on GitHub — GitHub keeps using `.github/workflows/ci.yml`.
+# It is deliberately self-contained (no GitHub-hosted actions): checkout comes from
+# code.forgejo.org and bun is installed via its official script, so CI can execute
+# with no dependency on github.com. Runner + labels: fbrain `infra-forgejo-local-forge`.
+name: Forge CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Typecheck + Tests
+    # Matches a label advertised by the local mac-forge-runner (Docker backend,
+    # node:20-bookworm container).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Install bun
+        run: |
+          set -euo pipefail
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
