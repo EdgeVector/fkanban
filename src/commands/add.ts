@@ -18,6 +18,7 @@ import {
   cardToFields,
   depStatus,
   deriveStructuredFields,
+  doneAtForColumnTransition,
   emptyStructuredFields,
   ensureColumn,
   findCard,
@@ -234,6 +235,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       tags: applyPriority(opts.tags ?? existing.tags, opts.priority),
       deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, existing.deps) : existing.deps,
       updated_at: now,
+      done_at: doneAtForColumnTransition(existing, targetColumn, columns, now),
     };
     // Auto-derive the pickup Repo:/Base: header from tags (default it when there's
     // no signal, flag a cross-repo conflict as needs_human), so a promoted/edited
@@ -269,6 +271,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     updated_at: now,
     ...emptyStructuredFields(),
   };
+  card.done_at = doneAtForColumnTransition(null, targetColumn, columns, now);
   applyDerivedHeader(
     card,
     applyHeaderDerivation(

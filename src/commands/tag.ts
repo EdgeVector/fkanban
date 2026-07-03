@@ -8,6 +8,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   cardToFields,
+  isDoneAtTag,
   isDepTag,
   nowIso,
   normalizeTags,
@@ -38,6 +39,13 @@ function rejectReservedTag(tag: string): void {
       code: "reserved_tag",
       message: `"${tag}" is a reserved dependency tag.`,
       hint: "Use `fkanban dep add`/`dep rm` to edit dependency edges.",
+    });
+  }
+  if (isDoneAtTag(tag)) {
+    throw new FkanbanError({
+      code: "reserved_tag",
+      message: `"${tag}" is a reserved completion timestamp tag.`,
+      hint: "Move the card to the board's final column to set done_at.",
     });
   }
   if (tag === TOMBSTONE_TAG) {
