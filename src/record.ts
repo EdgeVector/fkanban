@@ -385,13 +385,20 @@ export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): 
 // File-overlap alone misses work that touches the same product/source region
 // after an agent expands scope. Keep a schema-free coordination hint in tags:
 // `area:<tool>-<command>` (for example `area:fbrain-list`) is derived from
-// explicit Area:/Pickup Area: body lines and from common CLI/MCP command names
-// in card specs (`fbrain list`, `fbrain_list`). When a ready todo card shares a
-// pickup area with another unblocked active card in the same repo, put the new
-// card on a reversible needs_human hold so pickup serializes or re-grooms it.
+// explicit Area:/Pickup Area: body lines, common CLI/MCP command names in card
+// specs (`fbrain list`, `fbrain_list`), and narrowly-known feature-area phrases
+// that otherwise don't look like commands (`forge CI`, `.forgejo/workflows/*`).
+// When a ready todo card shares a pickup area with another unblocked active card
+// in the same repo, put the new card on a reversible needs_human hold so pickup
+// serializes or re-grooms it.
 export const PICKUP_AREA_TAG_PREFIX = "area:";
 export const PICKUP_AREA_BLOCK_PREFIX = "Pickup area overlap:";
 const PICKUP_AREA_ACTIVE_COLUMNS = new Set(["todo", "doing", "review"]);
+const FEATURE_AREA_PATTERNS: Array<{ area: string; pattern: RegExp }> = [
+  { area: "forge-ci", pattern: /\b(?:local[\s_-]+)?forge(?:jo)?[\s_-]+ci\b/gi },
+  { area: "forge-ci", pattern: /\bforge(?:jo)?[\s_-]+(?:required[\s_-]+)?checks?\b/gi },
+  { area: "forge-ci", pattern: /(?:^|[`"'([{\s])\.forgejo\/workflows(?:\/[A-Za-z0-9._/-]+)?/gim },
+];
 
 function normalizePickupArea(value: string): string | null {
   const raw = value
@@ -428,6 +435,11 @@ export function pickupAreaTagsForCard(card: Pick<Card, "title" | "body" | "tags"
   const commandRe = /\b(fbrain|fkanban)(?:[ \t]+|[_-]+)([a-z][a-z0-9-]*)\b/gi;
   for (const m of text.matchAll(commandRe)) {
     add(`${m[1]}-${m[2]}`);
+  }
+
+  for (const { area, pattern } of FEATURE_AREA_PATTERNS) {
+    if (pattern.test(text)) add(area);
+    pattern.lastIndex = 0;
   }
 
   return [...areas].sort();

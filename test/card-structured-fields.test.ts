@@ -175,6 +175,17 @@ describe("pickup area overlap", () => {
     expect(areas).toEqual(["area:fbrain-list"]);
   });
 
+  test("derives forge CI area from obvious feature wording and workflow paths", () => {
+    expect(
+      pickupAreaTagsForCard(
+        card({
+          title: "Require forge required checks",
+          body: "Port the local forge CI gate in `.forgejo/workflows/ci.yml`.",
+        }),
+      ),
+    ).toEqual(["area:forge-ci"]);
+  });
+
   test("holds a todo PR card that overlaps an active card in the same repo", () => {
     const first = card({
       slug: "fbrain-list-updated-since-offset-count",
@@ -201,6 +212,34 @@ describe("pickup area overlap", () => {
     expect(second.block_status).toBe("needs_human");
     expect(second.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
     expect(second.block_reason).toContain("fbrain-list-updated-since-offset-count");
+  });
+
+  test("holds same-repo forge CI cards even without explicit area tags", () => {
+    const compileFix = card({
+      slug: "fold-cloud-proxy-subscription-status-test-compile-break",
+      title: "Fix subscription status compile break",
+      body:
+        "Repo: EdgeVector/fold\nBase: main\n\nFix `cargo test --workspace --all-targets` so the forge check can go green.",
+      repo: "EdgeVector/fold",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+    });
+    const requiredCheck = card({
+      slug: "fold-ci-on-forge-required-checks",
+      title: "Require forge required checks",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nRequire `.forgejo/workflows/ci.yml` before merge.",
+      repo: "EdgeVector/fold",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+    });
+
+    applyPickupAreaDerivation(requiredCheck, [compileFix]);
+
+    expect(requiredCheck.tags).toContain("area:forge-ci");
+    expect(requiredCheck.block_status).toBe("needs_human");
+    expect(requiredCheck.block_reason).toContain("fold-cloud-proxy-subscription-status-test-compile-break");
   });
 
   test("does not treat the same area in a different repo as an overlap", () => {
@@ -338,6 +377,32 @@ describe("pickup area overlap", () => {
 
     // C shares area:fbrain-list with A but is transitively dep-connected -> no block.
     expect(findPickupAreaOverlap(c, all)).toBeNull();
+  });
+
+  test("dep-connected forge CI cards sharing an inferred area do not trip the overlap block", () => {
+    const a = card({
+      slug: "forge-ci-compile-fix",
+      title: "Fix forge check compile break",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nFix tests before the local forge CI gate is required.",
+      repo: "EdgeVector/fold",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+    });
+    const b = card({
+      slug: "forge-ci-required-check",
+      title: "Require forge required checks",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nRequire `.forgejo/workflows/ci.yml`.",
+      repo: "EdgeVector/fold",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      deps: ["forge-ci-compile-fix"],
+    });
+
+    expect(pickupAreaTagsForCard(a)).toContain("area:forge-ci");
+    expect(pickupAreaTagsForCard(b)).toContain("area:forge-ci");
+    expect(findPickupAreaOverlap(b, [a, b])).toBeNull();
   });
 
   test("an explicit --block-status none is authoritative on the same write", () => {
