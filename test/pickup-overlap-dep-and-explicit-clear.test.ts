@@ -138,6 +138,36 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
     expect(b?.block_reason ?? "").not.toContain(PICKUP_AREA_BLOCK_PREFIX);
   });
 
+  test("same-feature forge CI cards are overlap-held without explicit area tags", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "fold-cloud-proxy-subscription-status-test-compile-break",
+      title: "Fix subscription status compile break",
+      column: "doing",
+      repo: "EdgeVector/fold",
+      base: "main",
+      body:
+        "Repo: EdgeVector/fold\nBase: main\n\nFix `cargo test --workspace --all-targets` so the forge check can go green.",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "fold-ci-on-forge-required-checks",
+      title: "Require forge required checks",
+      column: "todo",
+      repo: "EdgeVector/fold",
+      base: "main",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nRequire `.forgejo/workflows/ci.yml` before merge.",
+    });
+
+    const second = await findCard(node, cfg, "fold-ci-on-forge-required-checks");
+    expect(second?.tags).toContain("area:forge-ci");
+    expect(second?.block_status).toBe("needs_human");
+    expect(second?.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
+    expect(second?.block_reason).toContain("fold-cloud-proxy-subscription-status-test-compile-break");
+  });
+
   test("`add <slug> --block-status none` clears a hook-set overlap block and it stays cleared", async () => {
     // An unrelated ACTIVE card in the same repo+area, with NO dep edge, so the
     // hook legitimately blocks the second card on overlap.
