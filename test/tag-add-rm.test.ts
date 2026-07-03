@@ -164,4 +164,10 @@ describe("tag add/rm edit one label without clobbering the rest", () => {
     const p = tagAddCmd({ cfg, node, slug: "probe", tag: ["__fkanban_deleted__"] });
     await expect(p).rejects.toMatchObject({ code: "reserved_tag" });
   });
+
+  test("tag add rejects the internal done_at tag", async () => {
+    await addCmd({ cfg, node, slug: "probe", column: "todo" });
+    const p = tagAddCmd({ cfg, node, slug: "probe", tag: ["done_at:2026-07-03T12:00:00.000Z"] });
+    await expect(p).rejects.toMatchObject({ code: "reserved_tag" });
+  });
 });

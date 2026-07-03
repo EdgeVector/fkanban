@@ -150,6 +150,7 @@ const cardShape = {
   deps: z.array(z.string()),
   created_at: z.string(),
   updated_at: z.string(),
+  done_at: z.string(),
 } as const;
 const cardSchema = z.object(cardShape);
 

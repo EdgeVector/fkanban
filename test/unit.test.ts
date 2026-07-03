@@ -163,12 +163,13 @@ describe("dependencies", () => {
   });
 
   test("cardToFields folds deps back into tags (round-trips)", () => {
-    const c = card({ slug: "x", tags: ["p1"], deps: ["a", "b"] });
+    const c = card({ slug: "x", tags: ["p1"], deps: ["a", "b"], done_at: "2026-07-03T12:00:00.000Z" });
     const fields = cardToFields(c);
-    expect(fields.tags).toEqual(["p1", depTag("a"), depTag("b")]);
+    expect(fields.tags).toEqual(["p1", "done_at:2026-07-03T12:00:00.000Z", depTag("a"), depTag("b")]);
     const back = rowToCard({ key: { hash: "x", range: null }, fields });
     expect(back.tags).toEqual(["p1"]);
     expect(back.deps).toEqual(["a", "b"]);
+    expect(back.done_at).toBe("2026-07-03T12:00:00.000Z");
   });
 
   test("DEP_TAG_PREFIX is the reserved prefix", () => {

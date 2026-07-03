@@ -27,6 +27,9 @@ export type Card = {
   deps: string[];
   created_at: string;
   updated_at: string;
+  // First time the card entered its board's terminal column. Empty for legacy
+  // or not-yet-complete cards; immutable once set.
+  done_at: string;
   // ── Structured pickup-decision + reconcile fields ───────────────────────
   // (fbrain design `fkanban-card-structured-fields`). Stored as plain String
   // schema fields; enum-valued ones (kind/block_status) are normalized on use
@@ -64,6 +67,7 @@ export function isTombstoned(tags: string[]): boolean {
 // `deps`, and cardToFields folds them back in, so dep tags never surface as
 // user-facing labels (same trick as TOMBSTONE_TAG).
 export const DEP_TAG_PREFIX = "dep:";
+export const DONE_AT_TAG_PREFIX = "done_at:";
 
 export function isDepTag(tag: string): boolean {
   return tag.startsWith(DEP_TAG_PREFIX);
@@ -71,6 +75,14 @@ export function isDepTag(tag: string): boolean {
 
 export function depTag(slug: string): string {
   return `${DEP_TAG_PREFIX}${slug}`;
+}
+
+export function isDoneAtTag(tag: string): boolean {
+  return tag.startsWith(DONE_AT_TAG_PREFIX);
+}
+
+export function doneAtTag(doneAt: string): string {
+  return `${DONE_AT_TAG_PREFIX}${doneAt}`;
 }
 
 // Clean a tag list: trim, drop blanks, dedupe (order-stable). The label
@@ -139,6 +151,24 @@ export const WORKING_COLUMNS = ["doing", "review", "done"] as const;
 
 export function isWorkingColumn(column: string): boolean {
   return (WORKING_COLUMNS as readonly string[]).includes(column);
+}
+
+export function terminalColumn(columns: readonly string[]): string {
+  const resolved = resolveColumns(columns);
+  return resolved[resolved.length - 1] ?? FALLBACK_TERMINAL_COLUMN;
+}
+
+export function doneAtForColumnTransition(
+  card: Pick<Card, "column" | "done_at"> | null,
+  targetColumn: string,
+  boardColumns: readonly string[],
+  now: string,
+): string {
+  const existing = card?.done_at ?? "";
+  if (existing) return existing;
+  const terminal = terminalColumn(boardColumns);
+  const fromColumn = card?.column ?? "";
+  return targetColumn === terminal && fromColumn !== terminal ? now : "";
 }
 
 // ── Repo/Base header auto-derivation ────────────────────────────────────────
@@ -642,13 +672,22 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
   return out;
 }
 
-// The structured fields all-empty — for building a fresh Card literal (the
-// create path, test factories) without spelling out eight defaults each time.
+// Fields that default empty on fresh/test Card literals.
 export function emptyStructuredFields(): Pick<
   Card,
-  "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch"
+  "done_at" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch"
 > {
-  return { repo: "", base: "", kind: "", block_status: "", block_reason: "", north_star: "", pr_url: "", branch: "" };
+  return {
+    done_at: "",
+    repo: "",
+    base: "",
+    kind: "",
+    block_status: "",
+    block_reason: "",
+    north_star: "",
+    pr_url: "",
+    branch: "",
+  };
 }
 
 export type DepStatus = {
@@ -834,6 +873,10 @@ export function rowToCard(row: QueryRow): Card {
     .filter(isDepTag)
     .map((t) => t.slice(DEP_TAG_PREFIX.length))
     .filter((s) => s.length > 0);
+  const doneAt =
+    allTags
+      .find(isDoneAtTag)
+      ?.slice(DONE_AT_TAG_PREFIX.length) ?? "";
   return {
     slug: stringField(f, "slug"),
     title: stringField(f, "title"),
@@ -843,10 +886,11 @@ export function rowToCard(row: QueryRow): Card {
     position: stringField(f, "position"),
     assignee: stringField(f, "assignee"),
     // dep tags are split into `deps`; everything else (incl. the tombstone) stays.
-    tags: allTags.filter((t) => !isDepTag(t)),
+    tags: allTags.filter((t) => !isDepTag(t) && !isDoneAtTag(t)),
     deps,
     created_at: stringField(f, "created_at"),
     updated_at: stringField(f, "updated_at"),
+    done_at: doneAt,
     // New fields default to "" for cards written before the schema gained them.
     repo: stringField(f, "repo"),
     base: stringField(f, "base"),
@@ -988,7 +1032,11 @@ export function cardToFields(c: Card): Record<string, unknown> {
     position: c.position,
     assignee: c.assignee,
     // Persist deps back as reserved `dep:<slug>` tags alongside the user tags.
-    tags: [...c.tags.filter((t) => !isDepTag(t)), ...c.deps.map(depTag)],
+    tags: [
+      ...c.tags.filter((t) => !isDepTag(t) && !isDoneAtTag(t)),
+      ...(c.done_at ? [doneAtTag(c.done_at)] : []),
+      ...c.deps.map(depTag),
+    ],
     created_at: c.created_at,
     updated_at: c.updated_at,
     repo: c.repo ?? "",

@@ -13,6 +13,7 @@ import {
   boardTerminalMap,
   cardToFields,
   depStatus,
+  doneAtForColumnTransition,
   deriveStructuredFields,
   ensureColumn,
   findBoard,
@@ -66,12 +67,14 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
 
   const from = card.column;
   const position = opts.position !== undefined ? String(opts.position) : appendPosition();
+  const now = nowIso();
 
   const updated: Card = {
     ...card,
     column: opts.column,
     position,
-    updated_at: nowIso(),
+    updated_at: now,
+    done_at: doneAtForColumnTransition(card, opts.column, columns, now),
   };
   // Promoting to todo (or backlog) is exactly when a card becomes pickup-eligible
   // — auto-derive the Repo:/Base: header from tags (default it when there's no

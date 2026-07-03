@@ -62,6 +62,14 @@ describe("unknown-flag rejection", () => {
     expect(stderr).not.toContain("Unknown option");
   });
 
+  test("list: --full_body and --full-body are recognized compatibility aliases", async () => {
+    for (const flag of ["--full_body", "--full-body"]) {
+      const { code, stderr } = await runCli(["list", flag]);
+      expect(code).not.toBe(2);
+      expect(stderr).not.toContain("Unknown option");
+    }
+  });
+
   test("known flags still parse: `add --help` prints help and exits 0", async () => {
     const { code, stdout } = await runCli(["add", "--help"]);
     expect(code).toBe(0);
