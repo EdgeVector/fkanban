@@ -21,6 +21,7 @@ import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
+import { migrateAreaTagsCmd } from "./commands/migrate.ts";
 import { orphanedDependentsWarning, normalizePriority, PRIORITY_TIERS, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import { suggestClosest } from "./suggest.ts";
@@ -33,6 +34,7 @@ import {
   formatBoardCreate,
   formatBoardRm,
   formatRank,
+  formatMigrateAreaTags,
   formatError,
 } from "./format.ts";
 
@@ -59,6 +61,7 @@ Commands:
   board list           list boards (--json)
   board rm <slug>      soft-delete a board (refuses the default board or a
                        board with live cards unless --force)
+  migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
   mcp                  start an MCP server over stdio
   version              print the fkanban version and exit (alias of --version)
@@ -311,6 +314,28 @@ Examples:
   fkanban board create sprint --title "Sprint 1" --columns todo,doing,done
   fkanban board rm sprint`),
 
+  migrate: withFooter(`fkanban migrate — one-time board data migrations
+
+Usage:
+  fkanban migrate area-tags [--dry-run] [--json]
+
+Subcommands:
+  area-tags            re-derive the pickup \`area:*\` tags on every active
+                       (non-done, non-tombstoned) card and rewrite only the
+                       cards whose derived set changed. Clears stale boilerplate
+                       tags (\`area:fkanban-agent\`, \`area:fbrain-got\`, …) minted
+                       by the pre-#130 prose-scraping bug on cards that were
+                       never re-written since. Re-derives TAGS only — never
+                       touches column, assignee, or an intentional block hold.
+
+Flags:
+  --dry-run            report the per-card tag deltas without writing anything
+  --json               machine-readable { scanned, changed, skippedDone, cards }
+
+Example:
+  fkanban migrate area-tags --dry-run   # preview
+  fkanban migrate area-tags             # apply`),
+
   doctor: withFooter(`fkanban doctor — health-check the local setup
 
 Usage:
@@ -558,6 +583,8 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   show: new Set(["board"]),
   // board's subcommands read title/columns/body (create) and force (rm).
   board: new Set(["title", "columns", "body", "force"]),
+  // migrate's one-time subcommands take --dry-run to preview without writing.
+  migrate: new Set(["dry-run"]),
 };
 
 // Closest valid flag for a mistyped option on a known command. Mirrors the
@@ -622,6 +649,7 @@ async function main(argv: string[]): Promise<number> {
         "pr-url": { type: "string" },
         branch: { type: "string" },
         force: { type: "boolean" },
+        "dry-run": { type: "boolean" },
         body: { type: "string" },
         columns: { type: "string" },
         position: { type: "string" },
@@ -923,6 +951,22 @@ async function dispatch(
         return 0;
       }
       console.error(`fkanban: Unknown tag subcommand "${sub ?? ""}". Try: tag add | tag rm`);
+      return 2;
+    }
+
+    case "migrate": {
+      const sub = positionals[1];
+      if (sub === "area-tags") {
+        const ctx = loadCtx({ verbose });
+        const res = await migrateAreaTagsCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          dryRun: values["dry-run"] as boolean | undefined,
+        });
+        console.log(formatMigrateAreaTags(res, values.json as boolean | undefined));
+        return 0;
+      }
+      console.error(`fkanban: Unknown migrate subcommand "${sub ?? ""}". Try: migrate area-tags`);
       return 2;
     }
 
