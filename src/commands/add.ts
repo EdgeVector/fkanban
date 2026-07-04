@@ -64,7 +64,7 @@ export type AddOptions = {
   // update keeps its existing value. See `fkanban-card-structured-fields`.
   repo?: string;
   base?: string;
-  kind?: string; // pr|registry|tracker
+  kind?: string; // pr|registry|tracker|umbrella|meta
   blockStatus?: string; // none|needs_human|design_first|deferred
   blockReason?: string;
   northStar?: string;

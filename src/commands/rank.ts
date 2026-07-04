@@ -16,6 +16,7 @@ import {
   RANK_POSITION_STEP,
   cardToFields,
   ensureColumn,
+  isMetaCardKind,
   listCards,
   nowIso,
   priorityOf,
@@ -37,7 +38,8 @@ export type RankedCard = { slug: string; priority: PriorityTier; position: numbe
 export type RankResult = {
   board: string;
   column: string;
-  // Total live cards in the ranked column.
+  // Total rankable work cards in the ranked column; meta/grouping cards are
+  // intentionally skipped so pickup ordering ignores them.
   total: number;
   // How many cards' positions actually changed (and were written).
   reordered: number;
@@ -54,7 +56,7 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult> {
   ensureColumn(column, board.columns);
 
   const all = await listCards(opts.node, opts.cfg);
-  const inColumn = all.filter((c) => c.board === boardSlug && c.column === column);
+  const inColumn = all.filter((c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind));
   const ranked = rankCards(inColumn);
 
   const hash = schemaHashFor("card", opts.cfg);
