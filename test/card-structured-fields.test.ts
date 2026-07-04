@@ -175,6 +175,51 @@ describe("pickup area overlap", () => {
     expect(areas).toEqual(["area:fbrain-list"]);
   });
 
+  test("does not derive an area from prose that merely follows the word fbrain/fkanban", () => {
+    expect(
+      pickupAreaTagsForCard(
+        card({ title: "Fix index lag", body: "fbrain got indexed tag queries wrong last night." }),
+      ),
+    ).toEqual([]);
+    expect(
+      pickupAreaTagsForCard(
+        card({ title: "Green the suite", body: "Confirmed `bun test` in fkanban passes now." }),
+      ),
+    ).toEqual([]);
+  });
+
+  test("does not derive area:fkanban-agent from the mandatory fkanban-agent skill boilerplate", () => {
+    const areas = pickupAreaTagsForCard(
+      card({
+        title: "Some card",
+        body:
+          "**Follow the fkanban-agent skill — drive this through to a MERGED PR.\n" +
+          "A card is only `done` when its code is actually in the repo.**\n\nRepo: EdgeVector/fold\nBase: main\n\nGOAL: ship the thing.",
+      }),
+    );
+    expect(areas).toEqual([]);
+  });
+
+  test("still derives areas from real command mentions", () => {
+    expect(
+      pickupAreaTagsForCard(card({ title: "x", body: "Run `fkanban list --column todo` to check." })),
+    ).toEqual(["area:fkanban-list"]);
+    expect(
+      pickupAreaTagsForCard(card({ title: "x", body: "Call `fbrain ask` with the right query." })),
+    ).toEqual(["area:fbrain-ask"]);
+  });
+
+  test("explicit Area: line is authoritative — skips prose scraping entirely", () => {
+    const areas = pickupAreaTagsForCard(
+      card({
+        title: "x",
+        body:
+          "Follow the fkanban-agent skill. Run `fkanban list` and `fbrain ask`.\nArea: fkanban-cards",
+      }),
+    );
+    expect(areas).toEqual(["area:fkanban-cards"]);
+  });
+
   test("derives forge CI area from obvious feature wording and workflow paths", () => {
     expect(
       pickupAreaTagsForCard(
