@@ -238,6 +238,58 @@ describe("pickup area overlap", () => {
     expect(areas).toEqual(["area:fkanban-cards"]);
   });
 
+  test("prose sentence beginning with 'Area:' is NOT an explicit declaration", () => {
+    // Regression (fkanban-explicit-area-line-scrapes-prose): a wrapped CONTEXT
+    // bullet fragment that merely begins with "Area:" must not be scraped into
+    // bogus `area:*` tags — nor should the fenced command example that follows.
+    const areas = pickupAreaTagsForCard(
+      card({
+        title: "x",
+        body:
+          "## CONTEXT\n\n" +
+          "The migration ITSELF ends up mis-tagged because its body contains the\n" +
+          "  Area: lines short-circuit prose scraping).\n" +
+          "(a wrapped sentence fragment) plus a fenced example:\n\n" +
+          "```\n" +
+          "fkanban tag rm <slug> area:<bogus-tag>\n" +
+          "```\n",
+      }),
+    );
+    expect(areas).not.toContain("area:lines");
+    expect(areas).not.toContain("area:short-circuit");
+    expect(areas).not.toContain("area:prose");
+    expect(areas).not.toContain("area:scraping");
+    expect(areas).not.toContain("area:the");
+    expect(areas).not.toContain("area:bogus-tag");
+    // The fenced `fkanban tag` example must not mint a command area either.
+    expect(areas).not.toContain("area:fkanban-tag");
+    expect(areas).toEqual([]);
+  });
+
+  test("exact Area: prose sentence from the stale-card repro is ignored", () => {
+    const areas = pickupAreaTagsForCard(
+      card({
+        title: "x",
+        body:
+          "Area: lines short-circuit prose scraping\n" +
+          "area:<bogus-tag>` clears the stale tags correctly under the fixed logic.",
+      }),
+    );
+    expect(areas).toEqual([]);
+  });
+
+  test("still honors a genuine short-slug Area: declaration despite nearby prose", () => {
+    const areas = pickupAreaTagsForCard(
+      card({
+        title: "x",
+        body:
+          "Area: lines short-circuit prose scraping (this is prose, ignored).\n" +
+          "Pickup Area: fkanban-cards, fbrain-list\n",
+      }),
+    );
+    expect(areas).toEqual(["area:fbrain-list", "area:fkanban-cards"]);
+  });
+
   test("derives forge CI area from obvious feature wording and workflow paths", () => {
     expect(
       pickupAreaTagsForCard(

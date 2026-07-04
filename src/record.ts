@@ -434,6 +434,48 @@ const FBRAIN_COMMANDS = new Set([
   "backlinks",
 ]);
 
+// An explicit `Area:` / `Feature Area:` / `Pickup Area:` declaration carries a
+// short comma/space list of slug-like tag tokens (`fkanban-cards`,
+// `fbrain-list, board`). A prose sentence that merely *begins* with "Area:"
+// (`Area: lines short-circuit prose scraping).`) must NOT be treated as an
+// authoritative declaration — it would scrape ordinary English words into
+// bogus `area:*` tags. Distinguish the two structurally: accept only a small
+// list whose every token is a bare slug (letters/digits joined by -, _ or /).
+// Whitespace-only multi-token lists must be visibly slug-like, so a sentence
+// such as `Area: lines short-circuit prose scraping` is not accepted just
+// because each word can be slugified.
+// Trailing sentence punctuation, internal apostrophes/parens, or too many
+// tokens all mark the line as prose, not a declaration.
+const MAX_EXPLICIT_AREA_TOKENS = 4;
+const AREA_TOKEN_RE = /^(?:#|area:)?[a-z0-9]+(?:[-/_][a-z0-9]+)*$/i;
+function isExplicitAreaDeclaration(value: string): boolean {
+  const tokens = value.trim().split(/[,\s]+/).filter((t) => t.length > 0);
+  if (tokens.length === 0 || tokens.length > MAX_EXPLICIT_AREA_TOKENS) return false;
+  if (!tokens.every((t) => AREA_TOKEN_RE.test(t))) return false;
+  if (!value.includes(",") && tokens.length > 1) {
+    return tokens.every((t) => /[-/_0-9]/.test(t.replace(/^#/, "").replace(/^area:/i, "")));
+  }
+  return true;
+}
+
+// Blank out ``` / ~~~ fenced code blocks so command examples inside them
+// (`fkanban tag rm <slug> area:<bogus-tag>`) can't be mistaken for explicit
+// `Area:` declarations or real command mentions. Replaced with blank lines so
+// line-anchored regexes keep their line geometry.
+function stripFencedCodeBlocks(text: string): string {
+  let inFence = false;
+  return text
+    .split("\n")
+    .map((line) => {
+      if (/^[ \t]*(?:```|~~~)/.test(line)) {
+        inFence = !inFence;
+        return "";
+      }
+      return inFence ? "" : line;
+    })
+    .join("\n");
+}
+
 function normalizePickupArea(value: string): string | null {
   const raw = value
     .trim()
@@ -460,12 +502,20 @@ export function pickupAreaTagsForCard(card: Pick<Card, "title" | "body" | "tags"
     if (isPickupAreaTag(tag)) add(tag);
   }
 
-  const text = `${card.title}\n${card.body}`;
-  const explicitAreaRe = /^[ \t]*(?:Feature[ \t]+Area|Pickup[ \t]+Area|Area):[ \t]*(.+)$/gim;
+  // Ignore fenced code blocks entirely: command examples inside them
+  // (`fkanban tag rm <slug> area:<bogus-tag>`) are illustrative, not
+  // declarations of the card's own pickup area.
+  const text = stripFencedCodeBlocks(`${card.title}\n${card.body}`);
+  const explicitAreaRe = /^(?:Feature[ \t]+Area|Pickup[ \t]+Area|Area):[ \t]*(.+)$/gm;
   let hasExplicitArea = false;
   for (const m of text.matchAll(explicitAreaRe)) {
+    const value = m[1] ?? "";
+    // Only a short slug-token list is an authoritative declaration; a prose
+    // sentence that merely begins with "Area:" is not (it would scrape
+    // ordinary words into bogus area tags).
+    if (!isExplicitAreaDeclaration(value)) continue;
     hasExplicitArea = true;
-    for (const part of (m[1] ?? "").split(/[,\s]+/)) add(part);
+    for (const part of value.split(/[,\s]+/)) add(part);
   }
 
   // Explicit signals are authoritative: once a card declares its area(s) via
