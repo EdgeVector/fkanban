@@ -395,7 +395,7 @@ export function createFkanbanMcpServer(
         force: z.boolean().optional().describe("Place the card even if it is blocked by an unfinished dependency."),
         repo: z.string().optional().describe("Repo a build agent clones (owner/name). When omitted: auto-derived from a subsystem tag; a card whose tags map to >1 repo is held needs_human instead of guessed, and no-signal cards stay headerless."),
         base: z.string().optional().describe("Base branch a PR targets (default: main)."),
-        kind: z.enum(["pr", "registry", "tracker"]).optional().describe("pr drives to a merged PR; registry edits an fbrain record (never picked up); tracker is informational."),
+        kind: z.enum(["pr", "registry", "tracker", "umbrella", "meta"]).optional().describe("pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up."),
         block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional().describe("Intentional hold (NOT dependency-blocked, which is derived from deps)."),
         block_reason: z.string().optional().describe("Why, when block_status != none."),
         north_star: z.string().optional().describe("fbrain North Star slug this card advances."),

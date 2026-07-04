@@ -12,6 +12,7 @@ import {
   applyPickupAreaDerivation,
   depsPathConnects,
   findPickupAreaOverlap,
+  isMetaCardKind,
   isPickupEligible,
   pickupAreaTagsForCard,
   normalizeBlockStatus,
@@ -47,8 +48,19 @@ describe("normalizers", () => {
   test("kind: known passes, empty/unknown → pr", () => {
     expect(normalizeKind("registry")).toBe("registry");
     expect(normalizeKind("tracker")).toBe("tracker");
+    expect(normalizeKind("umbrella")).toBe("umbrella");
+    expect(normalizeKind("meta")).toBe("meta");
     expect(normalizeKind("")).toBe("pr");
     expect(normalizeKind("bogus")).toBe("pr");
+  });
+
+  test("meta/grouping kinds are explicit non-work card kinds", () => {
+    expect(isMetaCardKind("registry")).toBe(true);
+    expect(isMetaCardKind("tracker")).toBe(true);
+    expect(isMetaCardKind("umbrella")).toBe(true);
+    expect(isMetaCardKind("meta")).toBe(true);
+    expect(isMetaCardKind("pr")).toBe(false);
+    expect(isMetaCardKind("bogus")).toBe(false);
   });
   test("block_status: known passes, empty/unknown → none", () => {
     expect(normalizeBlockStatus("needs_human")).toBe("needs_human");
@@ -112,6 +124,12 @@ describe("isPickupEligible", () => {
     expect(
       isPickupEligible(card({ kind: "", repo: "EdgeVector/fold", base: "main", body: "Target: fbrain record `dogfood-registry`" })),
     ).toBe(false);
+  });
+
+  test("tracker/umbrella/meta cards are never pickup-eligible", () => {
+    for (const kind of ["tracker", "umbrella", "meta"]) {
+      expect(isPickupEligible(card({ kind, repo: "EdgeVector/fold", base: "main" }))).toBe(false);
+    }
   });
 });
 

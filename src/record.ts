@@ -37,7 +37,7 @@ export type Card = {
   // All default to "" for pre-migration cards (rowToCard).
   repo: string; // owner/name a build agent clones; "" = not a code card
   base: string; // base branch a PR targets (default "main")
-  kind: string; // CardKind: pr|registry|tracker (normalizeKind for the enum)
+  kind: string; // CardKind: pr|registry|tracker|umbrella|meta (normalizeKind for the enum)
   block_status: string; // BlockStatus: none|needs_human|design_first|deferred
   block_reason: string; // free-text why, when block_status != none
   north_star: string; // fbrain North Star slug this advances
@@ -608,8 +608,10 @@ export function applyPickupAreaDerivation(
 // fields. Enum fields are stored as plain strings and normalized on use so a
 // stale/legacy/empty value degrades to the safe default instead of throwing.
 
-export const CARD_KINDS = ["pr", "registry", "tracker"] as const;
+export const CARD_KINDS = ["pr", "registry", "tracker", "umbrella", "meta"] as const;
 export type CardKind = (typeof CARD_KINDS)[number];
+export const META_CARD_KINDS = ["registry", "tracker", "umbrella", "meta"] as const;
+export type MetaCardKind = (typeof META_CARD_KINDS)[number];
 
 export const BLOCK_STATUSES = ["none", "needs_human", "design_first", "deferred"] as const;
 export type BlockStatus = (typeof BLOCK_STATUSES)[number];
@@ -620,6 +622,10 @@ export function isCardKind(s: string): s is CardKind {
 
 export function isBlockStatus(s: string): s is BlockStatus {
   return (BLOCK_STATUSES as readonly string[]).includes(s);
+}
+
+export function isMetaCardKind(kind: string): kind is MetaCardKind {
+  return (META_CARD_KINDS as readonly string[]).includes(normalizeKind(kind));
 }
 
 // Empty/unknown kind → "pr" (the default flow). Backfill sets "registry"
@@ -819,6 +825,8 @@ export function depStatus(
     const d = bySlug.get(dep);
     if (!d) {
       missing.push(dep);
+    } else if (isMetaCardKind(d.kind)) {
+      continue;
     } else if (d.column !== terminalColumnFor(d.board, boardTerminal)) {
       blockedBy.push(dep);
     }
@@ -994,7 +1002,7 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
 // except the heavy spec `body` (and other display-only fields). Used by the
 // read paths that fan out over the whole board so they don't re-download every
 // card's multi-paragraph body.
-export const CARD_STATUS_FIELDS = ["slug", "board", "column", "position", "tags", "created_at"];
+export const CARD_STATUS_FIELDS = ["slug", "board", "column", "position", "tags", "kind", "created_at"];
 
 // Like listCards but fetches only CARD_STATUS_FIELDS; absent fields come back
 // as "" on the Card. Enough for depStatus / blockedSlugSet / existence checks.
@@ -1009,7 +1017,7 @@ export async function listCardStatuses(node: NodeClient, cfg: Config): Promise<C
 // no longer drags every card's full spec over the wire (the first thing to time
 // out when the node is busy). `--json`/`--wide`/`search`/MCP still use the
 // full-body `listCards` because they genuinely surface structured/body fields.
-export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "assignee", "created_at"];
+export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "assignee", "kind", "created_at"];
 
 // Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields
 // (notably `body`) come back as "" on the Card. Enough for the text board render,

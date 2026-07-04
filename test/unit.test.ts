@@ -214,6 +214,16 @@ describe("dependencies", () => {
     expect(s.blocked).toBe(false);
   });
 
+  test("meta/grouping dep cards do not block pickup", () => {
+    for (const kind of ["tracker", "umbrella", "meta", "registry"]) {
+      const grouping = card({ slug: `${kind}-card`, kind, column: "todo" });
+      const x = card({ slug: `depends-on-${kind}`, deps: [grouping.slug] });
+      const s = depStatus(x, [grouping, x]);
+      expect(s.blocked, `${kind} should be non-blocking`).toBe(false);
+      expect(s.blockedBy).toEqual([]);
+    }
+  });
+
   // --- dep done-ness uses the dep board's TERMINAL column, not literal "done" ---
 
   test("boardTerminalMap maps each board slug to its last column", () => {
@@ -421,6 +431,21 @@ describe("render", () => {
     expect(out).toContain("Ship it");
     expect(out).toContain("#auth");
     expect(out).toContain("BACKLOG  (0)");
+  });
+
+  test("renders non-pr card kinds in list metadata", () => {
+    const board = {
+      slug: "default",
+      title: "Default board",
+      body: "",
+      columns: [...DEFAULT_COLUMNS],
+      created_at: "",
+      updated_at: "",
+    };
+    const out = renderBoard(board, [card({ slug: "umbrella", title: "Umbrella", kind: "umbrella" })], {
+      color: false,
+    });
+    expect(out).toContain("kind:umbrella");
   });
 
   test("renderWideTable prints the structured card fields in aligned columns", () => {

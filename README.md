@@ -8,7 +8,7 @@ of the `fold_db_node` (`/api/mutation` + `/api/query`) and the `schema_service`
 Two schemas, registered under the `fkanban/*` app namespace (so they never
 collide with `fbrain/*` or any other app on a shared daemon):
 
-- **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, created_at, updated_at`
+- **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, created_at, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
 - **`fkanban/Board`** — `slug, title, body, columns, created_at, updated_at`
 
 Default columns: `backlog → todo → doing → review → done`.
@@ -165,14 +165,14 @@ DONE  (0)
 | Command | What it does |
 |---|---|
 | `fkanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
-| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --priority P0-P3 --body`, or pipe body on stdin) |
+| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta --body`, or pipe body on stdin) |
 | `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` past a dependency block) |
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
 | `fkanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
-| `fkanban rank` | reorder a column by card priority so pickup works urgent cards first (`--board --column`, default `todo`) |
+| `fkanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
@@ -233,6 +233,11 @@ dependency reaches the `done` column, and `move` refuses to advance a blocked
 card into a working column (`doing` / `review` / `done`) unless you pass
 `--force`. Backlog/todo moves are always allowed.
 
+Cards marked `--kind tracker`, `--kind umbrella`, `--kind meta`, or
+`--kind registry` are context/grouping cards, not prerequisites: if another card
+lists one as a dep, it is treated as satisfied by default and does not block
+pickup.
+
 ```bash
 fkanban add api --title "Build API"
 fkanban add ui  --title "Build UI" --deps api   # ui depends on api
@@ -286,12 +291,14 @@ Priority is read, in precedence order, from **(1)** a line-anchored
 and the tombstone, it rides on the existing `tags` array — **no schema change /
 republish**.
 
-`rank` reassigns each card's `position` in priority order (ties broken by
+`rank` reassigns each work card's `position` in priority order (ties broken by
 `created_at`, oldest first), leaving gaps (`10, 20, 30, …`) so a card can be
-hand-inserted between two without a full re-rank. It's **idempotent** — re-running
-an already-ranked column writes nothing — and is the step the board groomer runs
-after promoting cards into `todo`. The priority *signal* alone does nothing until
-`rank` turns it into `position`.
+hand-inserted between two without a full re-rank. Context/grouping cards
+(`registry`, `tracker`, `umbrella`, `meta`) are skipped so they do not affect
+pickup order. It's **idempotent** — re-running an already-ranked column writes
+nothing — and is the step the board groomer runs after promoting cards into
+`todo`. The priority *signal* alone does nothing until `rank` turns it into
+`position`.
 
 ## MCP server
 

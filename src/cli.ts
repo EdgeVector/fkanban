@@ -136,7 +136,8 @@ Structured fields (auto-derived from the body/tags when omitted):
   --repo <owner/name>   repo a build agent clones (else: inferred from a subsystem
                         tag; >1-repo tags hold needs_human, no-signal cards stay headerless)
   --base <branch>       base branch a PR targets (default: main)
-  --kind <k>            pr|registry|tracker (registry cards are never picked up)
+  --kind <k>            pr|registry|tracker|umbrella|meta
+                        (non-pr kinds are context/grouping cards, never picked up)
   --block-status <s>    none|needs_human|design_first|deferred (intentional holds)
   --block-reason <text> why, when --block-status is set
   --north-star <slug>   fbrain North Star this card advances
@@ -234,13 +235,14 @@ Example:
 Usage:
   fkanban rank [options]
 
-Reassigns each card's \`position\` in priority order so \`fkanban-pickup\` (which
+Reassigns each work card's \`position\` in priority order so \`fkanban-pickup\` (which
 drains the LOWEST position first) works the most urgent cards first. Priority is
 read from a \`Priority: P<n>\` body header (wins) or a p0–p3 tag (set via
 \`add --priority\`); cards with neither sort as P2 (normal). Ties break by
-created_at (oldest first). Idempotent — re-running an already-ranked column
-writes nothing. This is the step the board groomer runs after promoting cards
-into \`todo\`.
+created_at (oldest first). Registry/tracker/umbrella/meta cards are skipped so
+grouping cards do not affect pickup order. Idempotent — re-running an
+already-ranked column writes nothing. This is the step the board groomer runs
+after promoting cards into \`todo\`.
 
 Options:
   --board <slug>        board whose column to rank (default: default)

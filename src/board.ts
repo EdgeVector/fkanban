@@ -2,7 +2,7 @@
 // listed under their column in position order.
 
 import { DEFAULT_BOARD_SLUG, resolveColumns } from "./schemas.ts";
-import { sortCards, type Board, type Card, type DepStatus } from "./record.ts";
+import { normalizeKind, sortCards, type Board, type Card, type DepStatus } from "./record.ts";
 
 export type RenderOptions = {
   // Restrict to a single column.
@@ -197,6 +197,8 @@ export function renderWideTable(cards: Card[]): string {
 
 function cardMetaSuffix(c: Card, color: boolean): string {
   const meta: string[] = [];
+  const kind = normalizeKind(c.kind);
+  if (kind !== "pr") meta.push(`kind:${kind}`);
   if (c.assignee) meta.push(`@${c.assignee}`);
   if (c.deps.length > 0) meta.push(`deps:${c.deps.length}`);
   if (c.tags.length > 0) meta.push(c.tags.map((t) => `#${t}`).join(" "));

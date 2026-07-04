@@ -254,6 +254,18 @@ describe("rank command", () => {
     expect(done?.position).not.toBe("10");
   });
 
+  test("skips meta/grouping cards in the ranked column", async () => {
+    await addCmd({ cfg, node, slug: "work", column: "todo", priority: "P1", tags: ["fold"] });
+    await addCmd({ cfg, node, slug: "umbrella", column: "todo", priority: "P0", tags: ["fold"], kind: "umbrella" });
+    const before = (await findCard(node, cfg, "umbrella"))?.position;
+    const res = await rankCmd({ cfg, node });
+
+    expect(res.total).toBe(1);
+    expect(res.order.map((o) => o.slug)).toEqual(["work"]);
+    expect((await findCard(node, cfg, "work"))?.position).toBe("10");
+    expect((await findCard(node, cfg, "umbrella"))?.position).toBe(before);
+  });
+
   test("an empty column ranks cleanly (total 0, nothing written)", async () => {
     const res = await rankCmd({ cfg, node, column: "review" });
     expect(res.total).toBe(0);
