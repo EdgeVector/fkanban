@@ -102,6 +102,12 @@ describe("misapplied-flag rejection (globally-known, wrong command)", () => {
     expect(stderr).toContain("fkanban show --help");
   });
 
+  test("show --board: accepted as a compatibility no-op (slugs are global)", async () => {
+    const { code, stderr } = await runCli(["show", "any-slug", "--board", "default"]);
+    expect(code).not.toBe(2);
+    expect(stderr).not.toContain("Unknown option");
+  });
+
   test("move --board: rejected with exit 2 (slugs are global; move can't scope)", async () => {
     const { code, stderr } = await runCli(["move", "any-slug", "doing", "--board", "X"]);
     expect(code).toBe(2);
