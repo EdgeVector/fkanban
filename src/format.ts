@@ -60,6 +60,14 @@ export interface RankResult {
   order: { slug: string; priority: string; position: number }[];
 }
 
+export interface MigrateAreaTagsResult {
+  scanned: number;
+  changed: number;
+  skippedDone: number;
+  dryRun: boolean;
+  cards: { slug: string; board: string; column: string; removed: string[]; added: string[] }[];
+}
+
 function emit(res: unknown, human: string, json: boolean | undefined): string {
   return json ? JSON.stringify(res) : human;
 }
@@ -113,4 +121,18 @@ export function formatRank(res: RankResult, json?: boolean): string {
       : `ranked ${res.board}/${res.column}: ${res.reordered} of ${res.total} reordered by priority ` +
         `(${res.order.map((c) => `${c.slug}[${c.priority}]`).join(", ")})`;
   return emit(res, human, json);
+}
+
+export function formatMigrateAreaTags(res: MigrateAreaTagsResult, json?: boolean): string {
+  if (json) return JSON.stringify(res);
+  const verb = res.dryRun ? "would re-derive" : "re-derived";
+  const lines = res.cards.map((c) => {
+    const rm = c.removed.length ? ` -[${c.removed.join(", ")}]` : "";
+    const add = c.added.length ? ` +[${c.added.join(", ")}]` : "";
+    return `  ${c.slug} (${c.board}/${c.column})${rm}${add}`;
+  });
+  const head =
+    `${verb} pickup area tags: ${res.changed} of ${res.scanned} active cards changed ` +
+    `(${res.skippedDone} done/terminal skipped)${res.dryRun ? " — DRY RUN, no writes" : ""}`;
+  return res.cards.length ? `${head}\n${lines.join("\n")}` : head;
 }
