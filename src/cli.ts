@@ -277,6 +277,7 @@ Usage:
 
 Options:
   --json                machine-readable output
+  --board <slug>        accepted as a compatibility no-op; card slugs are global
 
 Example:
   fkanban show ship-login`),
@@ -552,6 +553,9 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body"]),
   rank: new Set(["board", "column"]),
   search: new Set(["board", "column", "field", "limit", "all"]),
+  // show accepts --board as a compatibility no-op because agents often copy it
+  // from list/add flows. Card slugs are global, so dispatch still ignores it.
+  show: new Set(["board"]),
   // board's subcommands read title/columns/body (create) and force (rm).
   board: new Set(["title", "columns", "body", "force"]),
 };
