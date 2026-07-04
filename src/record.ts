@@ -385,9 +385,10 @@ export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): 
 // File-overlap alone misses work that touches the same product/source region
 // after an agent expands scope. Keep a schema-free coordination hint in tags:
 // `area:<tool>-<command>` (for example `area:fbrain-list`) is derived from
-// explicit Area:/Pickup Area: body lines, common CLI/MCP command names in card
-// specs (`fbrain list`, `fbrain_list`), and narrowly-known feature-area phrases
-// that otherwise don't look like commands (`forge CI`, `.forgejo/workflows/*`).
+// explicit Area:/Pickup Area: body lines, a fixed allowlist of real CLI/MCP
+// command names in card specs (`fbrain list`, `fbrain_list`), and
+// narrowly-known feature-area phrases that otherwise don't look like commands
+// (`forge CI`, `.forgejo/workflows/*`).
 // When a ready todo card shares a pickup area with another unblocked active card
 // in the same repo, put the new card on a reversible needs_human hold so pickup
 // serializes or re-grooms it.
@@ -399,6 +400,39 @@ const FEATURE_AREA_PATTERNS: Array<{ area: string; pattern: RegExp }> = [
   { area: "forge-ci", pattern: /\bforge(?:jo)?[\s_-]+(?:required[\s_-]+)?checks?\b/gi },
   { area: "forge-ci", pattern: /(?:^|[`"'([{\s])\.forgejo\/workflows(?:\/[A-Za-z0-9._/-]+)?/gim },
 ];
+
+// Real command names only — NOT "any following word". A prose match on
+// "fbrain got indexed" or the mandatory "Follow the fkanban-agent skill"
+// boilerplate must not mint an area tag. Keep in sync with src/cli.ts
+// commands (fkanban) and the fbrain MCP tool surface (fbrain).
+const FKANBAN_COMMANDS = new Set([
+  "init",
+  "mcp",
+  "version",
+  "doctor",
+  "add",
+  "move",
+  "dep",
+  "tag",
+  "list",
+  "rank",
+  "search",
+  "show",
+  "rm",
+  "board",
+]);
+const FBRAIN_COMMANDS = new Set([
+  "ask",
+  "get",
+  "put",
+  "list",
+  "search",
+  "link",
+  "append",
+  "delete",
+  "status",
+  "backlinks",
+]);
 
 function normalizePickupArea(value: string): string | null {
   const raw = value
@@ -428,18 +462,28 @@ export function pickupAreaTagsForCard(card: Pick<Card, "title" | "body" | "tags"
 
   const text = `${card.title}\n${card.body}`;
   const explicitAreaRe = /^[ \t]*(?:Feature[ \t]+Area|Pickup[ \t]+Area|Area):[ \t]*(.+)$/gim;
+  let hasExplicitArea = false;
   for (const m of text.matchAll(explicitAreaRe)) {
+    hasExplicitArea = true;
     for (const part of (m[1] ?? "").split(/[,\s]+/)) add(part);
   }
 
-  const commandRe = /\b(fbrain|fkanban)(?:[ \t]+|[_-]+)([a-z][a-z0-9-]*)\b/gi;
-  for (const m of text.matchAll(commandRe)) {
-    add(`${m[1]}-${m[2]}`);
-  }
+  // Explicit signals are authoritative: once a card declares its area(s) via
+  // Area:/Pickup Area: lines, skip prose scraping entirely rather than
+  // layering on false positives from unrelated command-shaped mentions.
+  if (!hasExplicitArea) {
+    const commandRe = /\b(fbrain|fkanban)(?:[ \t]+|[_-]+)([a-z][a-z0-9-]*)\b/gi;
+    for (const m of text.matchAll(commandRe)) {
+      const tool = (m[1] ?? "").toLowerCase();
+      const cmd = (m[2] ?? "").toLowerCase();
+      const allowlist = tool === "fbrain" ? FBRAIN_COMMANDS : FKANBAN_COMMANDS;
+      if (allowlist.has(cmd)) add(`${tool}-${cmd}`);
+    }
 
-  for (const { area, pattern } of FEATURE_AREA_PATTERNS) {
-    if (pattern.test(text)) add(area);
-    pattern.lastIndex = 0;
+    for (const { area, pattern } of FEATURE_AREA_PATTERNS) {
+      if (pattern.test(text)) add(area);
+      pattern.lastIndex = 0;
+    }
   }
 
   return [...areas].sort();
