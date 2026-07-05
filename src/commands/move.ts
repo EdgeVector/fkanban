@@ -15,8 +15,8 @@ import {
   depStatus,
   doneAtForColumnTransition,
   deriveStructuredFields,
+  ensureBoardRecord,
   ensureColumn,
-  findBoard,
   isDepEnforcedColumn,
   listBoards,
   listCards,
@@ -40,8 +40,8 @@ export type MoveResult = { slug: string; from: string; to: string };
 
 export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
-  const board = await findBoard(opts.node, opts.cfg, card.board);
-  const columns = board?.columns ?? [];
+  const board = await ensureBoardRecord(opts.node, opts.cfg, card.board);
+  const columns = board.columns;
   ensureColumn(opts.column, columns);
 
   // Soft-block: refuse to complete/start a card while any dependency is

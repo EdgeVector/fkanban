@@ -4,6 +4,8 @@
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import { schemaHashFor, type Config } from "./config.ts";
 import {
+  DEFAULT_BOARD_SLUG,
+  DEFAULT_COLUMNS,
   fieldsFor,
   isDefaultColumn,
   resolveColumns,
@@ -1232,6 +1234,22 @@ export async function findBoard(node: NodeClient, cfg: Config, slug: string): Pr
     : null;
 }
 
+function boardCreateHint(slug: string): string {
+  return `Create it first: \`fkanban board create ${slug} --columns ${DEFAULT_COLUMNS.join(",")}\`.`;
+}
+
+function seededBoard(slug: string): Board {
+  const now = nowIso();
+  return {
+    slug,
+    title: slug === DEFAULT_BOARD_SLUG ? "Default board" : slug,
+    body: "",
+    columns: [...DEFAULT_COLUMNS],
+    created_at: now,
+    updated_at: now,
+  };
+}
+
 // Resolve a board by slug, throwing the canonical `board_not_found` error
 // when it doesn't exist. Shared by `add`, `list`, and `search` so the message
 // + hint stay identical in one place.
@@ -1241,10 +1259,35 @@ export async function requireBoard(node: NodeClient, cfg: Config, slug: string):
     throw new FkanbanError({
       code: "board_not_found",
       message: `Board "${slug}" does not exist.`,
-      hint: `Create it first: \`fkanban board create ${slug}\` (or use the default board).`,
+      hint: boardCreateHint(slug),
     });
   }
   return board;
+}
+
+// Write paths can recover a missing board record when live cards still point at
+// that board: the cards prove the board slug is real user state, so recreate the
+// board metadata with default columns instead of stranding add/move.
+export async function ensureBoardRecord(node: NodeClient, cfg: Config, slug: string): Promise<Board> {
+  const board = await findBoard(node, cfg, slug);
+  if (board) return board;
+
+  const referenced = (await listCardStatuses(node, cfg)).some((c) => c.board === slug);
+  if (!referenced) {
+    throw new FkanbanError({
+      code: "board_not_found",
+      message: `Board "${slug}" does not exist.`,
+      hint: boardCreateHint(slug),
+    });
+  }
+
+  const healed = seededBoard(slug);
+  await node.createRecord({
+    schemaHash: schemaHashFor("board", cfg),
+    fields: boardToFields(healed),
+    keyHash: healed.slug,
+  });
+  return healed;
 }
 
 export function cardToFields(c: Card): Record<string, unknown> {
