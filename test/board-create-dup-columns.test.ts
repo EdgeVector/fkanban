@@ -13,7 +13,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { FkanbanError } from "../src/client.ts";
-import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
+import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { listBoards } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
@@ -37,13 +37,13 @@ function fakeNode(): NodeClient {
     }
     return t;
   };
-  const rowsFor = (schemaHash: string, filter?: { HashKey: string }): QueryRow[] => {
+  const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const t = tableFor(schemaHash);
-    const entries = filter
-      ? t.has(filter.HashKey)
-        ? [[filter.HashKey, t.get(filter.HashKey)!] as const]
-        : []
-      : [...t.entries()];
+    const entries = filter?.HashKey
+      ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : [])
+      : [...t.entries()].filter(([, fields]) =>
+          !filter || Object.entries(filter).every(([field, value]) => fields[field] === value)
+        );
     return entries.map(([hash, fields]) => ({ fields, key: { hash, range: null } }));
   };
   const notImpl = (m: string) => async (): Promise<never> => {

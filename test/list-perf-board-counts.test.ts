@@ -15,7 +15,7 @@ import { describe, expect, test } from "bun:test";
 
 import { boardListCmd, boardListResult } from "../src/commands/board.ts";
 import { listCmd } from "../src/commands/list.ts";
-import { type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
+import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
 
@@ -64,17 +64,20 @@ function fakeNode(opts: {
   boards: Board[];
   cards: Card[];
   cardScanError?: boolean;
-}): NodeClient & { cardScanFields: string[][] } {
+  rejectColumnFilter?: boolean;
+}): NodeClient & { cardScanFields: string[][]; cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> } {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
   const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
   const cardScanFields: string[][] = [];
+  const cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> = [];
   const stub = () => {
     throw new Error("not implemented in fake node");
   };
-  const node: NodeClient & { cardScanFields: string[][] } = {
+  const node: NodeClient & { cardScanFields: string[][]; cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> } = {
     baseUrl: "http://fake",
     userHash: "test-user",
     cardScanFields,
+    cardQueries,
     autoIdentity: stub as never,
     bootstrap: stub as never,
     loadSchemas: stub as never,
@@ -86,14 +89,27 @@ function fakeNode(opts: {
     nodeTransport: stub as never,
     async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
       if (q.schemaHash === "cardhash") {
+        cardQueries.push({ fields: q.fields, filter: q.filter });
         // Only the unfiltered full-board scan is the list/count payload; the
         // point-read (HashKey) findCard is not relevant here.
         if (!q.filter) {
           cardScanFields.push(q.fields);
           if (opts.cardScanError) throw new Error("node shed the full scan (load)");
         }
+        if (opts.rejectColumnFilter && q.filter?.column) {
+          throw new FkanbanError({
+            code: "node_http_400",
+            message: "Node /api/query returned HTTP 400: unsupported filter.",
+          });
+        }
         let rows = cardRows;
-        if (q.filter) rows = rows.filter((r) => r.key.hash === q.filter!.HashKey);
+        if (q.filter?.HashKey) {
+          rows = rows.filter((r) => r.key.hash === q.filter!.HashKey);
+        } else if (q.filter) {
+          rows = rows.filter((r) =>
+            Object.entries(q.filter!).every(([field, value]) => r.fields[field] === value)
+          );
+        }
         return { ok: true, results: rows };
       }
       let rows = q.schemaHash === "boardhash" ? boardRows : [];
@@ -226,5 +242,56 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(scan).toContain("base");
     expect(scan).toContain("pr_url");
     expect(scan).toContain("updated_at");
+  });
+
+  test("--column sends an indexed column filter instead of an unfiltered card scan", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "todo-a", column: "todo" }),
+        card({ slug: "doing-b", column: "doing" }),
+      ],
+    });
+    const out = await listCmd({ cfg, node, column: "todo", json: true });
+    expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
+
+    expect(node.cardQueries.some((q) => q.filter?.column === "todo")).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
+  });
+
+  test("--column point-reads dependency statuses for blocked metadata", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "todo-a", column: "todo", deps: ["dep-a"] }),
+        card({ slug: "dep-a", column: "doing" }),
+        card({ slug: "unrelated", column: "review" }),
+      ],
+    });
+    const out = await listCmd({ cfg, node, column: "todo", json: true });
+    const parsed = JSON.parse(out) as Array<Card & { blocked: boolean; blockedBy: string[] }>;
+    expect(parsed.map((c) => c.slug)).toEqual(["todo-a"]);
+    expect(parsed[0]!.blocked).toBe(true);
+    expect(parsed[0]!.blockedBy).toEqual(["dep-a"]);
+
+    expect(node.cardQueries.some((q) => q.filter?.column === "todo")).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "dep-a")).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
+  });
+
+  test("--column falls back to the old full scan when a node rejects column filters", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "todo-a", column: "todo" }),
+        card({ slug: "doing-b", column: "doing" }),
+      ],
+      rejectColumnFilter: true,
+    });
+    const out = await listCmd({ cfg, node, column: "todo", json: true });
+    expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
+
+    expect(node.cardQueries[0]!.filter).toEqual({ column: "todo" });
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(true);
   });
 });
