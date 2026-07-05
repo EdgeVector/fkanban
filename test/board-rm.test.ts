@@ -13,6 +13,7 @@ import {
   emptyStructuredFields,
   isTombstoned,
   rowToBoard,
+  rowToCard,
   type Board,
   type Card,
 } from "../src/record.ts";
@@ -137,17 +138,24 @@ describe("board rm", () => {
     expect(updates).toHaveLength(0);
   });
 
-  test("removes a board with live cards when --force is set", async () => {
+  test("removes a board and tombstones its live cards when --force is set", async () => {
     const updates: Update[] = [];
     const node = fakeNode({
       boards: [board({ slug: "busy" })],
-      cards: [card({ slug: "c1", board: "busy" })],
+      cards: [card({ slug: "c1", board: "busy" }), card({ slug: "c2", board: "other" })],
       updates,
     });
     const res = await boardRmCmd({ cfg, node, slug: "busy", force: true });
     expect(res.slug).toBe("busy");
-    expect(updates).toHaveLength(1);
-    const written = rowToBoard({ fields: updates[0]!.fields, key: { hash: "busy", range: null } });
+    expect(res.deletedCards).toEqual(["c1"]);
+    expect(updates).toHaveLength(2);
+    const writtenCard = rowToCard({ fields: updates[0]!.fields, key: { hash: "c1", range: null } });
+    expect(updates[0]!.schemaHash).toBe("cardhash");
+    expect(updates[0]!.keyHash).toBe("c1");
+    expect(isTombstoned(writtenCard.tags)).toBe(true);
+    const written = rowToBoard({ fields: updates[1]!.fields, key: { hash: "busy", range: null } });
+    expect(updates[1]!.schemaHash).toBe("boardhash");
+    expect(updates[1]!.keyHash).toBe("busy");
     expect(isTombstoned(written.columns)).toBe(true);
   });
 
@@ -166,7 +174,9 @@ describe("board rm", () => {
 
 describe("formatBoardRm", () => {
   test("human + json output", () => {
-    expect(formatBoardRm({ slug: "scratch" })).toBe("removed board scratch");
-    expect(formatBoardRm({ slug: "scratch" }, true)).toBe(JSON.stringify({ slug: "scratch" }));
+    expect(formatBoardRm({ slug: "scratch", deletedCards: [] })).toBe("removed board scratch");
+    expect(formatBoardRm({ slug: "scratch", deletedCards: ["c1"] }, true)).toBe(
+      JSON.stringify({ slug: "scratch", deletedCards: ["c1"] }),
+    );
   });
 });
