@@ -1,7 +1,8 @@
 // Owner-session attestation tests: mint over a Unix-domain control socket,
 // exchange for a session token, attach X-Folddb-Session to every node request,
-// and re-pair once on a 403 transport_not_attested. The full-surface socket can
-// serve the exchange directly; narrower sockets retain the TCP exchange fallback.
+// and re-pair once on a 403 transport_not_attested. The pairing-code exchange
+// always goes over the control socket now — the loopback TCP listener is retired
+// (fold `fold-retire-tcp-listener`), so there is no TCP exchange fallback.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -25,33 +26,33 @@ function socketPath(): string {
 }
 
 describe("attestOwnerSession", () => {
-  test("mints over the UDS socket, exchanges over TCP, returns the token", async () => {
+  test("mints AND exchanges the pairing code over the UDS socket, returns the token", async () => {
     const sock = socketPath();
+    const seen: string[] = [];
+    let exchangedCode: string | undefined;
     const uds = Bun.serve({
       unix: sock,
-      fetch(req) {
-        expect(new URL(req.url).pathname).toBe("/control/browser-pairing-code");
-        return Response.json({ pairing_code: "code-xyz" });
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        seen.push(path);
+        if (path === "/control/browser-pairing-code") {
+          return Response.json({ pairing_code: "code-xyz" });
+        }
+        if (path === "/api/session/browser-pair") {
+          const body = (await req.json()) as Record<string, unknown>;
+          exchangedCode = body.code as string;
+          return Response.json({ session_token: "tok-123" });
+        }
+        return Response.json({ error: "unexpected_path", path }, { status: 500 });
       },
     });
     track(uds);
 
-    let exchangedCode: string | undefined;
-    const tcp = Bun.serve({
-      port: 0,
-      async fetch(req) {
-        const url = new URL(req.url);
-        expect(url.pathname).toBe("/api/session/browser-pair");
-        const body = (await req.json()) as Record<string, unknown>;
-        exchangedCode = body.code as string;
-        return Response.json({ session_token: "tok-123" });
-      },
-    });
-    track(tcp);
-
-    const token = await attestOwnerSession(`http://127.0.0.1:${tcp.port}`, sock);
+    // nodeUrl is a dead placeholder — the exchange never dials TCP (listener retired).
+    const token = await attestOwnerSession("http://127.0.0.1:1", sock);
     expect(token).toBe("tok-123");
     expect(exchangedCode).toBe("code-xyz");
+    expect(seen).toEqual(["/control/browser-pairing-code", "/api/session/browser-pair"]);
   });
 
   test("full-surface socket exchanges the pairing code over UDS without TCP", async () => {
@@ -93,14 +94,17 @@ describe("attestOwnerSession", () => {
 
   test("returns null when the exchange is refused", async () => {
     const sock = socketPath();
-    const uds = Bun.serve({ unix: sock, fetch: () => Response.json({ pairing_code: "c" }) });
-    track(uds);
-    const tcp = Bun.serve({
-      port: 0,
-      fetch: () => Response.json({ error: "bad_code" }, { status: 400 }),
+    // The exchange (over the socket now) is refused → attestation fails → null.
+    const uds = Bun.serve({
+      unix: sock,
+      fetch(req) {
+        const path = new URL(req.url).pathname;
+        if (path === "/control/browser-pairing-code") return Response.json({ pairing_code: "c" });
+        return Response.json({ error: "bad_code" }, { status: 400 });
+      },
     });
-    track(tcp);
-    const token = await attestOwnerSession(`http://127.0.0.1:${tcp.port}`, sock);
+    track(uds);
+    const token = await attestOwnerSession("http://127.0.0.1:1", sock);
     expect(token).toBeNull();
   });
 });
@@ -108,10 +112,9 @@ describe("attestOwnerSession", () => {
 describe("newNodeClient attestation wiring", () => {
   test("attaches X-Folddb-Session to node requests once paired", async () => {
     const sock = socketPath();
-    // Socket-first (this card): the UDS now serves BOTH the control-plane mint
-    // AND the data-plane (query), since a present socket is the default
-    // transport for `service: node`. The session header must still be threaded
-    // onto the data-plane requests, now arriving over the socket.
+    // Socket-first + TCP retired: the UDS serves the control-plane mint, the
+    // pairing-code EXCHANGE, AND the data-plane (query). The session header must
+    // still be threaded onto the data-plane requests over the socket.
     const seenSessionHeaders: Array<string | null> = [];
     const uds = Bun.serve({
       unix: sock,
@@ -120,22 +123,17 @@ describe("newNodeClient attestation wiring", () => {
         if (url.pathname === "/control/browser-pairing-code") {
           return Response.json({ pairing_code: "pc" });
         }
+        if (url.pathname === "/api/session/browser-pair") {
+          return Response.json({ session_token: "sess-1" });
+        }
         seenSessionHeaders.push(req.headers.get("X-Folddb-Session"));
         return Response.json({ ok: true, results: [], has_more: false });
       },
     });
     track(uds);
 
-    // The pairing-code EXCHANGE still happens over TCP (attestation design,
-    // unchanged by socket-first) — only the data plane moved to the socket.
-    const tcp = Bun.serve({
-      port: 0,
-      fetch: () => Response.json({ session_token: "sess-1" }),
-    });
-    track(tcp);
-
     const node = newNodeClient({
-      baseUrl: `http://127.0.0.1:${tcp.port}`,
+      baseUrl: "http://127.0.0.1:1", // loopback placeholder; socket-only never dials it
       userHash: "uh",
       socketPath: sock,
     });
@@ -153,6 +151,8 @@ describe("newNodeClient attestation wiring", () => {
     // re-mints over the socket and retries — also over the socket — carrying
     // the fresh token.
     let mutationCalls = 0;
+    // Socket-first + TCP retired: the UDS serves the mint, the pairing-code
+    // exchange, AND the data-plane mutation.
     const uds = Bun.serve({
       unix: sock,
       async fetch(req) {
@@ -160,6 +160,10 @@ describe("newNodeClient attestation wiring", () => {
         if (url.pathname === "/control/browser-pairing-code") {
           mintCount++;
           return Response.json({ pairing_code: `pc-${mintCount}` });
+        }
+        if (url.pathname === "/api/session/browser-pair") {
+          const body = (await req.json()) as Record<string, unknown>;
+          return Response.json({ session_token: `sess-from-${body.code as string}` });
         }
         if (url.pathname === "/api/mutation") {
           mutationCalls++;
@@ -176,22 +180,8 @@ describe("newNodeClient attestation wiring", () => {
     });
     track(uds);
 
-    // The pairing-code EXCHANGE still goes over TCP (unchanged by socket-first).
-    const tcp = Bun.serve({
-      port: 0,
-      async fetch(req) {
-        const url = new URL(req.url);
-        if (url.pathname === "/api/session/browser-pair") {
-          const body = (await req.json()) as Record<string, unknown>;
-          return Response.json({ session_token: `sess-from-${body.code as string}` });
-        }
-        return Response.json({ error: "unexpected" }, { status: 500 });
-      },
-    });
-    track(tcp);
-
     const node = newNodeClient({
-      baseUrl: `http://127.0.0.1:${tcp.port}`,
+      baseUrl: "http://127.0.0.1:1", // loopback placeholder; socket-only never dials it
       userHash: "uh",
       socketPath: sock,
     });

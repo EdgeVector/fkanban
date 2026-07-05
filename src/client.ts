@@ -278,7 +278,11 @@ export type AttestationOutcome =
 // does the failure later surface (a `transport_not_attested` 403), and the
 // captured reason is what turns that into an actionable error.
 export async function attestOwnerSessionDetailed(
-  nodeUrl: string,
+  // Retained for signature compatibility only. The pairing-code exchange used to
+  // fall back to this TCP node URL for non-full-surface sockets, but the loopback
+  // TCP listener is retired (fold `fold-retire-tcp-listener`) so the exchange now
+  // always goes over the UDS control socket (see below).
+  _nodeUrl: string,
   socketPath: string,
   verbose: Verbose = noopVerbose,
 ): Promise<AttestationOutcome> {
@@ -325,21 +329,21 @@ export async function attestOwnerSessionDetailed(
     }
   }
 
-  // Exchange the code for a session token. A full-surface socket serves this
-  // route directly; narrower sockets fall back to the historical TCP exchange.
+  // Exchange the code for a session token OVER THE SAME UDS control socket the
+  // mint used. The loopback TCP listener is retired (fold `fold-retire-tcp-listener`),
+  // so the old `isFullSurfaceSocket`-gated TCP fallback for narrower sockets could
+  // only ever dead-end on connect and hang (~5s x SOCKET_CONNECT_RETRY_MAX, ~20-30s)
+  // before "proceeding unattested" — the dominant source of per-invocation CLI
+  // slowness. The node serves this route on the control socket regardless of
+  // surface (verified against the primary `folddb.sock`), so always use the socket.
   try {
-    const exchangeOverSocket = isFullSurfaceSocket(socketPath);
-    const exchangeUrl = exchangeOverSocket
-      ? "http://localhost/api/session/browser-pair"
-      : `${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`;
-    const exchangeInit: RequestInit & { unix?: string } = {
+    const exchangeRes = await fetch("http://localhost/api/session/browser-pair", {
       method: "POST",
+      unix: socketPath,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code: pairingCode }),
       signal: AbortSignal.timeout(5_000),
-    };
-    if (exchangeOverSocket) exchangeInit.unix = socketPath;
-    const exchangeRes = await fetch(exchangeUrl, exchangeInit);
+    });
     if (!exchangeRes.ok) {
       verbose(`attest: exchange refused (HTTP ${exchangeRes.status}) — proceeding unattested`);
       return fail(`the pairing-code exchange was refused (HTTP ${exchangeRes.status})`);

@@ -6,7 +6,7 @@ import {
   boardTerminalMap,
   depStatus,
   listBoards,
-  listCardStatuses,
+  listDependencyStatusesForCards,
   requireCard,
   type Card,
 } from "../record.ts";
@@ -29,8 +29,12 @@ export async function showResult(opts: {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Resolve dep done-ness against each dep board's terminal column (a dep may
   // live on a different board than this card), falling back to `done`.
+  // POINT-READ only this card's deps rather than scanning the whole card table:
+  // `depStatus` only consults `card.deps`, so fetching all ~1000s of cards here
+  // was a full-collection scan (the dominant per-`show` cost) for no benefit.
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
-  const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg), boardTerminal);
+  const relevant = await listDependencyStatusesForCards(opts.node, opts.cfg, [card]);
+  const status = depStatus(card, relevant, boardTerminal);
   const detail: CardDetail = {
     ...card,
     blocked: status.blocked,

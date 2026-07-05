@@ -20,7 +20,7 @@ import {
   isDepEnforcedColumn,
   listBoards,
   listCards,
-  listCardStatuses,
+  listDependencyStatusesForCards,
   nowIso,
   requireCard,
   type Card,
@@ -54,7 +54,10 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   if (!opts.force) {
     const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
     if (isDepEnforcedColumn(opts.column, card.board, boardTerminal)) {
-      const status = depStatus(card, await listCardStatuses(opts.node, opts.cfg), boardTerminal);
+      // Point-read only this card's deps (depStatus only consults `card.deps`)
+      // rather than scanning the whole card table for a single-card dep check.
+      const relevant = await listDependencyStatusesForCards(opts.node, opts.cfg, [card]);
+      const status = depStatus(card, relevant, boardTerminal);
       if (status.blocked) {
         throw new FkanbanError({
           code: "card_blocked",
