@@ -19,7 +19,7 @@ import { ConfigMissingError } from "../src/config.ts";
 
 import { createFkanbanMcpServer, FKANBAN_MCP_INSTRUCTIONS } from "../src/mcp/server.ts";
 import { FkanbanError } from "../src/client.ts";
-import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
+import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { boardToFields, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
@@ -39,7 +39,8 @@ const cfg: Config = {
 
 // In-memory fake node: a (schemaHash → keyHash → fields) store. Mirrors just
 // enough of fold_db_node's contract for the write commands — point reads via a
-// HashKey filter, full scans without one, and create/update/delete upserts.
+// HashKey filter, exact field filters, full scans without one, and
+// create/update/delete upserts.
 function fakeNode(): NodeClient {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
   const tableFor = (schemaHash: string) => {
@@ -50,9 +51,13 @@ function fakeNode(): NodeClient {
     }
     return t;
   };
-  const rowsFor = (schemaHash: string, filter?: { HashKey: string }): QueryRow[] => {
+  const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const t = tableFor(schemaHash);
-    const entries = filter ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : []) : [...t.entries()];
+    const entries = filter?.HashKey
+      ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : [])
+      : [...t.entries()].filter(([, fields]) =>
+          !filter || Object.entries(filter).every(([field, value]) => fields[field] === value)
+        );
     return entries.map(([hash, fields]) => ({ fields, key: { hash, range: null } }));
   };
   const notImpl = (m: string) => async (): Promise<never> => {

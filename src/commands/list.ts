@@ -3,11 +3,27 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { blockedSlugSet, boardTerminalMap, depStatus, ensureColumn, findBoard, listBoards, listCards, listCardsForDisplay, requireBoard, sortCards, type Card, type Board } from "../record.ts";
+import {
+  CARD_DISPLAY_FIELDS,
+  blockedSlugSet,
+  boardTerminalMap,
+  depStatus,
+  ensureColumn,
+  findBoard,
+  listBoards,
+  listCards,
+  listCardsByColumn,
+  listCardsForDisplay,
+  listDependencyStatusesForCards,
+  requireBoard,
+  sortCards,
+  type Card,
+  type Board,
+} from "../record.ts";
 import { capPerColumn, renderBoard, renderWideTable, type RenderOptions } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
-import { DEFAULT_COLUMNS } from "../schemas.ts";
+import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
 import { type CardDetail } from "./show.ts";
 
 // Cards shown per column before the rest collapse to a "… N more" line.
@@ -127,18 +143,26 @@ export async function listResult(
   // path is unchanged.
   if (opts.column !== undefined) ensureColumn(opts.column, resolvedBoard.columns);
 
-  // Body-free fetch on the text path (`displayOnly`): the render + filters +
-  // dep/blocked fan-out only need CARD_DISPLAY_FIELDS, never `body`. The
-  // `--json` and MCP callers leave `displayOnly` unset so they keep full bodies.
-  const allCards = opts.displayOnly
-    ? await listCardsForDisplay(opts.node, opts.cfg)
-    : await listCards(opts.node, opts.cfg);
+  // Body-free fetch on the text path (`displayOnly`): the render + filters need
+  // CARD_DISPLAY_FIELDS, never `body`. With --column, fetch the visible set via
+  // a server-side column filter, then point-read only its deps for blocked
+  // status. Without --column, keep the existing whole-board read so the normal
+  // full board render and multi-board footer retain their current behavior.
+  const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : fieldsFor("card");
+  const columnCards = opts.column
+    ? await listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields)
+    : null;
+  const allCards = columnCards
+    ? await listDependencyStatusesForCards(opts.node, opts.cfg, columnCards)
+    : opts.displayOnly
+      ? await listCardsForDisplay(opts.node, opts.cfg)
+      : await listCards(opts.node, opts.cfg);
   // Terminal column per board (board slug → last column) so a dep counts as
   // done at its OWN board's final column, not only a literal `done`. Resolved
   // against ALL boards because blocked status spans cross-board deps below.
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
   const cards = sortCards(
-    allCards.filter(
+    (columnCards ?? allCards).filter(
       (c) =>
         c.board === boardSlug &&
         (!opts.column || c.column === opts.column) &&
@@ -186,7 +210,7 @@ export async function listResult(
   // every board via separate calls), and `listCmd` returns `text` only when
   // `!--json`, so the footer is naturally suppressed under `--json`. Derived
   // from the already-fetched `allCards` — no extra node read.
-  const footer = otherBoardsFooter(allCards, boardSlug, fkanbanInvocation());
+  const footer = columnCards ? "" : otherBoardsFooter(allCards, boardSlug, fkanbanInvocation());
   const text = footer
     ? `${renderBoard(resolvedBoard, cards, renderOpts)}\n${footer}\n`
     : renderBoard(resolvedBoard, cards, renderOpts);

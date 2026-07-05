@@ -1,7 +1,7 @@
 // Domain helpers: turn fold_db query rows into typed Card / Board records,
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
-import { FkanbanError, type NodeClient, type QueryRow } from "./client.ts";
+import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import { schemaHashFor, type Config } from "./config.ts";
 import {
   fieldsFor,
@@ -1089,14 +1089,41 @@ export function rowToBoard(row: QueryRow): Board {
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop tombstoned cards. The public
 // variants differ ONLY in which fields they fetch over the wire.
-async function listCardsWithFields(node: NodeClient, cfg: Config, fields: string[]): Promise<Card[]> {
+async function listCardsWithFields(
+  node: NodeClient,
+  cfg: Config,
+  fields: string[],
+  filter?: QueryFilter,
+): Promise<Card[]> {
   const hash = schemaHashFor("card", cfg);
-  const res = await node.queryAll({ schemaHash: hash, fields });
+  const res = await node.queryAll({ schemaHash: hash, fields, filter });
   return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
+}
+
+function canFallbackColumnFilter(err: unknown): boolean {
+  return (
+    err instanceof FkanbanError &&
+    (err.code === "node_http_400" || err.code === "node_http_422" || err.code === "unknown_fields")
+  );
 }
 
 export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
   return listCardsWithFields(node, cfg, fieldsFor("card"));
+}
+
+export async function listCardsByColumn(
+  node: NodeClient,
+  cfg: Config,
+  column: string,
+  fields: string[],
+): Promise<Card[]> {
+  try {
+    const cards = await listCardsWithFields(node, cfg, fields, { column });
+    return cards.filter((c) => c.column === column);
+  } catch (err) {
+    if (!canFallbackColumnFilter(err)) throw err;
+    return (await listCardsWithFields(node, cfg, fields)).filter((c) => c.column === column);
+  }
 }
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
@@ -1115,6 +1142,33 @@ export const CARD_STATUS_FIELDS = ["slug", "board", "column", "position", "tags"
 // as "" on the Card. Enough for depStatus / blockedSlugSet / existence checks.
 export async function listCardStatuses(node: NodeClient, cfg: Config): Promise<Card[]> {
   return listCardsWithFields(node, cfg, CARD_STATUS_FIELDS);
+}
+
+async function findCardWithFields(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+  fields: string[],
+): Promise<Card | null> {
+  const cards = await listCardsWithFields(node, cfg, fields, { HashKey: slug });
+  const card = cards.find((c) => c.slug === slug);
+  return card ?? null;
+}
+
+export async function listDependencyStatusesForCards(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+): Promise<Card[]> {
+  const bySlug = new Map<string, Card>();
+  for (const card of cards) bySlug.set(card.slug, card);
+
+  const depSlugs = [...new Set(cards.flatMap((c) => c.deps))].filter((slug) => !bySlug.has(slug));
+  const deps = await Promise.all(depSlugs.map((slug) => findCardWithFields(node, cfg, slug, CARD_STATUS_FIELDS)));
+  for (const dep of deps) {
+    if (dep) bySlug.set(dep.slug, dep);
+  }
+  return [...bySlug.values()];
 }
 
 // Fields the TEXT board render (`renderBoard`) + its filters actually display:

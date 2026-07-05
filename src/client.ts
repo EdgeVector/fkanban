@@ -69,9 +69,10 @@ export type RawResponse = {
 export const QUERY_PAGE_SIZE = 1000;
 const QUERY_PAGE_LIMIT = 1000;
 
-// fold's /api/query `filter` — fkanban only ever needs the exact-key form,
-// which the node resolves as an indexed point read (no scan).
-export type QueryFilter = { HashKey: string };
+// fold's /api/query `filter` — exact field filters. `HashKey` is the special
+// primary-key point read; schema fields such as `column` may be backed by node
+// secondary indexes on newer nodes.
+export type QueryFilter = Record<string, string>;
 
 // Every request gets a deadline so a contended node can never hang the CLI
 // (an unbounded `add` is what used to orphan backgrounded processes).
