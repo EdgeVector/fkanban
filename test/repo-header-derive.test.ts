@@ -19,6 +19,7 @@ import {
   inferRepoFromTags,
   isRegistryCard,
   REPO_CONFLICT_BLOCK_PREFIX,
+  sanitizeRepoValue,
   type Card,
 } from "../src/record.ts";
 
@@ -129,7 +130,7 @@ describe("deriveRepoHeaders", () => {
     if (r.kind !== "defaulted") throw new Error("unreachable");
     expect(r.repo).toBe(DEFAULT_REPO);
     expect(r.base).toBe("main");
-    expect(r.body).toBe(`Repo: ${DEFAULT_REPO}\nBase: main\n# defaulted — no subsystem tag mapped; correct the Repo: line if wrong\n\n## GOAL\nfix it`);
+    expect(r.body).toBe(`Repo: ${DEFAULT_REPO}\nBase: main\n\n## GOAL\nfix it`);
     expect(hasRepoHeaders(r.body)).toBe(true);
   });
 
@@ -141,6 +142,21 @@ describe("deriveRepoHeaders", () => {
     expect(deriveRepoHeaders("body", ["bug"], "t", { defaultRepo: "" }).kind).toBe("ambiguous");
     // A conflict stays a conflict even with defaulting off — never guessed.
     expect(deriveRepoHeaders("body", ["fold", "exemem"], "t", { defaultRepo: "" }).kind).toBe("conflict");
+  });
+});
+
+describe("sanitizeRepoValue", () => {
+  test("cleans recoverable dirty Repo header values", () => {
+    expect(sanitizeRepoValue("EdgeVector/fold  # defaulted — no subsystem tag mapped")).toBe("EdgeVector/fold");
+    expect(sanitizeRepoValue("EdgeVector/fold (exemem-infra and schema-infra are sibling repos …")).toBe("EdgeVector/fold");
+    expect(sanitizeRepoValue("fold   Base: main   Branch: x")).toBe("fold");
+    expect(sanitizeRepoValue("fold  (primary) · also touches: exemem-infra")).toBe("fold");
+  });
+
+  test("keeps genuinely unresolvable values loud", () => {
+    expect(sanitizeRepoValue("none")).toBeNull();
+    expect(sanitizeRepoValue("")).toBeNull();
+    expect(sanitizeRepoValue("   ")).toBeNull();
   });
 });
 
@@ -157,6 +173,57 @@ describe("applyHeaderDerivation", () => {
       warn,
     );
     expect(r.body.startsWith("Repo: EdgeVector/fold\nBase: main\n\n")).toBe(true);
+    expect(r.blockStatus).toBeUndefined();
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("sanitizes an already-present dirty Repo header at the add/move chokepoint", () => {
+    const { warn, warnings } = collectWarn();
+    const r = applyHeaderDerivation(
+      {
+        slug: "c",
+        body: "Repo: EdgeVector/fold  # defaulted — no subsystem tag mapped\nBase: main\n\nx",
+        tags: [],
+        title: "t",
+        column: "todo",
+      },
+      warn,
+    );
+    expect(r.body).toBe("Repo: EdgeVector/fold\nBase: main\n\nx");
+    expect(r.blockStatus).toBeUndefined();
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("splits mashed headers while cleaning the persisted Repo line", () => {
+    const { warn, warnings } = collectWarn();
+    const r = applyHeaderDerivation(
+      {
+        slug: "c",
+        body: "Repo: fold   Base: main   Branch: fkanban/x\n\nx",
+        tags: [],
+        title: "t",
+        column: "todo",
+      },
+      warn,
+    );
+    expect(r.body).toBe("Repo: fold\nBase: main\nBranch: fkanban/x\n\nx");
+    expect(r.blockStatus).toBeUndefined();
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("leaves null Repo values intact so strict pickup resolution can fail loudly", () => {
+    const { warn, warnings } = collectWarn();
+    const r = applyHeaderDerivation(
+      {
+        slug: "c",
+        body: "Repo: none\nBase: main\n\nx",
+        tags: [],
+        title: "t",
+        column: "todo",
+      },
+      warn,
+    );
+    expect(r.body).toBe("Repo: none\nBase: main\n\nx");
     expect(r.blockStatus).toBeUndefined();
     expect(warnings).toHaveLength(0);
   });

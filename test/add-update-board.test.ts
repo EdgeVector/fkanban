@@ -20,6 +20,7 @@ import type { Config } from "../src/config.ts";
 import { boardToFields, findCard, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
+import { showCmd } from "../src/commands/show.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -186,6 +187,22 @@ describe("add update preserves the card's board", () => {
   test("(d') create with explicit --board honors it", async () => {
     const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "icebox" });
     expect(created).toMatchObject({ action: "created", board: "other", column: "icebox" });
+  });
+
+  test("add/show round-trip persists a sanitized dirty Repo header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "dirty-repo",
+      title: "Dirty repo",
+      column: "todo",
+      body: "Repo: EdgeVector/fold  # defaulted — no subsystem tag mapped; correct the Repo: line if wrong\nBase: main\n\nx",
+    });
+
+    const shown = JSON.parse(await showCmd({ cfg, node, slug: "dirty-repo", json: true }));
+    expect(shown.body).toBe("Repo: EdgeVector/fold\nBase: main\n\nx");
+    expect(shown.repo).toBe("EdgeVector/fold");
+    expect(shown.base).toBe("main");
   });
 });
 
