@@ -761,13 +761,13 @@ export function createFkanbanMcpServer(
       title: "Delete a board",
       description:
         "Soft-delete a board (fold_db is append-only; the board is tombstoned and hidden). " +
-        "Refuses the default board, and refuses a board with live cards unless force is set.",
+        "Refuses the default board, and refuses a board with live cards unless force is set; forced removal also tombstones those cards.",
       annotations: { title: "Delete a board", destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Board slug."),
-        force: z.boolean().optional().describe("Remove even if the board still has live cards."),
+        force: z.boolean().optional().describe("Remove even if the board still has live cards, tombstoning them too."),
       },
-      outputSchema: { slug: z.string() },
+      outputSchema: { slug: z.string(), deletedCards: z.array(z.string()) },
     },
     async (args) => {
       try {

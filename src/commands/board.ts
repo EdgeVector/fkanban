@@ -3,6 +3,7 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
+  cardToFields,
   boardToFields,
   findBoard,
   listBoards,
@@ -141,7 +142,7 @@ export async function boardRmCmd(opts: {
   node: NodeClient;
   slug: string;
   force?: boolean;
-}): Promise<{ slug: string }> {
+}): Promise<{ slug: string; deletedCards: string[] }> {
   // The default board is seeded by `init` and assumed by init-less flows;
   // removing it would silently break those, so it is never deletable.
   if (opts.slug === DEFAULT_BOARD_SLUG) {
@@ -156,27 +157,41 @@ export async function boardRmCmd(opts: {
     throw new FkanbanError({ code: "board_not_found", message: `No board with slug "${opts.slug}".` });
   }
   // Don't silently orphan cards: a board with live cards is only removable with
-  // --force (the cards remain, just on a now-hidden board).
-  if (!opts.force) {
-    const cards = await listCards(opts.node, opts.cfg);
-    const live = cards.filter((c) => c.board === opts.slug);
-    if (live.length > 0) {
-      const n = live.length;
-      throw new FkanbanError({
-        code: "board_not_empty",
-        message: `Board "${opts.slug}" still has ${n} live card${n === 1 ? "" : "s"}.`,
-        hint: "Move or rm those cards first, or pass --force to remove the board anyway.",
+  // --force. Forced removal tombstones those cards first, so short-lived harness
+  // boards can be torn down without leaving hidden live records behind.
+  const cards = await listCards(opts.node, opts.cfg);
+  const live = cards.filter((c) => c.board === opts.slug);
+  if (!opts.force && live.length > 0) {
+    const n = live.length;
+    throw new FkanbanError({
+      code: "board_not_empty",
+      message: `Board "${opts.slug}" still has ${n} live card${n === 1 ? "" : "s"}.`,
+      hint: "Move or rm those cards first, or pass --force to remove the board and its cards.",
+    });
+  }
+  const now = nowIso();
+  if (live.length > 0) {
+    const cardHash = schemaHashFor("card", opts.cfg);
+    for (const card of live) {
+      await opts.node.updateRecord({
+        schemaHash: cardHash,
+        fields: cardToFields({
+          ...card,
+          tags: [...new Set([...card.tags, TOMBSTONE_TAG])],
+          updated_at: now,
+        }),
+        keyHash: card.slug,
       });
     }
   }
   const tombstoned: Board = {
     ...board,
     columns: [...new Set([...board.columns, TOMBSTONE_TAG])],
-    updated_at: nowIso(),
+    updated_at: now,
   };
   const hash = schemaHashFor("board", opts.cfg);
   await opts.node.updateRecord({ schemaHash: hash, fields: boardToFields(tombstoned), keyHash: board.slug });
-  return { slug: board.slug };
+  return { slug: board.slug, deletedCards: live.map((c) => c.slug) };
 }
 
 export async function requireBoard(node: NodeClient, cfg: Config, slug: string): Promise<Board> {

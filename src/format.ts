@@ -50,6 +50,8 @@ export interface BoardCreateResult {
 
 export interface BoardRmResult {
   slug: string;
+  // Slugs of live cards tombstoned as part of a forced board removal.
+  deletedCards: string[];
 }
 
 export interface RankResult {
