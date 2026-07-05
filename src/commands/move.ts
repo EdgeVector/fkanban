@@ -91,7 +91,12 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     ),
   );
   Object.assign(updated, deriveStructuredFields(updated));
-  applyPickupAreaDerivation(updated, await listCards(opts.node, opts.cfg));
+  // The pickup-area overlap soft-block only fires for cards landing in `todo`
+  // (findPickupAreaOverlap short-circuits otherwise), so only pay the full
+  // card-table scan for todo-bound moves. Every other destination (doing/review/
+  // done/backlog — the reconciler's hot path) derives area tags without it.
+  const areaPeers = updated.column === "todo" ? await listCards(opts.node, opts.cfg) : [];
+  applyPickupAreaDerivation(updated, areaPeers);
   const hash = schemaHashFor("card", opts.cfg);
   await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
   return { slug: card.slug, from, to: opts.column };
