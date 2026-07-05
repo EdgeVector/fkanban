@@ -1,7 +1,8 @@
 // `fkanban add <slug>` — create or update a card. Body can come from --body
 // or stdin. Column defaults to the board's first column; position appends to
-// the end of that column. The whole command is two point reads (board, card)
-// plus one write — it never scans the board.
+// the end of that column. The hot path is point reads plus one write; if the
+// board record is missing, it scans card statuses once to decide whether the
+// board can be self-healed from existing cards.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
@@ -20,6 +21,7 @@ import {
   deriveStructuredFields,
   doneAtForColumnTransition,
   emptyStructuredFields,
+  ensureBoardRecord,
   ensureColumn,
   findCard,
   forwardDepWarning,
@@ -31,7 +33,6 @@ import {
   listCardStatuses,
   normalizeDeps,
   nowIso,
-  requireBoard,
   validateSlug,
   withPriorityTag,
   wouldCreateCycle,
@@ -217,7 +218,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   // `--board` still moves the card; only the implicit default would be wrong.
   const existing = await findCard(opts.node, opts.cfg, opts.slug);
   const boardSlug = opts.board ?? existing?.board ?? "default";
-  const board = await requireBoard(opts.node, opts.cfg, boardSlug);
+  const board = await ensureBoardRecord(opts.node, opts.cfg, boardSlug);
   const columns = board.columns;
   const targetColumn = existing ? (opts.column ?? existing.column) : (opts.column ?? columns[0] ?? "backlog");
   ensureColumn(targetColumn, columns);

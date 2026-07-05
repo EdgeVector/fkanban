@@ -95,7 +95,7 @@ function expectedBoardNotFound(slug: string): FkanbanError {
   return new FkanbanError({
     code: "board_not_found",
     message: `Board "${slug}" does not exist.`,
-    hint: `Create it first: \`fkanban board create ${slug}\` (or use the default board).`,
+    hint: `Create it first: \`fkanban board create ${slug} --columns backlog,todo,doing,review,done\`.`,
   });
 }
 

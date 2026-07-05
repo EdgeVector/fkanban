@@ -59,8 +59,8 @@ Commands:
   rm <slug>            soft-delete a card
   board create <slug>  create/update a board (--title --columns a,b,c)
   board list           list boards (--json)
-  board rm <slug>      soft-delete a board (refuses the default board or a
-                       board with live cards unless --force)
+  board rm <slug>      soft-delete a board (always refuses default; refuses
+                       live cards unless --force)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
   mcp                  start an MCP server over stdio

@@ -178,7 +178,7 @@ DONE  (0)
 | `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
 | `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
 | `fkanban board list` | list boards (`--json`) |
-| `fkanban board rm <slug>` | soft-delete a board (tombstone); refuses the `default` board or a board with live cards unless `--force` |
+| `fkanban board rm <slug>` | soft-delete a board (tombstone); always refuses `default`, and refuses non-default boards with live cards unless `--force` |
 | `fkanban doctor` | health-check config + node + schemas + a query round-trip |
 | `fkanban mcp` | start an MCP server over stdio |
 
