@@ -219,6 +219,68 @@ export function hasRepoHeaders(body: string): boolean {
   return /^[ \t]*Repo:/m.test(body) && /^[ \t]*Base:/m.test(body);
 }
 
+export function stripTrailingInlineComment(value: string): string {
+  return value.replace(/[ \t]+#.*$/, "").trim();
+}
+
+const MASHED_HEADER_RE = /\s+(Base|Branch|Kind):/gi;
+
+function firstHeaderToken(value: string): string {
+  const line = stripTrailingInlineComment(value.split("\\n")[0]!.split("\n")[0]!);
+  return line.match(/^(\S+)/)?.[1]?.trim() ?? "";
+}
+
+export function sanitizeRepoValue(raw: string): string | null {
+  let value = raw.trim();
+  const escapedNewline = value.indexOf("\\n");
+  if (escapedNewline >= 0) value = value.slice(0, escapedNewline);
+  const realNewline = value.indexOf("\n");
+  if (realNewline >= 0) value = value.slice(0, realNewline);
+  value = stripTrailingInlineComment(value);
+
+  MASHED_HEADER_RE.lastIndex = 0;
+  const mashedHeader = MASHED_HEADER_RE.exec(value);
+  if (mashedHeader) value = value.slice(0, mashedHeader.index);
+
+  value = value.replace(/\s+\(.+$/u, "");
+  value = value.replace(/\s+·.+$/u, "");
+  const token = value.match(/^(\S+)/)?.[1]?.trim() ?? "";
+  return token && token.toLowerCase() !== "none" ? token : null;
+}
+
+function mashedHeadersFromRepoTail(raw: string): string[] {
+  MASHED_HEADER_RE.lastIndex = 0;
+  const matches = [...raw.matchAll(MASHED_HEADER_RE)];
+  MASHED_HEADER_RE.lastIndex = 0;
+  const headers: string[] = [];
+  for (let i = 0; i < matches.length; i += 1) {
+    const match = matches[i]!;
+    const name = match[1]!;
+    const valueStart = match.index! + match[0].length;
+    const valueEnd = matches[i + 1]?.index ?? raw.length;
+    const value = firstHeaderToken(raw.slice(valueStart, valueEnd));
+    if (value) headers.push(`${name}: ${value}`);
+  }
+  return headers;
+}
+
+function sanitizeRepoHeaderLine(line: string): string {
+  const m = line.match(/^([ \t]*Repo:[ \t]*)(.*)$/i);
+  if (!m) return line;
+  const clean = sanitizeRepoValue(m[2]!);
+  if (!clean) return line;
+  const extraHeaders = mashedHeadersFromRepoTail(m[2]!);
+  return [m[1]! + clean, ...extraHeaders].join("\n");
+}
+
+function sanitizeRepoHeadersInBody(body: string): string {
+  return body.replace(/^[ \t]*Repo:[^\n]*(?:\n|$)/gim, (line) => {
+    const hadNewline = line.endsWith("\n");
+    const clean = sanitizeRepoHeaderLine(hadNewline ? line.slice(0, -1) : line);
+    return hadNewline ? `${clean}\n` : clean;
+  });
+}
+
 // Recipe/registry cards target an fbrain record, not a git repo — they are not
 // meant for the pickup→PR flow and must never be stamped.
 export function isRegistryCard(body: string, title: string): boolean {
@@ -254,9 +316,8 @@ export type HeaderDerivation =
   | { kind: "defaulted"; repo: string; base: string; body: string } // caller-supplied no-signal default
   | { kind: "stamped"; repo: string; base: string; body: string }; // unambiguous tag inference
 
-function stampHeader(repo: string, base: string, body: string, comment?: string): string {
-  const note = comment ? `\n# ${comment}` : "";
-  return `Repo: ${repo}\nBase: ${base}${note}\n\n${body}`;
+function stampHeader(repo: string, base: string, body: string): string {
+  return `Repo: ${repo}\nBase: ${base}\n\n${body}`;
 }
 
 // Pure decision + transform. Callers stamp the returned `body` for "stamped" /
@@ -289,8 +350,7 @@ export function deriveRepoHeaders(
   // caller explicitly opts into a default repo.
   const defaultRepo = (opts.defaultRepo ?? "").trim();
   if (defaultRepo) {
-    const comment = "defaulted — no subsystem tag mapped; correct the Repo: line if wrong";
-    return { kind: "defaulted", repo: defaultRepo, base: DEFAULT_BASE, body: stampHeader(defaultRepo, DEFAULT_BASE, body, comment) };
+    return { kind: "defaulted", repo: defaultRepo, base: DEFAULT_BASE, body: stampHeader(defaultRepo, DEFAULT_BASE, body) };
   }
   return { kind: "ambiguous" };
 }
@@ -341,8 +401,9 @@ export function applyHeaderDerivation(
   warn: (msg: string) => void,
   opts: { defaultRepo?: string; forcedRepo?: string } = {},
 ): HeaderDerivationResult {
-  if (isWorkingColumn(card.column)) return { body: card.body };
-  const d = deriveRepoHeaders(card.body, card.tags, card.title, opts);
+  const body = sanitizeRepoHeadersInBody(card.body);
+  if (isWorkingColumn(card.column)) return { body };
+  const d = deriveRepoHeaders(body, card.tags, card.title, opts);
   if (d.kind === "stamped") return { body: d.body };
   if (d.kind === "defaulted") {
     if (card.column === "todo") warn(defaultedRepoNotice(card.slug, d.repo));
@@ -351,13 +412,13 @@ export function applyHeaderDerivation(
   if (d.kind === "conflict" && card.column === "todo") {
     warn(conflictRepoWarning(card.slug, d.repos));
     return {
-      body: card.body,
+      body,
       blockStatus: "needs_human",
       blockReason: `${REPO_CONFLICT_BLOCK_PREFIX} tags map to ${d.repos.join(" + ")}. Set a single Repo:/Base: header to unblock.`,
     };
   }
   if (d.kind === "ambiguous" && card.column === "todo") warn(missingHeaderWarning(card.slug));
-  return { body: card.body };
+  return { body };
 }
 
 // Apply a `HeaderDerivationResult` onto a card (mutates): always take the new
@@ -691,10 +752,6 @@ export function normalizeBlockStatus(s: string): BlockStatus {
 }
 
 export const OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-
-export function stripTrailingInlineComment(value: string): string {
-  return value.replace(/[ \t]+#.*$/, "").trim();
-}
 
 // Read a `Name: value` header from a card body, used to backfill the structured
 // fields from the legacy body-header convention. All callers (repo/base/
