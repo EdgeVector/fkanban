@@ -16,6 +16,21 @@ fbrain get concepts-fkanban-cli-gotchas # worktree node_modules, --body replaces
 fbrain ask "<question about fkanban>"
 ```
 
+## Self-improvement papercuts
+
+Follow Tom's standing preference:
+
+```bash
+fbrain get preference-always-file-papercuts-for-self-improvement
+```
+
+When a tool, workflow, runbook, connector, repo setup, CLI, CI, LastDB path, or
+agent instruction creates avoidable friction while working on fkanban, record it
+instead of letting it vanish in chat. Put durable evidence and rationale in
+F-Brain, and create or update a matching F-Kanban card when the issue is
+actionable. Prefer dedupe/update over duplicate records. Do this
+opportunistically, unless filing it would materially derail urgent user work.
+
 ## Build / test
 
 ```bash
