@@ -18,6 +18,7 @@ import { join } from "node:path";
 
 import { FkanbanError } from "../src/client.ts";
 import { runInit } from "../src/commands/init.ts";
+import { fieldsFor, OWNER_APP_ID } from "../src/schemas.ts";
 
 const CARD_HASH = "socketcardhash18";
 const BOARD_HASH = "socketboardhash";
@@ -34,13 +35,17 @@ function closedTcpUrl(): string {
   return url;
 }
 
-// A narrow Unix-socket node: serves `/api/query`, `/api/mutation`, and
-// `/api/system/auto-identity` (plus the pairing-code mint), but not setup
-// writes like `/api/schemas/load`. `seedBoard` controls whether a `default`
-// board already exists so we can exercise both the create and the already-exists
-// legs.
-function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean; provisioned?: boolean } = {}) {
+// A Unix-socket node: by default it behaves like a narrower data socket serving
+// `/api/query`, `/api/mutation`, and `/api/system/auto-identity` (plus the
+// pairing-code mint), but not setup writes like `/api/schemas/load`.
+// `fullSurface` models current fold nodes where canonical `folddb.sock` carries
+// the full HTTP app.
+function makeSocketNode(
+  socketPath: string,
+  opts: { seedBoard?: boolean; provisioned?: boolean; fullSurface?: boolean } = {},
+) {
   const store = new Map<string, Record<string, unknown>>();
+  let provisioned = opts.provisioned !== false;
   if (opts.seedBoard) {
     store.set(`${BOARD_HASH}::default`, { slug: "default", title: "Default board", columns: [] });
   }
@@ -59,10 +64,35 @@ function makeSocketNode(socketPath: string, opts: { seedBoard?: boolean; provisi
         return Response.json({ pairing_code: "socket-only" });
       }
       if (url.pathname === "/api/system/auto-identity") {
-        if (opts.provisioned === false) {
+        if (!provisioned) {
           return Response.json({ error: "node_not_provisioned" }, { status: 503 });
         }
         return Response.json({ user_hash: "stub-user" });
+      }
+      if (opts.fullSurface && url.pathname === "/api/setup/bootstrap") {
+        provisioned = true;
+        return Response.json({ user_hash: "stub-user" });
+      }
+      if (opts.fullSurface && url.pathname === "/api/schemas/load") {
+        return Response.json({ available_schemas_loaded: 2, schemas_loaded_to_db: 2, failed_schemas: [] });
+      }
+      if (opts.fullSurface && url.pathname === "/api/schemas") {
+        return Response.json({
+          schemas: [
+            {
+              name: CARD_HASH,
+              descriptive_name: "Card",
+              owner_app_id: OWNER_APP_ID,
+              fields: fieldsFor("card"),
+            },
+            {
+              name: BOARD_HASH,
+              descriptive_name: "Board",
+              owner_app_id: OWNER_APP_ID,
+              fields: fieldsFor("board"),
+            },
+          ],
+        });
       }
       if (url.pathname === "/api/mutation") {
         const schema = body!.schema as string;
@@ -213,6 +243,35 @@ describe("runInit socket-only graceful degrade", () => {
       expect(fe.message).toContain("/api/setup/bootstrap");
       expect(fe.message).toContain("folddb-full.sock");
       expect(fe.hint).toContain("fresh bootstrap/schema-load needs the full surface");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("fresh unprovisioned canonical folddb.sock bootstraps when no legacy full socket exists", async () => {
+    const socketDir = mkdtempSync("/tmp/fk-collapse-");
+    const socketPath = join(socketDir, "folddb.sock");
+    const { server, seen } = makeSocketNode(socketPath, { provisioned: false, fullSurface: true });
+    const tcpUrl = closedTcpUrl();
+    const configPath = join(tmp, "collapsed-current-init.json");
+    const lines: string[] = [];
+    try {
+      const { config, bootstrapped } = await runInit({
+        nodeUrl: tcpUrl,
+        nodeSocketPath: socketPath,
+        configPath,
+        print: (l) => lines.push(l),
+      });
+      const report = lines.join("\n");
+      expect(bootstrapped).toBe(true);
+      expect(config.schemaHashes.card).toBe(CARD_HASH);
+      expect(config.schemaHashes.board).toBe(BOARD_HASH);
+      expect(report).toContain("bootstrap ok");
+      expect(report).toContain("[init] ok");
+      expect(seen).toContain("/api/setup/bootstrap");
+      expect(seen).toContain("/api/schemas/load");
+      expect(seen).toContain("/api/schemas");
+      expect(seen).toContain("/api/mutation");
     } finally {
       server.stop(true);
     }

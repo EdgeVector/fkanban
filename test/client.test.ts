@@ -363,6 +363,55 @@ describe("folddb-full socket routes every node path over UDS", () => {
   });
 });
 
+describe("canonical folddb.sock full-surface collapse", () => {
+  test("non-allowlisted routes use folddb.sock when no legacy full sibling exists", async () => {
+    const sockDir = mkdtempSync("/tmp/fkanban-collapse-");
+    const socketPath = join(sockDir, "folddb.sock");
+    const socketSeen: string[] = [];
+    const socketServer = Bun.serve({
+      unix: socketPath,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        socketSeen.push(path);
+        if (path === "/api/setup/bootstrap") return Response.json({ user_hash: "bootstrapped-user" });
+        return Response.json({ error: "unexpected_socket_path", path }, { status: 500 });
+      },
+    });
+    try {
+      const node = newNodeClient({ baseUrl, userHash: "test-user", socketPath });
+      await expect(node.bootstrap("Test User")).resolves.toEqual({ userHash: "bootstrapped-user" });
+      expect(socketSeen).toContain("/api/setup/bootstrap");
+    } finally {
+      socketServer.stop(true);
+      rmSync(sockDir, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy folddb-full.sock sibling still wins for setup routes", async () => {
+    const sockDir = mkdtempSync("/tmp/fkanban-legacy-full-");
+    const socketPath = join(sockDir, "folddb.sock");
+    const fullSocketPath = join(sockDir, "folddb-full.sock");
+    const fullSeen: string[] = [];
+    const fullServer = Bun.serve({
+      unix: fullSocketPath,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        fullSeen.push(path);
+        if (path === "/api/setup/bootstrap") return Response.json({ user_hash: "legacy-user" });
+        return Response.json({ error: "unexpected_socket_path", path }, { status: 500 });
+      },
+    });
+    try {
+      const node = newNodeClient({ baseUrl, userHash: "test-user", socketPath });
+      await expect(node.bootstrap("Test User")).resolves.toEqual({ userHash: "legacy-user" });
+      expect(fullSeen).toContain("/api/setup/bootstrap");
+    } finally {
+      fullServer.stop(true);
+      rmSync(sockDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("socket-only: no TCP fallback for a local node", () => {
   test("a loopback node whose socket cannot connect FAILS — it never dials TCP", async () => {
     // The loopback TCP listener is retired; a local node is socket-only. A

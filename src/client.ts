@@ -784,11 +784,12 @@ function isConnectError(err: unknown): boolean {
   );
 }
 
-// Routes served by the node's owner data socket (`folddb.sock`). The full
-// surface socket (`folddb-full.sock`) serves the whole HTTP app, and is handled
-// below by `isSocketRoute`. Keeping this allowlist method-aware prevents a
-// narrower data socket from receiving owner/control routes it cannot serve,
-// while still letting doctor prove schema + identity without retired TCP :9001.
+// Routes served by the node's owner data socket (`folddb.sock`). Older nodes
+// may expose a sibling full-surface socket (`folddb-full.sock`) for the whole
+// HTTP app; current nodes collapsed that surface into canonical `folddb.sock`.
+// Keeping this allowlist method-aware prevents non-canonical narrower sockets
+// from receiving owner/control routes they cannot serve, while still letting
+// doctor prove schema + identity without retired TCP :9001.
 const SOCKET_OWNER_ROUTES = [
   { method: "POST", path: "/api/query" },
   { method: "POST", path: "/api/mutation" },
@@ -796,12 +797,30 @@ const SOCKET_OWNER_ROUTES = [
   { method: "GET", path: "/api/system/auto-identity" },
 ] as const;
 
+const CANONICAL_NODE_SOCKET_BASENAME = "folddb.sock";
+const LEGACY_FULL_SURFACE_SOCKET_BASENAME = "folddb-full.sock";
+
 function isFullSurfaceSocket(socketPath: string): boolean {
-  return basename(socketPath) === "folddb-full.sock";
+  return basename(socketPath) === LEGACY_FULL_SURFACE_SOCKET_BASENAME;
+}
+
+function legacyFullSurfaceSocketPath(socketPath: string): string {
+  return join(dirname(socketPath), LEGACY_FULL_SURFACE_SOCKET_BASENAME);
+}
+
+function isCollapsedFullSurfaceSocket(socketPath: string): boolean {
+  return (
+    basename(socketPath) === CANONICAL_NODE_SOCKET_BASENAME &&
+    !existsSync(legacyFullSurfaceSocketPath(socketPath))
+  );
+}
+
+function socketServesEveryNodeRoute(socketPath: string): boolean {
+  return isFullSurfaceSocket(socketPath) || isCollapsedFullSurfaceSocket(socketPath);
 }
 
 function isSocketRoute(method: string, path: string, socketPath: string): boolean {
-  if (isFullSurfaceSocket(socketPath)) return true;
+  if (socketServesEveryNodeRoute(socketPath)) return true;
   return SOCKET_OWNER_ROUTES.some((r) => r.method === method && r.path === path);
 }
 
@@ -822,14 +841,16 @@ export function isLoopbackNodeUrl(url: string): boolean {
 }
 
 // The socket a given route must use under socket-only, computed regardless of
-// whether the file exists (a down node simply fails the connect, which the catch
-// maps to a node-not-running diagnostic instead of dialing :9001). A configured
-// full-surface socket carries every route; a data socket carries the allowlisted
-// data-plane routes and derives its sibling folddb-full.sock for the rest.
+// whether the selected file exists (a down node simply fails the connect, which
+// the catch maps to a node-not-running diagnostic instead of dialing :9001). A
+// configured legacy full-surface socket carries every route. A canonical
+// `folddb.sock` carries the whole app when no `folddb-full.sock` sibling exists
+// (current fold nodes); when the sibling exists (older nodes), non-data-plane
+// setup routes keep using it for back-compat.
 function routeSocketPathFor(method: string, path: string, socketPath: string): string {
-  if (isFullSurfaceSocket(socketPath)) return socketPath;
+  if (socketServesEveryNodeRoute(socketPath)) return socketPath;
   if (SOCKET_OWNER_ROUTES.some((r) => r.method === method && r.path === path)) return socketPath;
-  return join(dirname(socketPath), "folddb-full.sock");
+  return legacyFullSurfaceSocketPath(socketPath);
 }
 
 async function verboseFetch(opts: {
