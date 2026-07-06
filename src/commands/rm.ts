@@ -1,17 +1,8 @@
-// `fkanban rm <slug>` — soft-delete a card. fold_db is append-only, so this
-// overwrites the card's fields and stamps the tombstone tag; every read path
-// filters tombstoned cards out.
+// `fkanban rm <slug>` — delete a card with the node's native tombstone mutation.
 
 import { type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
-import {
-  cardToFields,
-  listCardStatuses,
-  nowIso,
-  requireCard,
-  TOMBSTONE_TAG,
-  type Card,
-} from "../record.ts";
+import { listCardStatuses, requireCard } from "../record.ts";
 
 export async function rmCmd(opts: {
   cfg: Config;
@@ -28,12 +19,7 @@ export async function rmCmd(opts: {
     .filter((c) => c.slug !== opts.slug && c.deps.includes(opts.slug))
     .map((c) => c.slug);
 
-  const tombstoned: Card = {
-    ...card,
-    tags: [...new Set([...card.tags, TOMBSTONE_TAG])],
-    updated_at: nowIso(),
-  };
   const hash = schemaHashFor("card", opts.cfg);
-  await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(tombstoned), keyHash: card.slug });
+  await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
   return { slug: card.slug, orphanedDependents };
 }

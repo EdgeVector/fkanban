@@ -3,14 +3,12 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
-  cardToFields,
   boardToFields,
   findBoard,
   listBoards,
   listCards,
   listCardsForDisplay,
   nowIso,
-  TOMBSTONE_TAG,
   validateSlug,
   type Board,
 } from "../record.ts";
@@ -133,10 +131,8 @@ export async function boardListCmd(opts: {
   return opts.json ? JSON.stringify(boards, null, 2) : text;
 }
 
-// `fkanban board rm <slug>` — soft-delete a board. fold_db is append-only, so
-// (like card `rm`) this overwrites the record and stamps TOMBSTONE_TAG; for a
-// board the tombstone marker lives in `columns`, which is exactly what every
-// board read path (listBoards / findBoard) filters on via isTombstoned.
+// `fkanban board rm <slug>` — delete a board with the node's native tombstone
+// mutation. Forced removal deletes the live cards on that board first.
 export async function boardRmCmd(opts: {
   cfg: Config;
   node: NodeClient;
@@ -169,28 +165,14 @@ export async function boardRmCmd(opts: {
       hint: "Move or rm those cards first, or pass --force to remove the board and its cards.",
     });
   }
-  const now = nowIso();
   if (live.length > 0) {
     const cardHash = schemaHashFor("card", opts.cfg);
     for (const card of live) {
-      await opts.node.updateRecord({
-        schemaHash: cardHash,
-        fields: cardToFields({
-          ...card,
-          tags: [...new Set([...card.tags, TOMBSTONE_TAG])],
-          updated_at: now,
-        }),
-        keyHash: card.slug,
-      });
+      await opts.node.deleteRecord({ schemaHash: cardHash, keyHash: card.slug });
     }
   }
-  const tombstoned: Board = {
-    ...board,
-    columns: [...new Set([...board.columns, TOMBSTONE_TAG])],
-    updated_at: now,
-  };
   const hash = schemaHashFor("board", opts.cfg);
-  await opts.node.updateRecord({ schemaHash: hash, fields: boardToFields(tombstoned), keyHash: board.slug });
+  await opts.node.deleteRecord({ schemaHash: hash, keyHash: board.slug });
   return { slug: board.slug, deletedCards: live.map((c) => c.slug) };
 }
 

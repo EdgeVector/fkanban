@@ -175,10 +175,10 @@ DONE  (0)
 | `fkanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
-| `fkanban rm <slug>` | soft-delete a card (tombstone — fold_db is append-only) |
+| `fkanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
 | `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
 | `fkanban board list` | list boards (`--json`) |
-| `fkanban board rm <slug>` | soft-delete a board (tombstone); always refuses `default`, and refuses non-default boards with live cards unless `--force` |
+| `fkanban board rm <slug>` | delete a board with native tombstones; always refuses `default`, and refuses non-default boards with live cards unless `--force` |
 | `fkanban doctor` | health-check config + node + schemas + a query round-trip |
 | `fkanban mcp` | start an MCP server over stdio |
 
@@ -391,8 +391,9 @@ confirm.)
   for a local / ephemeral node with `APP_IDENTITY_ENFORCE` off. Under
   enforcement the app would need a consent handshake (see `fbrain`'s
   `capability.ts`); that's intentionally out of scope here.
-- **Soft delete.** fold_db is append-only, so `rm` overwrites the card with a
-  `__fkanban_deleted__` tag and every read path filters it.
+- **Delete.** `rm` uses fold_db's native delete mutation, so tombstoned records
+  are skipped by the node before scans. Read paths still hide the historical
+  `__fkanban_deleted__` tag written by older fkanban builds.
 - **Append-with-gaps positions.** New cards land at `maxPosition + 10` so a
   card can later be inserted between two others.
 - **Priority is a signal over `position`.** A card's priority (`Priority:` header
