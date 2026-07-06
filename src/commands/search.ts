@@ -16,7 +16,7 @@ import {
   sortCards,
   type Card,
 } from "../record.ts";
-import { capFlat, DEFAULT_SEARCH_LIMIT, renderSearchResults } from "../board.ts";
+import { capFlat, DEFAULT_SEARCH_LIMIT, renderSearchResults, resolveLimits } from "../board.ts";
 import { renderFieldProjection } from "../field_projection.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 
@@ -90,25 +90,15 @@ export async function searchResult(
   // Text render cap: an explicit `--limit` (always >= 1 after flag parsing),
   // `--all` removes the cap (0), and the no-flag default falls back to
   // DEFAULT_SEARCH_LIMIT so a long match list collapses to a "… N more" line.
-  const limit = opts.all
-    ? 0
-    : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
-      ? (opts.limit as number)
-      : DEFAULT_SEARCH_LIMIT;
+  const { textLimit, jsonLimit } = resolveLimits(opts, DEFAULT_SEARCH_LIMIT);
   // Resolve blocked status against ALL live cards so cross-board deps count,
   // counting a dep as done at its own board's terminal column (board slug →
   // last column), falling back to `done` for unresolvable boards.
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
   const text = renderSearchResults(matches, opts.query, {
     blocked: blockedSlugSet(matches, allCards, boardTerminal),
-    limit,
+    limit: textLimit,
   });
-  // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`
-  // and the no-flag default leave it complete (0).
-  const jsonLimit =
-    !opts.all && Number.isFinite(opts.limit) && (opts.limit as number) >= 0
-      ? (opts.limit as number)
-      : 0;
   return { text, cards: matches, jsonLimit };
 }
 

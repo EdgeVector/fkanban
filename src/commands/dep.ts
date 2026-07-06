@@ -3,30 +3,17 @@
 // until each dep card reaches its board's final column (see record.ts depStatus).
 
 import { FkanbanError, type NodeClient } from "../client.ts";
-import { schemaHashFor, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import {
-  cardToFields,
   forwardDepWarning,
   listCardStatuses,
   normalizeDeps,
-  nowIso,
   requireCard,
   validateSlug,
   wouldCreateCycle,
-  type Card,
+  writeCardPatch,
 } from "../record.ts";
-
-export type DepResult = { slug: string; dep: string; action: "added" | "removed"; deps: string[] };
-
-async function writeDeps(
-  opts: { cfg: Config; node: NodeClient },
-  card: Card,
-  deps: string[],
-): Promise<void> {
-  const hash = schemaHashFor("card", opts.cfg);
-  const updated: Card = { ...card, deps, updated_at: nowIso() };
-  await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
-}
+import type { DepResult } from "../format.ts";
 
 export async function depAddCmd(opts: {
   cfg: Config;
@@ -56,7 +43,7 @@ export async function depAddCmd(opts: {
     });
   }
   const deps = normalizeDeps([...card.deps, opts.dep], opts.slug);
-  await writeDeps(opts, card, deps);
+  await writeCardPatch(opts, card, { deps });
   return { slug: opts.slug, dep: opts.dep, action: "added", deps };
 }
 
@@ -75,6 +62,6 @@ export async function depRmCmd(opts: {
     });
   }
   const deps = card.deps.filter((d) => d !== opts.dep);
-  await writeDeps(opts, card, deps);
+  await writeCardPatch(opts, card, { deps });
   return { slug: opts.slug, dep: opts.dep, action: "removed", deps };
 }

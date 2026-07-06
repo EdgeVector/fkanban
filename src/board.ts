@@ -216,6 +216,22 @@ function renderCardLine(c: Card, color: boolean, blocked: boolean): string {
 // the per-column board), so it gets a single flat cap rather than `capPerColumn`.
 export const DEFAULT_SEARCH_LIMIT = 20;
 
+export type LimitOptions = {
+  all?: boolean;
+  limit?: number;
+};
+
+export function resolveLimits(
+  opts: LimitOptions,
+  defaultTextLimit: number,
+): { textLimit: number; jsonLimit: number } {
+  const hasExplicitLimit = Number.isFinite(opts.limit) && (opts.limit as number) >= 0;
+  return {
+    textLimit: opts.all ? 0 : hasExplicitLimit ? (opts.limit as number) : defaultTextLimit,
+    jsonLimit: !opts.all && hasExplicitLimit ? (opts.limit as number) : 0,
+  };
+}
+
 // Cap a flat, already-sorted card list, returning the first `limit`. `limit <= 0`
 // (or `--all`) means no cap and returns the input unchanged. Mirrors
 // `capPerColumn`'s contract for the flat search list so the text and `--json`

@@ -100,11 +100,17 @@ function assertConfigShape(path: string, raw: unknown): Config {
   }
   const r = raw as Record<string, unknown>;
 
-  for (const key of ["nodeUrl", "schemaServiceUrl", "userHash"] as const) {
+  if (r.configVersion !== undefined && r.configVersion !== CONFIG_VERSION) {
+    throw new ConfigInvalidError(path, `unsupported configVersion "${String(r.configVersion)}" (expected ${CONFIG_VERSION})`);
+  }
+
+  for (const key of ["nodeUrl", "userHash"] as const) {
     if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
       throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
     }
   }
+
+  const schemaServiceUrl = typeof r.schemaServiceUrl === "string" ? r.schemaServiceUrl : "";
 
   const rawHashes = r.schemaHashes;
   if (typeof rawHashes !== "object" || rawHashes === null || Array.isArray(rawHashes)) {
@@ -126,7 +132,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
   return {
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
-    schemaServiceUrl: r.schemaServiceUrl as string,
+    schemaServiceUrl,
     userHash: r.userHash as string,
     schemaHashes,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),

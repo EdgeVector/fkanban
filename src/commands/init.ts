@@ -86,7 +86,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Step 1: probe identity, bootstrap if needed. The schema-load path below is
   // an owner verb that 403s `transport_not_attested` on an app-isolation node,
   // so every node client here attests an owner session over the control socket
-  // (no-op fallback when the node serves no socket — see attestOwnerSession).
+  // (no-op fallback when the node serves no socket).
   print(`[1/${STEPS}] probing node identity at ${nodeUrl}`);
   const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe", verbose, warn: print, socketPath });
 

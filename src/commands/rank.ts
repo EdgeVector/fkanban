@@ -11,20 +11,19 @@
 // a re-run on an already-ranked column performs zero mutations.
 
 import { type NodeClient } from "../client.ts";
-import { schemaHashFor, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import {
   RANK_POSITION_STEP,
-  cardToFields,
   ensureColumn,
   isMetaCardKind,
   listCards,
-  nowIso,
   priorityOf,
   rankCards,
   requireBoard,
-  type Card,
+  writeCardPatch,
   type PriorityTier,
 } from "../record.ts";
+import type { RankResult } from "../format.ts";
 
 export type RankOptions = {
   cfg: Config;
@@ -34,18 +33,6 @@ export type RankOptions = {
 };
 
 export type RankedCard = { slug: string; priority: PriorityTier; position: number };
-
-export type RankResult = {
-  board: string;
-  column: string;
-  // Total rankable work cards in the ranked column; meta/grouping cards are
-  // intentionally skipped so pickup ordering ignores them.
-  total: number;
-  // How many cards' positions actually changed (and were written).
-  reordered: number;
-  // The full resulting order, top (most urgent) first.
-  order: RankedCard[];
-};
 
 export async function rankCmd(opts: RankOptions): Promise<RankResult> {
   const boardSlug = opts.board ?? "default";
@@ -59,8 +46,6 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult> {
   const inColumn = all.filter((c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind));
   const ranked = rankCards(inColumn);
 
-  const hash = schemaHashFor("card", opts.cfg);
-  const now = nowIso();
   const order: RankedCard[] = [];
   let reordered = 0;
   for (let i = 0; i < ranked.length; i++) {
@@ -70,8 +55,7 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult> {
     // Idempotent: skip the write (and the updated_at bump) when the card is
     // already at its ranked position.
     if (card.position === String(position)) continue;
-    const updated: Card = { ...card, position: String(position), updated_at: now };
-    await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
+    await writeCardPatch(opts, card, { position: String(position) });
     reordered++;
   }
   return { board: boardSlug, column, total: ranked.length, reordered, order };

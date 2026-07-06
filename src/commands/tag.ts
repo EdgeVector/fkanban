@@ -5,29 +5,16 @@
 // src/commands/dep.ts.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
-import { schemaHashFor, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import {
-  cardToFields,
   isDoneAtTag,
   isDepTag,
-  nowIso,
   normalizeTags,
   requireCard,
   TOMBSTONE_TAG,
-  type Card,
+  writeCardPatch,
 } from "../record.ts";
-
-export type TagResult = { slug: string; tags: string[]; action: "added" | "removed"; tag: string[] };
-
-async function writeTags(
-  opts: { cfg: Config; node: NodeClient },
-  card: Card,
-  tags: string[],
-): Promise<void> {
-  const hash = schemaHashFor("card", opts.cfg);
-  const updated: Card = { ...card, tags, updated_at: nowIso() };
-  await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
-}
+import type { TagResult } from "../format.ts";
 
 // Reject the reserved tags users must not author by hand: dependency edges live
 // in `tags` as `dep:<slug>` (use `dep add`/`dep rm`), and the soft-delete
@@ -70,7 +57,7 @@ export async function tagAddCmd(opts: {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Union: adding a tag the card already carries is idempotent (no duplicate).
   const tags = normalizeTags([...card.tags, ...incoming]);
-  await writeTags(opts, card, tags);
+  await writeCardPatch(opts, card, { tags });
   return { slug: opts.slug, tags, action: "added", tag: incoming };
 }
 
@@ -90,7 +77,7 @@ export async function tagRmCmd(opts: {
   if (absent.length > 0) {
     console.error(`fkanban: warning — card "${opts.slug}" had no tag(s): ${absent.join(", ")} (nothing removed for those).`);
   }
-  const tags = card.tags.filter((t) => !drop.has(t) || t === TOMBSTONE_TAG);
-  await writeTags(opts, card, tags);
+  const tags = card.tags.filter((t) => !drop.has(t));
+  await writeCardPatch(opts, card, { tags });
   return { slug: opts.slug, tags, action: "removed", tag: incoming };
 }
