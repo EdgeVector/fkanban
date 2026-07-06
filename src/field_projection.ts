@@ -2,6 +2,7 @@
 
 import { FkanbanError } from "./client.ts";
 import type { Card } from "./record.ts";
+import { fieldsFor } from "./schemas.ts";
 
 type ProjectableCard = Card & Partial<{
   blocked: boolean;
@@ -15,30 +16,17 @@ const FIELD_ALIASES: Record<string, string> = {
   missing_deps: "missingDeps",
 };
 
-const FIELD_NAMES = new Set([
-  "slug",
-  "title",
-  "body",
-  "board",
-  "column",
-  "position",
-  "assignee",
-  "tags",
+const DERIVED_FIELD_NAMES = [
   "deps",
-  "created_at",
-  "updated_at",
   "done_at",
-  "repo",
-  "base",
-  "kind",
-  "block_status",
-  "block_reason",
-  "north_star",
-  "pr_url",
-  "branch",
   "blocked",
   "blockedBy",
   "missingDeps",
+] as const;
+
+export const FIELD_NAMES = new Set([
+  ...fieldsFor("card"),
+  ...DERIVED_FIELD_NAMES,
 ]);
 
 const DISPLAY_ONLY_FIELDS = new Set([

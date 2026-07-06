@@ -73,6 +73,61 @@ export function resolveColumns(boardColumns: readonly string[]): string[] {
 
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };
 
+export const CARD_FIELDS = [
+  "slug",
+  "title",
+  "body",
+  "board",
+  "column",
+  "position",
+  "assignee",
+  "tags",
+  "created_at",
+  "updated_at",
+  // Structured pickup-decision + reconcile fields (see fbrain design
+  // `fkanban-card-structured-fields`). Promote signals a fresh agent needs
+  // to decide "what do I pick up?" out of body prose into real fields, so
+  // every routine reads them the same way. `priority` is intentionally
+  // ABSENT — it's owned by a parallel design and added later (cheap, per
+  // LastDB's read-through field-mapper republish).
+  "repo",
+  "base",
+  "kind",
+  "block_status",
+  "block_reason",
+  "north_star",
+  "pr_url",
+  "branch",
+] as const;
+
+export const BOARD_FIELDS = [
+  "slug",
+  "title",
+  "body",
+  "columns",
+  "created_at",
+  "updated_at",
+] as const;
+
+function defaultStringFieldTypes(
+  fields: readonly string[],
+  arrayFields: readonly string[],
+): Record<string, FieldType> {
+  const arrays = new Set(arrayFields);
+  return Object.fromEntries(
+    fields.map((field) => [
+      field,
+      arrays.has(field) ? { Array: "String" } : "String",
+    ]),
+  ) as Record<string, FieldType>;
+}
+
+function generalDataClassifications(
+  fields: readonly string[],
+): SchemaDefinition["field_data_classifications"] {
+  return Object.fromEntries(fields.map((field) => [field, GENERAL]));
+}
+
 export const cardSchema: AddSchemaRequest = {
   schema: {
     name: "Card",
@@ -82,52 +137,8 @@ export const cardSchema: AddSchemaRequest = {
       "A single work item on a kanban board, moved through columns over its lifecycle",
     schema_type: "Hash",
     key: { hash_field: "slug" },
-    fields: [
-      "slug",
-      "title",
-      "body",
-      "board",
-      "column",
-      "position",
-      "assignee",
-      "tags",
-      "created_at",
-      "updated_at",
-      // Structured pickup-decision + reconcile fields (see fbrain design
-      // `fkanban-card-structured-fields`). Promote signals a fresh agent needs
-      // to decide "what do I pick up?" out of body prose into real fields, so
-      // every routine reads them the same way. `priority` is intentionally
-      // ABSENT — it's owned by a parallel design and added later (cheap, per
-      // LastDB's read-through field-mapper republish).
-      "repo",
-      "base",
-      "kind",
-      "block_status",
-      "block_reason",
-      "north_star",
-      "pr_url",
-      "branch",
-    ],
-    field_types: {
-      slug: "String",
-      title: "String",
-      body: "String",
-      board: "String",
-      column: "String",
-      position: "String",
-      assignee: "String",
-      tags: { Array: "String" },
-      created_at: "String",
-      updated_at: "String",
-      repo: "String",
-      base: "String",
-      kind: "String",
-      block_status: "String",
-      block_reason: "String",
-      north_star: "String",
-      pr_url: "String",
-      branch: "String",
-    },
+    fields: [...CARD_FIELDS],
+    field_types: defaultStringFieldTypes(CARD_FIELDS, ["tags"]),
     field_descriptions: {
       slug: "stable url-style id (board-unique card key)",
       title: "one-line card name",
@@ -149,26 +160,7 @@ export const cardSchema: AddSchemaRequest = {
       branch: "worktree/feature branch a build agent works on",
     },
     field_classifications: { title: ["word"], body: ["word"] },
-    field_data_classifications: {
-      slug: GENERAL,
-      title: GENERAL,
-      body: GENERAL,
-      board: GENERAL,
-      column: GENERAL,
-      position: GENERAL,
-      assignee: GENERAL,
-      tags: GENERAL,
-      created_at: GENERAL,
-      updated_at: GENERAL,
-      repo: GENERAL,
-      base: GENERAL,
-      kind: GENERAL,
-      block_status: GENERAL,
-      block_reason: GENERAL,
-      north_star: GENERAL,
-      pr_url: GENERAL,
-      branch: GENERAL,
-    },
+    field_data_classifications: generalDataClassifications(CARD_FIELDS),
   },
   mutation_mappers: {},
 };
@@ -182,15 +174,8 @@ export const boardSchema: AddSchemaRequest = {
       "A named kanban board defining an ordered set of columns cards flow through",
     schema_type: "Hash",
     key: { hash_field: "slug" },
-    fields: ["slug", "title", "body", "columns", "created_at", "updated_at"],
-    field_types: {
-      slug: "String",
-      title: "String",
-      body: "String",
-      columns: { Array: "String" },
-      created_at: "String",
-      updated_at: "String",
-    },
+    fields: [...BOARD_FIELDS],
+    field_types: defaultStringFieldTypes(BOARD_FIELDS, ["columns"]),
     field_descriptions: {
       slug: "stable url-style id",
       title: "one-line board name",
@@ -200,14 +185,7 @@ export const boardSchema: AddSchemaRequest = {
       updated_at: "RFC 3339 timestamp",
     },
     field_classifications: { title: ["word"], body: ["word"] },
-    field_data_classifications: {
-      slug: GENERAL,
-      title: GENERAL,
-      body: GENERAL,
-      columns: GENERAL,
-      created_at: GENERAL,
-      updated_at: GENERAL,
-    },
+    field_data_classifications: generalDataClassifications(BOARD_FIELDS),
   },
   mutation_mappers: {},
 };

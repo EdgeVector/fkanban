@@ -48,14 +48,15 @@ export async function boardCreateCmd(opts: {
       });
     }
   }
-  const columns = opts.columns && opts.columns.length > 0 ? opts.columns : [...DEFAULT_COLUMNS];
+  const columnsSupplied = opts.columns !== undefined && opts.columns.length > 0;
+  const columns = columnsSupplied ? opts.columns! : [...DEFAULT_COLUMNS];
   const existing = await findBoard(opts.node, opts.cfg, opts.slug);
   const now = nowIso();
   const board: Board = {
     slug: opts.slug,
     title: opts.title ?? existing?.title ?? opts.slug,
     body: opts.body ?? existing?.body ?? "",
-    columns: opts.columns ? columns : existing?.columns ?? columns,
+    columns: columnsSupplied ? columns : existing?.columns ?? columns,
     created_at: existing?.created_at ?? now,
     updated_at: now,
   };
