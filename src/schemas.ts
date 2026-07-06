@@ -1,16 +1,25 @@
 // Schema definitions for fkanban's record types.
 //
-// Two schemas are registered against the schema_service:
+// Two schemas back the board:
 //
 //   - **Card** — one card on a kanban board. Lives in a `column` (the
 //     kanban status) and on a `board`. Moving a card = updating `column`.
 //   - **Board** — a named board with an ordered list of `columns`.
 //
-// `POST /v1/schemas` accepts these bodies; the response's `schema.name`
-// IS THE CANONICAL HASH every subsequent mutation/query MUST pin to. The
-// `descriptive_name` / `purpose_statement` are for human display + the
-// dual-signal canonicalization gate (so Card and Board never collapse onto
-// one canonical hash, and `fkanban/*` never collides with another app).
+// How the CLI gets the canonical hashes (the values every mutation/query MUST
+// pin to): the `fkanban/*` schemas are PUBLISHED once, out-of-band, to the
+// schema_service by an enrolled developer (see README "Republishing the
+// schemas"). fkanban itself never registers them — `registerSchema`
+// (`POST /v1/schemas`) exists on the client but is not called from the CLI. At
+// `init` time the NODE pulls the published schemas from its schema_service
+// (`loadSchemas` → `POST /api/schemas/load`); fkanban then reads the node's
+// loaded set (`listSchemas`) and `resolveLoadedSchema` matches each record type
+// to a loaded schema by `owner_app_id` + `descriptive_name`, adopting a
+// write-compatible (field-superset) candidate's `name` as the canonical hash to
+// persist in config. The `descriptive_name` / `purpose_statement` are for human
+// display + the dual-signal canonicalization gate (so Card and Board never
+// collapse onto one canonical hash, and `fkanban/*` never collides with another
+// app).
 
 // The app id that owns every fkanban schema. Under app_identity v3.1,
 // `owner_app_id` folds into the schema's identity hash, so the

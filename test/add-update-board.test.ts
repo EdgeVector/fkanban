@@ -73,7 +73,7 @@ function fakeNode(): NodeClient {
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
     rawCall: notImpl("rawCall") as NodeClient["rawCall"],
-    nodeTransport: () => ({ transport: "tcp" as const }),
+    nodeTransport: () => ({ transport: "unavailable" as const }),
   };
 }
 

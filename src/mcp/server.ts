@@ -26,13 +26,47 @@ import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
 
+// The read-only vs mutating tool split, as the single source of truth for both
+// the MCP instructions blurb below and the `readOnlyHint` on each tool. Keeping
+// these lists here (rather than a hand-written "15 tools … the rest write."
+// sentence) means the count and the split are DERIVED, so they can't silently
+// rot when a tool is added or removed. A test asserts these names equal the
+// tools actually registered on the server, and that every read tool carries
+// `readOnlyHint:true` while every write tool does not.
+export const FKANBAN_READ_TOOLS = [
+  "fkanban_list",
+  "fkanban_search",
+  "fkanban_show",
+  "fkanban_board_list",
+  "fkanban_doctor",
+] as const;
+export const FKANBAN_WRITE_TOOLS = [
+  "fkanban_add",
+  "fkanban_move",
+  "fkanban_rank",
+  "fkanban_rm",
+  "fkanban_dep_add",
+  "fkanban_dep_rm",
+  "fkanban_tag_add",
+  "fkanban_tag_rm",
+  "fkanban_board_create",
+  "fkanban_board_rm",
+] as const;
+export const FKANBAN_TOOL_COUNT =
+  FKANBAN_READ_TOOLS.length + FKANBAN_WRITE_TOOLS.length;
+
+// Render a `fkanban_x, fkanban_y` list as the bare `x, y` short names the blurb
+// reads more naturally with.
+const shortNames = (names: readonly string[]): string =>
+  names.map((n) => n.replace(/^fkanban_/, "")).join(", ");
+
 // Server-level orientation surfaced to the model in the `initialize` result.
 // Keep this SHORT — hosts inject it into context every session, so verbosity
 // costs tokens for every user. Point at the tools; don't restate each one.
 export const FKANBAN_MCP_INSTRUCTIONS = [
-  "fkanban is a kanban board over fold_db. 15 tools: read tools",
-  "(fkanban_list, fkanban_search, fkanban_show, fkanban_board_list, fkanban_doctor)",
-  "never mutate; the rest (add, move, rank, rm, dep_add, dep_rm, tag_add, tag_rm, board_create, board_rm) write.",
+  `fkanban is a kanban board over fold_db. ${FKANBAN_TOOL_COUNT} tools: read tools`,
+  `(${FKANBAN_READ_TOOLS.join(", ")})`,
+  `never mutate; the rest (${shortNames(FKANBAN_WRITE_TOOLS)}) write.`,
   "",
   "Board model: a card lives on a board, in one column, at a position. Columns flow",
   "backlog → todo → doing → review → done.",

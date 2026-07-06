@@ -5,16 +5,24 @@
 // ephemeral node with app_identity enforcement off. All errors flow through
 // a single mapper so each failure mode maps to one actionable message.
 //
+// Local nodes are socket-only: the loopback `:9001` TCP control plane was
+// retired (fold `fold-retire-tcp-listener`), so every node route — data plane,
+// schema/identity reads, and owner-session attestation — travels over the
+// node's Unix-domain control socket. The `nodeUrl` is now just a loopback
+// identity string in error/diagnostic text; there is no live TCP transport to
+// fall back to.
+//
 // Owner-session attestation (app-isolation default-on, fold#739): when the
 // node enforces app-isolation, owner-authority verbs (schema load, control
-// plane) demand an *attested transport* and reject bare loopback TCP with
+// plane) demand an *attested transport* and reject unattested requests with
 // `403 transport_not_attested`. fkanban attests exactly like the CLI's
 // `attest_owner_session`: mint a one-time pairing code over the node's
-// Unix-domain control socket, exchange it over TCP for a session token, and
-// present that token as `X-Folddb-Session` on every request. Against a node
-// with no control socket (the device-trust :9001 brain today) the mint fails,
-// no token is obtained, and fkanban works exactly as before — the change is
-// fully backward-compatible.
+// Unix-domain control socket, exchange it over that same socket for a session
+// token, and present that token as `X-Folddb-Session` on every request.
+// Against a node with no control socket the mint fails, no token is obtained,
+// and requests proceed unattested (an owner verb will then 403) — the socket
+// is the only path, so a missing socket means the node is effectively
+// unreachable, not that TCP takes over.
 
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -195,13 +203,16 @@ export type NodeClient = {
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
   // Which transport local node requests take RIGHT NOW: `socket` when an owner
-  // socket was threaded in and the file currently exists (socket-first is live
-  // for board data-plane routes and the schema/identity checks doctor needs;
-  // `folddb-full.sock` carries every node route), else `tcp`. `socketPath`
-  // echoes the path consulted (so `fkanban doctor` can name it). Re-evaluates
-  // `existsSync` on each call so a socket that appears/vanishes between calls is
-  // reported accurately.
-  nodeTransport(): { transport: "socket" | "tcp"; socketPath?: string };
+  // socket was threaded in and the file currently exists (the socket carries
+  // board data-plane routes and the schema/identity checks doctor needs;
+  // `folddb-full.sock` carries every node route). Local nodes are socket-only —
+  // the loopback TCP control plane was retired — so when no socket file is
+  // present this returns `unavailable`: requests have no live transport and
+  // will fail, NOT silently fall back to TCP. `socketPath` echoes the path
+  // consulted (so `fkanban doctor` can name it). Re-evaluates `existsSync` on
+  // each call so a socket that appears/vanishes between calls is reported
+  // accurately.
+  nodeTransport(): { transport: "socket" | "unavailable"; socketPath?: string };
 };
 
 export function newSchemaServiceClient(
@@ -669,7 +680,7 @@ export function newNodeClient(opts: {
     },
     nodeTransport() {
       const live = socketPath !== undefined && socketPath.length > 0 && existsSync(socketPath);
-      return live ? { transport: "socket", socketPath } : { transport: "tcp", socketPath };
+      return live ? { transport: "socket", socketPath } : { transport: "unavailable", socketPath };
     },
   };
 }

@@ -44,9 +44,13 @@ import {
   type Board,
 } from "../record.ts";
 
-// `:9001` is the homebrew fold_db_node daemon; the schema service defaults to
-// the prod cloud Lambda. Override both with --node-url / --schema-service-url
-// (e.g. point at an ephemeral dev node + the dev Lambda).
+// A local fold_db_node is reached over its Unix-domain control socket, NOT over
+// TCP — the loopback `:9001` control plane was retired. This loopback default is
+// only a diagnostic identity string for that local node (the actual transport is
+// the socket resolved by `resolveSocketPath`); it also flags the node as local
+// (loopback) so client requests go socket-only with no TCP fallback. The schema
+// service defaults to the prod cloud Lambda. Override with --node-url /
+// --schema-service-url (e.g. point at an ephemeral dev node + the dev Lambda).
 export const DEFAULT_NODE_URL = "http://127.0.0.1:9001";
 export const DEFAULT_SCHEMA_SERVICE_URL =
   "https://axo709qs11.execute-api.us-east-1.amazonaws.com";

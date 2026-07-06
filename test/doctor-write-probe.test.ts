@@ -313,6 +313,28 @@ describe("doctor write-probe", () => {
     }
   });
 
+  test("red: a missing socket on a socket-only node is labeled 'unavailable', not 'tcp'", async () => {
+    // Local nodes are socket-only; a socket that isn't there means the node is
+    // unreachable, not that TCP takes over. Doctor must NOT print "node
+    // transport: tcp" (which reads as a live TCP path) — it must say the socket
+    // is missing. Point at a loopback nodeUrl and a socket path that doesn't
+    // exist.
+    const missingSocket = join(tmp, "does-not-exist.sock");
+    const cfgPath = writeCfgWithNode(
+      "socket-missing.json",
+      FULL_CARD_HASH,
+      "http://127.0.0.1:9001",
+      missingSocket,
+    );
+    const lines: string[] = [];
+    const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
+    const report = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(report).toContain("· node transport: unavailable");
+    expect(report).toContain("socket missing");
+    expect(report).not.toContain("node transport: tcp");
+  });
+
   test("red: socket mode still fails when neither socket nor TCP can answer data-plane reads", async () => {
     const socketPath = join(tmp, "unusable-socket.sock");
     writeFileSync(socketPath, "");

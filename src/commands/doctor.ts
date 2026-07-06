@@ -77,11 +77,13 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   const socketPath = resolveSocketPath(cfg);
   const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath });
 
-  // Which transport the node calls take. Socket-first is live for board
-  // data-plane routes plus the schema/identity reads doctor needs; when
-  // configured with `folddb-full.sock`, the socket carries the whole node HTTP
-  // app. This line is informational only — never flips `ok`; it just lets a
-  // user confirm socket-first is active (or see why it fell back to TCP).
+  // Which transport the node calls take. Local nodes are socket-only (the
+  // loopback TCP control plane was retired), so the socket carries the board
+  // data-plane routes plus the schema/identity reads doctor needs; with
+  // `folddb-full.sock` it carries the whole node HTTP app. When no socket file
+  // is present the transport is `unavailable` — there is no TCP to fall back to,
+  // so requests will fail. This line is informational only — never flips `ok`;
+  // it lets a user confirm the socket is live (or see that it's missing).
   // Printed BEFORE the reachability probe so the transport is named even if
   // that probe then fails.
   const transport = node.nodeTransport();
@@ -105,10 +107,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     print(`✓ node transport: socket — ${detail}`);
     onCheck?.({ name: "node transport", status: "info", detail });
   } else {
+    // Socket-only: a missing socket means the node is unreachable, not that TCP
+    // takes over. Name it plainly so a user doesn't read "tcp" as a live path.
     const detail = transport.socketPath
-      ? `loopback TCP ${cfg.nodeUrl} (no socket at ${transport.socketPath})`
-      : `loopback TCP ${cfg.nodeUrl} (no socket configured)`;
-    print(`· node transport: tcp — ${detail}`);
+      ? `socket missing at ${transport.socketPath} (local nodes are socket-only; ${cfg.nodeUrl} has no live TCP control plane)`
+      : `no socket configured (local nodes are socket-only; ${cfg.nodeUrl} has no live TCP control plane)`;
+    print(`· node transport: unavailable — ${detail}`);
     onCheck?.({ name: "node transport", status: "info", detail });
   }
 
