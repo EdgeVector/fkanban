@@ -505,10 +505,11 @@ function parseIntFlag(
   { min }: { min: number },
 ): number {
   const trimmed = raw.trim();
-  const n = Number(trimmed);
   const want = min === 1 ? "a positive integer" : `an integer >= ${min}`;
   const help = cmd in COMMAND_HELP ? `${cmd} --help` : "help";
-  if (trimmed.length === 0 || !Number.isInteger(n) || n < min) {
+  const cleanInteger = /^-?\d+$/.test(trimmed);
+  const n = cleanInteger ? Number(trimmed) : NaN;
+  if (!cleanInteger || !Number.isSafeInteger(n) || n < min) {
     let msg = `error: --${flag} must be ${want}, got "${raw}".`;
     // --limit 0 used to mean silent-unbounded; point at the documented flag.
     if (flag === "limit" && Number.isInteger(n) && n < 1) {
@@ -759,6 +760,8 @@ async function dispatch(
 ): Promise<number> {
   switch (cmd) {
     case "init": {
+      const extra = rejectExtraPositionals(positionals, 1, "init");
+      if (extra !== undefined) return extra;
       await runInit({
         nodeUrl: values["node-url"] as string | undefined,
         schemaServiceUrl: values["schema-service-url"] as string | undefined,
@@ -770,6 +773,8 @@ async function dispatch(
     }
 
     case "mcp": {
+      const extra = rejectExtraPositionals(positionals, 1, "mcp");
+      if (extra !== undefined) return extra;
       // Defer the MCP import so the heavyweight SDK only loads for `mcp`.
       const { startMcpServer } = await import("./mcp/server.ts");
       await startMcpServer({ verbose });
@@ -777,6 +782,8 @@ async function dispatch(
     }
 
     case "version": {
+      const extra = rejectExtraPositionals(positionals, 1, "version");
+      if (extra !== undefined) return extra;
       // Bare `version` subcommand — an alias for the `--version` flag (humans
       // and agents reflexively type `<tool> version`). Print just the version
       // from package.json (same source as `--version`/`-V`) and exit 0.
@@ -785,6 +792,8 @@ async function dispatch(
     }
 
     case "doctor": {
+      const extra = rejectExtraPositionals(positionals, 1, "doctor");
+      if (extra !== undefined) return extra;
       if (values.json) {
         // Machine-readable: collect the structured report (no human ✓/✗ lines
         // leak to stdout) and emit the SAME { ok, version, checks } shape the
@@ -799,6 +808,8 @@ async function dispatch(
 
     case "add": {
       const slug = requirePositional(positionals[1], "add <slug>");
+      const extra = rejectExtraPositionals(positionals, 2, "add <slug>");
+      if (extra !== undefined) return extra;
       const ctx = loadCtx({ verbose });
       // `--body` as a flag wins, and when it's present we must NOT touch stdin
       // at all: draining a stdin that never reaches EOF (a background-/agent-
@@ -863,6 +874,8 @@ async function dispatch(
     case "move": {
       const slug = requirePositional(positionals[1], "move <slug> <column>");
       const column = requirePositional(positionals[2], "move <slug> <column>");
+      const extra = rejectExtraPositionals(positionals, 3, "move <slug> <column>");
+      if (extra !== undefined) return extra;
       // Validate the numeric flag before touching config/node, so a bad
       // `--position` reports the exit-2 flag error rather than a config error.
       const position =
@@ -884,10 +897,16 @@ async function dispatch(
 
     case "dep": {
       const sub = positionals[1];
+      if (sub !== "add" && sub !== "rm" && sub !== "remove") {
+        console.error(`fkanban: Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
+        return 2;
+      }
       const slug = requirePositional(positionals[2], "dep <add|rm> <slug> <dep>");
       const dep = requirePositional(positionals[3], "dep <add|rm> <slug> <dep>");
-      const ctx = loadCtx({ verbose });
+      const extra = rejectExtraPositionals(positionals, 4, "dep <add|rm> <slug> <dep>");
+      if (extra !== undefined) return extra;
       if (sub === "add") {
+        const ctx = loadCtx({ verbose });
         try {
           const res = await depAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
           console.log(formatDep(res, values.json as boolean | undefined));
@@ -909,24 +928,28 @@ async function dispatch(
         }
       }
       if (sub === "rm" || sub === "remove") {
+        const ctx = loadCtx({ verbose });
         const res = await depRmCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
         console.log(formatDep(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`fkanban: Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
       return 2;
     }
 
     case "tag": {
       const sub = positionals[1];
+      if (sub !== "add" && sub !== "rm" && sub !== "remove") {
+        console.error(`fkanban: Unknown tag subcommand "${sub ?? ""}". Try: tag add | tag rm`);
+        return 2;
+      }
       const slug = requirePositional(positionals[2], "tag <add|rm> <slug> <tag...>");
       // Accept one OR MORE tags as positional rest (a card carries many).
       const tags = positionals.slice(3);
       if (tags.length === 0) {
         requirePositional(undefined, "tag <add|rm> <slug> <tag...>");
       }
-      const ctx = loadCtx({ verbose });
       if (sub === "add") {
+        const ctx = loadCtx({ verbose });
         try {
           const res = await tagAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, tag: tags });
           console.log(formatTag(res, values.json as boolean | undefined));
@@ -948,17 +971,19 @@ async function dispatch(
         }
       }
       if (sub === "rm" || sub === "remove") {
+        const ctx = loadCtx({ verbose });
         const res = await tagRmCmd({ cfg: ctx.cfg, node: ctx.node, slug, tag: tags });
         console.log(formatTag(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`fkanban: Unknown tag subcommand "${sub ?? ""}". Try: tag add | tag rm`);
       return 2;
     }
 
     case "migrate": {
       const sub = positionals[1];
       if (sub === "area-tags") {
+        const extra = rejectExtraPositionals(positionals, 2, "migrate area-tags");
+        if (extra !== undefined) return extra;
         const ctx = loadCtx({ verbose });
         const res = await migrateAreaTagsCmd({
           cfg: ctx.cfg,
@@ -973,6 +998,8 @@ async function dispatch(
     }
 
     case "list": {
+      const extra = rejectExtraPositionals(positionals, 1, "list");
+      if (extra !== undefined) return extra;
       // Validate the numeric flag before touching config/node, so a bad
       // `--limit` reports the exit-2 flag error rather than a config error.
       const limit =
@@ -999,6 +1026,8 @@ async function dispatch(
     }
 
     case "rank": {
+      const extra = rejectExtraPositionals(positionals, 1, "rank");
+      if (extra !== undefined) return extra;
       const ctx = loadCtx({ verbose });
       const res = await rankCmd({
         cfg: ctx.cfg,
@@ -1012,6 +1041,8 @@ async function dispatch(
 
     case "search": {
       const query = requirePositional(positionals[1], "search <query>");
+      const extra = rejectExtraPositionals(positionals, 2, "search <query>");
+      if (extra !== undefined) return extra;
       // Validate the numeric flag before touching config/node, so a bad
       // `--limit` reports the exit-2 flag error rather than a config error
       // (same contract as `list`).
@@ -1037,6 +1068,8 @@ async function dispatch(
 
     case "show": {
       const slug = requirePositional(positionals[1], "show <slug>");
+      const extra = rejectExtraPositionals(positionals, 2, "show <slug>");
+      if (extra !== undefined) return extra;
       const ctx = loadCtx({ verbose });
       const out = await showCmd({ cfg: ctx.cfg, node: ctx.node, slug, json: values.json as boolean | undefined });
       console.log(out);
@@ -1045,6 +1078,8 @@ async function dispatch(
 
     case "rm": {
       const slug = requirePositional(positionals[1], "rm <slug>");
+      const extra = rejectExtraPositionals(positionals, 2, "rm <slug>");
+      if (extra !== undefined) return extra;
       const ctx = loadCtx({ verbose });
       const res = await rmCmd({ cfg: ctx.cfg, node: ctx.node, slug });
       console.log(formatRm(res, values.json as boolean | undefined));
@@ -1060,9 +1095,15 @@ async function dispatch(
 
     case "board": {
       const sub = positionals[1];
-      const ctx = loadCtx({ verbose });
+      if (sub !== undefined && sub !== "create" && sub !== "list" && sub !== "rm") {
+        console.error(`fkanban: Unknown board subcommand "${sub}". Try: board create | board list | board rm`);
+        return 2;
+      }
       if (sub === "create") {
         const slug = requirePositional(positionals[2], "board create <slug>");
+        const extra = rejectExtraPositionals(positionals, 3, "board create <slug>");
+        if (extra !== undefined) return extra;
+        const ctx = loadCtx({ verbose });
         try {
           const res = await boardCreateCmd({
             cfg: ctx.cfg,
@@ -1092,12 +1133,18 @@ async function dispatch(
         }
       }
       if (sub === "list" || sub === undefined) {
+        const extra = rejectExtraPositionals(positionals, sub === undefined ? 1 : 2, "board list");
+        if (extra !== undefined) return extra;
+        const ctx = loadCtx({ verbose });
         const out = await boardListCmd({ cfg: ctx.cfg, node: ctx.node, json: values.json as boolean | undefined });
         console.log(out);
         return 0;
       }
       if (sub === "rm") {
         const slug = requirePositional(positionals[2], "board rm <slug>");
+        const extra = rejectExtraPositionals(positionals, 3, "board rm <slug>");
+        if (extra !== undefined) return extra;
+        const ctx = loadCtx({ verbose });
         const res = await boardRmCmd({
           cfg: ctx.cfg,
           node: ctx.node,
@@ -1107,7 +1154,6 @@ async function dispatch(
         console.log(formatBoardRm(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`fkanban: Unknown board subcommand "${sub}". Try: board create | board list | board rm`);
       return 2;
     }
 
@@ -1134,6 +1180,13 @@ function requirePositional(value: string | undefined, usage: string): string {
     throw new FkanbanError({ code: "missing_arg", message: `Missing argument — usage: fkanban ${usage}` });
   }
   return value;
+}
+
+function rejectExtraPositionals(positionals: string[], max: number, usage: string): number | undefined {
+  if (positionals.length <= max) return undefined;
+  const extras = positionals.slice(max).map((arg) => `"${arg}"`).join(" ");
+  console.error(`fkanban: Too many arguments: ${extras}. Usage: fkanban ${usage}`);
+  return 2;
 }
 
 // Write `data` to a raw fd, looping until every byte is accepted. `console.log`
