@@ -7,18 +7,24 @@ import { type Config } from "../config.ts";
 import {
   blockedSlugSet,
   boardTerminalMap,
+  CARD_DISPLAY_FIELDS,
   ensureColumn,
+  findCard,
+  listDependencyStatusesForCards,
   listBoards,
   listCards,
+  listCardsByFilter,
+  listCardsForDisplay,
   queryTerms,
   requireBoard,
+  cardMatchesQuery,
   searchCards,
   sortCards,
   type Card,
 } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT, renderSearchResults, resolveLimits } from "../board.ts";
-import { renderFieldProjection } from "../field_projection.ts";
-import { DEFAULT_COLUMNS } from "../schemas.ts";
+import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
+import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
 
 export type SearchOptions = {
   cfg: Config;
@@ -32,7 +38,114 @@ export type SearchOptions = {
   // `all` removes the cap. Mirrors `list`'s `--limit`/`--all` contract.
   limit?: number;
   all?: boolean;
+  // Complete mode preserves the historical exhaustive substring search. The
+  // default text command may use indexed/native candidates and body-free scans
+  // so an interactive search does not download every full card body.
+  complete?: boolean;
 };
+
+const NATIVE_INDEX_RESULT_CAP = 50;
+
+type SearchPlan = "complete-scan" | "indexed-candidates";
+
+function debugSearchPlan(plan: SearchPlan, detail: Record<string, unknown>): void {
+  if (!process.env.FKANBAN_DEBUG_QUERY_PLAN) return;
+  console.error(`fkanban: query-plan search ${plan} ${JSON.stringify(detail)}`);
+}
+
+function nativeIndexPath(query: string): string {
+  const params = new URLSearchParams({
+    q: query,
+    include_internal: "true",
+  });
+  return `/api/native-index/search?${params.toString()}`;
+}
+
+function nativeCardSlugs(json: unknown, cardSchemaHash: string): string[] {
+  if (typeof json !== "object" || json === null) return [];
+  const results = (json as Record<string, unknown>).results;
+  if (!Array.isArray(results)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const hit of results) {
+    if (typeof hit !== "object" || hit === null) continue;
+    const h = hit as Record<string, unknown>;
+    const schemaName = typeof h.schema_name === "string" ? h.schema_name : "";
+    const schemaDisplayName = typeof h.schema_display_name === "string" ? h.schema_display_name : "";
+    const schemaMatches = cardSchemaHash.length > 0
+      ? schemaName === cardSchemaHash
+      : schemaDisplayName === "Card" || schemaDisplayName === "fkanban/Card";
+    if (!schemaMatches) {
+      continue;
+    }
+    const keyValue = h.key_value;
+    if (typeof keyValue !== "object" || keyValue === null) continue;
+    const slug = (keyValue as Record<string, unknown>).hash;
+    if (typeof slug !== "string" || slug.length === 0 || seen.has(slug)) continue;
+    seen.add(slug);
+    out.push(slug);
+  }
+  return out;
+}
+
+async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: string[]; saturated: boolean } | null> {
+  const res = await opts.node.rawCall("GET", nativeIndexPath(opts.query));
+  if (res.status !== 200) return null;
+  const slugs = nativeCardSlugs(res.json, opts.cfg.schemaHashes.card ?? "");
+  return {
+    slugs,
+    saturated: slugs.length >= NATIVE_INDEX_RESULT_CAP,
+  };
+}
+
+async function indexedSearchCards(
+  opts: SearchOptions,
+): Promise<{ cards: Card[]; allCards: Card[]; fallbackReason?: string }> {
+  const filter: Record<string, string> = {};
+  if (opts.board) filter.board = opts.board;
+  if (opts.column) filter.column = opts.column;
+
+  const displayRead = Object.keys(filter).length > 0
+    ? await listCardsByFilter(opts.node, opts.cfg, filter, CARD_DISPLAY_FIELDS)
+    : { cards: await listCardsForDisplay(opts.node, opts.cfg), indexed: false };
+
+  let native: { slugs: string[]; saturated: boolean } | null = null;
+  try {
+    native = await nativeIndexCandidateSlugs(opts);
+  } catch {
+    native = null;
+  }
+
+  if (native?.saturated) {
+    return { cards: [], allCards: [], fallbackReason: "native-index returned its cap" };
+  }
+
+  const scopedDisplay = displayRead.cards.filter(
+    (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
+  );
+  const statusCards = await listDependencyStatusesForCards(opts.node, opts.cfg, scopedDisplay);
+  const bySlug = new Map<string, Card>();
+  for (const card of scopedDisplay) {
+    if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
+  }
+
+  const hydrated = await Promise.all((native?.slugs ?? []).map((slug) => findCard(opts.node, opts.cfg, slug)));
+  for (const card of hydrated) {
+    if (!card) continue;
+    if (opts.board && card.board !== opts.board) continue;
+    if (opts.column && card.column !== opts.column) continue;
+    if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
+  }
+
+  debugSearchPlan("indexed-candidates", {
+    displayCards: scopedDisplay.length,
+    displayIndexed: displayRead.indexed,
+    nativeCandidates: native?.slugs.length ?? 0,
+    hydratedCandidates: hydrated.filter(Boolean).length,
+    fullBodyScan: false,
+  });
+  return { cards: sortCards([...bySlug.values()]), allCards: statusCards };
+}
 
 // Both the human text and the structured (`--json`) matches, from a single
 // read. `searchCmd` (CLI) returns one; the MCP tool returns both.
@@ -81,11 +194,41 @@ export async function searchResult(
   if (opts.column !== undefined) {
     ensureColumn(opts.column, board?.columns ?? [...DEFAULT_COLUMNS]);
   }
-  const allCards = await listCards(opts.node, opts.cfg);
-  const scoped = allCards.filter(
-    (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
-  );
-  const matches = sortCards(searchCards(scoped, opts.query));
+  const complete = opts.complete ?? true;
+  let allCards: Card[];
+  let matches: Card[];
+  if (complete) {
+    const filter: Record<string, string> = {};
+    if (opts.board) filter.board = opts.board;
+    if (opts.column) filter.column = opts.column;
+    const read = Object.keys(filter).length > 0
+      ? await listCardsByFilter(opts.node, opts.cfg, filter, fieldsFor("card"))
+      : { cards: await listCards(opts.node, opts.cfg), indexed: false };
+    allCards = read.cards;
+    const scoped = allCards.filter(
+      (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
+    );
+    matches = sortCards(searchCards(scoped, opts.query));
+    debugSearchPlan("complete-scan", {
+      scopedCards: scoped.length,
+      filterIndexed: read.indexed,
+      fullBodyScan: !read.indexed,
+    });
+  } else {
+    const indexed = await indexedSearchCards(opts);
+    if (indexed.fallbackReason !== undefined) {
+      debugSearchPlan("complete-scan", { reason: indexed.fallbackReason });
+      const all = await listCards(opts.node, opts.cfg);
+      allCards = all;
+      const scoped = all.filter(
+        (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
+      );
+      matches = sortCards(searchCards(scoped, opts.query));
+    } else {
+      allCards = indexed.allCards;
+      matches = indexed.cards;
+    }
+  }
 
   // Text render cap: an explicit `--limit` (always >= 1 after flag parsing),
   // `--all` removes the cap (0), and the no-flag default falls back to
@@ -104,7 +247,8 @@ export async function searchResult(
 
 export async function searchCmd(opts: SearchOptions): Promise<string> {
   const projectionFields = opts.fields ?? [];
-  const { text, cards, jsonLimit } = await searchResult(opts);
+  const complete = Boolean(opts.json || opts.all || fieldProjectionNeedsFullCards(projectionFields));
+  const { text, cards, jsonLimit } = await searchResult({ ...opts, complete });
   const out = jsonLimit > 0 ? capFlat(cards, jsonLimit) : cards;
   if (projectionFields.length > 0) return renderFieldProjection(out, projectionFields);
   if (!opts.json) return text;

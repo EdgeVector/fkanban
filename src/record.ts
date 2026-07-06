@@ -1288,6 +1288,43 @@ export async function listCardsByColumn(
   }
 }
 
+export async function listCardsByFilter(
+  node: NodeClient,
+  cfg: Config,
+  filter: QueryFilter,
+  fields: string[],
+): Promise<{ cards: Card[]; indexed: boolean }> {
+  const entries = Object.entries(filter).filter(([, value]) => value.length > 0);
+  if (entries.length === 0) {
+    return { cards: await listCardsWithFields(node, cfg, fields), indexed: false };
+  }
+
+  const effectiveFilter = Object.fromEntries(entries);
+  try {
+    const cards = await listCardsWithFields(node, cfg, fields, effectiveFilter);
+    return {
+      cards: cards.filter((c) =>
+        entries.every(([field, value]) => {
+          const actual = (c as unknown as Record<string, unknown>)[field];
+          return typeof actual === "string" && actual === value;
+        })
+      ),
+      indexed: true,
+    };
+  } catch (err) {
+    if (!canFallbackColumnFilter(err)) throw err;
+    return {
+      cards: (await listCardsWithFields(node, cfg, fields)).filter((c) =>
+        entries.every(([field, value]) => {
+          const actual = (c as unknown as Record<string, unknown>)[field];
+          return typeof actual === "string" && actual === value;
+        })
+      ),
+      indexed: false,
+    };
+  }
+}
+
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
   const hash = schemaHashFor("board", cfg);
   const res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("board") });
