@@ -8,14 +8,16 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
+import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import {
   boardToFields,
   findCard,
   normalizeBlockStatus,
   nowIso,
+  PICKUP_AREA_ACTIVE_COLUMNS,
   PICKUP_AREA_BLOCK_PREFIX,
+  PICKUP_AREA_PEER_FIELDS,
 } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
@@ -29,8 +31,11 @@ const cfg: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
 
-function fakeNode(): NodeClient {
+function fakeNode(opts: { rejectColumnFilter?: boolean } = {}): NodeClient & {
+  cardQueries: Array<{ fields: string[]; filter?: QueryFilter }>;
+} {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
+  const cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> = [];
   const tableFor = (schemaHash: string) => {
     let t = store.get(schemaHash);
     if (!t) {
@@ -39,14 +44,19 @@ function fakeNode(): NodeClient {
     }
     return t;
   };
-  const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
+  const rowsFor = (schemaHash: string, filter?: QueryFilter, wantedFields?: string[]): QueryRow[] => {
     const t = tableFor(schemaHash);
     const entries = filter?.HashKey
       ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : [])
       : [...t.entries()].filter(([, fields]) =>
           !filter || Object.entries(filter).every(([field, value]) => fields[field] === value)
         );
-    return entries.map(([hash, fields]) => ({ fields, key: { hash, range: null } }));
+    return entries.map(([hash, fields]) => ({
+      fields: wantedFields
+        ? Object.fromEntries(wantedFields.filter((field) => field in fields).map((field) => [field, fields[field]]))
+        : fields,
+      key: { hash, range: null },
+    }));
   };
   const notImpl = (m: string) => async (): Promise<never> => {
     throw new Error(`fakeNode.${m} not implemented`);
@@ -54,6 +64,7 @@ function fakeNode(): NodeClient {
   return {
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
+    cardQueries,
     autoIdentity: notImpl("autoIdentity"),
     bootstrap: notImpl("bootstrap"),
     loadSchemas: notImpl("loadSchemas"),
@@ -67,8 +78,15 @@ function fakeNode(): NodeClient {
     async deleteRecord({ schemaHash, keyHash }) {
       tableFor(schemaHash).delete(keyHash);
     },
-    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
-      const results = rowsFor(schemaHash, filter);
+    async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
+      if (schemaHash === cfg.schemaHashes.card!) cardQueries.push({ fields, filter });
+      if (schemaHash === cfg.schemaHashes.card! && opts.rejectColumnFilter && filter?.column !== undefined) {
+        throw new FkanbanError({
+          code: "node_http_400",
+          message: "Node /api/query returned HTTP 400: unsupported field filter.",
+        });
+      }
+      const results = rowsFor(schemaHash, filter, fields);
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
     rawCall: notImpl("rawCall") as NodeClient["rawCall"],
@@ -99,7 +117,7 @@ function sharedAreaBody(): string {
 }
 
 describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () => {
-  let node: NodeClient;
+  let node: ReturnType<typeof fakeNode>;
 
   beforeEach(async () => {
     node = fakeNode();
@@ -167,6 +185,83 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
     expect(second?.block_status).toBe("needs_human");
     expect(second?.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
     expect(second?.block_reason).toContain("fold-cloud-proxy-subscription-status-test-compile-break");
+  });
+
+  test("todo add scopes pickup-area peer reads to active columns and minimal fields", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "backlog-fbrain-list",
+      title: "Backlog fbrain list work",
+      column: "backlog",
+      body: sharedAreaBody(),
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "done-fbrain-list",
+      title: "Done fbrain list work",
+      column: "done",
+      body: sharedAreaBody(),
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "active-fbrain-list",
+      title: "Active fbrain list work",
+      column: "doing",
+      body: sharedAreaBody(),
+    });
+
+    node.cardQueries.length = 0;
+    await addCmd({
+      cfg,
+      node,
+      slug: "todo-fbrain-list",
+      title: "Todo fbrain list work",
+      column: "todo",
+      body: sharedAreaBody(),
+    });
+
+    const peerQueries = node.cardQueries.filter((q) => q.filter?.column !== undefined);
+    expect(peerQueries.map((q) => q.filter!.column)).toEqual([...PICKUP_AREA_ACTIVE_COLUMNS]);
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
+    for (const q of peerQueries) {
+      expect(q.fields).toEqual([...PICKUP_AREA_PEER_FIELDS]);
+    }
+
+    const todo = await findCard(node, cfg, "todo-fbrain-list");
+    expect(todo?.block_status).toBe("needs_human");
+    expect(todo?.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
+    expect(todo?.block_reason).toContain("active-fbrain-list");
+  });
+
+  test("unsupported pickup column filters do not fall back to an unfiltered card scan", async () => {
+    node = fakeNode({ rejectColumnFilter: true });
+    await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
+    await addCmd({
+      cfg,
+      node,
+      slug: "active-fbrain-list",
+      title: "Active fbrain list work",
+      column: "doing",
+      body: sharedAreaBody(),
+    });
+
+    node.cardQueries.length = 0;
+    await addCmd({
+      cfg,
+      node,
+      slug: "todo-fbrain-list",
+      title: "Todo fbrain list work",
+      column: "todo",
+      body: sharedAreaBody(),
+    });
+
+    expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
+    const todo = await findCard(node, cfg, "todo-fbrain-list");
+    expect(normalizeBlockStatus(todo!.block_status)).toBe("none");
   });
 
   test("add and move apply the same pickup-area overlap gate for todo-bound cards", async () => {

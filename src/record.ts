@@ -467,7 +467,20 @@ export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): 
 // serializes or re-grooms it.
 export const PICKUP_AREA_TAG_PREFIX = "area:";
 export const PICKUP_AREA_BLOCK_PREFIX = "Pickup area overlap:";
-const PICKUP_AREA_ACTIVE_COLUMNS = new Set(["todo", "doing", "review"]);
+export const PICKUP_AREA_ACTIVE_COLUMNS = ["todo", "doing", "review"] as const;
+const PICKUP_AREA_ACTIVE_COLUMN_SET = new Set<string>(PICKUP_AREA_ACTIVE_COLUMNS);
+export const PICKUP_AREA_PEER_FIELDS = [
+  "slug",
+  "title",
+  "column",
+  "position",
+  "tags",
+  "created_at",
+  "repo",
+  "kind",
+  "block_status",
+] as const;
+const PICKUP_AREA_PEER_BODY_FIELDS = [...PICKUP_AREA_PEER_FIELDS, "body"] as const;
 const FEATURE_AREA_PATTERNS: Array<{ area: string; pattern: RegExp }> = [
   { area: "forge-ci", pattern: /\b(?:local[\s_-]+)?forge(?:jo)?[\s_-]+ci\b/gi },
   { area: "forge-ci", pattern: /\bforge(?:jo)?[\s_-]+(?:required[\s_-]+)?checks?\b/gi },
@@ -676,7 +689,7 @@ export function findPickupAreaOverlap(card: Card, allCards: Card[]): PickupAreaO
 
   for (const other of sortCards(allCards)) {
     if (other.slug === card.slug) continue;
-    if (!PICKUP_AREA_ACTIVE_COLUMNS.has(other.column)) continue;
+    if (!PICKUP_AREA_ACTIVE_COLUMN_SET.has(other.column)) continue;
     if (normalizeKind(other.kind) !== "pr" || normalizeBlockStatus(other.block_status) !== "none") continue;
     if (pickupRepo(other) !== repo) continue;
     // A dep path (either direction) already serializes the two cards, so an area
@@ -741,7 +754,7 @@ export async function stampCardForWrite(
   );
   Object.assign(card, deriveStructuredFields(card));
   const explicitBlockStatus = opts.explicitBlockStatus === true;
-  const areaPeers = card.column === "todo" && !explicitBlockStatus ? await listCards(node, cfg) : [];
+  const areaPeers = card.column === "todo" && !explicitBlockStatus ? await listPickupAreaPeers(node, cfg, card) : [];
   return applyPickupAreaDerivation(card, areaPeers, explicitBlockStatus);
 }
 
@@ -1174,6 +1187,90 @@ function canFallbackColumnFilter(err: unknown): boolean {
 
 export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
   return listCardsWithFields(node, cfg, fieldsFor("card"));
+}
+
+type PickupPeerPlan = { action: "ready"; card: Card } | { action: "hydrate"; card: Card } | { action: "skip" };
+
+function bodyFreeDerivedCard(card: Card): Card {
+  const summary = { ...card, body: "" };
+  Object.assign(summary, deriveStructuredFields(summary));
+  return summary;
+}
+
+function pickupPeerOverlaps(card: Card, targetRepo: string, targetAreas: Set<string>): boolean {
+  if (!PICKUP_AREA_ACTIVE_COLUMN_SET.has(card.column)) return false;
+  if (normalizeKind(card.kind) !== "pr" || normalizeBlockStatus(card.block_status) !== "none") return false;
+  if (pickupRepo(card) !== targetRepo) return false;
+  return pickupAreaTagsForCard(card).some((area) => targetAreas.has(area));
+}
+
+function summarizePickupPeer(card: Card, targetRepo: string, targetAreas: Set<string>): PickupPeerPlan {
+  if (!PICKUP_AREA_ACTIVE_COLUMN_SET.has(card.column)) return { action: "skip" };
+  const summary = bodyFreeDerivedCard(card);
+  if (normalizeKind(summary.kind) !== "pr" || normalizeBlockStatus(summary.block_status) !== "none") return { action: "skip" };
+
+  const repo = summary.repo.trim();
+  if (repo.length > 0 && repo !== targetRepo) return { action: "skip" };
+
+  if (repo.length > 0 && pickupAreaTagsForCard(summary).some((area) => targetAreas.has(area))) {
+    return { action: "ready", card: summary };
+  }
+
+  return { action: "hydrate", card: summary };
+}
+
+async function hydratePickupPeer(node: NodeClient, cfg: Config, card: Card): Promise<Card | null> {
+  if (card.body.length > 0) return card;
+  return findCardWithFields(node, cfg, card.slug, [...PICKUP_AREA_PEER_BODY_FIELDS]);
+}
+
+async function filterPickupAreaPeers(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+  targetRepo: string,
+  targetAreas: Set<string>,
+): Promise<Card[]> {
+  const out: Card[] = [];
+  const seen = new Set<string>();
+  for (const card of cards) {
+    if (seen.has(card.slug)) continue;
+    seen.add(card.slug);
+    const plan = summarizePickupPeer(card, targetRepo, targetAreas);
+    if (plan.action === "skip") continue;
+    if (plan.action === "ready") {
+      out.push(plan.card);
+      continue;
+    }
+    const peer = await hydratePickupPeer(node, cfg, plan.card);
+    if (!peer) continue;
+    Object.assign(peer, deriveStructuredFields(peer));
+    if (pickupPeerOverlaps(peer, targetRepo, targetAreas)) out.push(peer);
+  }
+  return out;
+}
+
+export async function listPickupAreaPeers(node: NodeClient, cfg: Config, card: Card): Promise<Card[]> {
+  const targetRepo = pickupRepo(card);
+  const targetAreas = new Set(pickupAreaTagsForCard(card));
+  if (!targetRepo || targetAreas.size === 0) return [];
+
+  const fields = [...PICKUP_AREA_PEER_FIELDS];
+  const summaries: Card[] = [];
+  try {
+    for (const column of PICKUP_AREA_ACTIVE_COLUMNS) {
+      for (const card of await listCardsWithFields(node, cfg, fields, { column })) {
+        summaries.push(card);
+      }
+    }
+    return filterPickupAreaPeers(node, cfg, summaries, targetRepo, targetAreas);
+  } catch (err) {
+    if (!canFallbackColumnFilter(err)) throw err;
+    // Pickup-area overlap is an advisory coordination hint. On nodes without
+    // secondary field filters, falling back to an unfiltered board scan puts the
+    // deterministic O(N) latency back on every `add --column todo`.
+    return [];
+  }
 }
 
 export async function listCardsByColumn(
