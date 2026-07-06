@@ -4,6 +4,7 @@ import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { listCmd } from "../src/commands/list.ts";
 import { searchCmd } from "../src/commands/search.ts";
+import { FIELD_NAMES, renderFieldProjection } from "../src/field_projection.ts";
 import {
   boardToFields,
   cardToFields,
@@ -12,7 +13,7 @@ import {
   type Board,
   type Card,
 } from "../src/record.ts";
-import { DEFAULT_COLUMNS } from "../src/schemas.ts";
+import { DEFAULT_COLUMNS, fieldsFor } from "../src/schemas.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -122,5 +123,12 @@ describe("--field projection", () => {
     const out = await searchCmd({ cfg, node: node(cards), query: "Alpha", fields: ["slug", "column"] });
     expect(out).toBe("alpha\ttodo");
     expect(out).not.toContain("match");
+  });
+
+  test("projection allowlist is seeded from the card schema fields", () => {
+    for (const field of fieldsFor("card")) {
+      expect(FIELD_NAMES.has(field)).toBe(true);
+      expect(() => renderFieldProjection(cards, [field])).not.toThrow();
+    }
   });
 });

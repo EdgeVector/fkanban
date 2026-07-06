@@ -4,6 +4,8 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEFAULT_COLUMNS,
+  CARD_FIELDS,
+  BOARD_FIELDS,
   cardSchema,
   boardSchema,
   isRecordType,
@@ -86,6 +88,35 @@ describe("schemas", () => {
 
   test("card key is its slug", () => {
     expect(cardSchema.schema.key.hash_field).toBe("slug");
+  });
+
+  test("schema field metadata is derived from the field registries", () => {
+    expect(cardSchema.schema.fields).toEqual([...CARD_FIELDS]);
+    expect(Object.keys(cardSchema.schema.field_types)).toEqual([...CARD_FIELDS]);
+    expect(Object.keys(cardSchema.schema.field_data_classifications)).toEqual([...CARD_FIELDS]);
+    expect(cardSchema.schema.field_types).toEqual({
+      slug: "String",
+      title: "String",
+      body: "String",
+      board: "String",
+      column: "String",
+      position: "String",
+      assignee: "String",
+      tags: { Array: "String" },
+      created_at: "String",
+      updated_at: "String",
+      repo: "String",
+      base: "String",
+      kind: "String",
+      block_status: "String",
+      block_reason: "String",
+      north_star: "String",
+      pr_url: "String",
+      branch: "String",
+    });
+    expect(boardSchema.schema.fields).toEqual([...BOARD_FIELDS]);
+    expect(Object.keys(boardSchema.schema.field_types)).toEqual([...BOARD_FIELDS]);
+    expect(Object.keys(boardSchema.schema.field_data_classifications)).toEqual([...BOARD_FIELDS]);
   });
 
   test("default columns are the kanban lifecycle", () => {

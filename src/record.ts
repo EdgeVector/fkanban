@@ -61,8 +61,17 @@ export type Board = {
 // Keep this backstop so records deleted by older fkanban builds stay hidden.
 export const TOMBSTONE_TAG = "__fkanban_deleted__";
 
+// The reserved slug a write probe uses. Namespaced + obviously-throwaway so it
+// never collides with a real card, and hidden from reads even if best-effort
+// cleanup is shed by a busy node.
+export const WRITE_PROBE_SLUG = "__fkanban_write_probe__";
+
 export function isTombstoned(tags: string[]): boolean {
   return tags.includes(TOMBSTONE_TAG);
+}
+
+function isHiddenCard(card: Card): boolean {
+  return card.slug === WRITE_PROBE_SLUG || isTombstoned(card.tags);
 }
 
 // Dependency edges piggyback on the existing `tags` array: a card that depends
@@ -1100,7 +1109,7 @@ async function listCardsWithFields(
 ): Promise<Card[]> {
   const hash = schemaHashFor("card", cfg);
   const res = await node.queryAll({ schemaHash: hash, fields, filter });
-  return res.results.map(rowToCard).filter((c) => !isTombstoned(c.tags));
+  return res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
 }
 
 function canFallbackColumnFilter(err: unknown): boolean {
@@ -1207,7 +1216,7 @@ export async function findCard(node: NodeClient, cfg: Config, slug: string): Pro
     res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("card") });
   }
   const card = res.results.map(rowToCard).find((c) => c.slug === slug);
-  return card !== undefined && !isTombstoned(card.tags) ? card : null;
+  return card !== undefined && !isHiddenCard(card) ? card : null;
 }
 
 // Resolve a card by slug, throwing the canonical `card_not_found` error when
@@ -1328,10 +1337,6 @@ export type WriteProbeResult =
   | { writable: true }
   | { writable: false; reason: string };
 
-// The reserved slug a write probe uses. Namespaced + obviously-throwaway so it
-// never collides with a real card, and tombstoned immediately after the probe.
-export const WRITE_PROBE_SLUG = "__fkanban_write_probe__";
-
 // Verify the node ACCEPTS a write carrying every field the app emits for `type`
 // against `schemaHash`, by creating a throwaway record with all fields set to a
 // probe value and then deleting it. Returns `{ writable: true }` on success, or
@@ -1346,8 +1351,8 @@ export const WRITE_PROBE_SLUG = "__fkanban_write_probe__";
 // adopted/declared healthy once a real write of all fields round-trips.
 //
 // Best-effort cleanup: if the create succeeds but the delete fails, the probe
-// still reports `writable: true` (the write path works) — the leftover record is
-// a tombstone-able throwaway, never surfaced by normal reads.
+// still reports `writable: true` (the write path works). Card reads filter this
+// reserved slug, so a leaked probe never surfaces on a board.
 export async function probeSchemaWritable(
   node: NodeClient,
   schemaHash: string,

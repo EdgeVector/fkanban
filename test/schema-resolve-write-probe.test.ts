@@ -16,7 +16,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
 
 import { FkanbanError, newNodeClient, type LoadedSchema } from "../src/client.ts";
-import { probeSchemaWritable } from "../src/record.ts";
+import { listCards, probeSchemaWritable, WRITE_PROBE_SLUG } from "../src/record.ts";
+import type { Config } from "../src/config.ts";
 import { fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
 
 // The current 18-field Card hash (writable) and a stale 10-field duplicate.
@@ -173,6 +174,33 @@ describe("probeSchemaWritable", () => {
       // The new fields are named in the surfaced reason.
       expect(r.reason).toContain("repo");
     }
+  });
+
+  test("returns writable and hides a leaked probe when cleanup delete fails", async () => {
+    const schemaHash = "deletefailurefullcardhash";
+    const realNode = newNodeClient({ baseUrl, userHash: "u" });
+    const leakyNode = {
+      ...realNode,
+      deleteRecord: async () => {
+        throw new Error("shed delete");
+      },
+    };
+    const cfg: Config = {
+      configVersion: 1,
+      nodeUrl: baseUrl,
+      schemaServiceUrl: baseUrl,
+      userHash: "u",
+      schemaHashes: { card: schemaHash, board: "unusedboardhash" },
+    };
+
+    const r = await probeSchemaWritable(leakyNode, schemaHash, "card");
+    expect(r.writable).toBe(true);
+    expect([...store.keys()].some((key) => key === `${schemaHash}::${WRITE_PROBE_SLUG}`)).toBe(true);
+
+    const cards = await listCards(realNode, cfg);
+    expect(cards.map((c) => c.slug)).not.toContain(WRITE_PROBE_SLUG);
+
+    await realNode.deleteRecord({ schemaHash, keyHash: WRITE_PROBE_SLUG });
   });
 });
 

@@ -165,4 +165,20 @@ describe("board create rejects duplicate column names", () => {
     const boards = await listBoards(node, cfg);
     expect(boards.find((b) => b.slug === "empty")?.columns).toEqual([...DEFAULT_COLUMNS]);
   });
+
+  test("an empty column list on update preserves an existing custom layout", async () => {
+    await boardCreateCmd({ cfg, node, slug: "custom", columns: ["alpha", "beta", "ship"] });
+    const res = await boardCreateCmd({ cfg, node, slug: "custom", columns: [] });
+    expect(res).toMatchObject({ action: "updated", slug: "custom" });
+    const boards = await listBoards(node, cfg);
+    expect(boards.find((b) => b.slug === "custom")?.columns).toEqual(["alpha", "beta", "ship"]);
+  });
+
+  test("a non-empty column list on update still replaces columns", async () => {
+    await boardCreateCmd({ cfg, node, slug: "custom", columns: ["alpha", "beta", "ship"] });
+    const res = await boardCreateCmd({ cfg, node, slug: "custom", columns: ["triage", "done"] });
+    expect(res).toMatchObject({ action: "updated", slug: "custom" });
+    const boards = await listBoards(node, cfg);
+    expect(boards.find((b) => b.slug === "custom")?.columns).toEqual(["triage", "done"]);
+  });
 });
