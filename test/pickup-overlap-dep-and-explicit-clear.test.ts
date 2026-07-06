@@ -19,6 +19,7 @@ import {
 } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
+import { moveCmd } from "../src/commands/move.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -166,6 +167,44 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
     expect(second?.block_status).toBe("needs_human");
     expect(second?.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
     expect(second?.block_reason).toContain("fold-cloud-proxy-subscription-status-test-compile-break");
+  });
+
+  test("add and move apply the same pickup-area overlap gate for todo-bound cards", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "active-fbrain-list",
+      title: "Active fbrain list work",
+      column: "doing",
+      body: sharedAreaBody(),
+    });
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "todo-via-add",
+      title: "Candidate fbrain list work",
+      column: "todo",
+      body: sharedAreaBody(),
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "todo-via-move",
+      title: "Candidate fbrain list work",
+      column: "backlog",
+      body: sharedAreaBody(),
+    });
+    await moveCmd({ cfg, node, slug: "todo-via-move", column: "todo" });
+
+    const viaAdd = await findCard(node, cfg, "todo-via-add");
+    const viaMove = await findCard(node, cfg, "todo-via-move");
+    for (const card of [viaAdd, viaMove]) {
+      expect(card?.tags).toContain("area:fbrain-list");
+      expect(card?.block_status).toBe("needs_human");
+      expect(card?.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
+      expect(card?.block_reason).toContain("active-fbrain-list");
+    }
   });
 
   test("`add <slug> --block-status none` clears a hook-set overlap block and it stays cleared", async () => {

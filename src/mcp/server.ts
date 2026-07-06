@@ -56,21 +56,16 @@ type ToolResult = {
   isError?: boolean;
 };
 
-// Write tools return BOTH a machine-readable result object (structuredContent,
-// matching the tool's declared outputSchema — the same shape the CLI emits
-// under `--json`) AND a human-readable text block, so MCP clients that don't
-// read structuredContent still get a useful rendering.
-function writeResult(text: string, structured: Record<string, unknown>): ToolResult {
-  return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }], structuredContent: structured };
-}
-
-// Read tools mirror the write-tool precedent: alongside the unchanged
-// human-readable text block, return `structuredContent` (the same shape the CLI
-// emits under `--json`, validated against the tool's declared outputSchema).
-// MCP requires structuredContent to be an object, so list/search/board_list
-// wrap their arrays as `{ cards }` / `{ boards }`; show returns the card object.
-function readResult(text: string, structured: Record<string, unknown>): ToolResult {
-  return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }], structuredContent: structured };
+function toolResult(
+  text: string,
+  structured: object,
+  opts: { isError?: boolean } = {},
+): ToolResult {
+  return {
+    content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }],
+    structuredContent: structured as Record<string, unknown>,
+    ...(opts.isError !== undefined ? { isError: opts.isError } : {}),
+  };
 }
 
 // Cap the structured card array the AGENT consumes. The human `text` block is
@@ -295,7 +290,7 @@ export function createFkanbanMcpServer(
         // Then preview each card's body (the bulk of the payload) unless the
         // caller opted into full bodies.
         const previewed = previewBodies(capped, args.full_body ?? false);
-        return readResult(text, { cards: previewed, total, truncated });
+        return toolResult(text, { cards: previewed, total, truncated });
       } catch (err) {
         return errorResult(err);
       }
@@ -353,7 +348,7 @@ export function createFkanbanMcpServer(
         // Then preview each card's body (the bulk of the payload) unless the
         // caller opted into full bodies.
         const previewed = previewBodies(capped, args.full_body ?? false);
-        return readResult(text, { cards: previewed, total, truncated });
+        return toolResult(text, { cards: previewed, total, truncated });
       } catch (err) {
         return errorResult(err);
       }
@@ -432,7 +427,7 @@ export function createFkanbanMcpServer(
         if (args.pr_url !== undefined) o.prUrl = args.pr_url;
         if (args.branch !== undefined) o.branch = args.branch;
         const res = await addCmd(o);
-        return writeResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
+        return toolResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -467,7 +462,7 @@ export function createFkanbanMcpServer(
         if (args.position !== undefined) o.position = args.position;
         if (args.force !== undefined) o.force = args.force;
         const res = await moveCmd(o);
-        return writeResult(`moved ${res.slug}: ${res.from} → ${res.to}`, res);
+        return toolResult(`moved ${res.slug}: ${res.from} → ${res.to}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -504,7 +499,7 @@ export function createFkanbanMcpServer(
           res.total === 0
             ? `ranked ${res.board}/${res.column}: no cards`
             : `ranked ${res.board}/${res.column}: ${res.reordered} of ${res.total} reordered by priority`;
-        return writeResult(human, res);
+        return toolResult(human, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -535,7 +530,7 @@ export function createFkanbanMcpServer(
         const dep = requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
         const res = await depAddCmd({ cfg, node, slug, dep });
-        return writeResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
+        return toolResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -565,7 +560,7 @@ export function createFkanbanMcpServer(
         const dep = requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
         const res = await depRmCmd({ cfg, node, slug, dep });
-        return writeResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
+        return toolResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -598,7 +593,7 @@ export function createFkanbanMcpServer(
         }
         const { cfg, node } = requireConfig();
         const res = await tagAddCmd({ cfg, node, slug, tag: args.tags });
-        return writeResult(`tagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
+        return toolResult(`tagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -631,7 +626,7 @@ export function createFkanbanMcpServer(
         }
         const { cfg, node } = requireConfig();
         const res = await tagRmCmd({ cfg, node, slug, tag: args.tags });
-        return writeResult(`untagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
+        return toolResult(`untagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -652,7 +647,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const { text, card } = await showResult({ cfg, node, slug });
-        return readResult(text, card);
+        return toolResult(text, card);
       } catch (err) {
         return errorResult(err);
       }
@@ -682,7 +677,7 @@ export function createFkanbanMcpServer(
           res.orphanedDependents.length > 0
             ? `removed card ${res.slug}\n${orphanedDependentsWarning(res.slug, res.orphanedDependents)}`
             : `removed card ${res.slug}`;
-        return writeResult(text, res);
+        return toolResult(text, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -715,7 +710,7 @@ export function createFkanbanMcpServer(
         if (args.columns !== undefined) o.columns = args.columns;
         if (args.body !== undefined) o.body = args.body;
         const res = await boardCreateCmd(o);
-        return writeResult(`${res.action} board ${res.slug}`, res);
+        return toolResult(`${res.action} board ${res.slug}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -748,7 +743,7 @@ export function createFkanbanMcpServer(
       try {
         const { cfg, node } = requireConfig();
         const { text, boards } = await boardListResult({ cfg, node });
-        return readResult(text, { boards });
+        return toolResult(text, { boards });
       } catch (err) {
         return errorResult(err);
       }
@@ -774,7 +769,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "board slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const res = await boardRmCmd({ cfg, node, slug, force: args.force });
-        return writeResult(`removed board ${res.slug}`, res);
+        return toolResult(`removed board ${res.slug}`, res);
       } catch (err) {
         return errorResult(err);
       }
@@ -809,11 +804,7 @@ export function createFkanbanMcpServer(
       try {
         const { ok, version, checks, lines } = await runDoctorStructured();
         const report = lines.join("\n");
-        return {
-          content: [{ type: "text", text: report.length > 0 ? report : "(no output)" }],
-          structuredContent: { ok, version, checks },
-          isError: !ok,
-        };
+        return toolResult(report, { ok, version, checks }, { isError: !ok });
       } catch (err) {
         return errorResult(err);
       }

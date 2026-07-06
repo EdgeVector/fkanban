@@ -8,17 +8,10 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
-  applyDerivedHeader,
-  applyHeaderDerivation,
-  applyPickupAreaDerivation,
+  assertDepUnblocked,
   BLOCK_STATUSES,
-  blockedByHint,
-  blockedByMessage,
-  boardTerminalMap,
   CARD_KINDS,
   cardToFields,
-  depStatus,
-  deriveStructuredFields,
   doneAtForColumnTransition,
   emptyStructuredFields,
   ensureBoardRecord,
@@ -27,12 +20,10 @@ import {
   forwardDepWarning,
   isBlockStatus,
   isCardKind,
-  isDepEnforcedColumn,
-  listBoards,
-  listCards,
   listCardStatuses,
   normalizeDeps,
   nowIso,
+  stampCardForWrite,
   validateSlug,
   withPriorityTag,
   wouldCreateCycle,
@@ -92,9 +83,9 @@ function validateStructuredOpts(opts: AddOptions): void {
   }
 }
 
-// Apply explicit --field opts onto a card, then backfill any still-empty
-// structured field from the body/tags. Mutates + returns the card.
-function applyStructuredFields(card: Card, opts: AddOptions): Card {
+// Apply explicit --field opts onto a card before the shared write stamp
+// backfills any still-empty structured field from the body/tags.
+function applyExplicitStructuredFields(card: Card, opts: AddOptions): Card {
   if (opts.repo !== undefined) card.repo = opts.repo;
   if (opts.base !== undefined) card.base = opts.base;
   if (opts.kind !== undefined) card.kind = opts.kind;
@@ -103,7 +94,7 @@ function applyStructuredFields(card: Card, opts: AddOptions): Card {
   if (opts.northStar !== undefined) card.north_star = opts.northStar;
   if (opts.prUrl !== undefined) card.pr_url = opts.prUrl;
   if (opts.branch !== undefined) card.branch = opts.branch;
-  return Object.assign(card, deriveStructuredFields(card));
+  return card;
 }
 
 // Validate + clean a user-supplied dep list for `slug`, warn (to stderr) on any
@@ -164,41 +155,6 @@ async function prepareDeps(
   return cleaned;
 }
 
-// Soft-block: refuse to place a card into a dep-enforced column while any
-// dependency is unfinished, unless --force. This mirrors `move`'s guard so
-// `add` and `move` read identically — `add` is also a column-changing command
-// (create+update), so a blocked card must not slip into a completion column
-// through it. The gated set is the default working columns (doing/review/done)
-// PLUS the card's own board's terminal column, so a custom board is enforced
-// too. Backlog/todo (intake) placements are always ok. Throws BEFORE any write,
-// so a blocked add leaves no partial state.
-async function enforceDepBlock(
-  opts: { cfg: Config; node: NodeClient; force?: boolean },
-  slug: string,
-  boardSlug: string,
-  column: string,
-  deps: string[],
-): Promise<void> {
-  if (opts.force) return;
-  // Resolve dep done-ness, and the gating column, against each board's terminal
-  // column (deps may live on other boards), falling back to `done` for
-  // unresolvable boards.
-  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
-  if (!isDepEnforcedColumn(column, boardSlug, boardTerminal)) return;
-  const status = depStatus(
-    { slug, board: boardSlug, deps } as Card,
-    await listCardStatuses(opts.node, opts.cfg),
-    boardTerminal,
-  );
-  if (status.blocked) {
-    throw new FkanbanError({
-      code: "card_blocked",
-      message: blockedByMessage(slug, status.blockedBy),
-      hint: blockedByHint(),
-    });
-  }
-}
-
 // Apply an optional `--priority` to a resolved tag list: replace any existing
 // p0..p3 tag and leave the rest. A no-op when no priority was requested, so an
 // ordinary update never disturbs the card's current priority tag.
@@ -238,30 +194,14 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       updated_at: now,
       done_at: doneAtForColumnTransition(existing, targetColumn, columns, now),
     };
-    // Auto-derive the pickup Repo:/Base: header from tags (default it when there's
-    // no signal, flag a cross-repo conflict as needs_human), so a promoted/edited
-    // card never silently strands in `todo`.
-    applyDerivedHeader(
-      updated,
-      applyHeaderDerivation(
-        { slug: opts.slug, body: updated.body, tags: updated.tags, title: updated.title, column: updated.column },
-        console.error,
-        { forcedRepo: opts.repo },
-      ),
-    );
-    // Apply any explicit --field opts, then backfill still-empty structured
-    // fields from the body/tags.
-    applyStructuredFields(updated, opts);
-    // Only scan the card table when the overlap check will actually run: it
-    // fires only for `todo`-bound cards without an explicit --block-status
-    // (findPickupAreaOverlap short-circuits otherwise). Skips the full scan for
-    // every other write.
-    const areaPeersU =
-      updated.column === "todo" && opts.blockStatus === undefined
-        ? await listCards(opts.node, opts.cfg)
-        : [];
-    applyPickupAreaDerivation(updated, areaPeersU, opts.blockStatus !== undefined);
-    await enforceDepBlock(opts, opts.slug, boardSlug, updated.column, updated.deps);
+    // Apply any explicit --field opts before the shared write stamp backfills
+    // still-empty structured fields from the body/tags.
+    applyExplicitStructuredFields(updated, opts);
+    await stampCardForWrite(opts.node, opts.cfg, updated, {
+      forcedRepo: opts.repo,
+      explicitBlockStatus: opts.blockStatus !== undefined,
+    });
+    await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
     await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
@@ -281,21 +221,12 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     ...emptyStructuredFields(),
   };
   card.done_at = doneAtForColumnTransition(null, targetColumn, columns, now);
-  applyDerivedHeader(
-    card,
-    applyHeaderDerivation(
-      { slug: card.slug, body: card.body, tags: card.tags, title: card.title, column: card.column },
-      console.error,
-      { forcedRepo: opts.repo },
-    ),
-  );
-  applyStructuredFields(card, opts);
-  const areaPeersC =
-    card.column === "todo" && opts.blockStatus === undefined
-      ? await listCards(opts.node, opts.cfg)
-      : [];
-  applyPickupAreaDerivation(card, areaPeersC, opts.blockStatus !== undefined);
-  await enforceDepBlock(opts, opts.slug, boardSlug, card.column, card.deps);
+  applyExplicitStructuredFields(card, opts);
+  await stampCardForWrite(opts.node, opts.cfg, card, {
+    forcedRepo: opts.repo,
+    explicitBlockStatus: opts.blockStatus !== undefined,
+  });
+  await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };
 }

@@ -20,7 +20,7 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
-import { capPerColumn, renderBoard, renderWideTable, type RenderOptions } from "../board.ts";
+import { capPerColumn, renderBoard, renderWideTable, resolveLimits, type RenderOptions } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
@@ -175,18 +175,14 @@ export async function listResult(
   // Text render cap: an explicit `--limit` (always >= 1 after flag parsing),
   // `--all` removes the cap (0), and the no-flag default falls back to
   // DEFAULT_COLUMN_LIMIT so a long column collapses to a "… N more" line.
-  const limit = opts.all
-    ? 0
-    : Number.isFinite(opts.limit) && (opts.limit as number) >= 0
-      ? (opts.limit as number)
-      : DEFAULT_COLUMN_LIMIT;
+  const { textLimit, jsonLimit } = resolveLimits(opts, DEFAULT_COLUMN_LIMIT);
   // Print the empty-board first-touch hint in the form that actually runs for
   // THIS dev — the `fkanban` shim if it's on PATH, else `bun run src/cli.ts`
   // (the fresh-clone default). Mirrors how init injects its Next-steps
   // invocation (PR #69); board.ts stays pure and defaults to bare `fkanban`.
   const renderOpts: RenderOptions = {
     blocked: blockedSlugSet(cards, allCards, boardTerminal),
-    limit,
+    limit: textLimit,
     invocation: fkanbanInvocation(),
   };
   if (opts.column) renderOpts.column = opts.column;
@@ -199,10 +195,6 @@ export async function listResult(
   // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`
   // and the no-flag default leave it uncapped (0). The implicit
   // DEFAULT_COLUMN_LIMIT never applies to JSON.
-  const jsonLimit =
-    !opts.all && Number.isFinite(opts.limit) && (opts.limit as number) >= 0
-      ? (opts.limit as number)
-      : 0;
   // Multi-board discoverability footer: if any OTHER board holds live cards,
   // append a one-line hint so a card created on a non-default board (and thus
   // absent from this view) is still discoverable. Text surface ONLY — the

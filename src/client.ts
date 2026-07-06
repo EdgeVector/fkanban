@@ -278,11 +278,6 @@ export type AttestationOutcome =
 // does the failure later surface (a `transport_not_attested` 403), and the
 // captured reason is what turns that into an actionable error.
 export async function attestOwnerSessionDetailed(
-  // Retained for signature compatibility only. The pairing-code exchange used to
-  // fall back to this TCP node URL for non-full-surface sockets, but the loopback
-  // TCP listener is retired (fold `fold-retire-tcp-listener`) so the exchange now
-  // always goes over the UDS control socket (see below).
-  _nodeUrl: string,
   socketPath: string,
   verbose: Verbose = noopVerbose,
 ): Promise<AttestationOutcome> {
@@ -363,19 +358,6 @@ export async function attestOwnerSessionDetailed(
   }
 }
 
-// Token-or-null wrapper around `attestOwnerSessionDetailed`. Kept for callers
-// (and tests) that only need the session token; `null` means "proceed
-// unattested". New code that needs the failure reason should call the detailed
-// form directly.
-export async function attestOwnerSession(
-  nodeUrl: string,
-  socketPath: string,
-  verbose: Verbose = noopVerbose,
-): Promise<string | null> {
-  const outcome = await attestOwnerSessionDetailed(nodeUrl, socketPath, verbose);
-  return outcome.ok ? outcome.token : null;
-}
-
 export function newNodeClient(opts: {
   baseUrl: string;
   userHash: string;
@@ -420,7 +402,7 @@ export function newNodeClient(opts: {
     }
     if (attesting === null) {
       attesting = (async () => {
-        const outcome = await attestOwnerSessionDetailed(url, socketPath, verbose);
+        const outcome = await attestOwnerSessionDetailed(socketPath, verbose);
         if (outcome.ok) {
           sessionToken = outcome.token;
           lastAttestFailure = null;

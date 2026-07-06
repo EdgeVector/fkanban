@@ -176,11 +176,3 @@ export async function boardRmCmd(opts: {
   await opts.node.deleteRecord({ schemaHash: hash, keyHash: board.slug });
   return { slug: board.slug, deletedCards: live.map((c) => c.slug) };
 }
-
-export async function requireBoard(node: NodeClient, cfg: Config, slug: string): Promise<Board> {
-  const board = await findBoard(node, cfg, slug);
-  if (!board) {
-    throw new FkanbanError({ code: "board_not_found", message: `No board with slug "${slug}".` });
-  }
-  return board;
-}

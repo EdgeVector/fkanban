@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { attestOwnerSession, FkanbanError, newNodeClient } from "../src/client.ts";
+import { attestOwnerSessionDetailed, FkanbanError, newNodeClient } from "../src/client.ts";
 
 type Stoppable = { stop: (closeActive?: boolean) => void };
 const cleanups: Array<() => void> = [];
@@ -25,7 +25,7 @@ function socketPath(): string {
   return join(tmpdir(), `fkanban-attest-${process.pid}-${Math.random().toString(36).slice(2)}.sock`);
 }
 
-describe("attestOwnerSession", () => {
+describe("attestOwnerSessionDetailed", () => {
   test("mints AND exchanges the pairing code over the UDS socket, returns the token", async () => {
     const sock = socketPath();
     const seen: string[] = [];
@@ -48,9 +48,8 @@ describe("attestOwnerSession", () => {
     });
     track(uds);
 
-    // nodeUrl is a dead placeholder — the exchange never dials TCP (listener retired).
-    const token = await attestOwnerSession("http://127.0.0.1:1", sock);
-    expect(token).toBe("tok-123");
+    const outcome = await attestOwnerSessionDetailed(sock);
+    expect(outcome).toMatchObject({ ok: true, token: "tok-123" });
     expect(exchangedCode).toBe("code-xyz");
     expect(seen).toEqual(["/control/browser-pairing-code", "/api/session/browser-pair"]);
   });
@@ -79,20 +78,21 @@ describe("attestOwnerSession", () => {
     });
     track(uds);
 
-    const token = await attestOwnerSession("http://127.0.0.1:1", sock);
-    expect(token).toBe("tok-full");
+    const outcome = await attestOwnerSessionDetailed(sock);
+    expect(outcome).toMatchObject({ ok: true, token: "tok-full" });
     expect(exchangedCode).toBe("code-full");
     expect(seen).toEqual(["/control/browser-pairing-code", "/api/session/browser-pair"]);
   });
 
-  test("returns null when the socket does not exist (device-trust fallback)", async () => {
+  test("returns a failed outcome when the socket does not exist (device-trust fallback)", async () => {
     const tcp = Bun.serve({ port: 0, fetch: () => Response.json({ session_token: "nope" }) });
     track(tcp);
-    const token = await attestOwnerSession(`http://127.0.0.1:${tcp.port}`, socketPath());
-    expect(token).toBeNull();
+    const sock = socketPath();
+    const outcome = await attestOwnerSessionDetailed(sock);
+    expect(outcome).toMatchObject({ ok: false, socketPath: sock, socketExists: false });
   });
 
-  test("returns null when the exchange is refused", async () => {
+  test("returns a failed outcome when the exchange is refused", async () => {
     const sock = socketPath();
     // The exchange (over the socket now) is refused → attestation fails → null.
     const uds = Bun.serve({
@@ -104,8 +104,8 @@ describe("attestOwnerSession", () => {
       },
     });
     track(uds);
-    const token = await attestOwnerSession("http://127.0.0.1:1", sock);
-    expect(token).toBeNull();
+    const outcome = await attestOwnerSessionDetailed(sock);
+    expect(outcome).toMatchObject({ ok: false, socketPath: sock, socketExists: true });
   });
 });
 

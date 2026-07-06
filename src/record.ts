@@ -725,6 +725,26 @@ export function applyPickupAreaDerivation(
   return card;
 }
 
+export async function stampCardForWrite(
+  node: NodeClient,
+  cfg: Config,
+  card: Card,
+  opts: { forcedRepo?: string; explicitBlockStatus?: boolean; warn?: (msg: string) => void } = {},
+): Promise<Card> {
+  applyDerivedHeader(
+    card,
+    applyHeaderDerivation(
+      { slug: card.slug, body: card.body, tags: card.tags, title: card.title, column: card.column },
+      opts.warn ?? console.error,
+      { forcedRepo: opts.forcedRepo },
+    ),
+  );
+  Object.assign(card, deriveStructuredFields(card));
+  const explicitBlockStatus = opts.explicitBlockStatus === true;
+  const areaPeers = card.column === "todo" && !explicitBlockStatus ? await listCards(node, cfg) : [];
+  return applyPickupAreaDerivation(card, areaPeers, explicitBlockStatus);
+}
+
 // ── Structured card fields: enums, normalizers, eligibility, backfill ───────
 // (fbrain design `fkanban-card-structured-fields`.) These promote the signals a
 // fresh agent needs to decide "what do I pick up?" out of body prose into real
@@ -951,6 +971,39 @@ export function depStatus(
     }
   }
   return { blockedBy, missing, blocked: blockedBy.length > 0 };
+}
+
+export async function assertDepUnblocked(
+  node: NodeClient,
+  cfg: Config,
+  card: Card,
+  force?: boolean,
+): Promise<void> {
+  if (force) return;
+  const boardTerminal = boardTerminalMap(await listBoards(node, cfg));
+  if (!isDepEnforcedColumn(card.column, card.board, boardTerminal)) return;
+  const status = depStatus(
+    card,
+    await listDependencyStatusesForCards(node, cfg, [card]),
+    boardTerminal,
+  );
+  if (status.blocked) {
+    throw new FkanbanError({
+      code: "card_blocked",
+      message: blockedByMessage(card.slug, status.blockedBy),
+      hint: blockedByHint(),
+    });
+  }
+}
+
+export async function writeCardPatch(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+  patch: Partial<Card>,
+): Promise<void> {
+  const hash = schemaHashFor("card", opts.cfg);
+  const updated: Card = { ...card, ...patch, updated_at: nowIso() };
+  await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
 }
 
 // Would adding the edge `fromSlug → toSlug` (fromSlug depends on toSlug) close a
