@@ -1,6 +1,6 @@
 // `fkanban board rm` behaviour tests against an in-memory fake node — exercises
-// the soft-delete write plus its two safety guards (default board, non-empty
-// board) without a live :9001 brain. Mirrors the card-rm tombstone pattern.
+// native delete writes plus its two safety guards (default board, non-empty
+// board) without a live node.
 
 import { describe, expect, test } from "bun:test";
 
@@ -11,9 +11,6 @@ import {
   boardToFields,
   cardToFields,
   emptyStructuredFields,
-  isTombstoned,
-  rowToBoard,
-  rowToCard,
   type Board,
   type Card,
 } from "../src/record.ts";
@@ -58,11 +55,12 @@ function card(partial: Partial<Card>): Card {
 }
 
 type Update = { schemaHash: string; keyHash: string; fields: Record<string, unknown> };
+type Delete = { schemaHash: string; keyHash: string };
 
 // Minimal NodeClient that serves the given boards + cards from memory and
-// records every updateRecord. queryAll honours the HashKey point-read filter so
+// records writes. queryAll honours the HashKey point-read filter so
 // findBoard resolves a single board by slug, exactly like the real node.
-function fakeNode(opts: { boards: Board[]; cards: Card[]; updates: Update[] }): NodeClient {
+function fakeNode(opts: { boards: Board[]; cards: Card[]; updates: Update[]; deletes: Delete[] }): NodeClient {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
   const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
   const stub = () => {
@@ -76,7 +74,9 @@ function fakeNode(opts: { boards: Board[]; cards: Card[]; updates: Update[] }): 
     loadSchemas: stub as never,
     listSchemas: stub as never,
     createRecord: stub as never,
-    deleteRecord: stub as never,
+    async deleteRecord(d) {
+      opts.deletes.push(d);
+    },
     rawCall: stub as never,
     nodeTransport: stub as never,
     async updateRecord(u) {
@@ -91,84 +91,89 @@ function fakeNode(opts: { boards: Board[]; cards: Card[]; updates: Update[] }): 
 }
 
 describe("board rm", () => {
-  test("soft-deletes an empty non-default board by tombstoning columns", async () => {
+  test("deletes an empty non-default board using the native delete mutation", async () => {
     const updates: Update[] = [];
-    const node = fakeNode({ boards: [board({ slug: "scratch" })], cards: [], updates });
+    const deletes: Delete[] = [];
+    const node = fakeNode({ boards: [board({ slug: "scratch" })], cards: [], updates, deletes });
 
     const res = await boardRmCmd({ cfg, node, slug: "scratch" });
 
     expect(res.slug).toBe("scratch");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.keyHash).toBe("scratch");
-    expect(updates[0]!.schemaHash).toBe("boardhash");
-    // The written-back board reads as tombstoned, so every board read path hides it.
-    const written = rowToBoard({ fields: updates[0]!.fields, key: { hash: "scratch", range: null } });
-    expect(isTombstoned(written.columns)).toBe(true);
+    expect(updates).toHaveLength(0);
+    expect(deletes).toEqual([{ schemaHash: "boardhash", keyHash: "scratch" }]);
   });
 
   test("rm of a nonexistent board throws board_not_found", async () => {
     const updates: Update[] = [];
-    const node = fakeNode({ boards: [], cards: [], updates });
+    const deletes: Delete[] = [];
+    const node = fakeNode({ boards: [], cards: [], updates, deletes });
     const err = await boardRmCmd({ cfg, node, slug: "nope" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("board_not_found");
     expect(updates).toHaveLength(0);
+    expect(deletes).toHaveLength(0);
   });
 
   test("refuses to remove the default board", async () => {
     const updates: Update[] = [];
-    const node = fakeNode({ boards: [board({ slug: "default" })], cards: [], updates });
+    const deletes: Delete[] = [];
+    const node = fakeNode({ boards: [board({ slug: "default" })], cards: [], updates, deletes });
     const err = await boardRmCmd({ cfg, node, slug: "default", force: true }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("board_protected");
     expect(updates).toHaveLength(0);
+    expect(deletes).toHaveLength(0);
   });
 
   test("refuses a board with live cards without --force", async () => {
     const updates: Update[] = [];
+    const deletes: Delete[] = [];
     const node = fakeNode({
       boards: [board({ slug: "busy" })],
       cards: [card({ slug: "c1", board: "busy" }), card({ slug: "c2", board: "busy" })],
       updates,
+      deletes,
     });
     const err = await boardRmCmd({ cfg, node, slug: "busy" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("board_not_empty");
     expect((err as FkanbanError).message).toContain("2");
     expect(updates).toHaveLength(0);
+    expect(deletes).toHaveLength(0);
   });
 
-  test("removes a board and tombstones its live cards when --force is set", async () => {
+  test("removes a board and deletes its live cards when --force is set", async () => {
     const updates: Update[] = [];
+    const deletes: Delete[] = [];
     const node = fakeNode({
       boards: [board({ slug: "busy" })],
       cards: [card({ slug: "c1", board: "busy" }), card({ slug: "c2", board: "other" })],
       updates,
+      deletes,
     });
     const res = await boardRmCmd({ cfg, node, slug: "busy", force: true });
     expect(res.slug).toBe("busy");
     expect(res.deletedCards).toEqual(["c1"]);
-    expect(updates).toHaveLength(2);
-    const writtenCard = rowToCard({ fields: updates[0]!.fields, key: { hash: "c1", range: null } });
-    expect(updates[0]!.schemaHash).toBe("cardhash");
-    expect(updates[0]!.keyHash).toBe("c1");
-    expect(isTombstoned(writtenCard.tags)).toBe(true);
-    const written = rowToBoard({ fields: updates[1]!.fields, key: { hash: "busy", range: null } });
-    expect(updates[1]!.schemaHash).toBe("boardhash");
-    expect(updates[1]!.keyHash).toBe("busy");
-    expect(isTombstoned(written.columns)).toBe(true);
+    expect(updates).toHaveLength(0);
+    expect(deletes).toEqual([
+      { schemaHash: "cardhash", keyHash: "c1" },
+      { schemaHash: "boardhash", keyHash: "busy" },
+    ]);
   });
 
   test("a card on a different board doesn't block removal", async () => {
     const updates: Update[] = [];
+    const deletes: Delete[] = [];
     const node = fakeNode({
       boards: [board({ slug: "empty" })],
       cards: [card({ slug: "c1", board: "other" })],
       updates,
+      deletes,
     });
     const res = await boardRmCmd({ cfg, node, slug: "empty" });
     expect(res.slug).toBe("empty");
-    expect(updates).toHaveLength(1);
+    expect(updates).toHaveLength(0);
+    expect(deletes).toEqual([{ schemaHash: "boardhash", keyHash: "empty" }]);
   });
 });
 

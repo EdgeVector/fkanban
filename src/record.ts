@@ -56,8 +56,9 @@ export type Board = {
   updated_at: string;
 };
 
-// Soft-delete sentinel — fold_db is append-only, so `fkanban rm` overwrites
-// the record's fields and stamps this tag; every read path drops it.
+// Legacy soft-delete sentinel. Current `rm` uses the node's native delete
+// mutation, so new tombstoned records are filtered before fkanban sees them.
+// Keep this backstop so records deleted by older fkanban builds stay hidden.
 export const TOMBSTONE_TAG = "__fkanban_deleted__";
 
 export function isTombstoned(tags: string[]): boolean {
@@ -1089,8 +1090,8 @@ export function rowToBoard(row: QueryRow): Board {
 }
 
 // Shared body of the three card list paths below: query the card schema for the
-// given field subset, map rows to Cards, and drop tombstoned cards. The public
-// variants differ ONLY in which fields they fetch over the wire.
+// given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
+// Native deletes are hidden by the node before this point.
 async function listCardsWithFields(
   node: NodeClient,
   cfg: Config,
