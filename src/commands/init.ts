@@ -340,6 +340,7 @@ function freshSetupSocketError(err: unknown, socketPath: string, route: string):
   const fullSocketPath = basename(socketPath) === "folddb-full.sock"
     ? socketPath
     : join(dirname(socketPath), "folddb-full.sock");
+  if (basename(socketPath) === "folddb.sock" && !existsSync(fullSocketPath)) return null;
   if (existsSync(fullSocketPath)) return null;
   return new FkanbanError({
     code: "full_surface_socket_unavailable",
