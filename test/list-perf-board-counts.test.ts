@@ -15,6 +15,7 @@ import { describe, expect, test } from "bun:test";
 
 import { boardListCmd, boardListResult } from "../src/commands/board.ts";
 import { listCmd } from "../src/commands/list.ts";
+import { searchCmd } from "../src/commands/search.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
@@ -65,6 +66,7 @@ function fakeNode(opts: {
   cards: Card[];
   cardScanError?: boolean;
   rejectColumnFilter?: boolean;
+  nativeSearchSlugs?: string[];
 }): NodeClient & { cardScanFields: string[][]; cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> } {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
   const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
@@ -85,7 +87,27 @@ function fakeNode(opts: {
     createRecord: stub as never,
     updateRecord: stub as never,
     deleteRecord: stub as never,
-    rawCall: stub as never,
+    async rawCall(method, path) {
+      if (method === "GET" && path.startsWith("/api/native-index/search")) {
+        return {
+          status: 200,
+          headers: new Headers(),
+          body: "",
+          json: {
+            ok: true,
+            results: (opts.nativeSearchSlugs ?? []).map((slug) => ({
+              schema_name: "cardhash",
+              schema_display_name: "Card",
+              field: "body",
+              key_value: { hash: slug, range: null },
+              value: "native candidate",
+              metadata: { score: 0.9 },
+            })),
+          },
+        };
+      }
+      return stub() as never;
+    },
     nodeTransport: stub as never,
     async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
       if (q.schemaHash === "cardhash") {
@@ -188,6 +210,51 @@ describe("board list — per-board live-card counts", () => {
     const out = await boardListCmd({ cfg, node, json: true });
     const parsed = JSON.parse(out) as Array<Board & { cardCount: number | null }>;
     expect(parsed[0]!.cardCount).toBeNull();
+  });
+});
+
+describe("search — default text path uses indexed/native candidates", () => {
+  test("does not fetch every full card body for a native-index body hit", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({
+          slug: "body-hit",
+          title: "Body hit",
+          body: "needle only appears in this full card body",
+        }),
+        card({
+          slug: "other",
+          title: "Other",
+          body: "a large unrelated body that should not be fetched by the default search scan",
+        }),
+      ],
+      nativeSearchSlugs: ["body-hit"],
+    });
+
+    const out = await searchCmd({ cfg, node, query: "needle" });
+    expect(out).toContain("body-hit");
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"))).toBe(true);
+    const fullScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
+    expect(fullScans).toHaveLength(0);
+  });
+
+  test("--json keeps the exhaustive full-body scan contract", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({
+          slug: "body-hit",
+          title: "Body hit",
+          body: "needle only appears in this full card body",
+        }),
+      ],
+    });
+
+    const out = await searchCmd({ cfg, node, query: "needle", json: true });
+    expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["body-hit"]);
+    const fullScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
+    expect(fullScans).toHaveLength(1);
   });
 });
 
