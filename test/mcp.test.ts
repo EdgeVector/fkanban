@@ -17,7 +17,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { ConfigMissingError } from "../src/config.ts";
 
-import { createFkanbanMcpServer, FKANBAN_MCP_INSTRUCTIONS } from "../src/mcp/server.ts";
+import {
+  createFkanbanMcpServer,
+  FKANBAN_MCP_INSTRUCTIONS,
+  FKANBAN_READ_TOOLS,
+  FKANBAN_WRITE_TOOLS,
+  FKANBAN_TOOL_COUNT,
+} from "../src/mcp/server.ts";
 import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
@@ -84,7 +90,7 @@ function fakeNode(): NodeClient {
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
     rawCall: notImpl("rawCall") as NodeClient["rawCall"],
-    nodeTransport: () => ({ transport: "tcp" as const }),
+    nodeTransport: () => ({ transport: "unavailable" as const }),
   };
 }
 
@@ -165,9 +171,46 @@ describe("MCP server starts (degrades, not crashes) when config is unavailable",
     client = await connectServer(createFkanbanMcpServer({ configError }));
   });
 
-  test("connect succeeds and listTools returns all 15 tools", async () => {
+  test("connect succeeds and listTools returns every registered tool", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(FKANBAN_TOOL_COUNT);
+  });
+
+  // The MCP instructions state a tool count and a read/write split. Both are
+  // DERIVED from FKANBAN_READ_TOOLS/FKANBAN_WRITE_TOOLS, not hand-written, so
+  // this guards against them rotting the moment a tool is added or removed:
+  // the declared split must equal the tools actually registered on the server,
+  // and their readOnlyHint annotations must line up.
+  test("the read/write tool split matches the tools registered on the server", async () => {
+    const { tools } = await client.listTools();
+    const registered = new Set(tools.map((t) => t.name));
+    const declared = new Set<string>([...FKANBAN_READ_TOOLS, ...FKANBAN_WRITE_TOOLS]);
+    expect(declared).toEqual(registered);
+    expect(FKANBAN_TOOL_COUNT).toBe(tools.length);
+
+    const readOnly = new Set(
+      tools.filter((t) => t.annotations?.readOnlyHint === true).map((t) => t.name),
+    );
+    expect(readOnly).toEqual(new Set(FKANBAN_READ_TOOLS));
+    for (const w of FKANBAN_WRITE_TOOLS) {
+      const tool = tools.find((t) => t.name === w);
+      expect(tool?.annotations?.readOnlyHint).not.toBe(true);
+    }
+  });
+
+  test("the instructions blurb reflects the derived count and split", () => {
+    // The count is DERIVED from the tool lists — the string must render exactly
+    // whatever FKANBAN_TOOL_COUNT is, with no separately-hardcoded number that
+    // could disagree with it. (If a tool is added/removed, both this and the
+    // blurb move together.)
+    expect(FKANBAN_MCP_INSTRUCTIONS).toContain(`${FKANBAN_TOOL_COUNT} tools`);
+    for (const r of FKANBAN_READ_TOOLS) {
+      expect(FKANBAN_MCP_INSTRUCTIONS).toContain(r);
+    }
+    // The write tools appear by short name in the blurb.
+    for (const w of FKANBAN_WRITE_TOOLS) {
+      expect(FKANBAN_MCP_INSTRUCTIONS).toContain(w.replace(/^fkanban_/, ""));
+    }
   });
 
   test("fkanban_list returns isError with the actionable 'run init' hint", async () => {

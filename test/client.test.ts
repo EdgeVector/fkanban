@@ -167,7 +167,7 @@ describe("findCard", () => {
       updateRecord: async () => {},
       deleteRecord: async () => {},
       rawCall: async () => ({ status: 200, headers: new Headers(), body: "", json: null }),
-      nodeTransport: () => ({ transport: "tcp" }),
+      nodeTransport: () => ({ transport: "unavailable" }),
       async queryAll(opts) {
         calls.push(opts);
         if (opts.filter !== undefined) {
@@ -311,6 +311,17 @@ describe("socket-first covers owner data socket routes", () => {
     const t = node.nodeTransport();
     expect(t.transport).toBe("socket");
     expect(t.socketPath).toBe(socketPath);
+  });
+
+  test("nodeTransport() reports 'unavailable' (not 'tcp') when the socket file is missing", () => {
+    // Local nodes are socket-only — a missing socket means requests will fail,
+    // not that TCP takes over. The label must say so, since `fkanban doctor`
+    // surfaces it to users.
+    const missingSocket = join(mkdtempSync(join(tmpdir(), "fkanban-nosock-")), "folddb.sock");
+    const node = newNodeClient({ baseUrl: tcpUrl, userHash: "test-user", socketPath: missingSocket });
+    const t = node.nodeTransport();
+    expect(t.transport).toBe("unavailable");
+    expect(t.socketPath).toBe(missingSocket);
   });
 });
 

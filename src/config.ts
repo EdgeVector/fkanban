@@ -23,10 +23,11 @@ export type Config = {
   nodeSocketPath?: string;
 };
 
-// The node's app-isolation control socket lives under its data dir. The :9001
-// brain uses ~/.folddb/data; an ephemeral dev node sets FOLDDB_HOME to a temp
-// dir. `FOLDDB_SOCKET_PATH` overrides everything; then the config field; then
-// the FOLDDB_HOME-derived default.
+// The node's app-isolation control socket lives under its data dir — for a
+// socket-only local node this IS the transport, not a fallback. The primary
+// local brain uses ~/.folddb/data; an ephemeral dev node sets FOLDDB_HOME to a
+// temp dir. `FOLDDB_SOCKET_PATH` overrides everything; then the config field;
+// then the FOLDDB_HOME-derived default.
 export function resolveSocketPath(cfg?: { nodeSocketPath?: string }): string {
   const envOverride = process.env.FOLDDB_SOCKET_PATH;
   if (envOverride && envOverride.length > 0) return envOverride;
