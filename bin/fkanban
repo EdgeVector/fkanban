@@ -18,4 +18,14 @@ while [ -h "$src" ]; do
 done
 dir="$(cd -P "$(dirname "$src")" && pwd)"
 
-exec bun run "$dir/../src/cli.ts" "$@"
+if bun_bin="$(command -v bun 2>/dev/null)"; then
+  :
+elif [ -n "${HOME:-}" ] && [ -x "$HOME/.bun/bin/bun" ]; then
+  bun_bin="$HOME/.bun/bin/bun"
+else
+  echo "fkanban: bun not found on PATH and no executable found at \$HOME/.bun/bin/bun" >&2
+  echo "fkanban: install Bun or add its bin directory to PATH before running fkanban" >&2
+  exit 127
+fi
+
+exec "$bun_bin" run "$dir/../src/cli.ts" "$@"
