@@ -84,14 +84,17 @@ bun run src/cli.ts init --node-url http://127.0.0.1:9105 \
 
 ## PR workflow
 
-PRs land through the merge queue — let the queue pick the strategy: bare
-`gh pr merge <n> --auto`, never `--squash`/`--merge`/`--rebase`.
+PRs land through the merge queue — let the queue pick the strategy. Use
+`gh pr merge <n>` with no `--squash`/`--merge`/`--rebase`; GitHub queues the PR
+when required checks are green and enables auto-merge while they are pending.
+Do not pass `--delete-branch` to the merge command on merge-queue repos; delete
+the branch after the PR reports `MERGED` if cleanup is needed.
 
 ```bash
 git push -u origin HEAD
 gh pr create --fill --base main
 gh pr checks <n> --watch     # block until CI is green
-gh pr merge <n> --auto       # queue it; no strategy flag
+gh pr merge <n>              # queue it; no strategy or delete-branch flag
 ```
 
 Keep PRs atomic. README has the full command catalog.
