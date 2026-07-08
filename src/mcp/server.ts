@@ -449,7 +449,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add or update a card",
       description:
-        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. A card blocked by an unfinished dependency cannot be placed in doing/review/done (or its board's final column) unless `force` is set.",
+        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. Existing deps are preserved unless `replace_deps` is set. A card blocked by an unfinished dependency cannot be placed in doing/review/done (or its board's final column) unless `force` is set.",
       annotations: { title: "Add or update a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Stable card id (lowercase [a-z0-9-_])."),
@@ -468,8 +468,10 @@ export function createFkanbanMcpServer(
           .array(z.string())
           .optional()
           .describe(
-            "Slugs this card depends on (replaces the existing dep list). It is blocked until each reaches `done`.",
+            "Slugs this card depends on. On create, sets the dep list. On update, changing deps requires `replace_deps`; omit this field for ordinary card cleanup so existing deps are preserved.",
           ),
+        replace_deps: z.boolean().optional().describe("Explicitly replace/clear an existing card's dep list with `deps`. Prefer `fkanban_dep_add`/`fkanban_dep_rm` for incremental edge edits."),
+        allow_forward_dep: z.boolean().optional().describe("Allow dependency slugs that do not have cards yet; without this, missing deps are rejected."),
         priority: z
           .enum(PRIORITY_TIERS)
           .optional()
@@ -505,6 +507,8 @@ export function createFkanbanMcpServer(
         if (args.assignee !== undefined) o.assignee = args.assignee;
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
+        if (args.replace_deps !== undefined) o.replaceDeps = args.replace_deps;
+        if (args.allow_forward_dep !== undefined) o.allowForwardDep = args.allow_forward_dep;
         if (args.priority !== undefined) o.priority = args.priority;
         if (args.force !== undefined) o.force = args.force;
         if (args.repo !== undefined) o.repo = args.repo;
@@ -605,6 +609,7 @@ export function createFkanbanMcpServer(
       inputSchema: {
         slug: z.string().optional().describe("The dependent card."),
         dep: z.string().optional().describe("The card it depends on (must reach `done` first)."),
+        allow_forward_dep: z.boolean().optional().describe("Allow `dep` to name a card that does not exist yet; without this, missing deps are rejected."),
       },
       outputSchema: {
         slug: z.string(),
@@ -618,7 +623,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "dependent card slug", "Pass a non-empty `slug`.");
         const dep = requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
-        const res = await depAddCmd({ cfg, node, slug, dep });
+        const res = await depAddCmd({ cfg, node, slug, dep, allowForwardDep: args.allow_forward_dep });
         return toolResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);

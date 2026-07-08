@@ -20,15 +20,22 @@ export async function depAddCmd(opts: {
   node: NodeClient;
   slug: string;
   dep: string;
+  allowForwardDep?: boolean;
 }): Promise<DepResult> {
   validateSlug(opts.dep);
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
   if (opts.dep === opts.slug) {
     throw new FkanbanError({ code: "invalid_dep", message: "A card cannot depend on itself." });
   }
-  // Warn (don't fail) on a forward/dangling dep — it just never resolves.
   const all = await listCardStatuses(opts.node, opts.cfg);
   if (!all.some((c) => c.slug === opts.dep)) {
+    if (!opts.allowForwardDep) {
+      throw new FkanbanError({
+        code: "forward_dep_requires_explicit",
+        message: `Dependency "${opts.dep}" does not exist.`,
+        hint: "Create the dependency card first, or pass --allow-forward-dep to mark the forward edge intentional.",
+      });
+    }
     console.error(forwardDepWarning(opts.dep));
   }
   // Refuse to close a dependency cycle: if `opts.dep` already (transitively)

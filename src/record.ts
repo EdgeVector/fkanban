@@ -120,11 +120,10 @@ export function normalizeDeps(deps: string[], selfSlug: string): string[] {
   return normalizeTags(deps).filter((d) => d !== selfSlug);
 }
 
-// The stderr heads-up both `add --deps` and `dep add` emit when a dependency
-// slug doesn't resolve to a live card. A missing dep is non-blocking by design
-// (a forward/dangling dep just never reaches `done`), so this is a warning, not
-// an error — the write still succeeds. Shared so the two authoring paths stay
-// in sync.
+// The stderr heads-up both `add --deps --allow-forward-dep` and
+// `dep add --allow-forward-dep` emit when a dependency slug doesn't resolve to
+// a live card. Missing deps are rejected by default; this warning marks the
+// explicit placeholder path.
 export function forwardDepWarning(dep: string): string {
   return `fkanban: warning — no card "${dep}" yet; adding it as a forward dependency.`;
 }

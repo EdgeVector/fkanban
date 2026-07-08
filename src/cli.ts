@@ -49,7 +49,7 @@ Usage:
 Commands:
   init                 bootstrap a node + load/resolve schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
-  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --priority P0-P3 --body, --force past a block)
+  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --allow-forward-dep --priority P0-P3 --body, --force past a block)
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
@@ -132,7 +132,11 @@ Options:
   --assignee <name>     who owns the card
   --tags a,b,c          comma-separated tags
   --deps a,b            comma-separated slugs this card depends on
-                        (an edge that would form a cycle is rejected, exit 2)
+                        On update, this requires --replace-deps when it changes
+                        existing deps. An edge that would form a cycle is
+                        rejected, exit 2.
+  --replace-deps        explicitly replace/clear deps on an existing card
+  --allow-forward-dep   allow dependency slugs that do not have cards yet
   --priority <P0-P3>    card priority (P0 = most urgent … P3 = least); stored as
                         a p0–p3 tag. \`fkanban rank\` orders a column by this so
                         fkanban-pickup works urgent cards first.
@@ -185,9 +189,11 @@ Example:
 
 Usage:
   fkanban dep add <slug> <dep>     # card <slug> depends on <dep>
+  fkanban dep add <slug> <dep> --allow-forward-dep
   fkanban dep rm  <slug> <dep>     # remove the edge
 
 Options:
+  --allow-forward-dep   allow a dependency card that does not exist yet
   --json                echo the write result as JSON
 
 A card with deps is 🔒 blocked until each dep card reaches its board's final column.
@@ -637,14 +643,15 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
 
 // Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
 // names as COMMAND_HELP. Derived from each command's `--help` text and the
-// flags its dispatch branch actually reads. Commands absent here (e.g. `dep`,
-// `show`, `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
+// flags its dispatch branch actually reads. Commands absent here (e.g. `show`,
+// `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
   add: new Set([
-    "title", "board", "column", "assignee", "tags", "deps", "priority", "body", "force",
+    "title", "board", "column", "assignee", "tags", "deps", "replace-deps", "allow-forward-dep", "priority", "body", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "pr-url", "branch",
   ]),
+  dep: new Set(["allow-forward-dep"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
@@ -714,6 +721,8 @@ async function main(argv: string[]): Promise<number> {
         assignee: { type: "string" },
         tags: { type: "string" },
         deps: { type: "string" },
+        "replace-deps": { type: "boolean" },
+        "allow-forward-dep": { type: "boolean" },
         priority: { type: "string" },
         repo: { type: "string" },
         base: { type: "string" },
@@ -912,6 +921,8 @@ async function dispatch(
           assignee: values.assignee as string | undefined,
           tags: parseTags(values.tags as string | undefined),
           deps: parseTags(values.deps as string | undefined),
+          replaceDeps: values["replace-deps"] as boolean | undefined,
+          allowForwardDep: values["allow-forward-dep"] as boolean | undefined,
           priority,
           body,
           force: values.force as boolean | undefined,
@@ -932,7 +943,13 @@ async function dispatch(
         // `dep add`), and as a clean envelope under --json — never a half write.
         if (
           err instanceof FkanbanError &&
-          (err.code === "dep_cycle" || err.code === "invalid_kind" || err.code === "invalid_block_status")
+          (
+            err.code === "dep_cycle" ||
+            err.code === "forward_dep_requires_explicit" ||
+            err.code === "deps_replace_requires_explicit" ||
+            err.code === "invalid_kind" ||
+            err.code === "invalid_block_status"
+          )
         ) {
           if (values.json) {
             console.log(formatError(err));
@@ -983,14 +1000,23 @@ async function dispatch(
       if (sub === "add") {
         const ctx = loadCtx({ verbose });
         try {
-          const res = await depAddCmd({ cfg: ctx.cfg, node: ctx.node, slug, dep });
+          const res = await depAddCmd({
+            cfg: ctx.cfg,
+            node: ctx.node,
+            slug,
+            dep,
+            allowForwardDep: values["allow-forward-dep"] as boolean | undefined,
+          });
           console.log(formatDep(res, values.json as boolean | undefined));
           return 0;
         } catch (err) {
           // A rejected cycle is a bad-input error, not a node failure: report it
           // LOUDLY with the exit-2 contract (like an unknown flag), and as a
           // clean machine-readable envelope under --json — never a half write.
-          if (err instanceof FkanbanError && err.code === "dep_cycle") {
+          if (
+            err instanceof FkanbanError &&
+            (err.code === "dep_cycle" || err.code === "forward_dep_requires_explicit")
+          ) {
             if (values.json) {
               console.log(formatError(err));
             } else {
