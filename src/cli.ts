@@ -49,7 +49,7 @@ Usage:
 Commands:
   init                 bootstrap a node + load/resolve schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
-  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --allow-forward-dep --priority P0-P3 --body, --force past a block)
+  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --priority P0-P3 --body, --force past a block)
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
@@ -133,10 +133,9 @@ Options:
   --tags a,b,c          comma-separated tags
   --deps a,b            comma-separated slugs this card depends on
                         On update, this requires --replace-deps when it changes
-                        existing deps. An edge that would form a cycle is
-                        rejected, exit 2.
+                        existing deps. Missing cards and edges that would form
+                        a cycle are rejected, exit 2.
   --replace-deps        explicitly replace/clear deps on an existing card
-  --allow-forward-dep   allow dependency slugs that do not have cards yet
   --priority <P0-P3>    card priority (P0 = most urgent … P3 = least); stored as
                         a p0–p3 tag. \`fkanban rank\` orders a column by this so
                         fkanban-pickup works urgent cards first.
@@ -189,15 +188,15 @@ Example:
 
 Usage:
   fkanban dep add <slug> <dep>     # card <slug> depends on <dep>
-  fkanban dep add <slug> <dep> --allow-forward-dep
   fkanban dep rm  <slug> <dep>     # remove the edge
 
 Options:
-  --allow-forward-dep   allow a dependency card that does not exist yet
   --json                echo the write result as JSON
 
 A card with deps is 🔒 blocked until each dep card reaches its board's final column.
-Edges that would form a cycle (direct or transitive) are rejected (exit 2).
+Dependency edges are stored in the card's canonical deps field, not in tags or
+body. The dependency card must already exist, and edges that would form a cycle
+(direct or transitive) are rejected (exit 2).
 
 Example:
   fkanban dep add ui api`),
@@ -212,10 +211,10 @@ Options:
   --json                echo the write result as JSON
 
 Unlike \`add --tags a,b,c\` (which REPLACES the whole tag list), \`tag add\`/
-\`tag rm\` edit one tag at a time without disturbing the rest — the same
-distinction \`dep add\`/\`dep rm\` has to \`add --deps\`. Adding a tag the card
-already carries is a no-op; removing one it lacks warns but succeeds. Reserved
-tags (\`dep:<slug>\`, the delete tombstone) are rejected — use \`dep\`/\`rm\`.
+\`tag rm\` edit one tag at a time without disturbing the rest. Adding a tag the
+card already carries is a no-op; removing one it lacks warns but succeeds.
+Reserved tags (\`dep:<slug>\` legacy dependency tags, the delete tombstone) are
+rejected — use \`dep\`/\`rm\`. Dependency edges live in the separate deps field.
 
 Example:
   fkanban tag add ship-login p1
@@ -648,10 +647,9 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
   add: new Set([
-    "title", "board", "column", "assignee", "tags", "deps", "replace-deps", "allow-forward-dep", "priority", "body", "force",
+    "title", "board", "column", "assignee", "tags", "deps", "replace-deps", "priority", "body", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "pr-url", "branch",
   ]),
-  dep: new Set(["allow-forward-dep"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["position", "force"]),
@@ -722,7 +720,6 @@ async function main(argv: string[]): Promise<number> {
         tags: { type: "string" },
         deps: { type: "string" },
         "replace-deps": { type: "boolean" },
-        "allow-forward-dep": { type: "boolean" },
         priority: { type: "string" },
         repo: { type: "string" },
         base: { type: "string" },
@@ -922,7 +919,6 @@ async function dispatch(
           tags: parseTags(values.tags as string | undefined),
           deps: parseTags(values.deps as string | undefined),
           replaceDeps: values["replace-deps"] as boolean | undefined,
-          allowForwardDep: values["allow-forward-dep"] as boolean | undefined,
           priority,
           body,
           force: values.force as boolean | undefined,
@@ -945,7 +941,7 @@ async function dispatch(
           err instanceof FkanbanError &&
           (
             err.code === "dep_cycle" ||
-            err.code === "forward_dep_requires_explicit" ||
+            err.code === "missing_dependency" ||
             err.code === "deps_replace_requires_explicit" ||
             err.code === "invalid_kind" ||
             err.code === "invalid_block_status"
@@ -1005,7 +1001,6 @@ async function dispatch(
             node: ctx.node,
             slug,
             dep,
-            allowForwardDep: values["allow-forward-dep"] as boolean | undefined,
           });
           console.log(formatDep(res, values.json as boolean | undefined));
           return 0;
@@ -1015,7 +1010,7 @@ async function dispatch(
           // clean machine-readable envelope under --json — never a half write.
           if (
             err instanceof FkanbanError &&
-            (err.code === "dep_cycle" || err.code === "forward_dep_requires_explicit")
+            (err.code === "dep_cycle" || err.code === "missing_dependency")
           ) {
             if (values.json) {
               console.log(formatError(err));

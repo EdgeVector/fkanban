@@ -16,10 +16,10 @@ import {
 } from "../record.ts";
 import type { TagResult } from "../format.ts";
 
-// Reject the reserved tags users must not author by hand: dependency edges live
-// in `tags` as `dep:<slug>` (use `dep add`/`dep rm`), and the soft-delete
-// tombstone is internal (use `rm`). Letting them through `tag add` would forge a
-// dependency / delete a card via a label, which would be surprising.
+// Reject the reserved tags users must not author by hand: legacy `dep:<slug>`
+// tags are migrated into the canonical `deps` field (use `dep add`/`dep rm`),
+// and the soft-delete tombstone is internal (use `rm`). Letting them through
+// `tag add` would forge a dependency / delete a card via a label.
 function rejectReservedTag(tag: string): void {
   if (isDepTag(tag)) {
     throw new FkanbanError({

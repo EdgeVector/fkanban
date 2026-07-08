@@ -24,8 +24,9 @@ export type Card = {
   assignee: string;
   tags: string[];
   // Slugs of cards this card depends on (it is "blocked" until each reaches the
-  // final column of its own board). Stored on the wire as `dep:<slug>` entries
-  // in `tags` — see DEP_TAG_PREFIX — so deps needed no schema change / republish.
+  // final column of its own board). Canonical storage is the Card schema's
+  // `deps` array field; legacy `dep:<slug>` tags are read only as a migration
+  // fallback and are stripped on the next write.
   deps: string[];
   created_at: string;
   updated_at: string;
@@ -74,10 +75,9 @@ function isHiddenCard(card: Card): boolean {
   return card.slug === WRITE_PROBE_SLUG || isTombstoned(card.tags);
 }
 
-// Dependency edges piggyback on the existing `tags` array: a card that depends
-// on `foo` carries the reserved tag `dep:foo`. rowToCard splits these out into
-// `deps`, and cardToFields folds them back in, so dep tags never surface as
-// user-facing labels (same trick as TOMBSTONE_TAG).
+// Legacy dependency tag prefix. Dependency edges are now canonically stored in
+// the Card schema's `deps` field. Keep the prefix reader so old rows are
+// migrated in memory, but never write `dep:<slug>` tags for dependency edges.
 export const DEP_TAG_PREFIX = "dep:";
 export const DONE_AT_TAG_PREFIX = "done_at:";
 
@@ -120,12 +120,15 @@ export function normalizeDeps(deps: string[], selfSlug: string): string[] {
   return normalizeTags(deps).filter((d) => d !== selfSlug);
 }
 
-// The stderr heads-up both `add --deps --allow-forward-dep` and
-// `dep add --allow-forward-dep` emit when a dependency slug doesn't resolve to
-// a live card. Missing deps are rejected by default; this warning marks the
-// explicit placeholder path.
-export function forwardDepWarning(dep: string): string {
-  return `fkanban: warning — no card "${dep}" yet; adding it as a forward dependency.`;
+// Shared dependency validation error. Dependency edges must point at live cards:
+// forward/dangling deps otherwise look like structured data but cannot ever
+// resolve without human archaeology.
+export function missingDepError(dep: string): FkanbanError {
+  return new FkanbanError({
+    code: "missing_dependency",
+    message: `Dependency card "${dep}" does not exist.`,
+    hint: "Create the dependency card first, or depend on the existing card slug that proves the prerequisite.",
+  });
 }
 
 // Legacy formatter for older result envelopes that reported dependent cards on
@@ -470,6 +473,7 @@ export const PICKUP_AREA_PEER_FIELDS = [
   "column",
   "position",
   "tags",
+  "deps",
   "created_at",
   "repo",
   "kind",
@@ -995,8 +999,8 @@ export type DepStatus = {
   // Existing dep cards not yet in their board's terminal column — these block
   // this card.
   blockedBy: string[];
-  // Dep slugs with no live card (deleted or forward-referenced) — surfaced as a
-  // warning, but they do NOT block (a dangling dep can never reach `done`).
+  // Dep slugs with no live card (legacy dangling data). These block because
+  // they can never reach the terminal column until the edge is repaired.
   missing: string[];
   blocked: boolean;
 };
@@ -1064,6 +1068,7 @@ export function depStatus(
     const d = bySlug.get(dep);
     if (!d) {
       missing.push(dep);
+      blockedBy.push(dep);
     } else if (isMetaCardKind(d.kind)) {
       continue;
     } else if (d.column !== terminalColumnFor(d.board, boardTerminal)) {
@@ -1157,9 +1162,8 @@ export function blockedSlugSet(
   return blocked;
 }
 
-// Case-insensitive substring search over a card's user-facing content (slug,
-// title, body, assignee, and visible tags — dep/tombstone tags never reach
-// here). Multi-word queries are AND-matched: every whitespace-separated term
+// Case-insensitive substring search over a card's user-facing content and
+// structured dependency slugs. Multi-word queries are AND-matched: every whitespace-separated term
 // must appear somewhere in the card, so `auth p1` finds cards mentioning both.
 // Tokenize a search query into its effective lowercased terms: trim, split on
 // whitespace, drop empties. A whitespace-only query yields `[]` — callers (see
@@ -1171,7 +1175,7 @@ export function queryTerms(query: string): string[] {
 export function cardMatchesQuery(card: Card, query: string): boolean {
   const terms = queryTerms(query);
   if (terms.length === 0) return true;
-  const hay = [card.slug, card.title, card.body, card.assignee, ...card.tags]
+  const hay = [card.slug, card.title, card.body, card.assignee, ...card.tags, ...card.deps]
     .join("\n")
     .toLowerCase();
   return terms.every((t) => hay.includes(t));
@@ -1205,25 +1209,27 @@ function arrayStringField(f: Record<string, unknown>, key: string): string[] {
 export function rowToCard(row: QueryRow): Card {
   const f = (row.fields ?? {}) as Record<string, unknown>;
   const allTags = arrayStringField(f, "tags");
-  const deps = allTags
+  const legacyTagDeps = allTags
     .filter(isDepTag)
     .map((t) => t.slice(DEP_TAG_PREFIX.length))
     .filter((s) => s.length > 0);
+  const deps = arrayStringField(f, "deps");
+  const slug = stringField(f, "slug");
   const doneAt =
     allTags
       .find(isDoneAtTag)
       ?.slice(DONE_AT_TAG_PREFIX.length) ?? "";
   return {
-    slug: stringField(f, "slug"),
+    slug,
     title: stringField(f, "title"),
     body: stringField(f, "body"),
     board: stringField(f, "board"),
     column: stringField(f, "column"),
     position: stringField(f, "position"),
     assignee: stringField(f, "assignee"),
-    // dep tags are split into `deps`; everything else (incl. the tombstone) stays.
+    // Legacy dep tags are migrated into `deps`; everything else stays.
     tags: allTags.filter((t) => !isDepTag(t) && !isDoneAtTag(t)),
-    deps,
+    deps: normalizeDeps([...deps, ...legacyTagDeps], slug),
     created_at: stringField(f, "created_at"),
     updated_at: stringField(f, "updated_at"),
     done_at: doneAt,
@@ -1422,7 +1428,7 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
 // except the heavy spec `body` (and other display-only fields). Used by the
 // read paths that fan out over the whole board so they don't re-download every
 // card's multi-paragraph body.
-export const CARD_STATUS_FIELDS = ["slug", "board", "column", "position", "tags", "kind", "created_at"];
+export const CARD_STATUS_FIELDS = ["slug", "board", "column", "position", "tags", "deps", "kind", "created_at"];
 
 // Like listCards but fetches only CARD_STATUS_FIELDS; absent fields come back
 // as "" on the Card. Enough for depStatus / blockedSlugSet / existence checks.
@@ -1464,7 +1470,7 @@ export async function listDependencyStatusesForCards(
 // no longer drags every card's full spec over the wire (the first thing to time
 // out when the node is busy). `--json`/`--wide`/`search`/MCP still use the
 // full-body `listCards` because they genuinely surface structured/body fields.
-export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "assignee", "kind", "created_at"];
+export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "deps", "assignee", "kind", "created_at"];
 
 // Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields
 // (notably `body`) come back as "" on the Card. Enough for the text board render,
@@ -1583,12 +1589,11 @@ export function cardToFields(c: Card): Record<string, unknown> {
     column: c.column,
     position: c.position,
     assignee: c.assignee,
-    // Persist deps back as reserved `dep:<slug>` tags alongside the user tags.
     tags: [
       ...c.tags.filter((t) => !isDepTag(t) && !isDoneAtTag(t)),
       ...(c.done_at ? [doneAtTag(c.done_at)] : []),
-      ...c.deps.map(depTag),
     ],
+    deps: normalizeDeps(c.deps, c.slug),
     created_at: c.created_at,
     updated_at: c.updated_at,
     repo: c.repo ?? "",
@@ -1633,12 +1638,12 @@ export async function probeSchemaWritable(
   type: RecordType,
 ): Promise<WriteProbeResult> {
   const fields: Record<string, unknown> = {};
+  const schema = schemaFor(type).schema;
   for (const f of fieldsFor(type)) {
-    // `tags` is the only array field on either schema; everything else is a
-    // String. A non-empty probe value per field exercises the write of EVERY
-    // field (an all-empty write could be silently accepted by a node that drops
-    // unknown empties), which is exactly the #94 failure we must catch.
-    fields[f] = f === "tags" || f === "columns" ? [] : `probe`;
+    // A non-empty probe value per field exercises the write of EVERY field (an
+    // all-empty write could be silently accepted by a node that drops unknown
+    // empties), which is exactly the #94 failure we must catch.
+    fields[f] = typeof schema.field_types[f] === "object" ? ["probe"] : `probe`;
   }
   // The key field must equal the key hash so the record is addressable for the
   // cleanup delete.

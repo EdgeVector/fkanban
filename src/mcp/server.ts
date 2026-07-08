@@ -468,10 +468,9 @@ export function createFkanbanMcpServer(
           .array(z.string())
           .optional()
           .describe(
-            "Slugs this card depends on. On create, sets the dep list. On update, changing deps requires `replace_deps`; omit this field for ordinary card cleanup so existing deps are preserved.",
+            "Slugs this card depends on. On create, sets the canonical deps field. On update, changing deps requires `replace_deps`; every slug must already be an existing live card. Omit this field for ordinary cleanup so existing deps are preserved. Prefer `fkanban_dep_add`/`fkanban_dep_rm` for incremental edits.",
           ),
         replace_deps: z.boolean().optional().describe("Explicitly replace/clear an existing card's dep list with `deps`. Prefer `fkanban_dep_add`/`fkanban_dep_rm` for incremental edge edits."),
-        allow_forward_dep: z.boolean().optional().describe("Allow dependency slugs that do not have cards yet; without this, missing deps are rejected."),
         priority: z
           .enum(PRIORITY_TIERS)
           .optional()
@@ -508,7 +507,6 @@ export function createFkanbanMcpServer(
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
         if (args.replace_deps !== undefined) o.replaceDeps = args.replace_deps;
-        if (args.allow_forward_dep !== undefined) o.allowForwardDep = args.allow_forward_dep;
         if (args.priority !== undefined) o.priority = args.priority;
         if (args.force !== undefined) o.force = args.force;
         if (args.repo !== undefined) o.repo = args.repo;
@@ -604,12 +602,11 @@ export function createFkanbanMcpServer(
     {
       title: "Add a dependency",
       description:
-        "Make `slug` depend on `dep`. `slug` is then blocked (cannot enter doing/review/done) until `dep` reaches the `done` column.",
+        "Make `slug` depend on the existing live card `dep`, updating the canonical deps field without touching tags or body. `slug` is then blocked (cannot enter doing/review/done) until `dep` reaches the `done` column.",
       annotations: { title: "Add a dependency", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("The dependent card."),
-        dep: z.string().optional().describe("The card it depends on (must reach `done` first)."),
-        allow_forward_dep: z.boolean().optional().describe("Allow `dep` to name a card that does not exist yet; without this, missing deps are rejected."),
+        dep: z.string().optional().describe("The existing live card it depends on (must reach `done` first)."),
       },
       outputSchema: {
         slug: z.string(),
@@ -623,7 +620,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "dependent card slug", "Pass a non-empty `slug`.");
         const dep = requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
-        const res = await depAddCmd({ cfg, node, slug, dep, allowForwardDep: args.allow_forward_dep });
+        const res = await depAddCmd({ cfg, node, slug, dep });
         return toolResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
       } catch (err) {
         return errorResult(err);
@@ -666,7 +663,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add tags",
       description:
-        "Add one or more tags to a card WITHOUT replacing its existing tags (the incremental counterpart to `fkanban_add`'s `tags`, which replaces the whole list — the same relationship `fkanban_dep_add` has to `add`'s `deps`). Adding a tag the card already carries is a no-op. Reserved tags (`dep:<slug>` dependency edges, the delete tombstone) are rejected — use `fkanban_dep_add`/`fkanban_rm` for those.",
+        "Add one or more tags to a card WITHOUT replacing its existing tags (the incremental counterpart to `fkanban_add`'s `tags`, which replaces the whole list). Adding a tag the card already carries is a no-op. Reserved tags (`dep:<slug>` legacy dependency tags, the delete tombstone) are rejected — use `fkanban_dep_add`/`fkanban_rm` for those. Dependency edges live in the separate `deps` field, not in tags.",
       annotations: { title: "Add tags", idempotentHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("The card to tag."),

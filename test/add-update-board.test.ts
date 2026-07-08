@@ -12,12 +12,12 @@
 // Backed by the same in-memory fake NodeClient used in mcp.test.ts /
 // read-board-validation.test.ts — exercises the real addCmd with no live node.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { boardToFields, findCard, nowIso } from "../src/record.ts";
+import { boardToFields, cardToFields, findCard, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { showCmd } from "../src/commands/show.ts";
@@ -219,75 +219,43 @@ describe("add update preserves the card's board", () => {
   });
 });
 
-describe("add dependency edge hardening", () => {
+// `add --deps` must reject a dep slug that doesn't resolve to a live card.
+// Dependencies are canonical structured edges, not free-text/body hints, so an
+// unresolved slug is almost always an agent typo and must not be persisted.
+describe("add --deps rejects missing dependency slugs", () => {
   let node: NodeClient;
-  let warnings: string[];
-  let restore: () => void;
 
   beforeEach(async () => {
     node = fakeNode();
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
-    warnings = [];
-    const orig = console.error;
-    console.error = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
-    restore = () => {
-      console.error = orig;
-    };
   });
 
-  afterEach(() => restore());
-
-  test("missing dep is rejected by default and writes nothing", async () => {
-    await expect(addCmd({
-      cfg,
-      node,
-      slug: "warn-a",
-      title: "A",
-      deps: ["does-not-exist"],
-    })).rejects.toMatchObject({ code: "forward_dep_requires_explicit" });
-    expect(warnings).toEqual([]);
-    expect(await findCard(node, cfg, "warn-a")).toBeNull();
-  });
-
-  test("missing dep with allowForwardDep warns once and creates the card", async () => {
-    const created = await addCmd({
-      cfg,
-      node,
-      slug: "warn-a",
-      title: "A",
-      deps: ["does-not-exist"],
-      allowForwardDep: true,
+  test("missing dep → rejects and writes nothing", async () => {
+    await expect(addCmd({ cfg, node, slug: "dep-a", title: "A", deps: ["does-not-exist"] })).rejects.toMatchObject({
+      code: "missing_dependency",
+      message: 'Dependency card "does-not-exist" does not exist.',
     });
-    expect(created).toMatchObject({ action: "created" });
-    expect(warnings).toEqual([
-      'fkanban: warning — no card "does-not-exist" yet; adding it as a forward dependency.',
-    ]);
-    // Write still landed, with the forward dep recorded.
-    const after = await findCard(node, cfg, "warn-a");
-    expect(after?.deps).toEqual(["does-not-exist"]);
+    expect(await findCard(node, cfg, "dep-a")).toBeNull();
   });
 
-  test("existing dep → no warning", async () => {
+  test("existing dep → accepted", async () => {
     await addCmd({ cfg, node, slug: "dep-target", title: "Target" });
-    warnings.length = 0;
-    await addCmd({ cfg, node, slug: "warn-b", title: "B", deps: ["dep-target"] });
-    expect(warnings).toEqual([]);
+    await addCmd({ cfg, node, slug: "dep-b", title: "B", deps: ["dep-target"] });
+    expect((await findCard(node, cfg, "dep-b"))?.deps).toEqual(["dep-target"]);
   });
 
-  test("mixed deps with allowForwardDep warns exactly once for the missing one only", async () => {
+  test("mixed deps → rejects on the missing one and writes no partial edge", async () => {
     await addCmd({ cfg, node, slug: "dep-ok", title: "OK" });
-    warnings.length = 0;
-    await addCmd({ cfg, node, slug: "warn-c", title: "C", deps: ["dep-ok", "dep-missing"], allowForwardDep: true });
-    expect(warnings).toEqual([
-      'fkanban: warning — no card "dep-missing" yet; adding it as a forward dependency.',
-    ]);
+    await expect(addCmd({ cfg, node, slug: "dep-c", title: "C", deps: ["dep-ok", "dep-missing"] })).rejects.toMatchObject({
+      code: "missing_dependency",
+      message: 'Dependency card "dep-missing" does not exist.',
+    });
+    expect(await findCard(node, cfg, "dep-c")).toBeNull();
   });
 
-  test("no --deps → never reads or warns", async () => {
-    await addCmd({ cfg, node, slug: "warn-d", title: "D" });
-    expect(warnings).toEqual([]);
+  test("no --deps → no dependency validation needed", async () => {
+    await addCmd({ cfg, node, slug: "dep-d", title: "D" });
+    expect((await findCard(node, cfg, "dep-d"))?.deps).toEqual([]);
   });
 
   test("generic update without deps preserves an existing dependency edge", async () => {
@@ -421,6 +389,7 @@ describe("add --deps rejects a dependency cycle", () => {
   test("cumulative: --deps adds two edges where the SECOND closes a cycle", async () => {
     // x → y exists. add y --deps z,x : z is fine, but x closes y→x→y.
     await addCmd({ cfg, node, slug: "y", title: "Y" });
+    await addCmd({ cfg, node, slug: "x", title: "X", deps: ["y"] });
     await addCmd({ cfg, node, slug: "z", title: "Z" });
     await addCmd({ cfg, node, slug: "x", title: "X", deps: ["y"] });
     await expectCycle(addCmd({ cfg, node, slug: "y", deps: ["z", "x"] }));
@@ -536,11 +505,18 @@ describe("add enforces the dependency soft-block into working columns", () => {
     expect(res2).toMatchObject({ action: "updated", column: "todo" });
   });
 
-  test("a missing (dangling) dep does NOT block placement into a working column", async () => {
-    // Forward dep that never resolves to a live card — non-blocking by design,
-    // exactly as depStatus treats it.
-    await addCmd({ cfg, node, slug: "fwd", title: "Fwd", column: "todo", body: validPickupBody, deps: ["never-exists"], allowForwardDep: true });
-    const res = await addCmd({ cfg, node, slug: "fwd", column: "doing" });
-    expect(res).toMatchObject({ action: "updated", column: "doing" });
+  test("a legacy dangling dep blocks placement into a working column", async () => {
+    await addCmd({ cfg, node, slug: "fwd", title: "Fwd", column: "todo", body: validPickupBody });
+    const card = await findCard(node, cfg, "fwd");
+    expect(card).not.toBeNull();
+    await node.updateRecord({
+      schemaHash: cfg.schemaHashes.card!,
+      keyHash: "fwd",
+      fields: cardToFields({ ...card!, deps: ["never-exists"] }),
+    });
+    await expect(addCmd({ cfg, node, slug: "fwd", column: "doing" })).rejects.toMatchObject({
+      code: "card_blocked",
+      message: 'Card "fwd" is blocked by "never-exists" (not yet done).',
+    });
   });
 });

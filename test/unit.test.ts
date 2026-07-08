@@ -103,6 +103,7 @@ describe("schemas", () => {
       position: "String",
       assignee: "String",
       tags: { Array: "String" },
+      deps: { Array: "String" },
       created_at: "String",
       updated_at: "String",
       repo: "String",
@@ -184,7 +185,16 @@ describe("row → card", () => {
 });
 
 describe("dependencies", () => {
-  test("dep tags split out of tags into deps on read", () => {
+  test("canonical deps field reads separately from visible tags", () => {
+    const c = rowToCard({
+      key: { hash: "x", range: null },
+      fields: { slug: "x", tags: ["p1", TOMBSTONE_TAG], deps: ["a", "b"] },
+    });
+    expect(c.deps).toEqual(["a", "b"]);
+    expect(c.tags).toEqual(["p1", TOMBSTONE_TAG]);
+  });
+
+  test("legacy dep tags split out of tags into deps on read", () => {
     const c = rowToCard({
       key: { hash: "x", range: null },
       fields: { slug: "x", tags: ["p1", depTag("a"), depTag("b"), TOMBSTONE_TAG] },
@@ -193,10 +203,11 @@ describe("dependencies", () => {
     expect(c.tags).toEqual(["p1", TOMBSTONE_TAG]); // tombstone stays, dep tags removed
   });
 
-  test("cardToFields folds deps back into tags (round-trips)", () => {
+  test("cardToFields writes deps to the canonical deps field and strips legacy dep tags", () => {
     const c = card({ slug: "x", tags: ["p1"], deps: ["a", "b"], done_at: "2026-07-03T12:00:00.000Z" });
     const fields = cardToFields(c);
-    expect(fields.tags).toEqual(["p1", "done_at:2026-07-03T12:00:00.000Z", depTag("a"), depTag("b")]);
+    expect(fields.tags).toEqual(["p1", "done_at:2026-07-03T12:00:00.000Z"]);
+    expect(fields.deps).toEqual(["a", "b"]);
     const back = rowToCard({ key: { hash: "x", range: null }, fields });
     expect(back.tags).toEqual(["p1"]);
     expect(back.deps).toEqual(["a", "b"]);
@@ -238,11 +249,12 @@ describe("dependencies", () => {
     expect(blockedSlugSet(all, all).has("x")).toBe(false);
   });
 
-  test("a missing dep is surfaced but does not block", () => {
+  test("a missing dep is surfaced and blocks", () => {
     const x = card({ slug: "x", deps: ["ghost"] });
     const s = depStatus(x, [x]);
     expect(s.missing).toEqual(["ghost"]);
-    expect(s.blocked).toBe(false);
+    expect(s.blockedBy).toEqual(["ghost"]);
+    expect(s.blocked).toBe(true);
   });
 
   test("meta/grouping dep cards do not block pickup", () => {
