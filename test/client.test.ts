@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { FkanbanError, newNodeClient, type NodeClient } from "../src/client.ts";
 import { findCard } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
+import { addCmd } from "../src/commands/add.ts";
 
 type SeenRequest = { path: string; body: unknown };
 
@@ -226,10 +227,34 @@ describe("socket-first covers owner data socket routes", () => {
     async fetch(req) {
       const path = new URL(req.url).pathname;
       socketSeen.push(path);
+      const body = req.method === "POST" ? await req.json().catch(() => undefined) : undefined;
       if (path === "/control/browser-pairing-code") {
         return Response.json({ pairing_code: "test-pairing-code" });
       }
-      if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
+      if (path === "/api/query") {
+        const q = body as Record<string, unknown> | undefined;
+        const filter = q?.filter as { HashKey?: string } | undefined;
+        if (q?.schema_name === "boardhash" && filter?.HashKey === "default") {
+          return Response.json({
+            ok: true,
+            results: [
+              {
+                fields: {
+                  slug: "default",
+                  title: "Default board",
+                  body: "",
+                  columns: ["backlog", "todo", "doing", "review", "done"],
+                  created_at: "2026-01-01T00:00:00.000Z",
+                  updated_at: "2026-01-01T00:00:00.000Z",
+                },
+                key: { hash: "default", range: null },
+              },
+            ],
+            has_more: false,
+          });
+        }
+        return Response.json({ ok: true, results: [], has_more: false });
+      }
       if (path === "/api/mutation") return Response.json({ ok: true });
       if (path === "/api/system/auto-identity") {
         return Response.json({ user_hash: "test-user" });
@@ -285,6 +310,25 @@ describe("socket-first covers owner data socket routes", () => {
     await node.createRecord({ schemaHash: "cardhash", fields: { slug: "x" }, keyHash: "x" });
     expect(socketSeen).toContain("/api/mutation");
     expect(tcpSeen.slice(before)).not.toContain("/api/mutation");
+  });
+
+  test("add create reads and writes cards over the socket when TCP is down", async () => {
+    const node = newNodeClient({ baseUrl: tcpUrl, userHash: "test-user", socketPath });
+    const beforeSocket = socketSeen.length;
+    const beforeTcp = tcpSeen.length;
+    const res = await addCmd({
+      cfg,
+      node,
+      slug: "socket-add-card",
+      title: "Socket add card",
+      column: "backlog",
+    });
+
+    expect(res).toMatchObject({ slug: "socket-add-card", action: "created", board: "default", column: "backlog" });
+    expect(socketSeen.slice(beforeSocket)).toContain("/api/query");
+    expect(socketSeen.slice(beforeSocket)).toContain("/api/mutation");
+    expect(tcpSeen.slice(beforeTcp)).not.toContain("/api/query");
+    expect(tcpSeen.slice(beforeTcp)).not.toContain("/api/mutation");
   });
 
   test("system /api/system/auto-identity goes over the socket, not TCP", async () => {
@@ -444,6 +488,42 @@ describe("socket-only: no TCP fallback for a local node", () => {
       // It errored over the socket, and the TCP server was NEVER contacted.
       expect(caught).toBeInstanceOf(FkanbanError);
       expect((caught as FkanbanError).code).toBe("service_unreachable");
+      expect(tcpSeen).toEqual([]);
+    } finally {
+      tcpServer.stop(true);
+      rmSync(sockDir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreachable socket write names the mutation route", async () => {
+    const sockDir = mkdtempSync(join(tmpdir(), "fkanban-bad-write-sock-"));
+    const badSocket = join(sockDir, "folddb.sock");
+    writeFileSync(badSocket, "");
+    const tcpSeen: string[] = [];
+    const tcpServer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        tcpSeen.push(new URL(req.url).pathname);
+        return Response.json({ ok: true });
+      },
+    });
+
+    try {
+      const node = newNodeClient({
+        baseUrl: `http://127.0.0.1:${tcpServer.port}`,
+        userHash: "test-user",
+        socketPath: badSocket,
+      });
+      const err = await node
+        .createRecord({ schemaHash: "cardhash", fields: { slug: "x" }, keyHash: "x" })
+        .then(() => null)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(FkanbanError);
+      expect((err as FkanbanError).code).toBe("service_unreachable");
+      expect((err as FkanbanError).message).toContain("write route");
+      expect((err as FkanbanError).message).toContain("POST /api/mutation");
+      expect((err as FkanbanError).message).toContain(badSocket);
       expect(tcpSeen).toEqual([]);
     } finally {
       tcpServer.stop(true);
