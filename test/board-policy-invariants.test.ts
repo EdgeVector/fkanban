@@ -200,4 +200,46 @@ describe("board policy invariants", () => {
     await moveCmd({ cfg, node, slug: "implementation", column: "doing" });
     expect((await findCard(node, cfg, "implementation"))?.column).toBe("doing");
   });
+
+  test("moving a dependency to done promotes newly unblocked backlog PR dependents to todo", async () => {
+    await addCmd({ cfg, node, slug: "api", column: "todo", body: validBody });
+    await addCmd({ cfg, node, slug: "ui", column: "backlog", body: validBody, deps: ["api"] });
+
+    const res = await moveCmd({ cfg, node, slug: "api", column: "done" });
+
+    expect(res.promotedDependents).toEqual(["ui"]);
+    expect((await findCard(node, cfg, "ui"))?.column).toBe("todo");
+  });
+
+  test("auto-promotion leaves still-blocked and non-pickup backlog dependents alone", async () => {
+    await addCmd({ cfg, node, slug: "api", column: "todo", body: validBody });
+    await addCmd({ cfg, node, slug: "design", column: "todo", body: validBody });
+    await addCmd({ cfg, node, slug: "blocked-child", column: "backlog", body: validBody, deps: ["api", "design"] });
+    await addCmd({
+      cfg,
+      node,
+      slug: "tracker-child",
+      column: "backlog",
+      kind: "tracker",
+      body: validBody,
+      deps: ["api"],
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "held-child",
+      column: "backlog",
+      blockStatus: "deferred",
+      blockReason: "wait for next milestone",
+      body: validBody,
+      deps: ["api"],
+    });
+
+    const res = await moveCmd({ cfg, node, slug: "api", column: "done" });
+
+    expect(res.promotedDependents).toBeUndefined();
+    expect((await findCard(node, cfg, "blocked-child"))?.column).toBe("backlog");
+    expect((await findCard(node, cfg, "tracker-child"))?.column).toBe("backlog");
+    expect((await findCard(node, cfg, "held-child"))?.column).toBe("backlog");
+  });
 });
