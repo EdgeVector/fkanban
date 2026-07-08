@@ -17,6 +17,8 @@ import {
 } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 
+const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\nDone-at fixture.";
+
 const cfg: Config = {
   configVersion: 1,
   nodeUrl: "http://unused.invalid",
@@ -100,7 +102,7 @@ describe("done_at stamping", () => {
   });
 
   test("move to done stamps done_at and tag/body updates keep it stable", async () => {
-    await addCmd({ cfg, node, slug: "probe", title: "Probe", column: "todo" });
+    await addCmd({ cfg, node, slug: "probe", title: "Probe", column: "todo", body: validPickupBody });
     expect((await findCard(node, cfg, "probe"))?.done_at).toBe("");
 
     await moveCmd({ cfg, node, slug: "probe", column: "done" });

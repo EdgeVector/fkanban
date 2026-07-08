@@ -30,6 +30,8 @@ const cfg: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
 
+const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.";
+
 function fakeNode(): NodeClient {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
   const tableFor = (schemaHash: string) => {
@@ -131,6 +133,7 @@ describe("add update preserves the card's board", () => {
       slug: "priority-only",
       title: "Priority only",
       column: "todo",
+      body: validPickupBody,
     });
 
     const updated = await addCmd({ cfg, node, slug: "priority-only", priority: "P2" });
@@ -142,7 +145,7 @@ describe("add update preserves the card's board", () => {
   });
 
   test("(b) update --column valid on the card's OWN board succeeds", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip" });
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
 
     // "shipped" is a column on "other" but NOT on the default board. Before the
     // fix this validated against the default board's columns and would throw.
@@ -161,7 +164,7 @@ describe("add update preserves the card's board", () => {
   });
 
   test("(c) explicit --board still moves the card (intended)", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip" });
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
 
     const moved = await addCmd({ cfg, node, slug: "probe", board: "default", column: "todo" });
     expect(moved).toMatchObject({ action: "updated", board: "default", column: "todo" });
@@ -189,7 +192,16 @@ describe("add update preserves the card's board", () => {
     expect(created).toMatchObject({ action: "created", board: "other", column: "icebox" });
   });
 
-  test("add/show round-trip persists a sanitized dirty Repo header", async () => {
+  test("add/show round-trip persists a sanitized dirty Repo header only with explicit force", async () => {
+    await expect(addCmd({
+      cfg,
+      node,
+      slug: "dirty-repo",
+      title: "Dirty repo",
+      column: "todo",
+      body: "Repo: EdgeVector/fold  # defaulted — no subsystem tag mapped; correct the Repo: line if wrong\nBase: main\n\nx",
+    })).rejects.toBeInstanceOf(FkanbanError);
+
     await addCmd({
       cfg,
       node,
@@ -197,6 +209,7 @@ describe("add update preserves the card's board", () => {
       title: "Dirty repo",
       column: "todo",
       body: "Repo: EdgeVector/fold  # defaulted — no subsystem tag mapped; correct the Repo: line if wrong\nBase: main\n\nx",
+      force: true,
     });
 
     const shown = JSON.parse(await showCmd({ cfg, node, slug: "dirty-repo", json: true }));
@@ -372,8 +385,8 @@ describe("add enforces the dependency soft-block into working columns", () => {
 
   // Seed `dep` (todo, not done) and `blk` (todo) depending on it — blk is blocked.
   async function seedBlocked(): Promise<void> {
-    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo" });
-    await addCmd({ cfg, node, slug: "blk", title: "Blocked", column: "todo", deps: ["dep"] });
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "blk", title: "Blocked", column: "todo", body: validPickupBody, deps: ["dep"] });
   }
 
   test("update a blocked card into `doing` is refused (card_blocked, no write)", async () => {
@@ -411,15 +424,15 @@ describe("add enforces the dependency soft-block into working columns", () => {
   });
 
   test("an UNblocked card moves into `doing` via add (no guard fires)", async () => {
-    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "done" });
-    await addCmd({ cfg, node, slug: "ok", title: "OK", column: "todo", deps: ["dep"] });
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "done", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "ok", title: "OK", column: "todo", body: validPickupBody, deps: ["dep"] });
     // dep is done → ok is unblocked.
     const res = await addCmd({ cfg, node, slug: "ok", column: "doing" });
     expect(res).toMatchObject({ action: "updated", column: "doing" });
   });
 
   test("creating a blocked card directly INTO a working column is refused", async () => {
-    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo" });
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo", body: validPickupBody });
     await expect(
       addCmd({ cfg, node, slug: "born-doing", title: "Born", column: "doing", deps: ["dep"] }),
     ).rejects.toMatchObject({ code: "card_blocked" });
@@ -428,7 +441,7 @@ describe("add enforces the dependency soft-block into working columns", () => {
   });
 
   test("creating a blocked card into `doing` succeeds with --force", async () => {
-    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo" });
+    await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo", body: validPickupBody });
     const res = await addCmd({
       cfg,
       node,
@@ -464,7 +477,7 @@ describe("add enforces the dependency soft-block into working columns", () => {
   test("a missing (dangling) dep does NOT block placement into a working column", async () => {
     // Forward dep that never resolves to a live card — non-blocking by design,
     // exactly as depStatus treats it.
-    await addCmd({ cfg, node, slug: "fwd", title: "Fwd", column: "todo", deps: ["never-exists"] });
+    await addCmd({ cfg, node, slug: "fwd", title: "Fwd", column: "todo", body: validPickupBody, deps: ["never-exists"] });
     const res = await addCmd({ cfg, node, slug: "fwd", column: "doing" });
     expect(res).toMatchObject({ action: "updated", column: "doing" });
   });

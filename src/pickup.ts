@@ -156,7 +156,7 @@ export function classifyPickupCard(card: Card, allCards: Card[], dep: DepStatus)
     return out("parked/non-work", "deferred hold", "Keep deferred work outside default todo until its sequence opens.");
   }
   if (kind !== "pr" || isRegistryCard(card.body, card.title)) {
-    return out("parked/non-work", `non-pickup kind: ${kind}`, "Leave grouping/tracker cards out of default todo, or split a concrete PR card.");
+    return out("parked/non-work", `non-pickup kind: ${kind}`, "Leave grouping/tracker/program/capstone/validation cards out of default todo, or split a concrete PR card.");
   }
   if (card.board !== "default") {
     return out("parked/non-work", `card is on non-default board ${card.board}`, "Move to default/todo only when an agent should pick it up.");

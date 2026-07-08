@@ -25,6 +25,8 @@ const cfg: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
 
+const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\nTag fixture.";
+
 function fakeNode(): NodeClient {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
   const tableFor = (schemaHash: string) => {
@@ -90,7 +92,7 @@ describe("tag add/rm edit one label without clobbering the rest", () => {
   });
 
   test("tag add unions into the existing list (other tags survive)", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a", "b"] });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a", "b"], body: validPickupBody });
 
     const res = await tagAddCmd({ cfg, node, slug: "probe", tag: ["c"] });
     expect(res).toEqual({ slug: "probe", action: "added", tag: ["c"], tags: ["a", "b", "c"] });
@@ -100,20 +102,20 @@ describe("tag add/rm edit one label without clobbering the rest", () => {
   });
 
   test("tag add of a present tag is idempotent (no duplicate)", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a", "b"] });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a", "b"], body: validPickupBody });
     const res = await tagAddCmd({ cfg, node, slug: "probe", tag: ["a"] });
     expect(res.tags).toEqual(["a", "b"]);
   });
 
   test("tag add accepts multiple tags at once, normalized + deduped", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a"] });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a"], body: validPickupBody });
     const res = await tagAddCmd({ cfg, node, slug: "probe", tag: [" b ", "a", "c", "b"] });
     expect(res.tags).toEqual(["a", "b", "c"]);
     expect(res.tag).toEqual(["b", "a", "c"]); // incoming normalized + deduped (order-stable), trim applied
   });
 
   test("tag rm removes only the named tag (others survive)", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a", "b", "c"] });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a", "b", "c"], body: validPickupBody });
     const res = await tagRmCmd({ cfg, node, slug: "probe", tag: ["b"] });
     expect(res).toEqual({ slug: "probe", action: "removed", tag: ["b"], tags: ["a", "c"] });
 
@@ -122,14 +124,14 @@ describe("tag add/rm edit one label without clobbering the rest", () => {
   });
 
   test("tag rm of an absent tag is a no-op (succeeds)", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a"] });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a"], body: validPickupBody });
     const res = await tagRmCmd({ cfg, node, slug: "probe", tag: ["ghost"] });
     expect(res.tags).toEqual(["a"]);
   });
 
   test("tag add/rm never disturb dependency edges (deps survive a tag edit)", async () => {
-    await addCmd({ cfg, node, slug: "api", column: "todo" });
-    await addCmd({ cfg, node, slug: "ui", column: "todo", tags: ["frontend"] });
+    await addCmd({ cfg, node, slug: "api", column: "todo", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "ui", column: "todo", tags: ["frontend"], body: validPickupBody });
     await depAddCmd({ cfg, node, slug: "ui", dep: "api" });
 
     await tagAddCmd({ cfg, node, slug: "ui", tag: ["p1"] });
@@ -154,19 +156,19 @@ describe("tag add/rm edit one label without clobbering the rest", () => {
   });
 
   test("tag add rejects a reserved dep: tag (use `dep add` instead)", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo" });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", body: validPickupBody });
     const p = tagAddCmd({ cfg, node, slug: "probe", tag: ["dep:api"] });
     await expect(p).rejects.toMatchObject({ code: "reserved_tag" });
   });
 
   test("tag add rejects the internal tombstone tag", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo" });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", body: validPickupBody });
     const p = tagAddCmd({ cfg, node, slug: "probe", tag: ["__fkanban_deleted__"] });
     await expect(p).rejects.toMatchObject({ code: "reserved_tag" });
   });
 
   test("tag add rejects the internal done_at tag", async () => {
-    await addCmd({ cfg, node, slug: "probe", column: "todo" });
+    await addCmd({ cfg, node, slug: "probe", column: "todo", body: validPickupBody });
     const p = tagAddCmd({ cfg, node, slug: "probe", tag: ["done_at:2026-07-03T12:00:00.000Z"] });
     await expect(p).rejects.toMatchObject({ code: "reserved_tag" });
   });
