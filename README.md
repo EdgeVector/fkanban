@@ -174,6 +174,7 @@ DONE  (0)
 | `fkanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
 | `fkanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
 | `fkanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
+| `fkanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for fkanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
 | `fkanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
@@ -300,6 +301,20 @@ block status/reason mismatches, stale pickup-area overlap holds, and
 human/parking candidates. With `--apply`, it rewrites only generated boilerplate
 and structured fields it can prove stale; ambiguous or real human gates stay as
 review-only candidates.
+
+`hygiene orphan-bun` is dry-run by default and does not talk to the folddb node:
+
+```bash
+fkanban hygiene orphan-bun
+fkanban hygiene orphan-bun --apply
+```
+
+It only targets PPID-1 Bun processes older than 24 hours whose command path
+matches the explicit agent-tooling allowlist: fkanban MCP (`src/cli.ts mcp` or
+`src/mcp/main.ts`), gstack browse server (`gstack/.../browse/src/server.ts`), or
+gstack terminal-agent (`gstack/.../browse/src/terminal-agent.ts`). It also flags
+same-parent Bun pileups above 100 processes so the machine-hygiene loop can
+surface Codex-style process explosions without killing by process name.
 
 ## Dependencies
 

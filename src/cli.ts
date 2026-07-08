@@ -21,6 +21,7 @@ import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
+import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
 import { migrateAreaTagsCmd } from "./commands/migrate.ts";
@@ -57,6 +58,8 @@ Commands:
   list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
   pickup status        classify active cards by pickup eligibility (--json)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
+  hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
+                       (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
@@ -381,6 +384,28 @@ Examples:
   fkanban groom stale-blockers
   fkanban groom stale-blockers --apply`),
 
+  hygiene: withFooter(`fkanban hygiene — local machine-hygiene helpers
+
+Usage:
+  fkanban hygiene orphan-bun [--apply] [--min-age-hours N] [--pileup-threshold N] [--json]
+
+Subcommands:
+  orphan-bun           list or signal stale PPID-1 Bun helper processes whose
+                       command path matches the explicit fkanban/gstack
+                       allowlist: fkanban MCP, gstack browse server, and
+                       gstack terminal-agent. Dry-run by default.
+
+Flags:
+  --apply              send SIGTERM to matching candidates. Omitted by default:
+                       dry-run only.
+  --min-age-hours N    minimum elapsed age, default 24
+  --pileup-threshold N flag a same-parent Bun pileup above N processes, default 100
+  --json               machine-readable report
+
+Examples:
+  fkanban hygiene orphan-bun
+  fkanban hygiene orphan-bun --apply`),
+
   doctor: withFooter(`fkanban doctor — health-check the local setup
 
 Usage:
@@ -632,6 +657,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   migrate: new Set(["dry-run"]),
   groom: new Set(["apply", "dry-run"]),
+  hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
 };
 
 // Closest valid flag for a mistyped option on a known command. Mirrors the
@@ -698,6 +724,8 @@ async function main(argv: string[]): Promise<number> {
         force: { type: "boolean" },
         "dry-run": { type: "boolean" },
         apply: { type: "boolean" },
+        "min-age-hours": { type: "string" },
+        "pileup-threshold": { type: "string" },
         body: { type: "string" },
         columns: { type: "string" },
         position: { type: "string" },
@@ -1102,6 +1130,31 @@ async function dispatch(
         node: ctx.node,
         apply: values.apply as boolean | undefined,
         json: values.json as boolean | undefined,
+      }));
+      return 0;
+    }
+
+    case "hygiene": {
+      const sub = positionals[1];
+      if (sub !== "orphan-bun") {
+        console.error(`fkanban: Unknown hygiene subcommand "${sub ?? ""}". Try: hygiene orphan-bun`);
+        return 2;
+      }
+      const extra = rejectExtraPositionals(positionals, 2, "hygiene orphan-bun");
+      if (extra !== undefined) return extra;
+      const minAgeHours =
+        values["min-age-hours"] !== undefined
+          ? parseIntFlag(values["min-age-hours"] as string, "min-age-hours", "hygiene", { min: 0 })
+          : undefined;
+      const pileupThreshold =
+        values["pileup-threshold"] !== undefined
+          ? parseIntFlag(values["pileup-threshold"] as string, "pileup-threshold", "hygiene", { min: 1 })
+          : undefined;
+      console.log(await hygieneOrphanBunCmd({
+        apply: Boolean(values.apply) && !values["dry-run"],
+        json: values.json as boolean | undefined,
+        minAgeHours,
+        pileupThreshold,
       }));
       return 0;
     }
