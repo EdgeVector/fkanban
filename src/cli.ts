@@ -19,6 +19,8 @@ import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
+import { pickupStatusCmd } from "./commands/pickup_status.ts";
+import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
 import { migrateAreaTagsCmd } from "./commands/migrate.ts";
@@ -53,6 +55,8 @@ Commands:
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
   list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
+  pickup status        classify active cards by pickup eligibility (--json)
+  groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
@@ -233,6 +237,22 @@ Example:
   fkanban list --column todo --field slug
   fkanban list --wide --column doing`),
 
+  pickup: withFooter(`fkanban pickup — report what can be picked up now
+
+Usage:
+  fkanban pickup status [--json]
+
+Classifies every active (non-terminal) card as pickup-ready, blocked-on-dependency,
+human-gated, malformed-routing, parked/non-work, collision, or stale-metadata.
+This is a read-only board hygiene report; it does not start pickup work.
+
+Options:
+  --json                machine-readable { scanned, ready, counts, cards }
+
+Example:
+  fkanban pickup status
+  fkanban pickup status --json`),
+
   rank: withFooter(`fkanban rank — reorder a column by card priority
 
 Usage:
@@ -341,6 +361,25 @@ Flags:
 Example:
   fkanban migrate area-tags --dry-run   # preview
   fkanban migrate area-tags             # apply`),
+
+  groom: withFooter(`fkanban groom — board hygiene reports and safe repairs
+
+Usage:
+  fkanban groom stale-blockers [--apply] [--json]
+
+Subcommands:
+  stale-blockers       detect stale generated pickup/blocker metadata, malformed
+                       Repo header lines, stale area-overlap holds, and
+                       human/parking candidates.
+
+Flags:
+  --apply              rewrite only generated boilerplate and structured fields
+                       proven stale. Omitted by default: dry-run only.
+  --json               machine-readable { scanned, candidates, changed, cards }
+
+Examples:
+  fkanban groom stale-blockers
+  fkanban groom stale-blockers --apply`),
 
   doctor: withFooter(`fkanban doctor — health-check the local setup
 
@@ -592,6 +631,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   board: new Set(["title", "columns", "body", "force"]),
   // migrate's one-time subcommands take --dry-run to preview without writing.
   migrate: new Set(["dry-run"]),
+  groom: new Set(["apply", "dry-run"]),
 };
 
 // Closest valid flag for a mistyped option on a known command. Mirrors the
@@ -657,6 +697,7 @@ async function main(argv: string[]): Promise<number> {
         branch: { type: "string" },
         force: { type: "boolean" },
         "dry-run": { type: "boolean" },
+        apply: { type: "boolean" },
         body: { type: "string" },
         columns: { type: "string" },
         position: { type: "string" },
@@ -1026,6 +1067,42 @@ async function dispatch(
         all: values.all as boolean | undefined,
       });
       console.log(out);
+      return 0;
+    }
+
+    case "pickup":
+    case "pickup-status": {
+      const usage = cmd === "pickup" ? "pickup status" : "pickup-status";
+      if (cmd === "pickup" && positionals[1] !== "status") {
+        console.error(`fkanban: Unknown pickup subcommand "${positionals[1] ?? ""}". Try: pickup status`);
+        return 2;
+      }
+      const extra = rejectExtraPositionals(positionals, cmd === "pickup" ? 2 : 1, usage);
+      if (extra !== undefined) return extra;
+      const ctx = loadCtx({ verbose });
+      console.log(await pickupStatusCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        json: values.json as boolean | undefined,
+      }));
+      return 0;
+    }
+
+    case "groom": {
+      const sub = positionals[1];
+      if (sub !== "stale-blockers") {
+        console.error(`fkanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers`);
+        return 2;
+      }
+      const extra = rejectExtraPositionals(positionals, 2, "groom stale-blockers");
+      if (extra !== undefined) return extra;
+      const ctx = loadCtx({ verbose });
+      console.log(await groomStaleBlockersCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        apply: values.apply as boolean | undefined,
+        json: values.json as boolean | undefined,
+      }));
       return 0;
     }
 

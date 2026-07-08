@@ -172,6 +172,8 @@ DONE  (0)
 | `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
 | `fkanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
+| `fkanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
+| `fkanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
 | `fkanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
 | `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
 | `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
@@ -225,6 +227,79 @@ to text **and** `--json`. As with `list`, the 20-match default is a *text
 display* affordance only: `--json` returns the complete match set by default and
 honors an explicit `--limit N`/`--all` to mean the same bounded (or unbounded)
 set the text view shows.
+
+## Pickup Status And Parking
+
+`default/todo` is the pickup lane: a `pr` card there should be runnable by an
+agent once its dependencies are done. Human-gated, deferred, tracker, umbrella,
+validation, and other non-pickup work should stay visible, but should not live
+as ordinary `default/todo` rows.
+
+Use `pickup status` before grooming or pickup:
+
+```bash
+fkanban pickup status
+fkanban pickup status --json
+```
+
+It classifies each active card as `pickup-ready`,
+`blocked-on-dependency`, `human-gated`, `malformed-routing`,
+`parked/non-work`, `collision`, or `stale-metadata`. The JSON shape carries the
+same counts and per-card reason/suggestion fields for automations.
+
+The conventional human/parking surface is a board named `human`:
+
+```bash
+fkanban board create human \
+  --title "Human / parked work" \
+  --columns todo,waiting,validated,done
+
+fkanban add legal-review \
+  --board human \
+  --column todo \
+  --block-status needs_human \
+  --block-reason "waiting on legal review"
+```
+
+Cards on `human` are visible through `fkanban list --board human` and
+`fkanban board list`, but `pickup status` never treats them as pickup-ready.
+Dependencies still work across boards: a `default/todo` card can depend on a
+human-board prerequisite and remains `blocked-on-dependency` until that
+prerequisite reaches the human board's terminal column (`done` by the convention
+above).
+
+Return work to the pickup lane only when the human gate is actually cleared:
+
+```bash
+fkanban add legal-review --board default --column todo \
+  --block-status none --block-reason ""
+fkanban rank
+```
+
+Migration guidance:
+
+- Move true Tom/human, legal, hardware, product-decision, or validation-evidence
+  gates to `human` and keep the explicit `block_status`/`block_reason`.
+- Move deliberately deferred or sequencing-only rows to a parking board, or keep
+  them out of `default/todo` with `--block-status deferred`.
+- Mark trackers, umbrellas, registries, and context rows with their non-`pr`
+  `--kind`; split out a concrete `pr` card when code is ready.
+- Do not auto-clear real human gates. Use
+  `fkanban groom stale-blockers` to find generated/stale blocker metadata, then
+  review the dry-run before applying safe generated cleanup.
+
+`groom stale-blockers` is dry-run by default:
+
+```bash
+fkanban groom stale-blockers
+fkanban groom stale-blockers --apply
+```
+
+It reports stale generated `BLOCKED:` prose, malformed `Repo:` header lines,
+block status/reason mismatches, stale pickup-area overlap holds, and
+human/parking candidates. With `--apply`, it rewrites only generated boilerplate
+and structured fields it can prove stale; ambiguous or real human gates stay as
+review-only candidates.
 
 ## Dependencies
 
@@ -308,6 +383,7 @@ nothing — and is the step the board groomer runs after promoting cards into
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_move`, `fkanban_rank`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
 `fkanban_tag_rm`, `fkanban_show`,
+`fkanban_pickup_status`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
 `fkanban_doctor`)
 so agents can drive — and self-diagnose — the board.
