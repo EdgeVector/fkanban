@@ -101,6 +101,22 @@ const server = Bun.serve({
           : [];
       return Response.json({ ok: true, results, has_more: false });
     }
+    if (url.pathname === "/api/app/search") {
+      return Response.json({
+        ok: true,
+        results: [
+          {
+            key: { hash: "my-card", range: null },
+            fields: { slug: "my-card", title: "My card" },
+            metadata: null,
+            author_pub_key: "PUBKEY",
+            schema_name: "cardhash",
+            schema_display_name: "fkanban/Card",
+            score: 0.92,
+          },
+        ],
+      });
+    }
     return Response.json({ error: "unexpected_path" }, { status: 500 });
   },
 });
@@ -136,6 +152,18 @@ describe("queryAll filter", () => {
     await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
     const last = seen.at(-1)!;
     expect("filter" in (last.body as Record<string, unknown>)).toBe(false);
+  });
+});
+
+describe("search data path", () => {
+  test("routes native-index compatibility calls through SDK /api/app/search", async () => {
+    const node = newNodeClient({ baseUrl, userHash: "test-user" });
+    const res = await node.rawCall("GET", "/api/native-index/search?q=spec&include_internal=true");
+    expect(res.status).toBe(200);
+    expect((res.json as { results: Array<{ key_value: { hash: string } }> }).results[0]!.key_value.hash).toBe("my-card");
+    const last = seen.at(-1)!;
+    expect(last.path).toBe("/api/app/search");
+    expect(last.body).toMatchObject({ query: "spec", k: 50 });
   });
 });
 

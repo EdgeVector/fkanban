@@ -26,7 +26,12 @@
     "skipLibCheck": true,
     "noEmit": true,
 
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@folddb/app-sdk": ["./vendor/folddb-app-sdk"]
+    }
   },
   "include": ["src/**/*", "test/**/*"],
   "exclude": ["node_modules", "dist"]

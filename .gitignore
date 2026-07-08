@@ -4,6 +4,10 @@ node_modules/
 .env
 .env.*
 
+# Vendored @folddb/app-sdk ships as prebuilt dist/ for now. Keep that nested
+# dist tracked even if a broader dist ignore is added later.
+!/vendor/folddb-app-sdk/dist/
+
 # Local fold_db node data dir — created when a CLI/test run points init at a
 # node rooted in the checkout (sled db + blobs + snapshots). Never committed.
 /data/
