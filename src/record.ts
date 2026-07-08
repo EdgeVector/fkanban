@@ -6,6 +6,7 @@ import { schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
+  CARD_OPTIONAL_SCHEMA_FIELDS,
   fieldsFor,
   isDefaultColumn,
   resolveColumns,
@@ -28,6 +29,9 @@ export type Card = {
   // `deps` array field; legacy `dep:<slug>` tags are read only as a migration
   // fallback and are stripped on the next write.
   deps: string[];
+  // Repo-relative path globs or bare subsystem names this card expects to
+  // touch. Used by `overlap` as an advisory file-surface claim.
+  surfaces: string[];
   created_at: string;
   updated_at: string;
   // First time the card entered its board's terminal column. Empty for legacy
@@ -118,6 +122,10 @@ export function normalizeTags(tags: string[]): string[] {
 // reuse normalizeTags for the trim/blank/dedupe pass and drop the self-edge.
 export function normalizeDeps(deps: string[], selfSlug: string): string[] {
   return normalizeTags(deps).filter((d) => d !== selfSlug);
+}
+
+export function normalizeSurfaces(surfaces: string[]): string[] {
+  return normalizeTags(surfaces);
 }
 
 // Shared dependency validation error. Dependency edges must point at live cards:
@@ -817,6 +825,21 @@ export function parseBodyHeader(body: string, name: string): string {
   return line.match(/^(\S+)/)?.[1]?.trim() ?? "";
 }
 
+export function parseBodyListHeader(body: string, name: string): string[] {
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
+  const m = body.match(re);
+  if (!m) return [];
+  const line = stripTrailingInlineComment(m[1]!.split("\\n")[0]!);
+  return normalizeSurfaces(line.split(","));
+}
+
+export function writeBodyListHeader(body: string, name: string, values: string[]): string {
+  const cleaned = normalizeSurfaces(values);
+  const without = body.replace(new RegExp(`^[ \\t]*${name}:[^\\n]*(?:\\n|$)`, "gim"), "");
+  if (cleaned.length === 0) return without.replace(/^\n+/, "");
+  return `${name}: ${cleaned.join(", ")}\n${without}`.replace(/\n{3,}/, "\n\n");
+}
+
 export type PickupRepoResolution =
   | { ok: true; repo: string; source: "structured" | "body" }
   | { ok: false; reason: string };
@@ -974,13 +997,17 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
     const ns = parseBodyHeader(card.body, "North Star");
     if (ns) out.north_star = ns;
   }
+  if (card.surfaces.length === 0) {
+    const surfaces = parseBodyListHeader(card.body, "Surfaces");
+    if (surfaces.length > 0) out.surfaces = surfaces;
+  }
   return out;
 }
 
 // Fields that default empty on fresh/test Card literals.
 export function emptyStructuredFields(): Pick<
   Card,
-  "done_at" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch"
+  "done_at" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch" | "surfaces"
 > {
   return {
     done_at: "",
@@ -992,6 +1019,7 @@ export function emptyStructuredFields(): Pick<
     north_star: "",
     pr_url: "",
     branch: "",
+    surfaces: [],
   };
 }
 
@@ -1106,9 +1134,8 @@ export async function writeCardPatch(
   card: Card,
   patch: Partial<Card>,
 ): Promise<void> {
-  const hash = schemaHashFor("card", opts.cfg);
   const updated: Card = { ...card, ...patch, updated_at: nowIso() };
-  await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
+  await updateCardRecord(opts, updated);
 }
 
 // Would adding the edge `fromSlug → toSlug` (fromSlug depends on toSlug) close a
@@ -1208,6 +1235,8 @@ function arrayStringField(f: Record<string, unknown>, key: string): string[] {
 
 export function rowToCard(row: QueryRow): Card {
   const f = (row.fields ?? {}) as Record<string, unknown>;
+  const body = stringField(f, "body");
+  const structuredSurfaces = normalizeSurfaces(arrayStringField(f, "surfaces"));
   const allTags = arrayStringField(f, "tags");
   const legacyTagDeps = allTags
     .filter(isDepTag)
@@ -1222,7 +1251,7 @@ export function rowToCard(row: QueryRow): Card {
   return {
     slug,
     title: stringField(f, "title"),
-    body: stringField(f, "body"),
+    body,
     board: stringField(f, "board"),
     column: stringField(f, "column"),
     position: stringField(f, "position"),
@@ -1230,6 +1259,7 @@ export function rowToCard(row: QueryRow): Card {
     // Legacy dep tags are migrated into `deps`; everything else stays.
     tags: allTags.filter((t) => !isDepTag(t) && !isDoneAtTag(t)),
     deps: normalizeDeps([...deps, ...legacyTagDeps], slug),
+    surfaces: structuredSurfaces.length > 0 ? structuredSurfaces : parseBodyListHeader(body, "Surfaces"),
     created_at: stringField(f, "created_at"),
     updated_at: stringField(f, "updated_at"),
     done_at: doneAt,
@@ -1267,8 +1297,27 @@ async function listCardsWithFields(
   filter?: QueryFilter,
 ): Promise<Card[]> {
   const hash = schemaHashFor("card", cfg);
-  const res = await node.queryAll({ schemaHash: hash, fields, filter });
+  const query = (queryFields: string[]) =>
+    filter === undefined
+      ? node.queryAll({ schemaHash: hash, fields: queryFields })
+      : node.queryAll({ schemaHash: hash, fields: queryFields, filter });
+  let res;
+  try {
+    res = await query(fields);
+  } catch (err) {
+    if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
+    res = await query(fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)));
+  }
   return res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+}
+
+function isOnlyOptionalFieldMiss(err: unknown, fields: string[]): boolean {
+  return (
+    err instanceof FkanbanError &&
+    err.code === "unknown_fields" &&
+    fields.some((field) => (CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)) &&
+    (CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).some((field) => err.message.includes(field))
+  );
 }
 
 function canFallbackColumnFilter(err: unknown): boolean {
@@ -1470,7 +1519,7 @@ export async function listDependencyStatusesForCards(
 // no longer drags every card's full spec over the wire (the first thing to time
 // out when the node is busy). `--json`/`--wide`/`search`/MCP still use the
 // full-body `listCards` because they genuinely surface structured/body fields.
-export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "deps", "assignee", "kind", "created_at"];
+export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "deps", "surfaces", "assignee", "kind", "created_at"];
 
 // Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields
 // (notably `body`) come back as "" on the Card. Enough for the text board render,
@@ -1483,20 +1532,13 @@ export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promis
 // Point read by slug — the node resolves a HashKey filter as an indexed key
 // lookup, so this never scans the board.
 export async function findCard(node: NodeClient, cfg: Config, slug: string): Promise<Card | null> {
-  const hash = schemaHashFor("card", cfg);
-  let res;
   try {
-    res = await node.queryAll({
-      schemaHash: hash,
-      fields: fieldsFor("card"),
-      filter: { HashKey: slug },
-    });
+    return await findCardWithFields(node, cfg, slug, fieldsFor("card"));
   } catch (err) {
     if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") throw err;
-    res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("card") });
+    const cards = await listCardsWithFields(node, cfg, fieldsFor("card"));
+    return cards.find((c) => c.slug === slug) ?? null;
   }
-  const card = res.results.map(rowToCard).find((c) => c.slug === slug);
-  return card !== undefined && !isHiddenCard(card) ? card : null;
 }
 
 // Resolve a card by slug, throwing the canonical `card_not_found` error when
@@ -1594,6 +1636,7 @@ export function cardToFields(c: Card): Record<string, unknown> {
       ...(c.done_at ? [doneAtTag(c.done_at)] : []),
     ],
     deps: normalizeDeps(c.deps, c.slug),
+    surfaces: normalizeSurfaces(c.surfaces ?? []),
     created_at: c.created_at,
     updated_at: c.updated_at,
     repo: c.repo ?? "",
@@ -1605,6 +1648,45 @@ export function cardToFields(c: Card): Record<string, unknown> {
     pr_url: c.pr_url ?? "",
     branch: c.branch ?? "",
   };
+}
+
+function cardToLegacySurfaceFields(c: Card): Record<string, unknown> {
+  const fields = cardToFields({
+    ...c,
+    body: writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []),
+  });
+  delete fields.surfaces;
+  return fields;
+}
+
+function isOptionalSurfacesWriteMiss(err: unknown): boolean {
+  return err instanceof FkanbanError && err.code === "unknown_fields" && err.message.includes("surfaces");
+}
+
+export async function createCardRecord(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+): Promise<void> {
+  const hash = schemaHashFor("card", opts.cfg);
+  try {
+    await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug });
+  } catch (err) {
+    if (!isOptionalSurfacesWriteMiss(err)) throw err;
+    await opts.node.createRecord({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug });
+  }
+}
+
+export async function updateCardRecord(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+): Promise<void> {
+  const hash = schemaHashFor("card", opts.cfg);
+  try {
+    await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug });
+  } catch (err) {
+    if (!isOptionalSurfacesWriteMiss(err)) throw err;
+    await opts.node.updateRecord({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug });
+  }
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of
@@ -1639,7 +1721,8 @@ export async function probeSchemaWritable(
 ): Promise<WriteProbeResult> {
   const fields: Record<string, unknown> = {};
   const schema = schemaFor(type).schema;
-  for (const f of fieldsFor(type)) {
+  const optionalFields = type === "card" ? new Set<string>(CARD_OPTIONAL_SCHEMA_FIELDS) : new Set<string>();
+  for (const f of fieldsFor(type).filter((field) => !optionalFields.has(field))) {
     // A non-empty probe value per field exercises the write of EVERY field (an
     // all-empty write could be silently accepted by a node that drops unknown
     // empties), which is exactly the #94 failure we must catch.

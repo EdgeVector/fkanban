@@ -5,14 +5,14 @@
 // board can be self-healed from existing cards.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
-import { schemaHashFor, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import {
   appendPosition,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
   BLOCK_STATUSES,
   CARD_KINDS,
-  cardToFields,
+  createCardRecord,
   doneAtForColumnTransition,
   emptyStructuredFields,
   ensureBoardRecord,
@@ -25,6 +25,7 @@ import {
   normalizeDeps,
   nowIso,
   stampCardForWrite,
+  updateCardRecord,
   validateSlug,
   withPriorityTag,
   wouldCreateCycle,
@@ -67,6 +68,7 @@ export type AddOptions = {
   northStar?: string;
   prUrl?: string;
   branch?: string;
+  surfaces?: string[];
 };
 
 // Reject an invalid --kind / --block-status BEFORE any write, mirroring the
@@ -99,6 +101,7 @@ function applyExplicitStructuredFields(card: Card, opts: AddOptions): Card {
   if (opts.northStar !== undefined) card.north_star = opts.northStar;
   if (opts.prUrl !== undefined) card.pr_url = opts.prUrl;
   if (opts.branch !== undefined) card.branch = opts.branch;
+  if (opts.surfaces !== undefined) card.surfaces = opts.surfaces;
   return card;
 }
 
@@ -181,7 +184,6 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
 
-  const hash = schemaHashFor("card", opts.cfg);
   // Resolve the card BEFORE the board context: on update we must honor the
   // card's existing board when no explicit `--board` is given. An explicit
   // `--board` still moves the card; only the implicit default would be wrong.
@@ -228,7 +230,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     });
     assertDefaultTodoPickupReady(updated, opts.force, rawBody);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
-    await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
+    await updateCardRecord(opts, updated);
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
 
@@ -256,6 +258,6 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   });
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
-  await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
+  await createCardRecord(opts, card);
   return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };
 }

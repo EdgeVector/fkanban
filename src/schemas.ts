@@ -92,6 +92,7 @@ export const CARD_FIELDS = [
   "assignee",
   "tags",
   "deps",
+  "surfaces",
   "created_at",
   "updated_at",
   // Structured pickup-decision + reconcile fields (see fbrain design
@@ -109,6 +110,11 @@ export const CARD_FIELDS = [
   "pr_url",
   "branch",
 ] as const;
+
+// New fields that can be losslessly mirrored through legacy body headers while
+// the published schema catches up. The resolver/doctor can treat a schema
+// missing only these fields as operationally writable.
+export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces"] as const;
 
 export const BOARD_FIELDS = [
   "slug",
@@ -148,7 +154,7 @@ export const cardSchema: AddSchemaRequest = {
     schema_type: "Hash",
     key: { hash_field: "slug" },
     fields: [...CARD_FIELDS],
-    field_types: defaultStringFieldTypes(CARD_FIELDS, ["tags", "deps"]),
+    field_types: defaultStringFieldTypes(CARD_FIELDS, ["tags", "deps", "surfaces"]),
     field_descriptions: {
       slug: "stable url-style id (board-unique card key)",
       title: "one-line card name",
@@ -159,6 +165,7 @@ export const cardSchema: AddSchemaRequest = {
       assignee: "who owns the card, empty string if unassigned",
       tags: "array of freeform labels",
       deps: "array of card slugs this card depends on; dependencies are satisfied when each referenced card reaches its board's terminal column",
+      surfaces: "array of repo-relative path globs or subsystem names this card expects to touch",
       created_at: "RFC 3339 timestamp",
       updated_at: "RFC 3339 timestamp",
       repo: "owner/name of the repo a build agent clones (empty = not a code card)",
@@ -280,7 +287,9 @@ export function resolveLoadedSchema(
   loaded: LoadedSchemaCandidate[],
 ): SchemaResolution {
   const def = RECORDS[type].schema.schema;
-  const localFields = def.fields;
+  const optionalFields =
+    type === "card" ? new Set<string>(CARD_OPTIONAL_SCHEMA_FIELDS) : new Set<string>();
+  const localFields = def.fields.filter((f) => !optionalFields.has(f));
   const candidates = loaded.filter(
     (s) =>
       s.owner_app_id === def.owner_app_id &&

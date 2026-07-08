@@ -8,7 +8,7 @@ of the `fold_db_node` (`/api/mutation` + `/api/query`) and the `schema_service`
 Two schemas, registered under the `fkanban/*` app namespace (so they never
 collide with `fbrain/*` or any other app on a shared daemon):
 
-- **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, deps, created_at, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
+- **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, deps, surfaces, created_at, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
 - **`fkanban/Board`** — `slug, title, body, columns, created_at, updated_at`
 
 Default columns: `backlog → todo → doing → review → done`.
@@ -165,13 +165,14 @@ DONE  (0)
 | Command | What it does |
 |---|---|
 | `fkanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
-| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
+| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
 | `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on existing live card `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
 | `fkanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
+| `fkanban overlap <slug>` | compare a candidate card's surfaces against doing/review cards in the same repo (exit 2 on declared conflict) |
 | `fkanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
 | `fkanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
 | `fkanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for fkanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
@@ -368,6 +369,28 @@ edge is repaired. `rm` refuses to delete/tombstone a card while any live card
 still depends on it, so normal operations cannot create new missing dependency
 slugs.
 
+## Surfaces
+
+Cards can declare the repo-relative paths or subsystem names they expect to
+touch. Declare surfaces when filing the card, and update them if the scope
+grows:
+
+```bash
+fkanban add ship-cli --surfaces "src/cli.ts,src/mcp/**"
+```
+
+The same data can live in the body for incremental adoption:
+
+```text
+Surfaces: src/cli.ts, src/mcp/**
+```
+
+Run `fkanban overlap <slug>` before picking up or widening a card. It compares
+the candidate against `doing`/`review` cards with the same repo and prints the
+conflicting card slugs plus matched patterns. Declared conflicts exit `2`; cards
+with missing surfaces only warn and exit `0` so older cards do not block
+adoption.
+
 ## Tags
 
 Tags are freeform labels for filtering (`fkanban list --tag <tag>`). There are
@@ -418,7 +441,7 @@ nothing — and is the step the board groomer runs after promoting cards into
 ## MCP server
 
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
-`fkanban_move`, `fkanban_rank`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
+`fkanban_move`, `fkanban_rank`, `fkanban_overlap`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
 `fkanban_tag_rm`, `fkanban_show`,
 `fkanban_pickup_status`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,

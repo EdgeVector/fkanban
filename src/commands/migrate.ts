@@ -18,14 +18,14 @@
 // terminal (done) column and tombstoned cards — those have no pickup impact.
 
 import { type NodeClient } from "../client.ts";
-import { schemaHashFor, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import {
   boardTerminalMap,
-  cardToFields,
   isPickupAreaTag,
   listBoards,
   listCards,
   nowIso,
+  updateCardRecord,
   withPickupAreaTags,
   type Card,
 } from "../record.ts";
@@ -64,7 +64,6 @@ export async function migrateAreaTagsCmd(
   const dryRun = opts.dryRun ?? false;
   const cards = await listCards(opts.node, opts.cfg);
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
-  const hash = schemaHashFor("card", opts.cfg);
 
   const result: MigrateAreaTagsResult = {
     scanned: 0,
@@ -104,11 +103,7 @@ export async function migrateAreaTagsCmd(
 
     if (!dryRun) {
       const updated: Card = { ...card, tags: after, updated_at: nowIso() };
-      await opts.node.updateRecord({
-        schemaHash: hash,
-        fields: cardToFields(updated),
-        keyHash: card.slug,
-      });
+      await updateCardRecord(opts, updated);
     }
   }
 

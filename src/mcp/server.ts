@@ -13,6 +13,7 @@ import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
 import { pickupStatusResult } from "../commands/pickup_status.ts";
+import { overlapResult, formatOverlap } from "../commands/overlap.ts";
 import { rankCmd } from "../commands/rank.ts";
 import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
@@ -38,6 +39,7 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_list",
   "fkanban_search",
   "fkanban_show",
+  "fkanban_overlap",
   "fkanban_pickup_status",
   "fkanban_board_list",
   "fkanban_doctor",
@@ -179,6 +181,7 @@ const cardShape = {
   assignee: z.string(),
   tags: z.array(z.string()),
   deps: z.array(z.string()),
+  surfaces: z.array(z.string()),
   created_at: z.string(),
   updated_at: z.string(),
   done_at: z.string(),
@@ -471,6 +474,10 @@ export function createFkanbanMcpServer(
             "Slugs this card depends on. On create, sets the canonical deps field. On update, changing deps requires `replace_deps`; every slug must already be an existing live card. Omit this field for ordinary cleanup so existing deps are preserved. Prefer `fkanban_dep_add`/`fkanban_dep_rm` for incremental edits.",
           ),
         replace_deps: z.boolean().optional().describe("Explicitly replace/clear an existing card's dep list with `deps`. Prefer `fkanban_dep_add`/`fkanban_dep_rm` for incremental edge edits."),
+        surfaces: z
+          .array(z.string())
+          .optional()
+          .describe("Repo-relative path globs or bare subsystem names this card expects to touch. Omit on update to preserve existing surfaces."),
         priority: z
           .enum(PRIORITY_TIERS)
           .optional()
@@ -507,6 +514,7 @@ export function createFkanbanMcpServer(
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
         if (args.replace_deps !== undefined) o.replaceDeps = args.replace_deps;
+        if (args.surfaces !== undefined) o.surfaces = args.surfaces;
         if (args.priority !== undefined) o.priority = args.priority;
         if (args.force !== undefined) o.force = args.force;
         if (args.repo !== undefined) o.repo = args.repo;
@@ -739,6 +747,42 @@ export function createFkanbanMcpServer(
         const { cfg, node } = requireConfig();
         const { text, card } = await showResult({ cfg, node, slug });
         return toolResult(text, card);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_overlap",
+    {
+      title: "Check surface overlap",
+      description:
+        "Compare a candidate card's declared surfaces against every doing/review card with the same repo. Returns conflicts by slug + matched patterns. Missing surfaces are adoption warnings, not conflicts.",
+      annotations: { title: "Check surface overlap", readOnlyHint: true, openWorldHint: false },
+      inputSchema: { slug: z.string().optional().describe("Candidate card slug.") },
+      outputSchema: {
+        slug: z.string(),
+        repo: z.string(),
+        surfaces: z.array(z.string()),
+        conflicts: z.array(
+          z.object({
+            slug: z.string(),
+            title: z.string(),
+            column: z.string(),
+            repo: z.string(),
+            matches: z.array(z.object({ candidate: z.string(), other: z.string() })),
+          }),
+        ),
+        warnings: z.array(z.string()),
+      },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
+        const { cfg, node } = requireConfig();
+        const result = await overlapResult({ cfg, node, slug });
+        return toolResult(formatOverlap(result), result);
       } catch (err) {
         return errorResult(err);
       }

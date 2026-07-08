@@ -18,6 +18,7 @@ import {
   normalizeBlockStatus,
   normalizeKind,
   parseBodyHeader,
+  parseBodyListHeader,
   PICKUP_AREA_BLOCK_PREFIX,
   resolvePickupRepo,
   rowToCard,
@@ -83,6 +84,7 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
       north_star: "north-star-x",
       pr_url: "https://github.com/EdgeVector/fold/pull/1",
       branch: "fkanban/c",
+      surfaces: ["src/cli.ts", "src/mcp/**"],
     });
     const back = rowToCard({ fields: cardToFields(c), key: { hash: c.slug, range: null } });
     expect(back.repo).toBe("EdgeVector/fold");
@@ -92,6 +94,7 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
     expect(back.north_star).toBe("north-star-x");
     expect(back.pr_url).toBe("https://github.com/EdgeVector/fold/pull/1");
     expect(back.branch).toBe("fkanban/c");
+    expect(back.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
   });
 
   test("a legacy card (fields absent on the wire) reads them as empty, not undefined", () => {
@@ -102,6 +105,7 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
     expect(legacy.repo).toBe("");
     expect(legacy.kind).toBe("");
     expect(legacy.block_status).toBe("");
+    expect(legacy.surfaces).toEqual([]);
     // normalizers make the empties safe to act on
     expect(normalizeKind(legacy.kind)).toBe("pr");
     expect(normalizeBlockStatus(legacy.block_status)).toBe("none");
@@ -155,6 +159,16 @@ describe("parseBodyHeader", () => {
 
   test("strips a trailing inline comment before returning the value", () => {
     expect(parseBodyHeader("Repo: EdgeVector/fold  # defaulted — fix if wrong\nBase: main", "Repo")).toBe("EdgeVector/fold");
+  });
+});
+
+describe("parseBodyListHeader", () => {
+  test("reads comma-separated Surfaces values without truncating at spaces", () => {
+    expect(parseBodyListHeader("Surfaces: src/cli.ts, src/mcp/**, fold_db_node/src/server/uds_* # note", "Surfaces")).toEqual([
+      "src/cli.ts",
+      "src/mcp/**",
+      "fold_db_node/src/server/uds_*",
+    ]);
   });
 });
 
@@ -622,6 +636,7 @@ describe("structured fields write+read-back against a node (real wire path)", ()
       north_star: "ns-x",
       pr_url: "https://github.com/EdgeVector/fold/pull/42",
       branch: "fkanban/wire-card",
+      surfaces: ["src/cli.ts", "src/mcp/**"],
     });
     await client.createRecord({ schemaHash: FULL, fields: cardToFields(c), keyHash: c.slug });
     const res = await client.queryAll({
@@ -638,6 +653,7 @@ describe("structured fields write+read-back against a node (real wire path)", ()
     expect(back.north_star).toBe("ns-x");
     expect(back.pr_url).toBe("https://github.com/EdgeVector/fold/pull/42");
     expect(back.branch).toBe("fkanban/wire-card");
+    expect(back.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
   });
 });
 
@@ -672,11 +688,23 @@ describe("deriveStructuredFields (backfill)", () => {
     expect(deriveStructuredFields(c).north_star).toBe("at-rest-encryption-g1");
   });
 
+  test("pulls surfaces from the body line", () => {
+    const c = card({ surfaces: [], body: "Surfaces: src/cli.ts, src/mcp/**\n\nbody" });
+    expect(deriveStructuredFields(c).surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
+  });
+
   test("never overwrites an already-set field", () => {
-    const c = card({ repo: "EdgeVector/already", base: "set", kind: "tracker", body: "Repo: EdgeVector/fold\nBase: main" });
+    const c = card({
+      repo: "EdgeVector/already",
+      base: "set",
+      kind: "tracker",
+      surfaces: ["src/existing.ts"],
+      body: "Repo: EdgeVector/fold\nBase: main\nSurfaces: src/new.ts",
+    });
     const d = deriveStructuredFields(c);
     expect(d.repo).toBeUndefined();
     expect(d.base).toBeUndefined();
     expect(d.kind).toBeUndefined();
+    expect(d.surfaces).toBeUndefined();
   });
 });

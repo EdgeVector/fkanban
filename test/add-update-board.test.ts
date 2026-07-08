@@ -144,6 +144,25 @@ describe("add update preserves the card's board", () => {
     expect(after?.tags).toContain("p2");
   });
 
+  test("add --surfaces writes claims and preserves them when omitted on update", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "surface-card",
+      title: "Surface card",
+      column: "todo",
+      body: validPickupBody,
+      surfaces: ["src/cli.ts", "src/mcp/**"],
+    });
+    const created = await findCard(node, cfg, "surface-card");
+    expect(created?.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
+
+    await addCmd({ cfg, node, slug: "surface-card", title: "Renamed" });
+    const updated = await findCard(node, cfg, "surface-card");
+    expect(updated?.title).toBe("Renamed");
+    expect(updated?.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
+  });
+
   test("(b) update --column valid on the card's OWN board succeeds", async () => {
     await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
 

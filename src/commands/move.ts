@@ -2,18 +2,18 @@
 // board. Optionally pin a position; otherwise it appends to the target column.
 
 import { type NodeClient } from "../client.ts";
-import { schemaHashFor, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import {
   appendPosition,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
-  cardToFields,
   doneAtForColumnTransition,
   ensureBoardRecord,
   ensureColumn,
   nowIso,
   requireCard,
   stampCardForWrite,
+  updateCardRecord,
   type Card,
 } from "../record.ts";
 
@@ -52,7 +52,6 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   });
   assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
-  const hash = schemaHashFor("card", opts.cfg);
-  await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });
+  await updateCardRecord(opts, updated);
   return { slug: card.slug, from, to: opts.column };
 }
