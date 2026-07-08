@@ -27,7 +27,7 @@ import {
 import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { boardToFields, nowIso } from "../src/record.ts";
+import { boardToFields, cardToFields, findCard, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { listCmd } from "../src/commands/list.ts";
 import { searchCmd, searchResult } from "../src/commands/search.ts";
@@ -323,19 +323,25 @@ describe("MCP write tools return structuredContent", () => {
     expect((shown.structuredContent as { deps: string[] }).deps).toEqual([]);
   });
 
-  test("fkanban_dep_add rejects a missing dep unless allow_forward_dep is explicit", async () => {
+  test("dependency write tools reject missing dependency slugs", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo", body: validPickupBody() } });
-    const rejected = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "ghost" } });
-    expect(rejected.isError).toBe(true);
-    expect((rejected.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
-      'Dependency "ghost" does not exist',
-    );
 
-    const allowed = await client.callTool({
-      name: "fkanban_dep_add",
-      arguments: { slug: "ui", dep: "ghost", allow_forward_dep: true },
+    const addRes = await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "new-ui", column: "todo", body: validPickupBody(), deps: ["missing-api"] },
     });
-    expect(allowed.structuredContent).toEqual({ slug: "ui", dep: "ghost", action: "added", deps: ["ghost"] });
+    expect(addRes.isError).toBe(true);
+    expect((addRes.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
+      'Dependency card "missing-api" does not exist.',
+    );
+    expect(await findCard(node, cfg, "new-ui")).toBeNull();
+
+    const depRes = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "missing-api" } });
+    expect(depRes.isError).toBe(true);
+    expect((depRes.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
+      'Dependency card "missing-api" does not exist.',
+    );
+    expect((await findCard(node, cfg, "ui"))?.deps).toEqual([]);
   });
 
   test("fkanban_tag_add / fkanban_tag_rm edit one tag without clobbering the rest", async () => {
@@ -419,7 +425,16 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
       // `ui` is deliberately a BLOCKED card sitting in `doing` (api is still in
       // todo) — the soft-block now refuses that placement, so `force` is needed
       // to construct the fixture state these read-tool tests assert against.
-      arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api", "ghost"], force: true, allow_forward_dep: true },
+      arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api"], force: true },
+    });
+    // New write APIs reject missing deps. Seed one directly so read tools still
+    // cover old rows written before that hardening.
+    const ui = await findCard(node, cfg, "ui");
+    expect(ui).not.toBeNull();
+    await node.updateRecord({
+      schemaHash: cfg.schemaHashes.card!,
+      keyHash: "ui",
+      fields: cardToFields({ ...ui!, deps: ["api", "ghost"] }),
     });
   });
 
@@ -442,8 +457,8 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     }));
     expect(res.structuredContent).toEqual({ cards: cliCardsPreviewed, total: cliCards.length, truncated: false });
     // Each list card now carries the same resolved dep status `show` returns:
-    // `ui` is blocked by the unfinished `api` and reports the dangling `ghost`
-    // as a missing (non-blocking) dep; `api` itself is unblocked.
+    // `ui` is blocked by the unfinished `api` and reports the dangling `ghost`;
+    // missing deps are blocking too, but `blockedBy` already includes `api`.
     const cards = (res.structuredContent as { cards: Array<Record<string, unknown>> }).cards;
     for (const c of cards) {
       expect(c).toHaveProperty("blocked");
@@ -451,7 +466,7 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
       expect(c).toHaveProperty("missingDeps");
     }
     const ui = cards.find((c) => c.slug === "ui");
-    expect(ui).toMatchObject({ blocked: true, blockedBy: ["api"], missingDeps: ["ghost"] });
+    expect(ui).toMatchObject({ blocked: true, blockedBy: ["api", "ghost"], missingDeps: ["ghost"] });
     const api = cards.find((c) => c.slug === "api");
     expect(api).toMatchObject({ blocked: false, blockedBy: [], missingDeps: [] });
     // Human text block is preserved for non-structured clients.
@@ -497,8 +512,8 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     const res = await client.callTool({ name: "fkanban_show", arguments: { slug: "ui" } });
     const cliCard = JSON.parse(await showCmd({ cfg, node, slug: "ui", json: true }));
     expect(res.structuredContent).toEqual(cliCard);
-    // A dangling dep is reported but does NOT block; an unfinished real dep does.
-    expect(res.structuredContent).toMatchObject({ blocked: true, blockedBy: ["api"], missingDeps: ["ghost"] });
+    // A dangling dep is reported and blocks alongside the unfinished real dep.
+    expect(res.structuredContent).toMatchObject({ blocked: true, blockedBy: ["api", "ghost"], missingDeps: ["ghost"] });
   });
 
   test("fkanban_board_list returns { boards } deep-equal to `board list --json`", async () => {

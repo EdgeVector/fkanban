@@ -5,8 +5,8 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
-  forwardDepWarning,
   listCardStatuses,
+  missingDepError,
   normalizeDeps,
   requireCard,
   validateSlug,
@@ -20,7 +20,6 @@ export async function depAddCmd(opts: {
   node: NodeClient;
   slug: string;
   dep: string;
-  allowForwardDep?: boolean;
 }): Promise<DepResult> {
   validateSlug(opts.dep);
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
@@ -29,14 +28,7 @@ export async function depAddCmd(opts: {
   }
   const all = await listCardStatuses(opts.node, opts.cfg);
   if (!all.some((c) => c.slug === opts.dep)) {
-    if (!opts.allowForwardDep) {
-      throw new FkanbanError({
-        code: "forward_dep_requires_explicit",
-        message: `Dependency "${opts.dep}" does not exist.`,
-        hint: "Create the dependency card first, or pass --allow-forward-dep to mark the forward edge intentional.",
-      });
-    }
-    console.error(forwardDepWarning(opts.dep));
+    throw missingDepError(opts.dep);
   }
   // Refuse to close a dependency cycle: if `opts.dep` already (transitively)
   // depends on `opts.slug`, adding `opts.slug → opts.dep` would deadlock every

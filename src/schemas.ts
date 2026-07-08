@@ -91,6 +91,7 @@ export const CARD_FIELDS = [
   "position",
   "assignee",
   "tags",
+  "deps",
   "created_at",
   "updated_at",
   // Structured pickup-decision + reconcile fields (see fbrain design
@@ -147,7 +148,7 @@ export const cardSchema: AddSchemaRequest = {
     schema_type: "Hash",
     key: { hash_field: "slug" },
     fields: [...CARD_FIELDS],
-    field_types: defaultStringFieldTypes(CARD_FIELDS, ["tags"]),
+    field_types: defaultStringFieldTypes(CARD_FIELDS, ["tags", "deps"]),
     field_descriptions: {
       slug: "stable url-style id (board-unique card key)",
       title: "one-line card name",
@@ -157,6 +158,7 @@ export const cardSchema: AddSchemaRequest = {
       position: "integer-as-string ordering within the column (lower = higher)",
       assignee: "who owns the card, empty string if unassigned",
       tags: "array of freeform labels",
+      deps: "array of card slugs this card depends on; dependencies are satisfied when each referenced card reaches its board's terminal column",
       created_at: "RFC 3339 timestamp",
       updated_at: "RFC 3339 timestamp",
       repo: "owner/name of the repo a build agent clones (empty = not a code card)",

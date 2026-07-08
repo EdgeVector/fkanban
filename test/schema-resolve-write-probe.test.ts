@@ -3,10 +3,10 @@
 // node would reject every write against.
 //
 // Root cause (verified 2026-06-25 against :9001 + the prod schema_service):
-// TWO `fkanban/Card` schemas were loaded — the current 18-field one AND a stale
+// TWO `fkanban/Card` schemas were loaded — the current full-field one AND a stale
 // 10-field duplicate. `init`'s old resolver picked the FIRST descriptive_name
 // match, which could be the stale 10-field hash; it then pinned config to it and
-// EVERY `fkanban add` 400'd (fkanban always emits all 18 fields). The fix:
+// EVERY `fkanban add` 400'd (fkanban always emits the full field set). The fix:
 //   1. resolveLoadedSchema prefers the candidate whose fields SUPERSET the local
 //      definition (the writable version), and reports `narrower` when none does.
 //   2. a write probe (create+delete of an all-fields record) is the runtime
@@ -20,8 +20,8 @@ import { listCards, probeSchemaWritable, WRITE_PROBE_SLUG } from "../src/record.
 import type { Config } from "../src/config.ts";
 import { fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
 
-// The current 18-field Card hash (writable) and a stale 10-field duplicate.
-const FULL_CARD_HASH = "full18fieldcardhash";
+// The current full Card hash (writable) and a stale 10-field duplicate.
+const FULL_CARD_HASH = "fullcardhash";
 const STALE_CARD_HASH = "stale10fieldcardhash";
 const OLD_FIELDS = [
   "slug",
@@ -208,7 +208,7 @@ describe("write+read-back of every structured field against a (full-schema) node
   test("each new #94 field persists and reads back its non-empty value", async () => {
     const node = newNodeClient({ baseUrl, userHash: "u" });
     const fields: Record<string, unknown> = {};
-    for (const f of fieldsFor("card")) fields[f] = f === "tags" ? ["t1"] : `val-${f}`;
+    for (const f of fieldsFor("card")) fields[f] = f === "tags" || f === "deps" ? [`${f}-1`] : `val-${f}`;
     fields.slug = "rt-card";
 
     await node.createRecord({ schemaHash: FULL_CARD_HASH, fields, keyHash: "rt-card" });
@@ -223,13 +223,15 @@ describe("write+read-back of every structured field against a (full-schema) node
       "repo",
       "base",
       "kind",
+      "deps",
       "block_status",
       "block_reason",
       "north_star",
       "pr_url",
       "branch",
     ]) {
-      expect(back[f]).toBe(`val-${f}`);
+      if (f === "deps") expect(back[f]).toEqual(["deps-1"]);
+      else expect(back[f]).toBe(`val-${f}`);
     }
     await node.deleteRecord({ schemaHash: FULL_CARD_HASH, keyHash: "rt-card" });
   });
