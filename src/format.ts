@@ -18,6 +18,7 @@ export interface MoveResult {
   slug: string;
   from: string;
   to: string;
+  promotedDependents?: string[];
 }
 
 export interface DepResult {
@@ -88,7 +89,9 @@ export function formatAdd(res: AddResult, json?: boolean): string {
 }
 
 export function formatMove(res: MoveResult, json?: boolean): string {
-  return emit(res, `moved ${res.slug}: ${res.from} → ${res.to}`, json);
+  const promoted = res.promotedDependents ?? [];
+  const suffix = promoted.length > 0 ? `; promoted ${promoted.join(", ")} to todo` : "";
+  return emit(res, `moved ${res.slug}: ${res.from} → ${res.to}${suffix}`, json);
 }
 
 export function formatDep(res: DepResult, json?: boolean): string {
