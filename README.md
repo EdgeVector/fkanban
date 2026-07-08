@@ -165,8 +165,8 @@ DONE  (0)
 | Command | What it does |
 |---|---|
 | `fkanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
-| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta --body`, or pipe body on stdin) |
-| `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` past a dependency block) |
+| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
+| `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
 | `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
@@ -231,10 +231,15 @@ set the text view shows.
 
 ## Pickup Status And Parking
 
-`default/todo` is the pickup lane: a `pr` card there should be runnable by an
-agent once its dependencies are done. Human-gated, deferred, tracker, umbrella,
-validation, and other non-pickup work should stay visible, but should not live
-as ordinary `default/todo` rows.
+`default/todo` is the pickup lane: a `pr` card there must carry clean routing
+data (`Repo: owner/name` and `Base: branch`, or the matching structured
+`--repo`/`--base` fields) so an agent can clone the repo and start once its
+dependencies are done. `fkanban add` and `fkanban move` reject malformed
+default-todo cards by default, including inline-commented `Repo:` headers,
+missing base branches, intentional `block_status` holds, and non-pickup
+`--kind` values. Use `--force` only as an explicit operator override; otherwise
+put human-gated, deferred, tracker, program, capstone, validation, and other
+non-pickup work on a parking surface until it is split into concrete PR work.
 
 Use `pickup status` before grooming or pickup:
 
@@ -283,8 +288,9 @@ Migration guidance:
   gates to `human` and keep the explicit `block_status`/`block_reason`.
 - Move deliberately deferred or sequencing-only rows to a parking board, or keep
   them out of `default/todo` with `--block-status deferred`.
-- Mark trackers, umbrellas, registries, and context rows with their non-`pr`
-  `--kind`; split out a concrete `pr` card when code is ready.
+- Mark trackers, programs, capstones, validations, registries, and context rows
+  with their non-`pr` `--kind`; split out a concrete `pr` card when code is
+  ready.
 - Do not auto-clear real human gates. Use
   `fkanban groom stale-blockers` to find generated/stale blocker metadata, then
   review the dry-run before applying safe generated cleanup.
@@ -318,15 +324,21 @@ surface Codex-style process explosions without killing by process name.
 
 ## Dependencies
 
-A card can depend on other cards. It stays **🔒 blocked** until every
-dependency reaches the `done` column, and `move` refuses to advance a blocked
-card into a working column (`doing` / `review` / `done`) unless you pass
-`--force`. Backlog/todo moves are always allowed.
+A card can depend on other cards, including cards on another board such as the
+`human` parking board. It stays **🔒 blocked** until every dependency reaches
+its own board's terminal column, and `move` refuses to advance a blocked card
+into a working column (`doing` / `review` / `done`, or a custom board's terminal
+column) unless you pass `--force`. Backlog/todo moves are always allowed.
 
-Cards marked `--kind tracker`, `--kind umbrella`, `--kind meta`, or
-`--kind registry` are context/grouping cards, not prerequisites: if another card
-lists one as a dep, it is treated as satisfied by default and does not block
-pickup.
+Cards marked `--kind tracker`, `--kind umbrella`, `--kind meta`,
+`--kind registry`, `--kind program`, `--kind capstone`, or `--kind validation`
+are context/grouping cards, not prerequisites: if another card lists one as a
+dep, it is treated as satisfied by default and does not block pickup. A parked
+human prerequisite that should block downstream implementation should remain a
+concrete `pr` dependency until it reaches the parking board's terminal column.
+
+Deleting/tombstoning a card with live dependents is refused (the policy landed
+in PR #149) so dependency edges cannot silently turn into missing slugs.
 
 ```bash
 fkanban add api --title "Build API"

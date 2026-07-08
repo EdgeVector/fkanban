@@ -246,7 +246,7 @@ describe("dependencies", () => {
   });
 
   test("meta/grouping dep cards do not block pickup", () => {
-    for (const kind of ["tracker", "umbrella", "meta", "registry"]) {
+    for (const kind of ["tracker", "umbrella", "meta", "registry", "program", "capstone", "validation"]) {
       const grouping = card({ slug: `${kind}-card`, kind, column: "todo" });
       const x = card({ slug: `depends-on-${kind}`, deps: [grouping.slug] });
       const s = depStatus(x, [grouping, x]);

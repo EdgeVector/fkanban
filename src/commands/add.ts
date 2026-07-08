@@ -8,6 +8,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  assertDefaultTodoPickupReady,
   assertDepUnblocked,
   BLOCK_STATUSES,
   CARD_KINDS,
@@ -56,7 +57,7 @@ export type AddOptions = {
   // update keeps its existing value. See `fkanban-card-structured-fields`.
   repo?: string;
   base?: string;
-  kind?: string; // pr|registry|tracker|umbrella|meta
+  kind?: string; // pr|registry|tracker|umbrella|meta|program|capstone|validation
   blockStatus?: string; // none|needs_human|design_first|deferred
   blockReason?: string;
   northStar?: string;
@@ -164,6 +165,10 @@ function applyPriority(tags: string[], priority?: PriorityTier): string[] {
 
 export type AddResult = { slug: string; action: "created" | "updated"; board: string; column: string };
 
+function suppressDefaultTodoWarning(card: Pick<Card, "board" | "column">, force?: boolean): boolean {
+  return !force && card.board === "default" && card.column === "todo";
+}
+
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
@@ -194,13 +199,16 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       updated_at: now,
       done_at: doneAtForColumnTransition(existing, targetColumn, columns, now),
     };
+    const rawBody = updated.body;
     // Apply any explicit --field opts before the shared write stamp backfills
     // still-empty structured fields from the body/tags.
     applyExplicitStructuredFields(updated, opts);
     await stampCardForWrite(opts.node, opts.cfg, updated, {
       forcedRepo: opts.repo,
       explicitBlockStatus: opts.blockStatus !== undefined,
+      warn: suppressDefaultTodoWarning(updated, opts.force) ? () => {} : undefined,
     });
+    assertDefaultTodoPickupReady(updated, opts.force, rawBody);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
     await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: opts.slug });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
@@ -221,11 +229,14 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     ...emptyStructuredFields(),
   };
   card.done_at = doneAtForColumnTransition(null, targetColumn, columns, now);
+  const rawBody = card.body;
   applyExplicitStructuredFields(card, opts);
   await stampCardForWrite(opts.node, opts.cfg, card, {
     forcedRepo: opts.repo,
     explicitBlockStatus: opts.blockStatus !== undefined,
+    warn: suppressDefaultTodoWarning(card, opts.force) ? () => {} : undefined,
   });
+  assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
   await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: opts.slug });
   return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };

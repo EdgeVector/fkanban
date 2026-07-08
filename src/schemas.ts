@@ -161,7 +161,7 @@ export const cardSchema: AddSchemaRequest = {
       updated_at: "RFC 3339 timestamp",
       repo: "owner/name of the repo a build agent clones (empty = not a code card)",
       base: "base branch a PR targets (default: main)",
-      kind: "pr|registry|tracker|umbrella|meta — pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up",
+      kind: "pr|registry|tracker|umbrella|meta|program|capstone|validation — pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up",
       block_status: "none|needs_human|design_first|deferred — INTENTIONAL holds only (dependency-blocked stays derived from deps)",
       block_reason: "free-text why, when block_status != none",
       north_star: "fbrain North Star slug this card advances",

@@ -43,6 +43,8 @@ const cfg: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
 
+const validPickupBody = (body = "MCP fixture work.") => `Repo: EdgeVector/fkanban\nBase: main\n\n${body}`;
+
 // In-memory fake node: a (schemaHash → keyHash → fields) store. Mirrors just
 // enough of fold_db_node's contract for the write commands — point reads via a
 // HashKey filter, exact field filters, full scans without one, and
@@ -266,7 +268,7 @@ describe("MCP write tools return structuredContent", () => {
   });
 
   test("fkanban_add echoes { slug, action, board, column }", async () => {
-    const res = await client.callTool({ name: "fkanban_add", arguments: { slug: "card-a", column: "todo" } });
+    const res = await client.callTool({ name: "fkanban_add", arguments: { slug: "card-a", column: "todo", body: validPickupBody() } });
     expect(res.structuredContent).toEqual({ slug: "card-a", action: "created", board: "default", column: "todo" });
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toBe("created card card-a → default/todo");
 
@@ -276,15 +278,15 @@ describe("MCP write tools return structuredContent", () => {
   });
 
   test("fkanban_move echoes { slug, from, to }", async () => {
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "card-b", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "card-b", column: "todo", body: validPickupBody() } });
     const res = await client.callTool({ name: "fkanban_move", arguments: { slug: "card-b", column: "doing" } });
     expect(res.structuredContent).toEqual({ slug: "card-b", from: "todo", to: "doing" });
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toBe("moved card-b: todo → doing");
   });
 
   test("fkanban_dep_add / fkanban_dep_rm echo { slug, dep, action, deps }", async () => {
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo" } });
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo", body: validPickupBody() } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
 
     const added = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "api" } });
     expect(added.structuredContent).toEqual({ slug: "ui", dep: "api", action: "added", deps: ["api"] });
@@ -300,7 +302,7 @@ describe("MCP write tools return structuredContent", () => {
   });
 
   test("fkanban_tag_add / fkanban_tag_rm edit one tag without clobbering the rest", async () => {
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "tg", column: "todo", tags: ["a", "b"] } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "tg", column: "todo", tags: ["a", "b"], body: validPickupBody() } });
 
     // Incremental add unions; the existing tags survive.
     const added = await client.callTool({ name: "fkanban_tag_add", arguments: { slug: "tg", tags: ["c"] } });
@@ -318,24 +320,24 @@ describe("MCP write tools return structuredContent", () => {
   });
 
   test("fkanban_tag_add rejects a reserved dep: tag", async () => {
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "tg2", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "tg2", column: "todo", body: validPickupBody() } });
     const res = await client.callTool({ name: "fkanban_tag_add", arguments: { slug: "tg2", tags: ["dep:foo"] } });
     expect(res.isError).toBe(true);
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain("reserved");
   });
 
   test("fkanban_rm echoes { slug, orphanedDependents } (empty when nothing depends on it)", async () => {
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "card-c", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "card-c", column: "todo", body: validPickupBody() } });
     const res = await client.callTool({ name: "fkanban_rm", arguments: { slug: "card-c" } });
     expect(res.structuredContent).toEqual({ slug: "card-c", orphanedDependents: [] });
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toBe("removed card card-c");
   });
 
   test("fkanban_rm refuses to create a dangling dependency", async () => {
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "dep-x", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "dep-x", column: "todo", body: validPickupBody() } });
     await client.callTool({
       name: "fkanban_add",
-      arguments: { slug: "uses-x", column: "todo", deps: ["dep-x"] },
+      arguments: { slug: "uses-x", column: "todo", deps: ["dep-x"], body: validPickupBody() },
     });
     const res = await client.callTool({ name: "fkanban_rm", arguments: { slug: "dep-x" } });
     expect(res.isError).toBe(true);
@@ -374,7 +376,7 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     await seedDefaultBoard(node);
     client = await connectedClient(node);
     await client.callTool({ name: "fkanban_board_create", arguments: { slug: "sprint", title: "Sprint" } });
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", title: "API", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", title: "API", column: "todo", body: validPickupBody() } });
     await client.callTool({
       name: "fkanban_add",
       // `ui` is deliberately a BLOCKED card sitting in `doing` (api is still in
@@ -505,7 +507,7 @@ describe("MCP read tools cap the structured card array by default", () => {
       const idx = String(i).padStart(3, "0");
       await client.callTool({
         name: "fkanban_add",
-        arguments: { slug: `card-${idx}`, title: `Card ${idx}`, body: "needle in the body", column: "todo" },
+        arguments: { slug: `card-${idx}`, title: `Card ${idx}`, body: validPickupBody("needle in the body"), column: "todo" },
       });
     }
   });
@@ -593,8 +595,8 @@ describe("MCP tools voice an empty required string arg (no raw -32602 Zod dump)"
     // Seed two real cards so dep tools' SECOND arg is what's empty, not a
     // missing-card domain error masking the empty-arg path.
     client = await connectedClient(node);
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "real-a", column: "todo" } });
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "real-b", column: "todo" } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "real-a", column: "todo", body: validPickupBody() } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "real-b", column: "todo", body: validPickupBody() } });
   });
 
   function textOf(res: unknown): string {

@@ -5,6 +5,7 @@ import { type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import {
   appendPosition,
+  assertDefaultTodoPickupReady,
   assertDepUnblocked,
   cardToFields,
   doneAtForColumnTransition,
@@ -45,7 +46,11 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     updated_at: now,
     done_at: doneAtForColumnTransition(card, opts.column, columns, now),
   };
-  await stampCardForWrite(opts.node, opts.cfg, updated);
+  const rawBody = updated.body;
+  await stampCardForWrite(opts.node, opts.cfg, updated, {
+    warn: !opts.force && updated.board === "default" && updated.column === "todo" ? () => {} : undefined,
+  });
+  assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
   const hash = schemaHashFor("card", opts.cfg);
   await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(updated), keyHash: card.slug });

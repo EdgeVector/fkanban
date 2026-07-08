@@ -256,7 +256,7 @@ describe("rank command", () => {
 
   test("skips meta/grouping cards in the ranked column", async () => {
     await addCmd({ cfg, node, slug: "work", column: "todo", priority: "P1", tags: ["fold"] });
-    await addCmd({ cfg, node, slug: "umbrella", column: "todo", priority: "P0", tags: ["fold"], kind: "umbrella" });
+    await addCmd({ cfg, node, slug: "umbrella", column: "todo", priority: "P0", tags: ["fold"], kind: "umbrella", force: true });
     const before = (await findCard(node, cfg, "umbrella"))?.position;
     const res = await rankCmd({ cfg, node });
 

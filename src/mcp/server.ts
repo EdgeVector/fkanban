@@ -21,7 +21,7 @@ import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.t
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
-import { PRIORITY_TIERS, type Card } from "../record.ts";
+import { CARD_KINDS, PRIORITY_TIERS, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
@@ -476,10 +476,10 @@ export function createFkanbanMcpServer(
           .describe(
             "Card priority (P0 = most urgent … P3 = least). Stored as a p0–p3 tag; `fkanban_rank` orders a column by it so fkanban-pickup works urgent cards first.",
           ),
-        force: z.boolean().optional().describe("Place the card even if it is blocked by an unfinished dependency."),
+        force: z.boolean().optional().describe("Explicit operator override for dependency blocks and default/todo pickup-readiness policy."),
         repo: z.string().optional().describe("Repo a build agent clones (owner/name). When omitted: auto-derived from a subsystem tag; a card whose tags map to >1 repo is held needs_human instead of guessed, and no-signal cards stay headerless."),
         base: z.string().optional().describe("Base branch a PR targets (default: main)."),
-        kind: z.enum(["pr", "registry", "tracker", "umbrella", "meta"]).optional().describe("pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up."),
+        kind: z.enum(CARD_KINDS).optional().describe("pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up."),
         block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional().describe("Intentional hold (NOT dependency-blocked, which is derived from deps)."),
         block_reason: z.string().optional().describe("Why, when block_status != none."),
         north_star: z.string().optional().describe("fbrain North Star slug this card advances."),
@@ -534,7 +534,7 @@ export function createFkanbanMcpServer(
         slug: z.string().optional().describe("Card slug."),
         column: z.string().optional().describe("Target column."),
         position: z.number().int().optional().describe("Explicit ordering within the column."),
-        force: z.boolean().optional().describe("Move even if the card is blocked by an unfinished dependency."),
+        force: z.boolean().optional().describe("Explicit operator override for dependency blocks and default/todo pickup-readiness policy."),
       },
       outputSchema: {
         slug: z.string(),

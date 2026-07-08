@@ -39,7 +39,7 @@ export type Card = {
   // All default to "" for pre-migration cards (rowToCard).
   repo: string; // owner/name a build agent clones; "" = not a code card
   base: string; // base branch a PR targets (default "main")
-  kind: string; // CardKind: pr|registry|tracker|umbrella|meta (normalizeKind for the enum)
+  kind: string; // CardKind: pr|registry|tracker|umbrella|meta|program|capstone|validation
   block_status: string; // BlockStatus: none|needs_human|design_first|deferred
   block_reason: string; // free-text why, when block_status != none
   north_star: string; // fbrain North Star slug this advances
@@ -760,9 +760,9 @@ export async function stampCardForWrite(
 // fields. Enum fields are stored as plain strings and normalized on use so a
 // stale/legacy/empty value degrades to the safe default instead of throwing.
 
-export const CARD_KINDS = ["pr", "registry", "tracker", "umbrella", "meta"] as const;
+export const CARD_KINDS = ["pr", "registry", "tracker", "umbrella", "meta", "program", "capstone", "validation"] as const;
 export type CardKind = (typeof CARD_KINDS)[number];
-export const META_CARD_KINDS = ["registry", "tracker", "umbrella", "meta"] as const;
+export const META_CARD_KINDS = ["registry", "tracker", "umbrella", "meta", "program", "capstone", "validation"] as const;
 export type MetaCardKind = (typeof META_CARD_KINDS)[number];
 
 export const BLOCK_STATUSES = ["none", "needs_human", "design_first", "deferred"] as const;
@@ -831,6 +831,98 @@ export function resolvePickupRepo(card: Pick<Card, "repo" | "body">): PickupRepo
   return OWNER_REPO_RE.test(fromBody)
     ? { ok: true, repo: fromBody, source: "body" }
     : { ok: false, reason: `invalid Repo header: ${fromBody}` };
+}
+
+function rawBodyHeaderValue(body: string, name: string): string | null {
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
+  const m = body.match(re);
+  return m ? m[1]!.trim() : null;
+}
+
+function strictBodyRepoProblem(body: string): string | null {
+  const raw = rawBodyHeaderValue(body, "Repo");
+  if (raw === null) return null;
+  const clean = sanitizeRepoValue(raw);
+  if (!clean) return "Repo header is empty or set to none.";
+  if (raw !== clean) return "Repo header must be a bare owner/name token with no inline comments or extra text.";
+  if (!OWNER_REPO_RE.test(clean)) return `Repo header must be owner/name; got "${clean}".`;
+  return null;
+}
+
+function strictRepoProblem(card: Pick<Card, "repo" | "body">): string | null {
+  const bodyProblem = strictBodyRepoProblem(card.body);
+  if (bodyProblem) return bodyProblem;
+
+  const structured = card.repo.trim();
+  if (structured) {
+    const clean = stripTrailingInlineComment(structured);
+    if (structured !== clean) return "Repo field must be a bare owner/name token with no inline comments.";
+    if (!OWNER_REPO_RE.test(clean)) return `Repo field must be owner/name; got "${clean}".`;
+    return null;
+  }
+
+  if (rawBodyHeaderValue(card.body, "Repo") === null) return "Missing Repo header or --repo field.";
+  return null;
+}
+
+function strictSingleTokenProblem(value: string, label: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return `Missing ${label} header or --${label.toLowerCase()} field.`;
+  if (trimmed.includes("#") || /\s/.test(trimmed)) {
+    return `${label} must be a single bare token with no inline comments or spaces.`;
+  }
+  return null;
+}
+
+function strictBaseProblem(card: Pick<Card, "base" | "body">): string | null {
+  if (card.base.trim()) return strictSingleTokenProblem(card.base, "Base");
+  const raw = rawBodyHeaderValue(card.body, "Base");
+  if (raw === null) return "Missing Base header or --base field.";
+  return strictSingleTokenProblem(raw, "Base");
+}
+
+export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBody?: string): void {
+  if (force) return;
+  if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return;
+
+  const blockStatus = normalizeBlockStatus(card.block_status);
+  const generatedPickupAreaHold =
+    blockStatus === "needs_human" && card.block_reason.startsWith(PICKUP_AREA_BLOCK_PREFIX);
+  if (blockStatus !== "none" && !generatedPickupAreaHold) {
+    throw new FkanbanError({
+      code: "default_todo_not_pickup_ready",
+      message: `Card "${card.slug}" cannot be placed in default/todo with block_status=${blockStatus}.`,
+      hint: "Default todo is the pickup lane. Move human-gated or deferred work to another board/column, clear the hold once runnable, or pass --force for an explicit operator override.",
+    });
+  }
+
+  const kind = normalizeKind(card.kind);
+  if (kind !== "pr" || isRegistryCard(card.body, card.title)) {
+    throw new FkanbanError({
+      code: "default_todo_not_pickup_ready",
+      message: `Card "${card.slug}" cannot be placed in default/todo with non-pickup kind=${kind}.`,
+      hint: "Use default/backlog or a parking board for tracker/program/capstone/validation work; split a concrete --kind pr card when code is ready, or pass --force.",
+    });
+  }
+
+  const bodyForHeaderCheck = rawBody ?? card.body;
+  const repoProblem = strictRepoProblem({ repo: card.repo, body: bodyForHeaderCheck });
+  if (repoProblem) {
+    throw new FkanbanError({
+      code: "default_todo_not_pickup_ready",
+      message: `Card "${card.slug}" is not pickup-ready: ${repoProblem}`,
+      hint: "Set a clean standalone `Repo: owner/name` line or pass `--repo owner/name`; use another board/column for non-pickup work, or pass --force.",
+    });
+  }
+
+  const baseProblem = strictBaseProblem({ base: card.base, body: bodyForHeaderCheck });
+  if (baseProblem) {
+    throw new FkanbanError({
+      code: "default_todo_not_pickup_ready",
+      message: `Card "${card.slug}" is not pickup-ready: ${baseProblem}`,
+      hint: "Set a clean standalone `Base: branch` line or pass `--base branch`; use another board/column for non-pickup work, or pass --force.",
+    });
+  }
 }
 
 // The card-LOCAL half of "can a build agent pick this up?". Dependency

@@ -59,6 +59,9 @@ describe("normalizers", () => {
     expect(isMetaCardKind("tracker")).toBe(true);
     expect(isMetaCardKind("umbrella")).toBe(true);
     expect(isMetaCardKind("meta")).toBe(true);
+    expect(isMetaCardKind("program")).toBe(true);
+    expect(isMetaCardKind("capstone")).toBe(true);
+    expect(isMetaCardKind("validation")).toBe(true);
     expect(isMetaCardKind("pr")).toBe(false);
     expect(isMetaCardKind("bogus")).toBe(false);
   });
@@ -127,7 +130,7 @@ describe("isPickupEligible", () => {
   });
 
   test("tracker/umbrella/meta cards are never pickup-eligible", () => {
-    for (const kind of ["tracker", "umbrella", "meta"]) {
+    for (const kind of ["tracker", "umbrella", "meta", "program", "capstone", "validation"]) {
       expect(isPickupEligible(card({ kind, repo: "EdgeVector/fold", base: "main" }))).toBe(false);
     }
   });

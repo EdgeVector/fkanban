@@ -26,6 +26,8 @@ const cfg: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
 
+const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\nRead validation fixture.";
+
 function fakeNode(): NodeClient {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
   const tableFor = (schemaHash: string) => {
@@ -105,7 +107,7 @@ describe("list/search validate an explicit --board", () => {
   beforeEach(async () => {
     node = fakeNode();
     await seedDefaultBoard(node);
-    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo" });
+    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo", body: validPickupBody });
   });
 
   test("list --board <bogus> throws board_not_found (message + hint)", async () => {
@@ -166,7 +168,7 @@ describe("list validates an explicit --column", () => {
   beforeEach(async () => {
     node = fakeNode();
     await seedDefaultBoard(node);
-    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo" });
+    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo", body: validPickupBody });
   });
 
   test("list --column <bogus> throws invalid_column (message + hint)", async () => {
@@ -214,7 +216,7 @@ describe("search validates an explicit --column", () => {
   beforeEach(async () => {
     node = fakeNode();
     await seedDefaultBoard(node);
-    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo" });
+    await addCmd({ cfg, node, slug: "card-a", title: "Card A", column: "todo", body: validPickupBody });
   });
 
   test("search --column <bogus> throws invalid_column (message + hint)", async () => {

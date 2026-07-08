@@ -139,14 +139,15 @@ Options:
   --body <text>         card body (Markdown); replaces the whole body.
                         Also reads the body from piped stdin when no --body
                         is given (recommended for multi-line/Markdown bodies).
-  --force               add even past a 🔒 dependency block
+  --force               explicit operator override for dependency blocks and
+                        default/todo pickup-readiness policy
   --json                echo the write result as JSON
 
 Structured fields (auto-derived from the body/tags when omitted):
   --repo <owner/name>   repo a build agent clones (else: inferred from a subsystem
                         tag; >1-repo tags hold needs_human, no-signal cards stay headerless)
   --base <branch>       base branch a PR targets (default: main)
-  --kind <k>            pr|registry|tracker|umbrella|meta
+  --kind <k>            pr|registry|tracker|umbrella|meta|program|capstone|validation
                         (non-pr kinds are context/grouping cards, never picked up)
   --block-status <s>    none|needs_human|design_first|deferred (intentional holds)
   --block-reason <text> why, when --block-status is set
@@ -173,7 +174,8 @@ Usage:
 
 Options:
   --position <N>        insert at position N within the column
-  --force               move past a 🔒 dependency block
+  --force               explicit operator override for dependency blocks and
+                        default/todo pickup-readiness policy
   --json                echo the write result as JSON
 
 Example:
