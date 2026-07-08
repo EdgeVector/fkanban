@@ -167,6 +167,19 @@ export async function boardRmCmd(opts: {
     });
   }
   if (live.length > 0) {
+    const deletedSlugs = new Set(live.map((c) => c.slug));
+    const externalDependents = cards
+      .filter((c) => !deletedSlugs.has(c.slug) && c.deps.some((dep) => deletedSlugs.has(dep)))
+      .map((c) => c.slug);
+    if (externalDependents.length > 0) {
+      throw new FkanbanError({
+        code: "board_cards_have_dependents",
+        message:
+          `Board "${opts.slug}" contains card(s) still depended on by ` +
+          `${externalDependents.length} live card${externalDependents.length === 1 ? "" : "s"}.`,
+        hint: `Remove or retarget those dependency edges first: ${externalDependents.join(", ")}`,
+      });
+    }
     const cardHash = schemaHashFor("card", opts.cfg);
     for (const card of live) {
       await opts.node.deleteRecord({ schemaHash: cardHash, keyHash: card.slug });
