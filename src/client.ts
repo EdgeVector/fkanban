@@ -997,10 +997,10 @@ async function verboseFetch(opts: {
     if (isTimeoutError(err)) {
       throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
     }
-    throw connectionError(opts.baseUrl, opts.service, err, errorSocketPath);
+    throw connectionError(opts.baseUrl, opts.service, err, errorSocketPath, opts.method, opts.path);
   }
   if (res === undefined) {
-    throw connectionError(opts.baseUrl, opts.service, new Error("no response"), errorSocketPath);
+    throw connectionError(opts.baseUrl, opts.service, new Error("no response"), errorSocketPath, opts.method, opts.path);
   }
 
   const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
@@ -1016,7 +1016,7 @@ async function verboseFetch(opts: {
       if (isTimeoutError(err)) {
         throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
       }
-      throw connectionError(opts.baseUrl, opts.service, err, errorSocketPath);
+      throw connectionError(opts.baseUrl, opts.service, err, errorSocketPath, opts.method, opts.path);
     }
   }) as ReadBody;
 
@@ -1073,15 +1073,19 @@ function connectionError(
   service: "node" | "schema",
   cause: unknown,
   socketPath?: string,
+  method?: string,
+  path?: string,
 ): FkanbanError {
   const which = service === "node" ? "node" : "schema service";
   // A local node is socket-only (the loopback TCP listener is retired), so name
   // the socket — not :9001 — when one was configured; only a remote/non-socket
   // target reports the base URL.
   const where = socketPath ? `over its Unix socket ${socketPath}` : `at ${baseUrl}`;
+  const route = method && path ? ` during ${method} ${path}` : "";
+  const routeKind = path === "/api/mutation" ? "write" : path === "/api/query" ? "read" : "request";
   return new FkanbanError({
     code: "service_unreachable",
-    message: `${which} not reachable ${where} — run \`fkanban doctor\` for a diagnosis.`,
+    message: `${which} ${routeKind} route not reachable ${where}${route} — run \`fkanban doctor\` for a diagnosis.`,
     hint:
       service === "node"
         ? "Is a folddb node running? The local node is reached only over its Unix socket (the legacy loopback TCP port is retired), so an absent or unresponsive socket means it isn't up. Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `fkanban init`."
