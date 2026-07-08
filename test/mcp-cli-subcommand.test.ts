@@ -7,7 +7,7 @@
 // config (PR #29 only fixed `runMcp` in main.ts, leaving the CLI subcommand
 // path dead). So here we spawn the REAL CLI subcommand over a real
 // StdioClientTransport with a bogus FKANBAN_CONFIG and assert the server still
-// connects, lists all 12 tools, and degrades each config-dependent tool to a
+// connects, lists every registered tool, and degrades each config-dependent tool to a
 // clean per-call `isError` "Run `fkanban init` first." — matching the
 // `fkanban-mcp` bin.
 //
@@ -20,6 +20,7 @@ import { dirname, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { FKANBAN_TOOL_COUNT } from "../src/mcp/server.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cliPath = resolve(here, "../src/cli.ts");
@@ -47,11 +48,11 @@ describe("`fkanban mcp` CLI subcommand starts gracefully on a missing config", (
     close = undefined;
   });
 
-  test("connect succeeds and listTools returns all 15 tools", async () => {
+  test("connect succeeds and listTools returns every registered tool", async () => {
     const { client, close: c } = await connectViaCliSubcommand();
     close = c;
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(FKANBAN_TOOL_COUNT);
   });
 
   test("fkanban_list returns isError with the actionable 'run init' hint", async () => {

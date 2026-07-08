@@ -12,6 +12,7 @@ import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError, 
 import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
+import { pickupStatusResult } from "../commands/pickup_status.ts";
 import { rankCmd } from "../commands/rank.ts";
 import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
@@ -37,6 +38,7 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_list",
   "fkanban_search",
   "fkanban_show",
+  "fkanban_pickup_status",
   "fkanban_board_list",
   "fkanban_doctor",
 ] as const;
@@ -186,6 +188,33 @@ const cardSchema = z.object(cardShape);
 // `show --json` adds resolved dependency status to the card.
 const cardDetailSchema = cardSchema.extend({
   blocked: z.boolean(),
+  blockedBy: z.array(z.string()),
+  missingDeps: z.array(z.string()),
+});
+
+const pickupCategorySchema = z.enum([
+  "pickup-ready",
+  "blocked-on-dependency",
+  "human-gated",
+  "malformed-routing",
+  "parked/non-work",
+  "collision",
+  "stale-metadata",
+]);
+const pickupClassificationSchema = z.object({
+  slug: z.string(),
+  title: z.string(),
+  board: z.string(),
+  column: z.string(),
+  category: pickupCategorySchema,
+  ready: z.boolean(),
+  reason: z.string(),
+  details: z.array(z.string()),
+  suggestion: z.string(),
+  repo: z.string(),
+  base: z.string(),
+  kind: z.string(),
+  block_status: z.string(),
   blockedBy: z.array(z.string()),
   missingDeps: z.array(z.string()),
 });
@@ -383,6 +412,32 @@ export function createFkanbanMcpServer(
         // caller opted into full bodies.
         const previewed = previewBodies(capped, args.full_body ?? false);
         return toolResult(text, { cards: previewed, total, truncated });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_pickup_status",
+    {
+      title: "Report pickup eligibility",
+      description:
+        "Classify every active card as pickup-ready, blocked-on-dependency, human-gated, malformed-routing, parked/non-work, collision, or stale-metadata. Read-only: answers what can be picked up now and why other cards were skipped.",
+      annotations: { title: "Report pickup eligibility", readOnlyHint: true, openWorldHint: false },
+      inputSchema: {},
+      outputSchema: {
+        scanned: z.number().int(),
+        ready: z.number().int(),
+        counts: z.record(pickupCategorySchema, z.number().int()),
+        cards: z.array(pickupClassificationSchema),
+      },
+    },
+    async () => {
+      try {
+        const { cfg, node } = requireConfig();
+        const { text, report } = await pickupStatusResult({ cfg, node });
+        return toolResult(text, report);
       } catch (err) {
         return errorResult(err);
       }
