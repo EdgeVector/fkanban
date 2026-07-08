@@ -250,8 +250,11 @@ fkanban dep rm  ui docs      # …or drop one
 
 Edges are stored as reserved `dep:<slug>` entries in the card's `tags`
 array, so dependencies needed **no schema change / republish** — the same
-trick used for the soft-delete tombstone. A dep pointing at a non-existent
-card is surfaced as a warning but never blocks (it could never reach `done`).
+trick used for the historical soft-delete tombstone. A dep pointing at a
+non-existent card is surfaced as a warning and should be resolved by creating
+or retargeting the dependency card. Once a dependency card exists, `rm` refuses
+to delete it while any live card still depends on it, so tombstones cannot
+create new missing dependency slugs.
 
 ## Tags
 
@@ -392,8 +395,11 @@ confirm.)
   enforcement the app would need a consent handshake (see `fbrain`'s
   `capability.ts`); that's intentionally out of scope here.
 - **Delete.** `rm` uses fold_db's native delete mutation, so tombstoned records
-  are skipped by the node before scans. Read paths still hide the historical
-  `__fkanban_deleted__` tag written by older fkanban builds.
+  are skipped by the node before scans. To preserve dependency resolution, card
+  deletion refuses while live dependents still point at the card; `board rm
+  --force` has the same guard for cards outside the board being removed. Read
+  paths still hide the historical `__fkanban_deleted__` tag written by older
+  fkanban builds.
 - **Append-with-gaps positions.** New cards land at `maxPosition + 10` so a
   card can later be inserted between two others.
 - **Priority is a signal over `position`.** A card's priority (`Priority:` header

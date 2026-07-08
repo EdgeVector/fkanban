@@ -22,7 +22,7 @@ import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
 import { migrateAreaTagsCmd } from "./commands/migrate.ts";
-import { orphanedDependentsWarning, normalizePriority, PRIORITY_TIERS, type PriorityTier } from "./record.ts";
+import { normalizePriority, PRIORITY_TIERS, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import { suggestClosest } from "./suggest.ts";
 import {
@@ -56,7 +56,7 @@ Commands:
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
-  rm <slug>            soft-delete a card
+  rm <slug>            soft-delete a card (refuses if live cards depend on it)
   board create <slug>  create/update a board (--title --columns a,b,c)
   board list           list boards (--json)
   board rm <slug>      soft-delete a board (always refuses default; refuses
@@ -287,13 +287,16 @@ Options:
 Example:
   fkanban show ship-login`),
 
-  rm: withFooter(`fkanban rm — soft-delete a card (tombstoned and hidden; no restore command; recovery requires hand-editing the record)
+  rm: withFooter(`fkanban rm — soft-delete a card (refuses while live cards depend on it)
 
 Usage:
   fkanban rm <slug> [options]
 
 Options:
   --json                echo the write result as JSON
+
+Deletion uses the node's native tombstone path. It refuses if any live card still
+depends on the target; remove or retarget those dependency edges first.
 
 Example:
   fkanban rm ship-login`),
@@ -309,7 +312,8 @@ Options:
   --title <text>        board title (create)
   --columns a,b,c       comma-separated column names (create)
   --body <text>         board body (create)
-  --force               soft-delete a board with live cards (rm)
+  --force               soft-delete a board with live cards (rm); refuses if
+                        outside live cards depend on cards being deleted
   --json                machine-readable output
 
 Examples:
@@ -1083,13 +1087,6 @@ async function dispatch(
       const ctx = loadCtx({ verbose });
       const res = await rmCmd({ cfg: ctx.cfg, node: ctx.node, slug });
       console.log(formatRm(res, values.json as boolean | undefined));
-      // Deleting a card that other live cards still depend on leaves those edges
-      // dangling — warn loudly (stderr), mirroring `add --deps <missing>`. Under
-      // --json the dependents ride along in the result object, so suppress the
-      // prose line (same convention as the rest of the CLI).
-      if (!values.json && res.orphanedDependents.length > 0) {
-        console.error(orphanedDependentsWarning(res.slug, res.orphanedDependents));
-      }
       return 0;
     }
 

@@ -161,6 +161,53 @@ describe("board rm", () => {
     ]);
   });
 
+  test("refuses forced removal when outside live cards depend on board cards", async () => {
+    const updates: Update[] = [];
+    const deletes: Delete[] = [];
+    const node = fakeNode({
+      boards: [board({ slug: "busy" })],
+      cards: [
+        card({ slug: "api", board: "busy" }),
+        card({ slug: "ui", board: "other", deps: ["api"] }),
+      ],
+      updates,
+      deletes,
+    });
+
+    const err = await boardRmCmd({ cfg, node, slug: "busy", force: true }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("board_cards_have_dependents");
+    expect((err as FkanbanError).message).toContain("1 live card");
+    expect((err as FkanbanError).hint).toContain("ui");
+    expect(updates).toHaveLength(0);
+    expect(deletes).toHaveLength(0);
+  });
+
+  test("forced removal allows internal dependencies deleted together", async () => {
+    const updates: Update[] = [];
+    const deletes: Delete[] = [];
+    const node = fakeNode({
+      boards: [board({ slug: "busy" })],
+      cards: [
+        card({ slug: "api", board: "busy" }),
+        card({ slug: "ui", board: "busy", deps: ["api"] }),
+      ],
+      updates,
+      deletes,
+    });
+
+    const res = await boardRmCmd({ cfg, node, slug: "busy", force: true });
+
+    expect(res.deletedCards).toEqual(["api", "ui"]);
+    expect(updates).toHaveLength(0);
+    expect(deletes).toEqual([
+      { schemaHash: "cardhash", keyHash: "api" },
+      { schemaHash: "cardhash", keyHash: "ui" },
+      { schemaHash: "boardhash", keyHash: "busy" },
+    ]);
+  });
+
   test("a card on a different board doesn't block removal", async () => {
     const updates: Update[] = [];
     const deletes: Delete[] = [];

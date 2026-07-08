@@ -61,17 +61,33 @@ function fakeNode(opts: { cards: Card[]; deletes: Delete[] }): NodeClient {
 }
 
 describe("rm native delete", () => {
-  test("deletes the card using the native delete mutation and reports orphaned dependents", async () => {
+  test("deletes the card using the native delete mutation when it has no dependents", async () => {
+    const deletes: Delete[] = [];
+    const node = fakeNode({
+      cards: [card({ slug: "api" }), card({ slug: "docs" })],
+      deletes,
+    });
+
+    const res = await rmCmd({ cfg, node, slug: "api" });
+
+    expect(res).toEqual({ slug: "api", orphanedDependents: [] });
+    expect(deletes).toEqual([{ schemaHash: "cardhash", keyHash: "api" }]);
+  });
+
+  test("refuses to delete a card that live cards still depend on", async () => {
     const deletes: Delete[] = [];
     const node = fakeNode({
       cards: [card({ slug: "api" }), card({ slug: "ui", deps: ["api"] }), card({ slug: "docs" })],
       deletes,
     });
 
-    const res = await rmCmd({ cfg, node, slug: "api" });
+    const err = await rmCmd({ cfg, node, slug: "api" }).catch((e: unknown) => e);
 
-    expect(res).toEqual({ slug: "api", orphanedDependents: ["ui"] });
-    expect(deletes).toEqual([{ schemaHash: "cardhash", keyHash: "api" }]);
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("card_has_dependents");
+    expect((err as FkanbanError).message).toContain("1 live card");
+    expect((err as FkanbanError).hint).toContain("ui");
+    expect(deletes).toHaveLength(0);
   });
 
   test("missing cards still raise card_not_found before any delete", async () => {
