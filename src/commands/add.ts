@@ -42,8 +42,15 @@ export type AddOptions = {
   assignee?: string;
   tags?: string[];
   // Replace the card's dependency list with these slugs (validated, deduped,
-  // self-references dropped). Omit to leave existing deps untouched on update.
+  // self-references dropped). On update this is refused unless replaceDeps is
+  // true; omit to leave existing deps untouched.
   deps?: string[];
+  // Explicit operator acknowledgement that update-time deps replacement is
+  // intended. Required even for clearing with deps: [].
+  replaceDeps?: boolean;
+  // Explicit operator acknowledgement that newly-authored dep slugs may point
+  // at cards that do not exist yet.
+  allowForwardDep?: boolean;
   // Set the card's priority tier (P0–P3). Stored as a `p0`..`p3` tag: any
   // existing priority tag is replaced, the rest of the tags are preserved.
   // Omit to leave the card's current priority untouched on update.
@@ -98,9 +105,9 @@ function applyExplicitStructuredFields(card: Card, opts: AddOptions): Card {
   return card;
 }
 
-// Validate + clean a user-supplied dep list for `slug`, warn (to stderr) on any
-// forward/dangling dep — the same heads-up `dep add` emits — and REJECT any new
-// edge that would close a dependency cycle, exactly like `dep add` does (#38).
+// Validate + clean a user-supplied dep list for `slug`, reject forward/dangling
+// deps unless explicitly allowed, and REJECT any new edge that would close a
+// dependency cycle, exactly like `dep add` does (#38).
 //
 // `existingDeps` is the card's current dep list (empty on create). Only deps
 // that are NEW relative to it are cycle-checked, so re-`add`ing a card with an
@@ -113,16 +120,26 @@ async function prepareDeps(
   deps: string[],
   slug: string,
   existingDeps: string[],
+  allowForwardDep = false,
 ): Promise<string[]> {
   const cleaned = normalizeDeps(deps, slug);
   for (const d of cleaned) validateSlug(d);
 
-  // Board graph for the forward-dep warning + the cycle guard. One scan shared
-  // by both, mirroring the single `listCardStatuses` call `dep add` makes.
+  // Board graph for the forward-dep guard + the cycle guard. One scan shared by
+  // both, mirroring the single `listCardStatuses` call `dep add` makes.
   const all = await listCardStatuses(opts.node, opts.cfg);
   const live = new Set(all.map((c) => c.slug));
   for (const dep of cleaned) {
-    if (!live.has(dep)) console.error(forwardDepWarning(dep));
+    if (!live.has(dep)) {
+      if (!allowForwardDep) {
+        throw new FkanbanError({
+          code: "forward_dep_requires_explicit",
+          message: `Dependency "${dep}" does not exist.`,
+          hint: "Create the dependency card first, or pass --allow-forward-dep to mark the forward edge intentional.",
+        });
+      }
+      console.error(forwardDepWarning(dep));
+    }
   }
 
   // Cycle guard: walk the NEW edges (those not already on the card) and reject
@@ -156,6 +173,10 @@ async function prepareDeps(
   return cleaned;
 }
 
+function sameDeps(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((dep, i) => dep === b[i]);
+}
+
 // Apply an optional `--priority` to a resolved tag list: replace any existing
 // p0..p3 tag and leave the rest. A no-op when no priority was requested, so an
 // ordinary update never disturbs the card's current priority tag.
@@ -187,6 +208,16 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   const now = nowIso();
 
   if (existing) {
+    const nextDeps = opts.deps !== undefined
+      ? await prepareDeps(opts, opts.deps, opts.slug, existing.deps, opts.allowForwardDep)
+      : existing.deps;
+    if (opts.deps !== undefined && !opts.replaceDeps && !sameDeps(nextDeps, existing.deps)) {
+      throw new FkanbanError({
+        code: "deps_replace_requires_explicit",
+        message: `Updating "${opts.slug}" would replace its dependency list.`,
+        hint: "Use `fkanban dep add`/`dep rm` for incremental edits, or pass --replace-deps with --deps for an intentional replacement/clear.",
+      });
+    }
     const updated: Card = {
       ...existing,
       title: opts.title ?? existing.title,
@@ -195,7 +226,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       column: targetColumn,
       assignee: opts.assignee ?? existing.assignee,
       tags: applyPriority(opts.tags ?? existing.tags, opts.priority),
-      deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, existing.deps) : existing.deps,
+      deps: nextDeps,
       updated_at: now,
       done_at: doneAtForColumnTransition(existing, targetColumn, columns, now),
     };
@@ -223,7 +254,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     position: appendPosition(),
     assignee: opts.assignee ?? "",
     tags: applyPriority(opts.tags ?? [], opts.priority),
-    deps: opts.deps ? await prepareDeps(opts, opts.deps, opts.slug, []) : [],
+    deps: opts.deps !== undefined ? await prepareDeps(opts, opts.deps, opts.slug, [], opts.allowForwardDep) : [],
     created_at: now,
     updated_at: now,
     ...emptyStructuredFields(),

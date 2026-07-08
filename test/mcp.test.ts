@@ -301,6 +301,43 @@ describe("MCP write tools return structuredContent", () => {
     );
   });
 
+  test("fkanban_add preserves deps unless replace_deps is explicit", async () => {
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "ui", column: "todo", deps: ["api"], body: validPickupBody() },
+    });
+
+    const rejected = await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", deps: [] } });
+    expect(rejected.isError).toBe(true);
+    expect((rejected.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
+      "would replace its dependency list",
+    );
+
+    const cleared = await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "ui", deps: [], replace_deps: true },
+    });
+    expect(cleared.structuredContent).toEqual({ slug: "ui", action: "updated", board: "default", column: "todo" });
+    const shown = await client.callTool({ name: "fkanban_show", arguments: { slug: "ui" } });
+    expect((shown.structuredContent as { deps: string[] }).deps).toEqual([]);
+  });
+
+  test("fkanban_dep_add rejects a missing dep unless allow_forward_dep is explicit", async () => {
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo", body: validPickupBody() } });
+    const rejected = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "ghost" } });
+    expect(rejected.isError).toBe(true);
+    expect((rejected.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
+      'Dependency "ghost" does not exist',
+    );
+
+    const allowed = await client.callTool({
+      name: "fkanban_dep_add",
+      arguments: { slug: "ui", dep: "ghost", allow_forward_dep: true },
+    });
+    expect(allowed.structuredContent).toEqual({ slug: "ui", dep: "ghost", action: "added", deps: ["ghost"] });
+  });
+
   test("fkanban_tag_add / fkanban_tag_rm edit one tag without clobbering the rest", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "tg", column: "todo", tags: ["a", "b"], body: validPickupBody() } });
 
@@ -382,7 +419,7 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
       // `ui` is deliberately a BLOCKED card sitting in `doing` (api is still in
       // todo) — the soft-block now refuses that placement, so `force` is needed
       // to construct the fixture state these read-tool tests assert against.
-      arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api", "ghost"], force: true },
+      arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api", "ghost"], force: true, allow_forward_dep: true },
     });
   });
 

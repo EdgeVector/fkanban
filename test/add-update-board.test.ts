@@ -219,11 +219,7 @@ describe("add update preserves the card's board", () => {
   });
 });
 
-// `add --deps` must warn (to stderr) on a dep slug that doesn't resolve to a
-// live card — the same forward-dependency heads-up `dep add` emits — WITHOUT
-// blocking the write. A missing dep is non-blocking by design; we only signal
-// at write time what `show` would otherwise surface much later.
-describe("add --deps warns on missing dependency slugs", () => {
+describe("add dependency edge hardening", () => {
   let node: NodeClient;
   let warnings: string[];
   let restore: () => void;
@@ -243,13 +239,26 @@ describe("add --deps warns on missing dependency slugs", () => {
 
   afterEach(() => restore());
 
-  test("missing dep → warns once and STILL creates the card", async () => {
+  test("missing dep is rejected by default and writes nothing", async () => {
+    await expect(addCmd({
+      cfg,
+      node,
+      slug: "warn-a",
+      title: "A",
+      deps: ["does-not-exist"],
+    })).rejects.toMatchObject({ code: "forward_dep_requires_explicit" });
+    expect(warnings).toEqual([]);
+    expect(await findCard(node, cfg, "warn-a")).toBeNull();
+  });
+
+  test("missing dep with allowForwardDep warns once and creates the card", async () => {
     const created = await addCmd({
       cfg,
       node,
       slug: "warn-a",
       title: "A",
       deps: ["does-not-exist"],
+      allowForwardDep: true,
     });
     expect(created).toMatchObject({ action: "created" });
     expect(warnings).toEqual([
@@ -267,10 +276,10 @@ describe("add --deps warns on missing dependency slugs", () => {
     expect(warnings).toEqual([]);
   });
 
-  test("mixed deps → exactly one warning, for the missing one only", async () => {
+  test("mixed deps with allowForwardDep warns exactly once for the missing one only", async () => {
     await addCmd({ cfg, node, slug: "dep-ok", title: "OK" });
     warnings.length = 0;
-    await addCmd({ cfg, node, slug: "warn-c", title: "C", deps: ["dep-ok", "dep-missing"] });
+    await addCmd({ cfg, node, slug: "warn-c", title: "C", deps: ["dep-ok", "dep-missing"], allowForwardDep: true });
     expect(warnings).toEqual([
       'fkanban: warning — no card "dep-missing" yet; adding it as a forward dependency.',
     ]);
@@ -279,6 +288,59 @@ describe("add --deps warns on missing dependency slugs", () => {
   test("no --deps → never reads or warns", async () => {
     await addCmd({ cfg, node, slug: "warn-d", title: "D" });
     expect(warnings).toEqual([]);
+  });
+
+  test("generic update without deps preserves an existing dependency edge", async () => {
+    await addCmd({ cfg, node, slug: "dep-target", title: "Target" });
+    await addCmd({ cfg, node, slug: "dependent", title: "Dependent", deps: ["dep-target"] });
+
+    const updated = await addCmd({ cfg, node, slug: "dependent", title: "Dependent v2" });
+    expect(updated).toMatchObject({ action: "updated" });
+    const after = await findCard(node, cfg, "dependent");
+    expect(after?.title).toBe("Dependent v2");
+    expect(after?.deps).toEqual(["dep-target"]);
+  });
+
+  test("generic update with deps: [] cannot silently clear an existing edge", async () => {
+    await addCmd({ cfg, node, slug: "dep-target", title: "Target" });
+    await addCmd({ cfg, node, slug: "dependent", title: "Dependent", deps: ["dep-target"] });
+
+    await expect(addCmd({ cfg, node, slug: "dependent", deps: [] })).rejects.toMatchObject({
+      code: "deps_replace_requires_explicit",
+    });
+    const after = await findCard(node, cfg, "dependent");
+    expect(after?.deps).toEqual(["dep-target"]);
+  });
+
+  test("clearing deps requires replaceDeps", async () => {
+    await addCmd({ cfg, node, slug: "dep-target", title: "Target" });
+    await addCmd({ cfg, node, slug: "dependent", title: "Dependent", deps: ["dep-target"] });
+
+    const cleared = await addCmd({ cfg, node, slug: "dependent", deps: [], replaceDeps: true });
+    expect(cleared).toMatchObject({ action: "updated" });
+    expect((await findCard(node, cfg, "dependent"))?.deps).toEqual([]);
+  });
+
+  test("replacing deps requires replaceDeps", async () => {
+    await addCmd({ cfg, node, slug: "dep-a", title: "A" });
+    await addCmd({ cfg, node, slug: "dep-b", title: "B" });
+    await addCmd({ cfg, node, slug: "dependent", title: "Dependent", deps: ["dep-a"] });
+
+    await expect(addCmd({ cfg, node, slug: "dependent", deps: ["dep-b"] })).rejects.toMatchObject({
+      code: "deps_replace_requires_explicit",
+    });
+    const replaced = await addCmd({ cfg, node, slug: "dependent", deps: ["dep-b"], replaceDeps: true });
+    expect(replaced).toMatchObject({ action: "updated" });
+    expect((await findCard(node, cfg, "dependent"))?.deps).toEqual(["dep-b"]);
+  });
+
+  test("re-sending the same deps on update is idempotent without replaceDeps", async () => {
+    await addCmd({ cfg, node, slug: "dep-target", title: "Target" });
+    await addCmd({ cfg, node, slug: "dependent", title: "Dependent", deps: ["dep-target"] });
+
+    const updated = await addCmd({ cfg, node, slug: "dependent", title: "Dependent v2", deps: ["dep-target"] });
+    expect(updated).toMatchObject({ action: "updated" });
+    expect((await findCard(node, cfg, "dependent"))?.deps).toEqual(["dep-target"]);
   });
 });
 
@@ -300,8 +362,8 @@ describe("add --deps rejects a dependency cycle", () => {
 
   test("direct mutual edge (a→b then add b --deps a) is rejected, nothing written", async () => {
     // a depends on b.
-    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
     await addCmd({ cfg, node, slug: "b", title: "B" });
+    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
     // Now b --deps a would close a 2-cycle.
     await expectCycle(addCmd({ cfg, node, slug: "b", deps: ["a"] }));
     // No edge written: b still has no deps.
@@ -310,17 +372,17 @@ describe("add --deps rejects a dependency cycle", () => {
   });
 
   test("transitive cycle (a→b→c then add c --deps a) is rejected", async () => {
-    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
-    await addCmd({ cfg, node, slug: "b", title: "B", deps: ["c"] });
     await addCmd({ cfg, node, slug: "c", title: "C" });
+    await addCmd({ cfg, node, slug: "b", title: "B", deps: ["c"] });
+    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
     await expectCycle(addCmd({ cfg, node, slug: "c", deps: ["a"] }));
     const after = await findCard(node, cfg, "c");
     expect(after?.deps).toEqual([]);
   });
 
   test("error message + hint are byte-aligned with `dep add`", async () => {
-    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
     await addCmd({ cfg, node, slug: "b", title: "B" });
+    await addCmd({ cfg, node, slug: "a", title: "A", deps: ["b"] });
     try {
       await addCmd({ cfg, node, slug: "b", deps: ["a"] });
       throw new Error("expected addCmd to throw a dep_cycle error");
@@ -358,9 +420,9 @@ describe("add --deps rejects a dependency cycle", () => {
 
   test("cumulative: --deps adds two edges where the SECOND closes a cycle", async () => {
     // x → y exists. add y --deps z,x : z is fine, but x closes y→x→y.
-    await addCmd({ cfg, node, slug: "x", title: "X", deps: ["y"] });
     await addCmd({ cfg, node, slug: "y", title: "Y" });
     await addCmd({ cfg, node, slug: "z", title: "Z" });
+    await addCmd({ cfg, node, slug: "x", title: "X", deps: ["y"] });
     await expectCycle(addCmd({ cfg, node, slug: "y", deps: ["z", "x"] }));
     // Nothing written — y still has no deps.
     const after = await findCard(node, cfg, "y");
@@ -477,7 +539,7 @@ describe("add enforces the dependency soft-block into working columns", () => {
   test("a missing (dangling) dep does NOT block placement into a working column", async () => {
     // Forward dep that never resolves to a live card — non-blocking by design,
     // exactly as depStatus treats it.
-    await addCmd({ cfg, node, slug: "fwd", title: "Fwd", column: "todo", body: validPickupBody, deps: ["never-exists"] });
+    await addCmd({ cfg, node, slug: "fwd", title: "Fwd", column: "todo", body: validPickupBody, deps: ["never-exists"], allowForwardDep: true });
     const res = await addCmd({ cfg, node, slug: "fwd", column: "doing" });
     expect(res).toMatchObject({ action: "updated", column: "doing" });
   });

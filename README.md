@@ -165,9 +165,9 @@ DONE  (0)
 | Command | What it does |
 |---|---|
 | `fkanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
-| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
+| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --allow-forward-dep --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
 | `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
-| `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`) |
+| `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on `<dep>`; use `--allow-forward-dep` for intentional missing/placeholder deps) |
 | `fkanban dep rm <slug> <dep>` | remove a dependency edge |
 | `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
@@ -348,15 +348,19 @@ fkanban move api done
 fkanban move ui doing        # ✓ unblocked
 fkanban dep add ui docs      # add another edge incrementally
 fkanban dep rm  ui docs      # …or drop one
+fkanban add ui --deps "" --replace-deps  # explicitly clear all deps
 ```
 
 Edges are stored as reserved `dep:<slug>` entries in the card's `tags`
 array, so dependencies needed **no schema change / republish** — the same
 trick used for the historical soft-delete tombstone. A dep pointing at a
-non-existent card is surfaced as a warning and should be resolved by creating
-or retargeting the dependency card. Once a dependency card exists, `rm` refuses
-to delete it while any live card still depends on it, so tombstones cannot
-create new missing dependency slugs.
+non-existent card is rejected by default. If a placeholder edge is intentional,
+pass `--allow-forward-dep`; the command will still warn so the forward edge is
+auditable. Generic card updates preserve existing deps unless `--replace-deps`
+is set, so a cleanup call with `deps: []` cannot silently erase real dependency
+edges. Once a dependency card exists, `rm` refuses to delete it while any live
+card still depends on it, so tombstones cannot create new missing dependency
+slugs.
 
 ## Tags
 
@@ -414,6 +418,12 @@ Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
 `fkanban_doctor`)
 so agents can drive — and self-diagnose — the board.
+
+For MCP writes, omit `deps` on `fkanban_add` unless you are intentionally
+setting dependencies. Existing deps are preserved by default; replacing or
+clearing them requires `replace_deps: true`, and missing dependency cards
+require `allow_forward_dep: true`. Prefer `fkanban_dep_add` and
+`fkanban_dep_rm` for ordinary edge edits.
 
 Register it with Claude Code (the `--` separates the `claude mcp add` flags from
 the command it runs). With the global `fkanban` shim on PATH, use the short
