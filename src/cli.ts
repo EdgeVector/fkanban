@@ -20,6 +20,7 @@ import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
+import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
@@ -49,13 +50,14 @@ Usage:
 Commands:
   init                 bootstrap a node + load/resolve schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
-  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --priority P0-P3 --body, --force past a block)
+  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
   list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
+  overlap <slug>       report declared surface conflicts with doing/review cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
@@ -136,6 +138,8 @@ Options:
                         existing deps. Missing cards and edges that would form
                         a cycle are rejected, exit 2.
   --replace-deps        explicitly replace/clear deps on an existing card
+  --surfaces a,b        comma-separated repo-relative path globs or subsystem
+                        names this card expects to touch
   --priority <P0-P3>    card priority (P0 = most urgent … P3 = least); stored as
                         a p0–p3 tag. \`fkanban rank\` orders a column by this so
                         fkanban-pickup works urgent cards first.
@@ -219,6 +223,21 @@ rejected — use \`dep\`/\`rm\`. Dependency edges live in the separate deps fiel
 Example:
   fkanban tag add ship-login p1
   fkanban tag rm  ship-login blocked`),
+
+  overlap: withFooter(`fkanban overlap — report declared file-surface conflicts
+
+Usage:
+  fkanban overlap <slug> [--json]
+
+Compares the candidate card's surfaces against every doing/review card with the
+same repo. Surfaces come from the structured field or a body header:
+  Surfaces: src/cli.ts, src/mcp/**
+
+Missing surfaces are adoption warnings, not conflicts: the command exits 0 when
+the answer is unknown. Declared conflicts exit 2 and name the matching patterns.
+
+Example:
+  fkanban overlap ship-login`),
 
   list: withFooter(`fkanban list — render a board as columns of cards
 
@@ -647,7 +666,7 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
   add: new Set([
-    "title", "board", "column", "assignee", "tags", "deps", "replace-deps", "priority", "body", "force",
+    "title", "board", "column", "assignee", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "pr-url", "branch",
   ]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
@@ -720,6 +739,7 @@ async function main(argv: string[]): Promise<number> {
         tags: { type: "string" },
         deps: { type: "string" },
         "replace-deps": { type: "boolean" },
+        surfaces: { type: "string" },
         priority: { type: "string" },
         repo: { type: "string" },
         base: { type: "string" },
@@ -919,6 +939,7 @@ async function dispatch(
           tags: parseTags(values.tags as string | undefined),
           deps: parseTags(values.deps as string | undefined),
           replaceDeps: values["replace-deps"] as boolean | undefined,
+          surfaces: parseTags(values.surfaces as string | undefined),
           priority,
           body,
           force: values.force as boolean | undefined,
@@ -1119,6 +1140,21 @@ async function dispatch(
       });
       console.log(out);
       return 0;
+    }
+
+    case "overlap": {
+      const slug = requirePositional(positionals[1], "overlap <slug>");
+      const extra = rejectExtraPositionals(positionals, 2, "overlap <slug>");
+      if (extra !== undefined) return extra;
+      const ctx = loadCtx({ verbose });
+      const { text, result } = await overlapCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        slug,
+        json: values.json as boolean | undefined,
+      });
+      console.log(text);
+      return result.conflicts.length > 0 ? 2 : 0;
     }
 
     case "pickup":

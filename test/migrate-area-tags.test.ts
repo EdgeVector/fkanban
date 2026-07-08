@@ -109,6 +109,7 @@ function seedRawCard(node: NodeClient, card: Partial<Card> & { slug: string }): 
     assignee: card.assignee ?? "",
     tags: card.tags ?? [],
     deps: card.deps ?? [],
+    surfaces: card.surfaces ?? [],
     created_at: card.created_at ?? now,
     updated_at: card.updated_at ?? now,
     done_at: card.done_at ?? "",

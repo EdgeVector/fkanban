@@ -1,7 +1,6 @@
 import { type NodeClient } from "./client.ts";
 import { type Config } from "./config.ts";
 import {
-  cardToFields,
   depStatus,
   isRegistryCard,
   normalizeBlockStatus,
@@ -12,11 +11,11 @@ import {
   resolvePickupRepo,
   sanitizeRepoValue,
   sortCards,
+  updateCardRecord,
   type Board,
   type Card,
   type DepStatus,
 } from "./record.ts";
-import { schemaHashFor } from "./config.ts";
 
 export const HUMAN_BOARD_SLUG = "human";
 export const HUMAN_BOARD_TITLE = "Human / parked work";
@@ -345,9 +344,5 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
 }
 
 export async function writeGroomedCard(opts: { cfg: Config; node: NodeClient }, card: Card): Promise<void> {
-  await opts.node.updateRecord({
-    schemaHash: schemaHashFor("card", opts.cfg),
-    keyHash: card.slug,
-    fields: cardToFields({ ...card, updated_at: nowIso() }),
-  });
+  await updateCardRecord(opts, { ...card, updated_at: nowIso() });
 }

@@ -104,6 +104,7 @@ describe("schemas", () => {
       assignee: "String",
       tags: { Array: "String" },
       deps: { Array: "String" },
+      surfaces: { Array: "String" },
       created_at: "String",
       updated_at: "String",
       repo: "String",
@@ -212,6 +213,14 @@ describe("dependencies", () => {
     expect(back.tags).toEqual(["p1"]);
     expect(back.deps).toEqual(["a", "b"]);
     expect(back.done_at).toBe("2026-07-03T12:00:00.000Z");
+  });
+
+  test("surfaces round-trip through card fields", () => {
+    const c = card({ slug: "x", surfaces: ["src/cli.ts", "src/mcp/**", "src/cli.ts"] });
+    const fields = cardToFields(c);
+    expect(fields.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
+    const back = rowToCard({ key: { hash: "x", range: null }, fields });
+    expect(back.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
   });
 
   test("DEP_TAG_PREFIX is the reserved prefix", () => {

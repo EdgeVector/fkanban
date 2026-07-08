@@ -268,13 +268,37 @@ describe("MCP write tools return structuredContent", () => {
   });
 
   test("fkanban_add echoes { slug, action, board, column }", async () => {
-    const res = await client.callTool({ name: "fkanban_add", arguments: { slug: "card-a", column: "todo", body: validPickupBody() } });
+    const res = await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "card-a", column: "todo", body: validPickupBody(), surfaces: ["src/cli.ts"] },
+    });
     expect(res.structuredContent).toEqual({ slug: "card-a", action: "created", board: "default", column: "todo" });
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toBe("created card card-a → default/todo");
+    const shown = await client.callTool({ name: "fkanban_show", arguments: { slug: "card-a" } });
+    expect((shown.structuredContent as { surfaces: string[] }).surfaces).toEqual(["src/cli.ts"]);
 
     // A second add for the same slug reports the update transition.
     const upd = await client.callTool({ name: "fkanban_add", arguments: { slug: "card-a", column: "doing" } });
     expect(upd.structuredContent).toEqual({ slug: "card-a", action: "updated", board: "default", column: "doing" });
+  });
+
+  test("fkanban_overlap reports matching surface claims", async () => {
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "peer", title: "Peer", column: "doing", body: validPickupBody(), surfaces: ["src/mcp/**"] },
+    });
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "candidate", column: "todo", body: validPickupBody(), surfaces: ["src/mcp/server.ts"] },
+    });
+
+    const res = await client.callTool({ name: "fkanban_overlap", arguments: { slug: "candidate" } });
+    expect((res.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain("Surface conflicts for candidate");
+    const structured = res.structuredContent as {
+      conflicts: Array<{ slug: string; matches: Array<{ candidate: string; other: string }> }>;
+    };
+    expect(structured.conflicts[0]?.slug).toBe("peer");
+    expect(structured.conflicts[0]?.matches).toEqual([{ candidate: "src/mcp/server.ts", other: "src/mcp/**" }]);
   });
 
   test("fkanban_move echoes { slug, from, to }", async () => {

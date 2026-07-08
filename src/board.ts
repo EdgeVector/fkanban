@@ -298,6 +298,7 @@ export function renderCardDetail(
   if (c.north_star) lines.push(`north star: ${c.north_star}`);
   if (c.pr_url) lines.push(`pr: ${c.pr_url}`);
   if (c.branch) lines.push(`branch: ${c.branch}`);
+  if (c.surfaces.length > 0) lines.push(`surfaces: ${c.surfaces.join(", ")}`);
   if (c.deps.length > 0) {
     lines.push(`deps: ${c.deps.map((d) => renderDep(d, color, status)).join("  ")}`);
     if (status && status.missing.length > 0) {
