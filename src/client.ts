@@ -27,6 +27,23 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
+import {
+  CapabilityDeniedError,
+  FoldDbClient,
+  PermissionDeniedError,
+  RequestRejectedError,
+  TransportError,
+  UnexpectedResponseError,
+  capabilityStoreKey,
+  type CapabilityStore,
+  type JsonValue,
+  type KeyValue,
+  type QueryResult as SdkQueryResult,
+  type RowFields,
+  type SearchResult as SdkSearchResult,
+  type Transport as SdkTransport,
+} from "@folddb/app-sdk";
+
 import type { AddSchemaRequest } from "./schemas.ts";
 
 export type Verbose = (msg: string) => void;
@@ -213,6 +230,16 @@ export type NodeClient = {
   // each call so a socket that appears/vanishes between calls is reported
   // accurately.
   nodeTransport(): { transport: "socket" | "unavailable"; socketPath?: string };
+};
+
+const FKANBAN_APP_ID = "fkanban";
+
+const noopCapabilityStore: CapabilityStore = {
+  async store() {},
+  async load() {
+    return null;
+  },
+  async remove() {},
 };
 
 export function newSchemaServiceClient(
@@ -480,6 +507,77 @@ export function newNodeClient(opts: {
   const isNotAttested = (status: number, body: unknown): boolean =>
     status === 403 && bodyError(body) === "transport_not_attested";
 
+  const sdkTransport: SdkTransport = {
+    target: socketPath ? `unix:${socketPath}` : url,
+    async send(
+      method: "GET" | "POST",
+      path: string,
+      options: { headers?: Record<string, string>; body?: unknown } = {},
+    ): Promise<{ status: number; body: unknown }> {
+      await ensureAttested();
+      const doFetch = async () => {
+        const { res, readBody } = await verboseFetch({
+          baseUrl: url,
+          path,
+          method,
+          body: options.body,
+          verbose,
+          service: "node",
+          headers: { ...nodeHeaders(), ...(options.headers ?? {}) },
+          timeoutMs,
+          socketPath,
+        });
+        const parsed = await readBody();
+        return { status: res.status, body: parsed };
+      };
+      let result = await doFetch();
+      if (isNotAttested(result.status, result.body) && socketPath) {
+        verbose("node: transport_not_attested — re-pairing owner session and retrying");
+        await ensureAttested(true);
+        result = await doFetch();
+      }
+      for (
+        let attempt = 1;
+        attempt <= BUSY_RETRY_MAX && isTransientBusy(result.status, result.body);
+        attempt++
+      ) {
+        const wait = busyBackoffMs(attempt, result.body);
+        verbose(
+          `node: transient 503 backpressure (${bodyError(result.body) ?? "busy"}) — ` +
+            `retry ${attempt}/${BUSY_RETRY_MAX} after ${wait}ms`,
+        );
+        await sleep(wait);
+        result = await doFetch();
+      }
+      if (isNotAttested(result.status, result.body) && sessionToken === null) {
+        throw attestationUnavailableError(path);
+      }
+      return result;
+    },
+  };
+
+  const sdkStoreKey = capabilityStoreKey(FKANBAN_APP_ID, sdkTransport.target);
+  let sdkClient: FoldDbClient | null = null;
+  const dataClient = (): FoldDbClient => {
+    sdkClient ??= new FoldDbClient(
+      FKANBAN_APP_ID,
+      sdkTransport,
+      noopCapabilityStore,
+      null,
+      sdkStoreKey,
+      sdkTransport.target,
+    );
+    return sdkClient;
+  };
+
+  const sdkDataPath = async <T>(path: string, fn: (client: FoldDbClient) => Promise<T>): Promise<T> => {
+    try {
+      return await fn(dataClient());
+    } catch (err) {
+      throw mapSdkDataError(err, url, "POST", path, socketPath);
+    }
+  };
+
   const callJson = async (
     path: string,
     method: "GET" | "POST",
@@ -537,22 +635,6 @@ export function newNodeClient(opts: {
     return result;
   };
 
-  const mutate = async (
-    kind: "create" | "update" | "delete",
-    schemaHash: string,
-    fields: Record<string, unknown>,
-    keyHash: string,
-  ): Promise<void> => {
-    const { status, body } = await callJson("/api/mutation", "POST", {
-      type: "mutation",
-      schema: schemaHash,
-      fields_and_values: fields,
-      key_value: { hash: keyHash, range: null },
-      mutation_type: kind,
-    });
-    if (status !== 200) throw mapNodeError(status, body, "/api/mutation");
-  };
-
   return {
     baseUrl: url,
     userHash,
@@ -607,47 +689,54 @@ export function newNodeClient(opts: {
       }));
     },
     async createRecord({ schemaHash, fields, keyHash }) {
-      await mutate("create", schemaHash, fields, keyHash);
+      await sdkDataPath("/api/mutation", (client) =>
+        client.mutate(schemaHash, {
+          mutationType: "create",
+          fields: fields as RowFields,
+          key: hashKey(keyHash),
+        }),
+      );
     },
     async updateRecord({ schemaHash, fields, keyHash }) {
-      await mutate("update", schemaHash, fields, keyHash);
+      await sdkDataPath("/api/mutation", (client) =>
+        client.mutate(schemaHash, {
+          mutationType: "update",
+          fields: fields as RowFields,
+          key: hashKey(keyHash),
+        }),
+      );
     },
     async deleteRecord({ schemaHash, keyHash }) {
-      await mutate("delete", schemaHash, {}, keyHash);
+      await sdkDataPath("/api/mutation", (client) =>
+        client.mutate(schemaHash, {
+          mutationType: "delete",
+          fields: {},
+          key: hashKey(keyHash),
+        }),
+      );
     },
     async queryAll({ schemaHash, fields, filter }) {
-      // Paginate up to QUERY_PAGE_SIZE rows per request, deduping by record
-      // key across pages (fold_db_node's offset pagination is unstable above
-      // one page — dedupe keeps us correct if a board ever exceeds the page).
-      const allResults: QueryRow[] = [];
-      const seenKeys = new Set<string>();
-      let offset = 0;
-      for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-        const { status, body } = await callJson("/api/query", "POST", {
-          schema_name: schemaHash,
-          fields,
-          ...(filter !== undefined ? { filter } : {}),
-          limit: QUERY_PAGE_SIZE,
-          offset,
-        });
-        if (status !== 200) throw mapNodeError(status, body, "/api/query");
-        const b = body as Record<string, unknown>;
-        const pageResults = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
-        let newOnPage = 0;
-        for (const row of pageResults) {
-          const k = recordDedupKey(row);
-          if (seenKeys.has(k)) continue;
-          seenKeys.add(k);
-          allResults.push(row);
-          newOnPage++;
-        }
-        if (b.has_more !== true) break;
-        if (newOnPage === 0 || pageResults.length === 0) break;
-        offset += pageResults.length;
-      }
-      return { ok: true, results: allResults, returned_count: allResults.length, total_count: allResults.length };
+      const result = await sdkDataPath("/api/query", (client) =>
+        client.queryAll(
+          schemaHash,
+          {
+            fields,
+            ...(filter !== undefined ? { filter: filter as JsonValue } : {}),
+          },
+          { pageSize: QUERY_PAGE_SIZE, maxRows: QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT },
+        ),
+      );
+      return queryResponseFromSdk(result);
     },
     async rawCall(method, path, body) {
+      const sdkSearch = sdkSearchFromNativeIndexPath(method, path);
+      if (sdkSearch !== null) {
+        const result = await sdkDataPath("/api/app/search", (client) =>
+          client.search(sdkSearch.query, { k: sdkSearch.k }),
+        );
+        const json = nativeIndexJsonFromSdkSearch(result);
+        return { status: 200, headers: new Headers(), body: JSON.stringify(json), json };
+      }
       await ensureAttested();
       const doFetch = async () =>
         verboseFetch({
@@ -689,6 +778,67 @@ function recordDedupKey(row: QueryRow): string {
   const key = row.key;
   if (!key || typeof key !== "object") return `__no_key__|${JSON.stringify(row.fields ?? null)}`;
   return `h:${key.hash ?? ""}|r:${key.range ?? ""}`;
+}
+
+function hashKey(keyHash: string): KeyValue {
+  return { hash: keyHash, range: null };
+}
+
+function queryResponseFromSdk(result: SdkQueryResult): QueryResponse {
+  const allResults: QueryRow[] = [];
+  const seenKeys = new Set<string>();
+  for (const row of result.rows) {
+    const converted = queryRowFromSdk(row);
+    const k = recordDedupKey(converted);
+    if (seenKeys.has(k)) continue;
+    seenKeys.add(k);
+    allResults.push(converted);
+  }
+  return {
+    ok: true,
+    results: allResults,
+    returned_count: allResults.length,
+    total_count: result.page?.totalCount ?? result.rowCount ?? allResults.length,
+  };
+}
+
+function queryRowFromSdk(row: SdkQueryResult["rows"][number]): QueryRow {
+  return {
+    fields: row.fields,
+    key: row.keyValue ?? renderedKeyFallback(row.key),
+  };
+}
+
+function renderedKeyFallback(rendered: string): KeyValue {
+  return { hash: rendered.length > 0 ? rendered : null, range: null };
+}
+
+function sdkSearchFromNativeIndexPath(method: string, path: string): { query: string; k: number } | null {
+  if (method !== "GET" || !path.startsWith("/api/native-index/search")) return null;
+  const url = new URL(path, "http://localhost");
+  const query = url.searchParams.get("q") ?? "";
+  if (query.length === 0) return null;
+  return { query, k: 50 };
+}
+
+function nativeIndexJsonFromSdkSearch(result: SdkSearchResult): unknown {
+  return {
+    ok: true,
+    results: result.hits.map((hit) => ({
+      key_value: hit.keyValue ?? renderedKeyFallback(fieldString(hit.fields, "slug") ?? hit.key),
+      fields: hit.fields,
+      metadata: hit.metadata,
+      author_pub_key: hit.authorPubKey ?? "",
+      schema_name: hit.schemaName,
+      schema_display_name: hit.schemaDisplayName ?? "",
+      score: hit.score,
+    })),
+  };
+}
+
+function fieldString(fields: RowFields, key: string): string | null {
+  const value = fields[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function numField(obj: Record<string, unknown>, key: string): number {
@@ -1091,6 +1241,40 @@ function connectionError(
         ? "Is a folddb node running? The local node is reached only over its Unix socket (the legacy loopback TCP port is retired), so an absent or unresponsive socket means it isn't up. Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `fkanban init`."
         : "Check the schema-service URL in ~/.fkanban/config.json.",
     cause,
+  });
+}
+
+function mapSdkDataError(
+  err: unknown,
+  baseUrl: string,
+  method: string,
+  path: string,
+  socketPath?: string,
+): FkanbanError {
+  if (err instanceof FkanbanError) return err;
+  if (err instanceof CapabilityDeniedError) {
+    const body: Record<string, unknown> = { status: 403, reason: err.reason };
+    if (err.detail.capabilityId !== undefined) body.capability_id = err.detail.capabilityId;
+    if (err.detail.schema !== undefined) body.schema = err.detail.schema;
+    if (err.detail.timestampSkewSecs !== undefined) body.timestamp_skew_secs = err.detail.timestampSkewSecs;
+    return mapNodeError(403, body, path);
+  }
+  if (err instanceof PermissionDeniedError) {
+    return mapNodeError(403, { kind: "permission_denied", error: err.reason }, path);
+  }
+  if (err instanceof RequestRejectedError) {
+    return mapNodeError(400, err.body ?? { kind: err.kind, error: err.message }, path);
+  }
+  if (err instanceof UnexpectedResponseError) {
+    return mapNodeError(err.status, err.body, path);
+  }
+  if (err instanceof TransportError) {
+    return connectionError(baseUrl, "node", err, socketPath, method, path);
+  }
+  return new FkanbanError({
+    code: "sdk_error",
+    message: `SDK call to ${path} failed: ${err instanceof Error ? err.message : String(err)}.`,
+    cause: err,
   });
 }
 
