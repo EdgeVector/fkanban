@@ -1327,6 +1327,18 @@ function canFallbackColumnFilter(err: unknown): boolean {
   );
 }
 
+async function listCardsByColumnFallbackScan(
+  node: NodeClient,
+  cfg: Config,
+  column: string,
+  fields: string[],
+): Promise<Card[]> {
+  const summaries = await listCardsWithFields(node, cfg, CARD_STATUS_FIELDS);
+  const slugs = summaries.filter((c) => c.column === column).map((c) => c.slug);
+  const hydrated = await Promise.all(slugs.map((slug) => findCardWithFields(node, cfg, slug, fields)));
+  return hydrated.filter((c): c is Card => c !== null && c.column === column);
+}
+
 export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
   return listCardsWithFields(node, cfg, fieldsFor("card"));
 }
@@ -1426,7 +1438,7 @@ export async function listCardsByColumn(
     return cards.filter((c) => c.column === column);
   } catch (err) {
     if (!canFallbackColumnFilter(err)) throw err;
-    return (await listCardsWithFields(node, cfg, fields)).filter((c) => c.column === column);
+    return listCardsByColumnFallbackScan(node, cfg, column, fields);
   }
 }
 
