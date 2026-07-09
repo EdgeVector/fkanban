@@ -346,7 +346,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
   });
 
-  test("--column falls back to the old full scan when a node rejects column filters", async () => {
+  test("--column fallback avoids a full-body board scan when a node rejects column filters", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -360,5 +360,8 @@ describe("list — text path fetches body-free fields, structured views keep ful
 
     expect(node.cardQueries[0]!.filter).toEqual({ column: "todo" });
     expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter === undefined && q.fields.includes("body"))).toBe(false);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "todo-a" && q.fields.includes("body"))).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "doing-b")).toBe(false);
   });
 });
