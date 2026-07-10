@@ -2,6 +2,7 @@
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
+import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import {
   boardToFields,
   findBoard,
@@ -182,6 +183,13 @@ export async function boardRmCmd(opts: {
     }
     const cardHash = schemaHashFor("card", opts.cfg);
     for (const card of live) {
+      await checkpointCardCompletion({
+        cfg: opts.cfg,
+        node: opts.node,
+        card,
+        boardColumns: board.columns,
+        reason: "delete-backstop",
+      });
       await opts.node.deleteRecord({ schemaHash: cardHash, keyHash: card.slug });
     }
   }

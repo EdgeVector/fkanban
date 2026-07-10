@@ -6,6 +6,7 @@
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
+import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import {
   appendPosition,
   assertDefaultTodoPickupReady,
@@ -230,6 +231,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     });
     assertDefaultTodoPickupReady(updated, opts.force, rawBody);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
+    await checkpointCardCompletion({
+      cfg: opts.cfg,
+      node: opts.node,
+      card: updated,
+      boardColumns: columns,
+      reason: "done-transition",
+    });
     await updateCardRecord(opts, updated);
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
@@ -258,6 +266,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   });
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
+  await checkpointCardCompletion({
+    cfg: opts.cfg,
+    node: opts.node,
+    card,
+    boardColumns: columns,
+    reason: "done-transition",
+  });
   await createCardRecord(opts, card);
   return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };
 }

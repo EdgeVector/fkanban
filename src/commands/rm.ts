@@ -3,7 +3,9 @@
 import { type NodeClient } from "../client.ts";
 import { schemaHashFor, type Config } from "../config.ts";
 import { FkanbanError } from "../client.ts";
-import { listCardStatuses, requireCard } from "../record.ts";
+import { checkpointCardCompletion } from "../brain_checkpoint.ts";
+import { ensureBoardRecord, listCardStatuses, requireCard } from "../record.ts";
+import { DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "../schemas.ts";
 
 export async function rmCmd(opts: {
   cfg: Config;
@@ -23,6 +25,20 @@ export async function rmCmd(opts: {
       code: "card_has_dependents",
       message: `Card "${opts.slug}" is still a dependency of ${dependents.length} live card${dependents.length === 1 ? "" : "s"}.`,
       hint: `Remove or retarget those dependency edges first: ${dependents.join(", ")}`,
+    });
+  }
+
+  if (card.column === "done" || card.done_at) {
+    const boardColumns =
+      card.board === DEFAULT_BOARD_SLUG && card.column === "done"
+        ? [...DEFAULT_COLUMNS]
+        : (await ensureBoardRecord(opts.node, opts.cfg, card.board)).columns;
+    await checkpointCardCompletion({
+      cfg: opts.cfg,
+      node: opts.node,
+      card,
+      boardColumns,
+      reason: "delete-backstop",
     });
   }
 
