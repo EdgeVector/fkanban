@@ -6,6 +6,7 @@
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
+import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import {
   appendPosition,
   assertDefaultTodoPickupReady,
@@ -119,6 +120,13 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   });
   assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
+  await checkpointCardCompletion({
+    cfg: opts.cfg,
+    node: opts.node,
+    card: updated,
+    boardColumns: columns,
+    reason: "done-transition",
+  });
   await updateCardRecord(opts, updated);
   const promotedDependents =
     opts.column === terminalColumn(columns)
