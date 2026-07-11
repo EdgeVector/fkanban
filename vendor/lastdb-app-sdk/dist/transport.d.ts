@@ -2,7 +2,7 @@
  * HTTP transport over either a TCP base URL or a Unix-domain socket.
  *
  * Both transports speak the same HTTP/1.1 dialect the node serves on its TCP
- * listener and its control socket (`folddb_dev_core` binds both; production
+ * listener and its control socket (`fold_db_node::dev_mode` binds both; production
  * `fold_db_node` serves the control-socket route table over its UDS). Node's
  * built-in `http` client handles UDS natively via the `socketPath` request
  * option, so one implementation covers both — the only difference is whether
@@ -41,17 +41,22 @@ export declare function httpTransport(baseUrl: string, defaultHeaders?: Record<s
  */
 export declare function udsTransport(socketPath: string, defaultHeaders?: Record<string, string>): Transport;
 /**
- * Discover which transport an app should use against a local node, matching
- * the Rust `FoldDbHttpClient` discovery order (CLI + MCP) so a TypeScript app
- * and the Rust client agree on where the socket lives.
+ * Discover which transport an app should use against a local node. Mirrors the
+ * Rust `FoldDbHttpClient` discovery (CLI + MCP) so a TypeScript app and the
+ * Rust client agree on where the socket lives, and additionally accepts the
+ * brand-forward `LASTDB_SOCKET_PATH` override ahead of the Rust client's
+ * `FOLDDB_SOCKET_PATH` (both resolve to the same socket when only one is set).
  *
  * Order (highest priority first):
- * 1. `FOLDDB_SOCKET_PATH` — canonical explicit socket-path override.
- * 2. `FOLDDB_SOCK` — deprecated socket-path alias, still honored.
- * 3. `<data_dir>/folddb.sock` — the default the node binds, resolved via
+ * 1. `LASTDB_SOCKET_PATH` — canonical explicit socket-path override
+ *    (brand-forward; SDK-preferred).
+ * 2. `FOLDDB_SOCKET_PATH` — legacy socket-path alias (the current Rust client's
+ *    canonical override), still honored.
+ * 3. `FOLDDB_SOCK` — deprecated socket-path alias, still honored.
+ * 4. `<data_dir>/folddb.sock` — the default the node binds, resolved via
  *    {@link resolveSocketPath} (honors the `LASTDB_HOME`/`FOLDDB_HOME` →
  *    `~/.lastdb`/`~/.folddb` home order).
- * 4. Loopback TCP at `fallbackBaseUrl` — the fallback when no socket exists.
+ * 5. Loopback TCP at `fallbackBaseUrl` — the fallback when no socket exists.
  *
  * A socket path is only chosen when the file actually EXISTS, so a node that
  * binds no socket (a pre-data-plane node, or one whose bind failed)
