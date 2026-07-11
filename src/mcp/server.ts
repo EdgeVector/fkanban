@@ -203,6 +203,7 @@ const pickupCategorySchema = z.enum([
   "parked/non-work",
   "collision",
   "stale-metadata",
+  "situation-fenced",
 ]);
 const pickupClassificationSchema = z.object({
   slug: z.string(),

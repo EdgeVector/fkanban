@@ -33,6 +33,7 @@ import {
   type Card,
   type PriorityTier,
 } from "../record.ts";
+import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 
 export type AddOptions = {
   cfg: Config;
@@ -70,6 +71,7 @@ export type AddOptions = {
   prUrl?: string;
   branch?: string;
   surfaces?: string[];
+  situationPreflight?: SituationPreflight;
 };
 
 // Reject an invalid --kind / --block-status BEFORE any write, mirroring the
@@ -230,6 +232,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       warn: suppressDefaultTodoWarning(updated, opts.force) ? () => {} : undefined,
     });
     assertDefaultTodoPickupReady(updated, opts.force, rawBody);
+    await assertSituationPreflightAllowed(updated, opts.situationPreflight);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
     await checkpointCardCompletion({
       cfg: opts.cfg,
@@ -265,6 +268,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     warn: suppressDefaultTodoWarning(card, opts.force) ? () => {} : undefined,
   });
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
+  await assertSituationPreflightAllowed(card, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
   await checkpointCardCompletion({
     cfg: opts.cfg,

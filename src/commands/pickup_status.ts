@@ -2,15 +2,17 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { listBoards, listCards } from "../record.ts";
 import {
-  buildPickupStatusReport,
+  buildPickupStatusReportWithSituations,
   renderPickupStatus,
   type PickupStatusReport,
 } from "../pickup.ts";
+import { type SituationPreflight } from "../situations.ts";
 
 export type PickupStatusOptions = {
   cfg: Config;
   node: NodeClient;
   json?: boolean;
+  situationPreflight?: SituationPreflight;
 };
 
 export async function pickupStatusResult(opts: PickupStatusOptions): Promise<{
@@ -21,7 +23,7 @@ export async function pickupStatusResult(opts: PickupStatusOptions): Promise<{
     listCards(opts.node, opts.cfg),
     listBoards(opts.node, opts.cfg),
   ]);
-  const report = buildPickupStatusReport(cards, boards);
+  const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight);
   return { text: renderPickupStatus(report), report };
 }
 
