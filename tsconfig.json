@@ -30,7 +30,7 @@
 
     "baseUrl": ".",
     "paths": {
-      "@folddb/app-sdk": ["./vendor/folddb-app-sdk"]
+      "@lastdb/app-sdk": ["./vendor/lastdb-app-sdk"]
     }
   },
   "include": ["src/**/*", "test/**/*"],

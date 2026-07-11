@@ -1,5 +1,5 @@
 /**
- * The FoldDB runtime app client.
+ * The LastDB runtime app client.
  *
  * Wraps the node's production `/api/*` dialect: connect → request-consent →
  * poll → query/mutation-with-capability. Every method maps the node's
@@ -7,7 +7,7 @@
  *
  * Surface verified against `origin/main`:
  * - consent flow handlers: `fold_db_node/src/server/routes/apps.rs`
- * - data path handlers: `folddb_dev_core` `app_endpoints.rs` (the dev mirror of
+ * - data path handlers: `fold_db_node::dev_mode` `app_endpoints.rs` (the dev mirror of
  *   production `fold_db_node`'s control-socket route table)
  * - capability header: `fold_db_node/src/handlers/caller.rs`
  *   (`X-App-Capability` = base64 JSON CapabilityToken, `X-Capability-Ts` =
@@ -35,7 +35,7 @@ function nowEpochSecs() {
     return String(Math.floor(Date.now() / 1000));
 }
 /**
- * Connect to a FoldDB node. Provide exactly one of `baseUrl` (HTTP) or
+ * Connect to a LastDB node. Provide exactly one of `baseUrl` (HTTP) or
  * `socketPath` (Unix-domain socket) — the transport is chosen by which is
  * present. Attempts to auto-load a stored capability for `appId` unless one
  * is supplied inline.
@@ -43,8 +43,11 @@ function nowEpochSecs() {
  * **Socket-first discovery.** When you pass `baseUrl` (the local-node case),
  * the SDK PREFERS the node's Unix-domain data-plane socket and falls back to
  * the `baseUrl` TCP listener only when no socket file is present. This follows
- * the same discovery order the Rust client uses (`FOLDDB_SOCKET_PATH` →
- * `FOLDDB_SOCK` legacy alias → `<data_dir>/folddb.sock` → TCP), making the
+ * the discovery order the Rust client uses, with the brand-forward
+ * `LASTDB_SOCKET_PATH` preferred ahead of the Rust client's
+ * `FOLDDB_SOCKET_PATH` (`LASTDB_SOCKET_PATH` → `FOLDDB_SOCKET_PATH` legacy
+ * alias → `FOLDDB_SOCK` legacy alias → `<data_dir>/folddb.sock` → TCP),
+ * making the
  * socket the normal app path while keeping TCP working mid-migration. Opt out
  * with `connect({ baseUrl, discoverSocket: false })` to force the TCP listener
  * (e.g. against a remote/non-local node, or a browser-style HTTP path). An
@@ -107,10 +110,10 @@ export async function connect(options) {
             capability = null;
         }
     }
-    return new FoldDbClient(appId, transport, store, capability, storeKey, nodeTarget, { verifyCapability });
+    return new LastDbClient(appId, transport, store, capability, storeKey, nodeTarget, { verifyCapability });
 }
-/** A connected FoldDB app client. Construct via {@link connect}. */
-export class FoldDbClient {
+/** A connected LastDB app client. Construct via {@link connect}. */
+export class LastDbClient {
     appId;
     transport;
     store;
@@ -276,7 +279,7 @@ export class FoldDbClient {
      * check `result.page?.hasMore` or use {@link queryAll} to drain it.
      * `filter.limit`/`filter.offset` are forwarded verbatim as the request's
      * top-level pagination fields, and only when set. Both the production node
-     * and the dev node (`folddb_dev_core`) honor them with production-parity
+     * and the dev node (`fold_db_node::dev_mode`) honor them with production-parity
      * semantics (default 100, clamp 1000, `total_count`/`has_more` metadata).
      */
     async query(schemaName, filter = {}) {
@@ -317,7 +320,7 @@ export class FoldDbClient {
      * truncation stays visible.
      *
      * Works against both node kinds: production `fold_db_node` and the dev node
-     * (`folddb_dev_core`) both paginate `/api/query` with the same default/clamp
+     * (`fold_db_node::dev_mode`) both paginate `/api/query` with the same default/clamp
      * and `page` metadata, so the drain follows `page.hasMore` identically on
      * either.
      */
@@ -490,11 +493,18 @@ export class FoldDbClient {
     }
 }
 /**
+ * @deprecated Renamed to {@link LastDbClient}. Kept as an exported value + type
+ * alias so mid-port consumers keep compiling (`new FoldDbClient(...)` and
+ * `: FoldDbClient` both resolve to `LastDbClient`); removed at the adoption
+ * capstone.
+ */
+export const FoldDbClient = LastDbClient;
+/**
  * Parse a `200` `/api/query` body into a {@link QueryResult}, surfacing the
  * full per-row envelope (gap #3).
  *
  * The node returns its rows under `results` (production `fold_db_node`) or
- * `rows` (the `folddb_dev_core` mirror); both carry per-key objects shaped
+ * `rows` (the `fold_db_node::dev_mode` mirror); both carry per-key objects shaped
  * `{ key, fields, metadata, author_pub_key }`. Each row is normalized to a
  * {@link QueryRow}. A bare field-map row (a node that pre-dates the envelope)
  * is still accepted: its `key`/`metadata`/`authorPubKey` come back empty/null

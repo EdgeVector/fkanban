@@ -29,7 +29,7 @@ import { basename, dirname, join } from "node:path";
 
 import {
   CapabilityDeniedError,
-  FoldDbClient,
+  LastDbClient,
   PermissionDeniedError,
   RequestRejectedError,
   TransportError,
@@ -42,7 +42,7 @@ import {
   type RowFields,
   type SearchResult as SdkSearchResult,
   type Transport as SdkTransport,
-} from "@folddb/app-sdk";
+} from "@lastdb/app-sdk";
 
 import type { AddSchemaRequest } from "./schemas.ts";
 
@@ -578,9 +578,9 @@ export function newNodeClient(opts: {
   };
 
   const sdkStoreKey = capabilityStoreKey(FKANBAN_APP_ID, sdkTransport.target);
-  let sdkClient: FoldDbClient | null = null;
-  const dataClient = (): FoldDbClient => {
-    sdkClient ??= new FoldDbClient(
+  let sdkClient: LastDbClient | null = null;
+  const dataClient = (): LastDbClient => {
+    sdkClient ??= new LastDbClient(
       FKANBAN_APP_ID,
       sdkTransport,
       noopCapabilityStore,
@@ -591,7 +591,7 @@ export function newNodeClient(opts: {
     return sdkClient;
   };
 
-  const sdkDataPath = async <T>(path: string, fn: (client: FoldDbClient) => Promise<T>): Promise<T> => {
+  const sdkDataPath = async <T>(path: string, fn: (client: LastDbClient) => Promise<T>): Promise<T> => {
     try {
       return await fn(dataClient());
     } catch (err) {

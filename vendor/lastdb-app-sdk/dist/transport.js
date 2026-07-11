@@ -2,7 +2,7 @@
  * HTTP transport over either a TCP base URL or a Unix-domain socket.
  *
  * Both transports speak the same HTTP/1.1 dialect the node serves on its TCP
- * listener and its control socket (`folddb_dev_core` binds both; production
+ * listener and its control socket (`fold_db_node::dev_mode` binds both; production
  * `fold_db_node` serves the control-socket route table over its UDS). Node's
  * built-in `http` client handles UDS natively via the `socketPath` request
  * option, so one implementation covers both — the only difference is whether
@@ -43,9 +43,11 @@ export function udsTransport(socketPath, defaultHeaders = {}) {
 }
 /** The fixed file name the node binds its data-plane socket under. */
 const SOCKET_FILE_NAME = 'folddb.sock';
-/** Canonical explicit node-socket override. */
+/** Canonical explicit node-socket override (brand-forward name). */
+const LASTDB_SOCKET_PATH_ENV = 'LASTDB_SOCKET_PATH';
+/** Legacy alias for {@link LASTDB_SOCKET_PATH_ENV}, still honored. */
 const FOLDDB_SOCKET_PATH_ENV = 'FOLDDB_SOCKET_PATH';
-/** Deprecated alias for {@link FOLDDB_SOCKET_PATH_ENV}. */
+/** Deprecated alias for {@link LASTDB_SOCKET_PATH_ENV}. */
 const FOLDDB_SOCK_ENV = 'FOLDDB_SOCK';
 let warnedLegacySocketEnv = false;
 function warnLegacySocketEnv() {
@@ -53,7 +55,7 @@ function warnLegacySocketEnv() {
         return;
     }
     warnedLegacySocketEnv = true;
-    process.emitWarning(`${FOLDDB_SOCK_ENV} is deprecated; set ${FOLDDB_SOCKET_PATH_ENV} for explicit node socket overrides`, 'DeprecationWarning');
+    process.emitWarning(`${FOLDDB_SOCK_ENV} is deprecated; set ${LASTDB_SOCKET_PATH_ENV} for explicit node socket overrides`, 'DeprecationWarning');
 }
 /**
  * Expand a leading `~` (or `~/...`) against the current user's home directory,
@@ -105,14 +107,20 @@ function resolveFolddbHome(env) {
     return lastdb;
 }
 /**
- * Resolve the node's default data-plane socket path the same way the Rust
- * client's `resolve_socket_path()` does: an explicit `FOLDDB_SOCKET_PATH`
- * override (tilde-expanded) wins, then the deprecated `FOLDDB_SOCK` alias,
- * otherwise `<folddb_home>/data/folddb.sock`.
- * Returns `null` only when neither the env override is set nor a home dir can
+ * Resolve the node's default data-plane socket path, mirroring the Rust
+ * client's `resolve_socket_path()` and additionally preferring the
+ * brand-forward `LASTDB_SOCKET_PATH`: an explicit `LASTDB_SOCKET_PATH`
+ * override (tilde-expanded) wins, then the legacy `FOLDDB_SOCKET_PATH` alias
+ * (the Rust client's canonical override), then the deprecated `FOLDDB_SOCK`
+ * alias, otherwise `<folddb_home>/data/folddb.sock`.
+ * Returns `null` only when neither an env override is set nor a home dir can
  * be resolved.
  */
 function resolveSocketPath(env) {
+    const lastdbExplicit = env[LASTDB_SOCKET_PATH_ENV];
+    if (lastdbExplicit && lastdbExplicit.length > 0) {
+        return expandTilde(lastdbExplicit);
+    }
     const explicit = env[FOLDDB_SOCKET_PATH_ENV];
     if (explicit && explicit.length > 0) {
         return expandTilde(explicit);
@@ -129,17 +137,22 @@ function resolveSocketPath(env) {
     return join(home, 'data', SOCKET_FILE_NAME);
 }
 /**
- * Discover which transport an app should use against a local node, matching
- * the Rust `FoldDbHttpClient` discovery order (CLI + MCP) so a TypeScript app
- * and the Rust client agree on where the socket lives.
+ * Discover which transport an app should use against a local node. Mirrors the
+ * Rust `FoldDbHttpClient` discovery (CLI + MCP) so a TypeScript app and the
+ * Rust client agree on where the socket lives, and additionally accepts the
+ * brand-forward `LASTDB_SOCKET_PATH` override ahead of the Rust client's
+ * `FOLDDB_SOCKET_PATH` (both resolve to the same socket when only one is set).
  *
  * Order (highest priority first):
- * 1. `FOLDDB_SOCKET_PATH` — canonical explicit socket-path override.
- * 2. `FOLDDB_SOCK` — deprecated socket-path alias, still honored.
- * 3. `<data_dir>/folddb.sock` — the default the node binds, resolved via
+ * 1. `LASTDB_SOCKET_PATH` — canonical explicit socket-path override
+ *    (brand-forward; SDK-preferred).
+ * 2. `FOLDDB_SOCKET_PATH` — legacy socket-path alias (the current Rust client's
+ *    canonical override), still honored.
+ * 3. `FOLDDB_SOCK` — deprecated socket-path alias, still honored.
+ * 4. `<data_dir>/folddb.sock` — the default the node binds, resolved via
  *    {@link resolveSocketPath} (honors the `LASTDB_HOME`/`FOLDDB_HOME` →
  *    `~/.lastdb`/`~/.folddb` home order).
- * 4. Loopback TCP at `fallbackBaseUrl` — the fallback when no socket exists.
+ * 5. Loopback TCP at `fallbackBaseUrl` — the fallback when no socket exists.
  *
  * A socket path is only chosen when the file actually EXISTS, so a node that
  * binds no socket (a pre-data-plane node, or one whose bind failed)
