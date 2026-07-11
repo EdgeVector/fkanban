@@ -14,7 +14,9 @@ import {
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { pickupStatusResult } from "../src/commands/pickup_status.ts";
 import { groomStaleBlockersResult } from "../src/commands/groom.ts";
+import { moveCmd } from "../src/commands/move.ts";
 import { HUMAN_BOARD_COLUMNS, PICKUP_CATEGORIES } from "../src/pickup.ts";
+import type { SituationPreflight } from "../src/situations.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -22,6 +24,23 @@ const cfg: Config = {
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
   schemaHashes: { card: "cardhash", board: "boardhash" },
+};
+
+const minimalNodeFence = {
+  situation: {
+    slug: "fold-db-node-major-simplification",
+    links_brain: ["north-star-lastdb-minimal-node"],
+    allowed_actions: [],
+  },
+  action: "file-fold-db-node-feature-card",
+  message: "Only north-star-lastdb-minimal-node cards may modify fold_db_node.",
+};
+
+const foldDbNodeFencePreflight: SituationPreflight = async ({ action }) => {
+  if (action === "file-fold-db-node-feature-card") {
+    return { ok: false, blocks: [minimalNodeFence] };
+  }
+  return { ok: false, blocks: [minimalNodeFence] };
 };
 
 function fakeNode(): NodeClient {
@@ -177,6 +196,52 @@ describe("pickup-status", () => {
     const bySlug = new Map(report.cards.map((c) => [c.slug, c.category]));
     expect(bySlug.get("stale")).toBe("stale-metadata");
     expect(bySlug.get("real-human")).toBe("human-gated");
+  });
+
+  test("preflights Situation-fenced pickup candidates and allows matching north-star cards", async () => {
+    await seedCard(node, card({
+      slug: "org-invite",
+      repo: "EdgeVector/fold",
+      base: "main",
+      tags: ["fold_db_node"],
+      north_star: "north-star-org-invite-via-link",
+    }));
+    await seedCard(node, card({
+      slug: "strip-card",
+      repo: "EdgeVector/fold",
+      base: "main",
+      tags: ["fold_db_node"],
+      north_star: "north-star-lastdb-minimal-node",
+    }));
+
+    const { report } = await pickupStatusResult({ cfg, node, situationPreflight: foldDbNodeFencePreflight });
+    const bySlug = new Map(report.cards.map((c) => [c.slug, c]));
+
+    expect(bySlug.get("org-invite")?.category).toBe("situation-fenced");
+    expect(bySlug.get("org-invite")?.ready).toBe(false);
+    expect(bySlug.get("org-invite")?.reason).toContain("fold-db-node-major-simplification");
+    expect(bySlug.get("strip-card")?.category).toBe("pickup-ready");
+  });
+
+  test("refuses moving a Situation-fenced candidate to doing without writing", async () => {
+    await seedCard(node, card({
+      slug: "org-invite",
+      repo: "EdgeVector/fold",
+      base: "main",
+      tags: ["fold_db_node"],
+      north_star: "north-star-org-invite-via-link",
+    }));
+
+    await expect(moveCmd({
+      cfg,
+      node,
+      slug: "org-invite",
+      column: "doing",
+      situationPreflight: foldDbNodeFencePreflight,
+    })).rejects.toMatchObject({
+      code: "situation_fenced",
+    });
+    expect((await findCard(node, cfg, "org-invite"))?.column).toBe("todo");
   });
 });
 

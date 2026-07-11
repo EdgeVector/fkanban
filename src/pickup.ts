@@ -16,6 +16,7 @@ import {
   type Card,
   type DepStatus,
 } from "./record.ts";
+import { checkSituationFence, type SituationFenceResult, type SituationPreflight } from "./situations.ts";
 
 export const HUMAN_BOARD_SLUG = "human";
 export const HUMAN_BOARD_TITLE = "Human / parked work";
@@ -29,6 +30,7 @@ export const PICKUP_CATEGORIES = [
   "parked/non-work",
   "collision",
   "stale-metadata",
+  "situation-fenced",
 ] as const;
 export type PickupCategory = (typeof PICKUP_CATEGORIES)[number];
 
@@ -113,7 +115,12 @@ function isStaleGeneratedHold(card: Card, allCards: Card[]): boolean {
   return false;
 }
 
-export function classifyPickupCard(card: Card, allCards: Card[], dep: DepStatus): PickupClassification {
+export function classifyPickupCard(
+  card: Card,
+  allCards: Card[],
+  dep: DepStatus,
+  situationFence?: SituationFenceResult,
+): PickupClassification {
   const kind = normalizeKind(card.kind);
   const blockStatus = normalizeBlockStatus(card.block_status);
   const repo = repoForDisplay(card);
@@ -179,15 +186,23 @@ export function classifyPickupCard(card: Card, allCards: Card[], dep: DepStatus)
     details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
     return out("blocked-on-dependency", "unfinished dependency", "Finish or retarget the dependency before pickup.");
   }
+  if (situationFence && !situationFence.allowed) {
+    details.push(...situationFence.details);
+    return out("situation-fenced", situationFence.reason, situationFence.suggestion);
+  }
 
   return out("pickup-ready", "ready for fkanban-agent WORK mode", "Pick this card up next.");
 }
 
-export function buildPickupStatusReport(cards: Card[], boards: Board[]): PickupStatusReport {
+export function buildPickupStatusReport(
+  cards: Card[],
+  boards: Board[],
+  situationFences: Map<string, SituationFenceResult> = new Map(),
+): PickupStatusReport {
   const active = sortCards(activeCards(cards, boards));
   const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
   const classifications = active.map((card) =>
-    classifyPickupCard(card, active, depStatus(card, active, terminalByBoard)),
+    classifyPickupCard(card, active, depStatus(card, active, terminalByBoard), situationFences.get(card.slug)),
   );
   const counts = Object.fromEntries(PICKUP_CATEGORIES.map((category) => [category, 0])) as Record<PickupCategory, number>;
   for (const c of classifications) counts[c.category] += 1;
@@ -197,6 +212,25 @@ export function buildPickupStatusReport(cards: Card[], boards: Board[]): PickupS
     counts,
     cards: classifications,
   };
+}
+
+export async function buildPickupStatusReportWithSituations(
+  cards: Card[],
+  boards: Board[],
+  preflight?: SituationPreflight,
+): Promise<PickupStatusReport> {
+  const local = buildPickupStatusReport(cards, boards);
+  const activeBySlug = new Map(activeCards(cards, boards).map((card) => [card.slug, card]));
+  const fences = new Map<string, SituationFenceResult>();
+  await Promise.all(local.cards
+    .filter((card) => card.category === "pickup-ready")
+    .map(async (classification) => {
+      const card = activeBySlug.get(classification.slug);
+      if (!card) return;
+      const result = await checkSituationFence(card, preflight);
+      if (!result.allowed) fences.set(card.slug, result);
+    }));
+  return fences.size > 0 ? buildPickupStatusReport(cards, boards, fences) : local;
 }
 
 export function renderPickupStatus(report: PickupStatusReport): string {

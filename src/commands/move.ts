@@ -25,6 +25,7 @@ import {
   updateCardRecord,
   type Card,
 } from "../record.ts";
+import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -34,6 +35,7 @@ export type MoveOptions = {
   position?: number;
   // Override the dependency soft-block when moving into a working column.
   force?: boolean;
+  situationPreflight?: SituationPreflight;
 };
 
 export type MoveResult = { slug: string; from: string; to: string; promotedDependents?: string[] };
@@ -119,6 +121,7 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     warn: !opts.force && updated.board === "default" && updated.column === "todo" ? () => {} : undefined,
   });
   assertDefaultTodoPickupReady(updated, opts.force, rawBody);
+  await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
   await checkpointCardCompletion({
     cfg: opts.cfg,
