@@ -88,6 +88,14 @@ export type RawResponse = {
   json: unknown;
 };
 
+export type AppSchemaDeclaration = {
+  app_id: string;
+  schema: string;
+  canonical: string;
+  resolution: "mint" | "link" | string;
+  decision?: string;
+};
+
 // Single-request page size for the /api/query pagination loop — the node caps
 // individual pages at 1000. fkanban boards stay well under that, so in
 // practice one round trip resolves the whole schema.
@@ -214,6 +222,7 @@ export type NodeClient = {
   // resolve `fkanban/<Name>` → canonical hash after the schemas are published
   // out-of-band via the exemem app-creation flow.
   listSchemas(): Promise<LoadedSchema[]>;
+  declareAppSchema?(appId: string, schema: Record<string, unknown>): Promise<AppSchemaDeclaration>;
   createRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string }): Promise<void>;
   updateRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
@@ -411,6 +420,10 @@ export function newNodeClient(opts: {
   // a request later 403s with `transport_not_attested` (a restarted node drops
   // the in-memory session). Omit to talk to the node unattested.
   socketPath?: string;
+  // Dev-first app-caller mode. When present, requests carry an app capability
+  // envelope for this app id so the node applies per-app schema LINK mappings.
+  appId?: string;
+  appCapability?: string;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
@@ -418,6 +431,8 @@ export function newNodeClient(opts: {
   const userHash = opts.userHash;
   const timeoutMs = opts.timeoutMs;
   const socketPath = opts.socketPath;
+  const appId = opts.appId;
+  const appCapability = opts.appCapability;
 
   // Owner-session token, established lazily on the first request and shared
   // across every subsequent call. `attesting` dedupes concurrent first-hits so
@@ -499,6 +514,12 @@ export function newNodeClient(opts: {
   const nodeHeaders = (): Record<string, string> => {
     const h: Record<string, string> = { "X-User-Hash": userHash };
     if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
+    if (appId !== undefined && appId.length > 0) {
+      h["X-App-Capability"] = appCapability && appCapability.length > 0
+        ? appCapability
+        : appCapabilityHeader(appId);
+      h["X-Capability-Ts"] = Math.floor(Date.now() / 1000).toString();
+    }
     return h;
   };
 
@@ -688,6 +709,31 @@ export function newNodeClient(opts: {
           : [],
       }));
     },
+    async declareAppSchema(appId, schema) {
+      const { status, body } = await callJson("/api/apps/declare-schema", "POST", {
+        app_id: appId,
+        schema,
+      });
+      if (status !== 200) throw mapNodeError(status, body, "/api/apps/declare-schema");
+      const b = body as Record<string, unknown>;
+      const canonical = typeof b.canonical === "string" ? b.canonical : "";
+      const schemaName = typeof b.schema === "string" ? b.schema : "";
+      const resolution = typeof b.resolution === "string" ? b.resolution : "";
+      if (!canonical || !schemaName || !resolution) {
+        throw new FkanbanError({
+          code: "app_schema_declare_bad_response",
+          message: `Node /api/apps/declare-schema returned an incomplete response: ${JSON.stringify(body).slice(0, 300)}.`,
+          hint: "Upgrade the node or inspect the app-schema declaration response.",
+        });
+      }
+      return {
+        app_id: typeof b.app_id === "string" ? b.app_id : appId,
+        schema: schemaName,
+        canonical,
+        resolution,
+        decision: typeof b.decision === "string" ? b.decision : undefined,
+      };
+    },
     async createRecord({ schemaHash, fields, keyHash }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
@@ -844,6 +890,29 @@ function fieldString(fields: RowFields, key: string): string | null {
 function numField(obj: Record<string, unknown>, key: string): number {
   const v = obj[key];
   return typeof v === "number" ? v : 0;
+}
+
+function appCapabilityHeader(appId: string): string {
+  const now = new Date().toISOString();
+  const token = {
+    envelope: {
+      version: 1,
+      purpose: "capability_grant",
+      alg: "Ed25519",
+      key_id: "fkanban-dev-local",
+      issued_at: now,
+      env: "dev",
+      payload_hash: "dev-local",
+      sig: "ZGV2LWxvY2Fs",
+    },
+    capability_id: `fkanban-dev-local-${appId}`,
+    app_id: appId,
+    scope: { wildcard: `${appId}/*` },
+    granted_ops: ["read", "write"],
+    granted_at: now,
+    node_pubkey: "dev-local",
+  };
+  return Buffer.from(JSON.stringify(token), "utf8").toString("base64");
 }
 
 function bodyError(body: unknown): string | undefined {

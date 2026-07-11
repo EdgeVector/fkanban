@@ -39,6 +39,13 @@ import {
 } from "../src/record.ts";
 import { FkanbanError, type NodeClient, type QueryResponse, type QueryRow } from "../src/client.ts";
 import { listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
+import {
+  GATES_LOCAL_SCHEMA,
+  declareGatesLink,
+  formatGateLineForDisplay,
+  gatesCmd,
+  parseGateLine,
+} from "../src/commands/gates.ts";
 import { type Config } from "../src/config.ts";
 import {
   formatAdd,
@@ -950,6 +957,96 @@ describe("listCmd empty board", () => {
     expect(out).not.toContain("No cards yet");
     expect(out).toContain("TODO  (0)");
     expect(out).toContain("  —");
+  });
+});
+
+describe("gates command", () => {
+  const ledgerBody = [
+    "# Decisions",
+    "",
+    "## Structured gate ledger",
+    "",
+    '- status=open slug=needs-tom program="[[north-star]]" unblocks="prod cutover" evidence="fbrain:project-x" surfaced=2026-06-29 recommendation="ship after GO"',
+    '- status=cleared slug=old-gate program="x" unblocks="y" evidence="z" surfaced=2026-06-01 cleared=2026-06-02 resolution="done"',
+  ].join("\n");
+
+  function gatesNode(opts: {
+    body?: string;
+    declareResolution?: "link" | "mint";
+  } = {}): NodeClient {
+    return {
+      baseUrl: "http://stub",
+      userHash: "stub",
+      autoIdentity: async () => ({ provisioned: true, userHash: "stub" }),
+      bootstrap: async () => ({ userHash: "stub" }),
+      loadSchemas: async () => ({ available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] }),
+      listSchemas: async () => [],
+      declareAppSchema: async (appId, schema) => ({
+        app_id: appId,
+        schema: String(schema.name ?? ""),
+        canonical: "fbrain-reference-hash",
+        resolution: opts.declareResolution ?? "link",
+        decision: opts.declareResolution ?? "link",
+      }),
+      createRecord: async () => {},
+      updateRecord: async () => {},
+      deleteRecord: async () => {},
+      queryAll: async (q: { schemaHash: string; fields: string[]; filter?: { HashKey: string } }) => {
+        expect(q.schemaHash).toBe(GATES_LOCAL_SCHEMA);
+        expect(q.filter).toEqual({ HashKey: "open-decisions" });
+        return {
+          ok: true,
+          results: [
+            {
+              fields: { slug: "open-decisions", body: opts.body ?? ledgerBody },
+              key: { hash: "open-decisions", range: null },
+            },
+          ],
+        };
+      },
+      rawCall: async () => ({ status: 200, headers: new Headers(), body: "", json: null }),
+      nodeTransport: () => ({ transport: "socket" }),
+    };
+  }
+
+  test("parses and formats the same open-gate line as fbrain gates --open", () => {
+    const gate = parseGateLine(
+      '- status=open slug=needs-tom program="[[north-star]]" unblocks="prod cutover" evidence="fbrain:project-x" surfaced=2026-06-29 recommendation="ship after GO"',
+    );
+    expect(gate).not.toBeNull();
+    expect(formatGateLineForDisplay(gate!)).toBe(
+      "needs-tom · program=[[north-star]] · unblocks=prod cutover · evidence=fbrain:project-x · surfaced=2026-06-29",
+    );
+  });
+
+  test("renders only open gates from the linked ledger", async () => {
+    const out = await gatesCmd({ node: gatesNode() });
+    expect(out).toBe(
+      "needs-tom · program=[[north-star]] · unblocks=prod cutover · evidence=fbrain:project-x · surfaced=2026-06-29",
+    );
+    expect(out).not.toContain("old-gate");
+  });
+
+  test("--json returns the open gate array", async () => {
+    const out = await gatesCmd({ node: gatesNode(), json: true });
+    expect(JSON.parse(out)).toEqual([
+      {
+        status: "open",
+        slug: "needs-tom",
+        program: "[[north-star]]",
+        unblocks: "prod cutover",
+        evidence: "fbrain:project-x",
+        surfaced: "2026-06-29",
+        recommendation: "ship after GO",
+      },
+    ]);
+  });
+
+  test("declare setup requires the node to establish a read-only LINK", async () => {
+    await expect(declareGatesLink({ node: gatesNode({ declareResolution: "mint" }) }))
+      .rejects.toThrow("not as a read-only LINK");
+    const linked = await declareGatesLink({ node: gatesNode({ declareResolution: "link" }) });
+    expect(linked.resolution).toBe("link");
   });
 });
 
