@@ -36,6 +36,10 @@ export type BrainCheckpointResult =
   | { action: "already-exists"; targetSlug: string }
   | { action: "written"; targetSlug: string; ownerSlug: string; orphan: boolean };
 
+function defaultCheckpointWarn(msg: string): void {
+  process.stderr.write(`fkanban: warning: ${msg}\n`);
+}
+
 let testClient: BrainCheckpointClient | null = null;
 
 export function setBrainCheckpointClientForTest(client: BrainCheckpointClient | null): () => void {
@@ -236,6 +240,9 @@ export async function checkpointCardCompletion(opts: {
   card: Card;
   boardColumns: readonly string[];
   reason: "done-transition" | "delete-backstop";
+  // Surface for a best-effort skip (F-Brain unconfigured/unreachable). Defaults
+  // to a one-line stderr warning. The card write must never be gated on this.
+  warn?: (msg: string) => void;
 }): Promise<BrainCheckpointResult> {
   if (opts.card.column !== terminalColumn(opts.boardColumns)) {
     return { action: "skipped", reason: "card is not in the board terminal column" };
@@ -244,25 +251,40 @@ export async function checkpointCardCompletion(opts: {
   const client = brainClient();
   if (!client) return { action: "skipped", reason: "brain checkpoints disabled in this process" };
 
-  const ownerSlug = await resolveOwnerSlug(client, opts.card);
-  const ownerRecord = ownerSlug ? await client.get(ownerSlug).catch(() => null) : null;
-  const orphan = !ownerRecord;
-  const targetRecord = orphan ? await ensureOrphanLedger(client) : ownerRecord!;
-  const marker = checkpointMarker(opts.card.slug);
-  if (targetRecord.body.includes(marker)) {
-    return { action: "already-exists", targetSlug: targetRecord.slug };
-  }
+  // The completion checkpoint is a durable-history nicety, not a correctness
+  // gate for the board write. F-Brain may be unconfigured (no
+  // ~/.fbrain/config.json on a fresh machine / CI / isolated $HOME) or the node
+  // may be unreachable; either way the spawned `fbrain` CLI rejects with a raw
+  // dependency error. Degrade gracefully: warn and skip so the caller still
+  // performs its column write instead of hard-failing with a stack error.
+  try {
+    const ownerSlug = await resolveOwnerSlug(client, opts.card);
+    const ownerRecord = ownerSlug ? await client.get(ownerSlug).catch(() => null) : null;
+    const orphan = !ownerRecord;
+    const targetRecord = orphan ? await ensureOrphanLedger(client) : ownerRecord!;
+    const marker = checkpointMarker(opts.card.slug);
+    if (targetRecord.body.includes(marker)) {
+      return { action: "already-exists", targetSlug: targetRecord.slug };
+    }
 
-  const remainingLiveCards = ownerSlug && !orphan
-    ? await remainingLiveOwnerCards({ cfg: opts.cfg, node: opts.node, completedCard: opts.card, ownerSlug })
-    : [];
-  const chunk = checkpointChunk({
-    card: opts.card,
-    ownerSlug,
-    orphan,
-    reason: opts.reason,
-    remainingLiveCards,
-  });
-  await client.append(targetRecord.slug, chunk, targetRecord.type);
-  return { action: "written", targetSlug: targetRecord.slug, ownerSlug, orphan };
+    const remainingLiveCards = ownerSlug && !orphan
+      ? await remainingLiveOwnerCards({ cfg: opts.cfg, node: opts.node, completedCard: opts.card, ownerSlug })
+      : [];
+    const chunk = checkpointChunk({
+      card: opts.card,
+      ownerSlug,
+      orphan,
+      reason: opts.reason,
+      remainingLiveCards,
+    });
+    await client.append(targetRecord.slug, chunk, targetRecord.type);
+    return { action: "written", targetSlug: targetRecord.slug, ownerSlug, orphan };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const firstLine = message.split("\n")[0]!.trim();
+    (opts.warn ?? defaultCheckpointWarn)(
+      `F-Brain completion checkpoint skipped for \`${opts.card.slug}\` (${firstLine}); card write still applied.`,
+    );
+    return { action: "skipped", reason: `brain unavailable: ${firstLine}` };
+  }
 }

@@ -6,6 +6,7 @@ import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
 import { rmCmd } from "../src/commands/rm.ts";
 import {
+  checkpointCardCompletion,
   ORPHAN_COMPLETION_LEDGER,
   setBrainCheckpointClientForTest,
 } from "../src/brain_checkpoint.ts";
@@ -223,5 +224,49 @@ describe("F-Brain completion checkpoints", () => {
     expect(brain.puts).toContain(ORPHAN_COMPLETION_LEDGER);
     expect(body).toContain("<!-- fkanban-completion-checkpoint:legacy-done -->");
     expect(await findCard(node, cfg, "legacy-done")).toBeNull();
+  });
+
+  test("move to done still persists when F-Brain is unconfigured/unreachable", async () => {
+    // Simulate a fresh machine / CI / isolated $HOME: the spawned `fbrain` CLI
+    // rejects because there is no ~/.fbrain/config.json. The checkpoint must
+    // degrade to a warning, and the column write must still land.
+    const failingClient = {
+      async get() {
+        throw new Error("Config not found at /tmp/isolated/.fbrain/config.json.\n  hint: Run `fbrain init` to create it.");
+      },
+      async put(): Promise<void> {
+        throw new Error("Config not found at /tmp/isolated/.fbrain/config.json.");
+      },
+      async append(): Promise<void> {
+        throw new Error("Config not found at /tmp/isolated/.fbrain/config.json.");
+      },
+    };
+    restoreBrainClient = setBrainCheckpointClientForTest(failingClient);
+    await seedCard(node, {
+      slug: "isolated-home-card",
+      title: "Isolated home card",
+      column: "review",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+    });
+
+    const warnings: string[] = [];
+    const res = await checkpointCardCompletion({
+      cfg,
+      node,
+      card: { ...(await findCard(node, cfg, "isolated-home-card"))!, column: "done" },
+      boardColumns: [...DEFAULT_COLUMNS],
+      reason: "done-transition",
+      warn: (m) => warnings.push(m),
+    });
+    expect(res.action).toBe("skipped");
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("Config not found");
+    expect(warnings[0]).not.toContain("\n"); // one-line, not a raw stack
+
+    // And the end-to-end move actually persists the column despite the failure.
+    const moved = await moveCmd({ cfg, node, slug: "isolated-home-card", column: "done" });
+    expect(moved.to).toBe("done");
+    expect((await findCard(node, cfg, "isolated-home-card"))?.column).toBe("done");
   });
 });
