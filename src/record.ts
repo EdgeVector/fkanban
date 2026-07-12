@@ -923,11 +923,28 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
   }
 
   const kind = normalizeKind(card.kind);
-  if (kind !== "pr" || isRegistryCard(card.body, card.title)) {
+  if (kind !== "pr") {
     throw new FkanbanError({
       code: "default_todo_not_pickup_ready",
       message: `Card "${card.slug}" cannot be placed in default/todo with non-pickup kind=${kind}.`,
       hint: "Use default/backlog or a parking board for tracker/program/capstone/validation work; split a concrete --kind pr card when code is ready, or pass --force.",
+    });
+  }
+  // The registry/recipe classifier is a belt-and-suspenders FALLBACK for cards
+  // whose `kind` field was never set (un-backfilled/legacy). An explicit kind is
+  // authoritative and must win over keyword inference: a card filed with
+  // `--kind pr` (raw `card.kind` is a real kind value) is never re-classified as
+  // a registry card by body/title keywords — otherwise a legitimate PR card gets
+  // the self-contradictory "non-pickup kind=pr" rejection. Note that by the time
+  // this runs `deriveStructuredFields` has already stamped an empty-kind registry
+  // card as kind="registry" (caught above), so this branch only fires for the
+  // genuinely un-stamped empty-kind path.
+  const kindExplicit = isCardKind(card.kind);
+  if (!kindExplicit && isRegistryCard(card.body, card.title)) {
+    throw new FkanbanError({
+      code: "default_todo_not_pickup_ready",
+      message: `Card "${card.slug}" cannot be placed in default/todo: it is classified as a registry/recipe card (targets an fbrain record, not a repo PR).`,
+      hint: "Registry/recipe cards never enter the pickup flow. Use default/backlog or a parking board; if this really is a concrete code PR, file it with an explicit --kind pr, or pass --force.",
     });
   }
 
@@ -974,7 +991,12 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
   const out: Partial<Card> = {};
 
   // kind: classify registry/recipe cards so they never enter the pickup flow.
-  const registry = isRegistryCard(card.body, card.title);
+  // An explicit `--kind pr` is authoritative and suppresses the keyword-based
+  // registry classification (both here and in the pickup gate) — a filer who
+  // says "this is a PR card" is never overridden by a "dogfood-registry"/
+  // "Target: fbrain record" keyword in the body, so its repo/base still derive.
+  const explicitPr = card.kind === "pr";
+  const registry = !explicitPr && isRegistryCard(card.body, card.title);
   if (!card.kind) out.kind = registry ? "registry" : "pr";
 
   // repo/base: registry cards target an fbrain record, not a repo — never give

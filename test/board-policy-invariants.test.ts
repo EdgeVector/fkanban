@@ -170,6 +170,37 @@ describe("board policy invariants", () => {
     expect((await findCard(node, cfg, "parked-human"))?.board).toBe("human");
   });
 
+  test("explicit --kind pr wins over registry keyword inference in default/todo", async () => {
+    // A concrete PR card whose body trips the registry-card keyword classifier
+    // (contains "dogfood-registry"). Without --kind it is classified registry
+    // and blocked; with an explicit --kind pr the classifier must NOT override
+    // the filer's intent, and the card lands in todo.
+    const registryKeywordBody =
+      "Repo: EdgeVector/fkanban\nBase: main\n\nRotate the dogfood-registry entries via a code change.";
+
+    // Explicit --kind pr → accepted into todo, no --force.
+    await addCmd({ cfg, node, slug: "explicit-pr-registry-kw", column: "todo", kind: "pr", body: registryKeywordBody });
+    const accepted = await findCard(node, cfg, "explicit-pr-registry-kw");
+    expect(accepted?.column).toBe("todo");
+    expect(accepted?.kind).toBe("pr");
+    // Explicit pr also lets repo/base still derive rather than being skipped.
+    expect(accepted?.repo).toBe("EdgeVector/fkanban");
+    expect(accepted?.base).toBe("main");
+
+    // Same body WITHOUT --kind → classified registry and blocked; the error must
+    // never name the self-contradictory "kind=pr".
+    const rejected = await expectPolicyReject(
+      addCmd({ cfg, node, slug: "inferred-registry-kw", column: "todo", body: registryKeywordBody }),
+    );
+    expect(rejected.message).not.toContain("kind=pr");
+    expect(rejected.message.toLowerCase()).toContain("registry");
+    expect(await findCard(node, cfg, "inferred-registry-kw")).toBeNull();
+
+    // And it is accepted into backlog, stamped kind=registry.
+    await addCmd({ cfg, node, slug: "inferred-registry-kw-backlog", column: "backlog", body: registryKeywordBody });
+    expect((await findCard(node, cfg, "inferred-registry-kw-backlog"))?.kind).toBe("registry");
+  });
+
   test("move into default todo enforces the same pickup-ready contract", async () => {
     await addCmd({ cfg, node, slug: "parked-malformed", column: "backlog", body: "Not routable yet." });
     await expectPolicyReject(moveCmd({ cfg, node, slug: "parked-malformed", column: "todo" }));
