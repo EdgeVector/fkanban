@@ -20,6 +20,7 @@ import type { Config } from "../src/config.ts";
 import { boardToFields, cardToFields, findCard, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
+import { depAddCmd } from "../src/commands/dep.ts";
 import { showCmd } from "../src/commands/show.ts";
 
 const cfg: Config = {
@@ -142,6 +143,39 @@ describe("add update preserves the card's board", () => {
     const after = await findCard(node, cfg, "priority-only");
     expect(after?.column).toBe("todo");
     expect(after?.tags).toContain("p2");
+  });
+
+  test("metadata-only update with NO --column keeps a dep-blocked todo card in todo", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "dependency",
+      title: "Dependency",
+      column: "todo",
+      body: validPickupBody,
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "blocked-dependent",
+      title: "Blocked dependent",
+      column: "todo",
+      body: validPickupBody,
+    });
+    await depAddCmd({ cfg, node, slug: "blocked-dependent", dep: "dependency" });
+
+    const updated = await addCmd({
+      cfg,
+      node,
+      slug: "blocked-dependent",
+      northStar: "north-star-test",
+    });
+    expect(updated).toMatchObject({ action: "updated", board: "default", column: "todo" });
+
+    const after = await findCard(node, cfg, "blocked-dependent");
+    expect(after?.column).toBe("todo");
+    expect(after?.deps).toEqual(["dependency"]);
+    expect(after?.north_star).toBe("north-star-test");
   });
 
   test("add --surfaces writes claims and preserves them when omitted on update", async () => {
