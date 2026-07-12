@@ -54,13 +54,17 @@ function textMentionsFoldDbNodeWork(card: Card): boolean {
   ].some((needle) => haystack.includes(needle));
 }
 
-export function inferSituationPreflightAction(card: Card): string | null {
+export function inferSituationPreflightActions(card: Card): string[] {
   const repo = resolvePickupRepo(card);
-  if (!repo.ok) return null;
+  if (!repo.ok) return [];
   if (repo.repo === "EdgeVector/fold" && textMentionsFoldDbNodeWork(card)) {
-    return "file-fold-db-node-feature-card";
+    return ["file-fold-db-node-feature-card", "modify-fold-db-node"];
   }
-  return null;
+  return [];
+}
+
+export function inferSituationPreflightAction(card: Card): string | null {
+  return inferSituationPreflightActions(card)[0] ?? null;
 }
 
 function situationSlug(result: SituationPreflightResponse): string {
@@ -128,8 +132,8 @@ export async function checkSituationFence(
   card: Card,
   preflight: SituationPreflight = fsituationsPreflight,
 ): Promise<SituationFenceResult> {
-  const action = inferSituationPreflightAction(card);
-  if (!action) {
+  const actions = inferSituationPreflightActions(card);
+  if (actions.length === 0) {
     return { allowed: true, reason: "no Situation preflight action inferred", suggestion: "", details: [] };
   }
   const repo = resolvePickupRepo(card);
@@ -138,32 +142,31 @@ export async function checkSituationFence(
   }
 
   try {
-    const allowListed = await preflight({ action: `work-cards:${card.slug}`, repo: repo.repo });
-    if (allowListed.ok) {
-      return { allowed: true, reason: "card allow-listed by active Situation", suggestion: "", details: [] };
+    for (const action of actions) {
+      const result = await preflight({ action, repo: repo.repo });
+      if (result.ok || situationAllowsNorthStar(result, card) || situationAllowsCardAction(result, card)) {
+        continue;
+      }
+
+      const slug = situationSlug(result);
+      return {
+        allowed: false,
+        reason: `blocked by active Situation ${slug}`,
+        suggestion: "Do not pick up this card until the Situation allows it or the card is re-scoped.",
+        details: [`fsituations preflight ${action} --repo ${repo.repo} returned BLOCKED`, `action: ${action}`],
+        situationSlug: slug,
+        action,
+      };
     }
 
-    const result = await preflight({ action, repo: repo.repo });
-    if (result.ok || situationAllowsNorthStar(result, card) || situationAllowsCardAction(result, card)) {
-      return { allowed: true, reason: "Situation preflight allowed card", suggestion: "", details: [] };
-    }
-
-    const slug = situationSlug(result);
-    return {
-      allowed: false,
-      reason: `blocked by active Situation ${slug}`,
-      suggestion: "Do not pick up this card until the Situation allows it or the card is re-scoped.",
-      details: [`fsituations preflight ${action} --repo ${repo.repo} returned BLOCKED`, `action: ${action}`],
-      situationSlug: slug,
-      action,
-    };
+    return { allowed: true, reason: "Situation preflight allowed card", suggestion: "", details: [] };
   } catch (err) {
     return {
       allowed: false,
       reason: "fsituations preflight failed",
       suggestion: "Fix fsituations preflight before moving this card into doing.",
       details: [err instanceof Error ? err.message : String(err)],
-      action,
+      action: actions.join(","),
     };
   }
 }

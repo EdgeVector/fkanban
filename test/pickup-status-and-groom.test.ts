@@ -43,6 +43,16 @@ const foldDbNodeFencePreflight: SituationPreflight = async ({ action }) => {
   return { ok: false, blocks: [minimalNodeFence] };
 };
 
+const modifyFoldDbNodeFence = {
+  situation: {
+    slug: "fold-db-node-dmg-temporary-deprecation",
+    links_brain: [],
+    allowed_actions: [],
+  },
+  action: "modify-fold-db-node",
+  message: "fold_db_node modification is temporarily frozen.",
+};
+
 function fakeNode(): NodeClient {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
   const tableFor = (schemaHash: string) => {
@@ -221,6 +231,54 @@ describe("pickup-status", () => {
     expect(bySlug.get("org-invite")?.ready).toBe(false);
     expect(bySlug.get("org-invite")?.reason).toContain("fold-db-node-major-simplification");
     expect(bySlug.get("strip-card")?.category).toBe("pickup-ready");
+  });
+
+  test("fences fold_db_node cards when only modify-fold-db-node is blocked", async () => {
+    const checkedActions: string[] = [];
+    const modifyOnlyFencePreflight: SituationPreflight = async ({ action }) => {
+      checkedActions.push(action);
+      if (action === "modify-fold-db-node") {
+        return { ok: false, blocks: [modifyFoldDbNodeFence] };
+      }
+      return { ok: true, checked: { action } };
+    };
+    await seedCard(node, card({
+      slug: "node-removal",
+      repo: "EdgeVector/fold",
+      base: "main",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nTouch fold_db_node cleanup.",
+    }));
+
+    const { report } = await pickupStatusResult({ cfg, node, situationPreflight: modifyOnlyFencePreflight });
+    const fenced = report.cards.find((c) => c.slug === "node-removal");
+
+    expect(checkedActions).toContain("file-fold-db-node-feature-card");
+    expect(checkedActions).toContain("modify-fold-db-node");
+    expect(fenced?.category).toBe("situation-fenced");
+    expect(fenced?.ready).toBe(false);
+    expect(fenced?.details).toContain("action: modify-fold-db-node");
+  });
+
+  test("leaves fold_db_node cards pickup-ready when neither relevant action is blocked", async () => {
+    const checkedActions: string[] = [];
+    const noFencePreflight: SituationPreflight = async ({ action }) => {
+      checkedActions.push(action);
+      return { ok: true, checked: { action } };
+    };
+    await seedCard(node, card({
+      slug: "node-observability",
+      repo: "EdgeVector/fold",
+      base: "main",
+      tags: ["fold_db_node"],
+    }));
+
+    const { report } = await pickupStatusResult({ cfg, node, situationPreflight: noFencePreflight });
+    const eligible = report.cards.find((c) => c.slug === "node-observability");
+
+    expect(checkedActions).toContain("file-fold-db-node-feature-card");
+    expect(checkedActions).toContain("modify-fold-db-node");
+    expect(eligible?.category).toBe("pickup-ready");
+    expect(eligible?.ready).toBe(true);
   });
 
   test("refuses moving a Situation-fenced candidate to doing without writing", async () => {
