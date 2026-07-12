@@ -86,11 +86,11 @@ export function matchOrphanBunCommand(command: string): OrphanBunCandidate["matc
   if (!isBunCommand(command)) return null;
   const words = shellWords(command);
 
-  const fkanbanCli = words.findIndex((word) => /\/fkanban\/src\/cli\.ts$/.test(word));
+  const fkanbanCli = words.findIndex((word) => /\/(?:kanban|fkanban)\/src\/cli\.ts$/.test(word));
   if (fkanbanCli >= 0 && words.slice(fkanbanCli + 1).includes("mcp")) {
     return "fkanban-mcp";
   }
-  if (words.some((word) => /\/fkanban\/src\/mcp\/main\.ts$/.test(word))) {
+  if (words.some((word) => /\/(?:kanban|fkanban)\/src\/mcp\/main\.ts$/.test(word))) {
     return "fkanban-mcp";
   }
   if (/\/gstack(?:\/.*)?\/browse\/src\/server\.ts(?:\s|$)/.test(command)) {

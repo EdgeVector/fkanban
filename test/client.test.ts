@@ -635,7 +635,7 @@ describe("transient busy-503 backpressure retry", () => {
     expect(busyHits.always).toBe(4);
   });
 
-  test("a node_not_provisioned 503 is NOT retried and still surfaces 'Run `fkanban init`'", async () => {
+  test("a node_not_provisioned 503 is NOT retried and still surfaces 'Run `kanban init`'", async () => {
     busyHits.notProvisioned = 0;
     const node = newNodeClient({ baseUrl: `${baseUrl}/busy-not-provisioned`, userHash: "test-user" });
     const err = await node
@@ -645,7 +645,7 @@ describe("transient busy-503 backpressure retry", () => {
     expect(err).toBeInstanceOf(FkanbanError);
     const fe = err as FkanbanError;
     expect(fe.code).toBe("node_not_provisioned");
-    expect(fe.hint).toContain("fkanban init");
+    expect(fe.hint).toContain("kanban init");
     // Exactly one hit — no retry for the non-transient 503.
     expect(busyHits.notProvisioned).toBe(1);
   });

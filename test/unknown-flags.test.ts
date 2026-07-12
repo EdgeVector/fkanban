@@ -36,7 +36,7 @@ describe("unknown-flag rejection", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("--titel");
     expect(stderr.toLowerCase()).toContain("unknown option");
-    expect(stderr).toContain("fkanban add --help");
+    expect(stderr).toContain("kanban add --help");
   });
 
   test("add: a typo'd --colum (column) errors with exit 2 — no silent default", async () => {
@@ -49,7 +49,7 @@ describe("unknown-flag rejection", () => {
     const { code, stderr } = await runCli(["list", "--bogusflag"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--bogusflag");
-    expect(stderr).toContain("fkanban list --help");
+    expect(stderr).toContain("kanban list --help");
   });
 
   test("list: --tag is now a recognized flag (NOT an unknown-flag exit 2)", async () => {
@@ -73,7 +73,7 @@ describe("unknown-flag rejection", () => {
   test("known flags still parse: `add --help` prints help and exits 0", async () => {
     const { code, stdout } = await runCli(["add", "--help"]);
     expect(code).toBe(0);
-    expect(stdout).toContain("fkanban add");
+    expect(stdout).toContain("kanban add");
   });
 
   test("--version still works (exit 0)", async () => {
@@ -99,7 +99,7 @@ describe("misapplied-flag rejection (globally-known, wrong command)", () => {
     const { code, stderr } = await runCli(["show", "any-slug", "--column", "todo"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--column'");
-    expect(stderr).toContain("fkanban show --help");
+    expect(stderr).toContain("kanban show --help");
   });
 
   test("show --board: accepted as a compatibility no-op (slugs are global)", async () => {
@@ -112,14 +112,14 @@ describe("misapplied-flag rejection (globally-known, wrong command)", () => {
     const { code, stderr } = await runCli(["move", "any-slug", "doing", "--board", "X"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--board'");
-    expect(stderr).toContain("fkanban move --help");
+    expect(stderr).toContain("kanban move --help");
   });
 
   test("rm --tags: rejected with exit 2", async () => {
     const { code, stderr } = await runCli(["rm", "any-slug", "--tags", "foo"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--tags'");
-    expect(stderr).toContain("fkanban rm --help");
+    expect(stderr).toContain("kanban rm --help");
   });
 
   test("add --tags: accepted (NOT an exit-2 unknown-flag rejection)", async () => {

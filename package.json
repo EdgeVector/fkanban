@@ -1,15 +1,18 @@
 {
-  "name": "fkanban",
+  "name": "kanban",
   "version": "0.1.0",
-  "description": "fkanban — a kanban board over fold_db. Cards move through columns; everything persists in folddb.",
+  "description": "kanban — a kanban board over fold_db. Cards move through columns; everything persists in folddb.",
   "private": true,
   "license": "MIT",
   "type": "module",
   "bin": {
+    "kanban": "src/cli.ts",
+    "kanban-mcp": "src/mcp/main.ts",
     "fkanban": "src/cli.ts",
     "fkanban-mcp": "src/mcp/main.ts"
   },
   "scripts": {
+    "kanban": "bun src/cli.ts",
     "fkanban": "bun src/cli.ts",
     "install-cli": "bash bin/install.sh",
     "test": "bun test",

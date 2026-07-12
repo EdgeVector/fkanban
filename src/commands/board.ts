@@ -114,7 +114,7 @@ export async function boardListResult(opts: {
 
   const text =
     boards.length === 0
-      ? "No boards. Run `fkanban init` to seed the default board."
+      ? "No boards. Run `kanban init` to seed the default board."
       : boards
           .map((b) => {
             const suffix = b.cardCount === null ? "" : `  ${cardCountLabel(b.cardCount)}`;

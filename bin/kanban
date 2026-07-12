@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# kanban — global shim. Resolves to this repo's src/cli.ts and runs it under
+# bun, so a bare `kanban <cmd>` works from anywhere on PATH.
+#
+# Install (one-liner, reversible): symlink this script into a PATH dir, e.g.
+#   ln -sf "$PWD/bin/kanban" /usr/local/bin/kanban    # run from the repo root
+# Removing the symlink fully reverses it — nothing is published to a registry.
+#
+# Follow symlinks so the repo's src/cli.ts is found even when invoked via a
+# symlink in ~/bin or /usr/local/bin.
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+dir="$(cd -P "$(dirname "$src")" && pwd)"
+
+if bun_bin="$(command -v bun 2>/dev/null)"; then
+  :
+elif [ -n "${HOME:-}" ] && [ -x "$HOME/.bun/bin/bun" ]; then
+  bun_bin="$HOME/.bun/bin/bun"
+else
+  echo "kanban: bun not found on PATH and no executable found at \$HOME/.bun/bin/bun" >&2
+  echo "kanban: install Bun or add its bin directory to PATH before running kanban" >&2
+  exit 127
+fi
+
+exec "$bun_bin" run "$dir/../src/cli.ts" "$@"

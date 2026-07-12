@@ -1,7 +1,7 @@
-# AGENTS.md — developing fkanban itself
+# AGENTS.md — developing kanban itself
 
 Canonical build/test/run/PR commands for this repo. `CLAUDE.md` is a symlink to
-this file (shared by Claude Code, Cursor, Codex, …). For *using* fkanban
+this file (shared by Claude Code, Cursor, Codex, …). For *using* kanban
 (install, command catalog, MCP setup) see `README.md`.
 
 Ask the brain for anything project-specific — it's consolidated; this doc stays
@@ -13,7 +13,7 @@ fbrain get projects-fkanban             # orientation, architecture, history,
 fbrain get concepts-fkanban-cli-gotchas # worktree node_modules, --body replaces,
                                         #   tag-encoded deps, soft-delete tombstone,
                                         #   schemas published once out-of-band
-fbrain ask "<question about fkanban>"
+fbrain ask "<question about kanban>"
 ```
 
 ## Self-improvement papercuts
@@ -25,7 +25,7 @@ fbrain get preference-always-file-papercuts-for-self-improvement
 ```
 
 When a tool, workflow, runbook, connector, repo setup, CLI, CI, LastDB path, or
-agent instruction creates avoidable friction while working on fkanban, record it
+agent instruction creates avoidable friction while working on kanban, record it
 instead of letting it vanish in chat. Put durable evidence and rationale in
 F-Brain, and create or update a matching F-Kanban card when the issue is
 actionable. Prefer dedupe/update over duplicate records. Do this
@@ -57,7 +57,7 @@ diverge, and an **independent** target/ per worktree (never a shared dir/symlink
 bin/fkanban-worktree <repo-root> <worktree-dir> <branch> [base-ref]
 # e.g. fold card:
 bin/fkanban-worktree ~/code/edgevector/fold \
-  ~/.fkanban/worktrees/<slug> fkanban/<slug> origin/main
+  ~/.kanban/worktrees/<slug> kanban/<slug> origin/main
 ```
 
 Best-effort: if the parent has no `target/`, or the FS isn't APFS, the worktree
@@ -68,7 +68,7 @@ like organic ones; undiverged CoW files make pruning even cheaper.)
 ## Run / dogfood
 
 ```bash
-bun run src/cli.ts <cmd>     # or the bin/fkanban shim once on PATH
+bun run src/cli.ts <cmd>     # or the bin/kanban shim once on PATH
 bun run src/cli.ts doctor    # health-check config + node + schemas + round-trip
 ```
 

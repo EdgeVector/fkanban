@@ -69,7 +69,7 @@ export async function declareGatesLink(opts: GatesDeclareOptions): Promise<AppSc
     throw new FkanbanError({
       code: "app_schema_declare_unsupported",
       message: "This node client does not support /api/apps/declare-schema.",
-      hint: "Upgrade LastDB/fold, then re-run `fkanban gates --declare-link`.",
+      hint: "Upgrade LastDB/fold, then re-run `kanban gates --declare-link`.",
     });
   }
   const declared = await opts.node.declareAppSchema(FKANBAN_APP_ID, openDecisionsLinkSchema);
@@ -81,7 +81,7 @@ export async function declareGatesLink(opts: GatesDeclareOptions): Promise<AppSc
         `(${declared.canonical}), not as a read-only LINK.`,
       hint:
         "Configure the dev node's app-schema matcher so it links the fkanban Reference ref " +
-        "to fbrain's shared Reference canonical, then re-run `fkanban gates --declare-link`.",
+        "to fbrain's shared Reference canonical, then re-run `kanban gates --declare-link`.",
     });
   }
   return declared;
@@ -99,7 +99,7 @@ export async function gatesCmd(opts: GatesOptions): Promise<string> {
     throw new FkanbanError({
       code: "open_decisions_not_found",
       message: `No linked ${OPEN_DECISIONS_SLUG} ledger was visible through ${FKANBAN_APP_ID}/${GATES_LOCAL_SCHEMA}.`,
-      hint: "Run `fkanban gates --declare-link` against the dev node and ensure fbrain has seeded open-decisions.",
+      hint: "Run `kanban gates --declare-link` against the dev node and ensure fbrain has seeded open-decisions.",
     });
   }
   const open = parseGateEntries(body).filter((g) => g.status === "open");

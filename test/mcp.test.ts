@@ -220,14 +220,14 @@ describe("MCP server starts (degrades, not crashes) when config is unavailable",
     expect(res.isError).toBe(true);
     expect(res.structuredContent).toBeUndefined();
     const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
-    expect(text).toContain("Run `fkanban init` first.");
+    expect(text).toContain("Run `kanban init` first.");
   });
 
   test("a write tool also short-circuits to the same actionable hint", async () => {
     const res = await client.callTool({ name: "fkanban_add", arguments: { slug: "x" } });
     expect(res.isError).toBe(true);
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
-      "Run `fkanban init` first.",
+      "Run `kanban init` first.",
     );
   });
 
@@ -519,7 +519,7 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
       }
       expect(err, `query ${JSON.stringify(q)} should throw`).toBeInstanceOf(FkanbanError);
       expect((err as FkanbanError).code).toBe("missing_arg");
-      expect((err as FkanbanError).message).toContain("usage: fkanban search");
+      expect((err as FkanbanError).message).toContain("usage: kanban search");
     }
   });
 

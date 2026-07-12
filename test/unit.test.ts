@@ -720,7 +720,7 @@ describe("doctor", () => {
     expect(ok).toBe(false);
     const report = lines.join("\n");
     expect(report).toContain("✗ config present");
-    expect(report).toContain("fkanban init");
+    expect(report).toContain("kanban init");
   });
 });
 
@@ -731,7 +731,7 @@ describe("mcp register helper (single source of truth)", () => {
   // (in the bun+path form). See card `doctor-verify-mcp-entrypoint-fkanban`.
   test("mcpAddCommand uses the canonical `--` form", () => {
     expect(mcpAddCommand()).toMatch(
-      /^claude mcp add fkanban -- (fkanban mcp|bun .+\/src\/mcp\/main\.ts)$/,
+      /^claude mcp add fkanban -- (kanban mcp|fkanban mcp|bun .+\/src\/mcp\/main\.ts)$/,
     );
   });
 
@@ -781,9 +781,9 @@ describe("per-command help", () => {
 
   test("each entry names its command, shows a Usage line + an example, and the footer", () => {
     for (const [cmd, text] of Object.entries(COMMAND_HELP)) {
-      expect(text).toContain(`fkanban ${cmd}`);
+      expect(text).toContain(`kanban ${cmd}`);
       expect(text).toContain("Usage:");
-      expect(text).toContain("Run `fkanban help` for all commands.");
+      expect(text).toContain("Run `kanban help` for all commands.");
     }
   });
 
@@ -833,8 +833,8 @@ describe("per-command help", () => {
   });
 
   test("TOP_HELP advertises per-command help discovery", () => {
-    expect(TOP_HELP).toContain("fkanban help <command>");
-    expect(TOP_HELP).toContain("fkanban <command> --help");
+    expect(TOP_HELP).toContain("kanban help <command>");
+    expect(TOP_HELP).toContain("kanban <command> --help");
   });
 
   test("list help advertises the wide table view", () => {

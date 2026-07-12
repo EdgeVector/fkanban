@@ -42,7 +42,9 @@ describe("hygiene orphan-bun process parsing", () => {
 });
 
 describe("hygiene orphan-bun classifier", () => {
-  test("matches only the explicit fkanban/gstack Bun helper paths", () => {
+  test("matches only the explicit kanban/fkanban/gstack Bun helper paths", () => {
+    expect(matchOrphanBunCommand("bun /x/kanban/src/cli.ts mcp")).toBe("fkanban-mcp");
+    expect(matchOrphanBunCommand("/Users/me/.bun/bin/bun /x/kanban/src/mcp/main.ts")).toBe("fkanban-mcp");
     expect(matchOrphanBunCommand("bun /x/fkanban/src/cli.ts mcp")).toBe("fkanban-mcp");
     expect(matchOrphanBunCommand("/Users/me/.bun/bin/bun /x/fkanban/src/mcp/main.ts")).toBe("fkanban-mcp");
     expect(matchOrphanBunCommand("bun /x/gstack/browse/src/server.ts")).toBe("gstack-browse-server");

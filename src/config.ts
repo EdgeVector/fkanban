@@ -1,6 +1,7 @@
-// Persistent CLI config — `~/.fkanban/config.json` by default, or the path
-// in $FKANBAN_CONFIG. Holds the canonical schema hashes (NOT the descriptive
-// names) plus the node + schema-service URLs and the node user hash.
+// Persistent CLI config — `~/.kanban/config.json` by default, with
+// `~/.fkanban/config.json` as the compatibility fallback. Holds the canonical
+// schema hashes (NOT the descriptive names) plus the node + schema-service URLs
+// and the node user hash.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -9,6 +10,8 @@ import { dirname, join } from "node:path";
 import type { RecordType } from "./schemas.ts";
 
 export const CONFIG_VERSION = 1;
+const PRIMARY_CONFIG_ENV = "KANBAN_CONFIG";
+const LEGACY_CONFIG_ENV = "FKANBAN_CONFIG";
 
 export type Config = {
   configVersion: number;
@@ -59,26 +62,40 @@ export function resolveSocketPath(cfg?: { nodeSocketPath?: string }): string {
 }
 
 export function defaultConfigPath(): string {
-  const override = process.env.FKANBAN_CONFIG;
+  const override = process.env[PRIMARY_CONFIG_ENV] ?? process.env[LEGACY_CONFIG_ENV];
   if (override && override.length > 0) return override;
+  return join(homedir(), ".kanban", "config.json");
+}
+
+export function legacyConfigPath(): string {
   return join(homedir(), ".fkanban", "config.json");
+}
+
+export function defaultReadConfigPath(): string {
+  const override = process.env[PRIMARY_CONFIG_ENV] ?? process.env[LEGACY_CONFIG_ENV];
+  if (override && override.length > 0) return override;
+  const primary = defaultConfigPath();
+  if (existsSync(primary)) return primary;
+  const legacy = legacyConfigPath();
+  if (existsSync(legacy)) return legacy;
+  return primary;
 }
 
 export class ConfigMissingError extends Error {
   constructor(path: string) {
-    super(`Config not found at ${path}. Run \`fkanban init\` first.`);
+    super(`Config not found at ${path}. Run \`kanban init\` first.`);
     this.name = "ConfigMissingError";
   }
 }
 
 export class ConfigInvalidError extends Error {
   constructor(path: string, reason: string) {
-    super(`Config at ${path} is invalid: ${reason}. Re-run \`fkanban init\`.`);
+    super(`Config at ${path} is invalid: ${reason}. Re-run \`kanban init\`.`);
     this.name = "ConfigInvalidError";
   }
 }
 
-export function readConfig(path: string = defaultConfigPath()): Config {
+export function readConfig(path: string = defaultReadConfigPath()): Config {
   if (!existsSync(path)) throw new ConfigMissingError(path);
   let parsed: unknown;
   try {
@@ -90,7 +107,7 @@ export function readConfig(path: string = defaultConfigPath()): Config {
   return assertConfigShape(path, parsed);
 }
 
-export function tryReadConfig(path: string = defaultConfigPath()): Config | null {
+export function tryReadConfig(path: string = defaultReadConfigPath()): Config | null {
   if (!existsSync(path)) return null;
   return readConfig(path);
 }

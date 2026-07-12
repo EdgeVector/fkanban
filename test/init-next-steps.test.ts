@@ -35,7 +35,7 @@ describe("init next-steps", () => {
     expect(out).toContain("fkanban list");
     expect(out).toContain("fkanban add my-first-card --title");
     // The MCP register command must be surfaced (form depends on PATH shim).
-    expect(out).toMatch(/claude mcp add fkanban -- (fkanban mcp|bun .+\/src\/mcp\/main\.ts)/);
+    expect(out).toMatch(/claude mcp add fkanban -- (kanban mcp|fkanban mcp|bun .+\/src\/mcp\/main\.ts)/);
   });
 
   test("fresh bootstrap on a shim-less clone prints runnable `bun run src/cli.ts` commands", () => {
@@ -56,7 +56,7 @@ describe("init next-steps", () => {
     const out = capture(true, "fkanban").join("\n");
     expect(out).toContain("Next steps:");
     expect(out).toContain("fkanban add my-first-card --title");
-    expect(out).toMatch(/claude mcp add fkanban -- (fkanban mcp|bun .+\/src\/mcp\/main\.ts)/);
+    expect(out).toMatch(/claude mcp add fkanban -- (kanban mcp|fkanban mcp|bun .+\/src\/mcp\/main\.ts)/);
   });
 
   test("idempotent re-init collapses to a single quiet line, no Next steps block", () => {

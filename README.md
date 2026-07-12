@@ -1,4 +1,4 @@
-# fkanban
+# kanban
 
 A kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db). Cards move through columns; every
 change persists in folddb. Modeled on `fbrain` — a thin Bun/TypeScript client
@@ -13,12 +13,12 @@ collide with `fbrain/*` or any other app on a shared daemon):
 
 Default columns: `backlog → todo → doing → review → done`.
 
-> Contributing to fkanban itself? See [AGENTS.md](AGENTS.md) for the
+> Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/test/run/dogfood + PR workflow and the non-obvious gotchas.
 
-> **Just want to use fkanban?** The `fkanban/*` schemas are already published —
+> **Just want to use kanban?** The `fkanban/*` schemas are already published —
 > skip straight to [Prerequisites](#prerequisites) + [Quick start](#quick-start);
-> `fkanban init` only loads them. (Re-publishing those schemas to a *new*
+> `kanban init` only loads them. (Re-publishing those schemas to a *new*
 > schema_service is a one-time maintainer task — see
 > [Republishing the schemas](#republishing-the-schemas-maintainers--one-time).)
 
@@ -26,26 +26,26 @@ Default columns: `backlog → todo → doing → review → done`.
 
 You need three things before the Quick start, in this order:
 
-**1. Bun.** fkanban is a Bun/TypeScript app, so you need the Bun runtime.
+**1. Bun.** kanban is a Bun/TypeScript app, so you need the Bun runtime.
 
 ```bash
 curl -fsSL https://bun.sh/install | bash   # or: brew install oven-sh/bun/bun
 ```
 
-**2. The fkanban repo.** Clone it and install its dependencies — this is where
-the Quick start's `cd fkanban` comes from.
+**2. The kanban repo.** Clone it and install its dependencies — this is where
+the Quick start's `cd kanban` comes from.
 
 ```bash
-git clone https://github.com/EdgeVector/fkanban.git
-cd fkanban
+git clone https://github.com/EdgeVector/kanban.git
+cd kanban
 bun install
 ```
 
-**3. A running folddb node.** fkanban is a thin client — it needs a running
+**3. A running folddb node.** kanban is a thin client — it needs a running
 **folddb node** to talk to (`init` defaults to `http://127.0.0.1:9001`). Start
 one before `init` in one of two ways:
 
-- **Homebrew (recommended for just using fkanban):** install folddb from the
+- **Homebrew (recommended for just using kanban):** install folddb from the
   [EdgeVector/homebrew-folddb](https://github.com/EdgeVector/homebrew-folddb)
   tap and start the daemon. It listens on **:9001** by default — exactly
   `init`'s default `--node-url`.
@@ -57,10 +57,10 @@ one before `init` in one of two ways:
 
   (`folddb daemon start` works too if you'd rather not run it as a service.)
 
-  You don't need to run `folddb setup` first: `fkanban init` auto-provisions
+  You don't need to run `folddb setup` first: `kanban init` auto-provisions
   the node identity on first run against a fresh, unprovisioned node — so a
-  fkanban-only user can skip it (handy for headless/SSH/CI: just start a node,
-  then `fkanban init`, no interactive wizard required). `folddb setup` remains
+  kanban-only user can skip it (handy for headless/SSH/CI: just start a node,
+  then `kanban init`, no interactive wizard required). `folddb setup` remains
   the way to set up a full folddb identity (24-word recovery phrase, cloud
   sync) if you want one.
 
@@ -73,15 +73,15 @@ one before `init` in one of two ways:
 Once a node is up, run `bun src/cli.ts doctor` to confirm it's reachable, then
 `bun src/cli.ts init` to bootstrap the board.
 
-## Install the global `fkanban` shim
+## Install the global `kanban` shim
 
-The commands below are written as `fkanban <cmd>`. To make a bare `fkanban`
+The commands below are written as `kanban <cmd>`. To make a bare `kanban`
 resolve from any directory, run the one-line installer from the repo root:
 
 ```bash
-cd fkanban
-bun run install-cli   # symlinks the fkanban + fkanban-mcp shims onto your PATH
-fkanban doctor        # confirms the shim is on PATH
+cd kanban
+bun run install-cli   # symlinks kanban/kanban-mcp plus fkanban/fkanban-mcp aliases
+kanban doctor        # confirms the shim is on PATH
 ```
 
 `install-cli` auto-picks a writable PATH directory (`/usr/local/bin`,
@@ -89,41 +89,42 @@ fkanban doctor        # confirms the shim is on PATH
 (`bun run install-cli ~/bin`). If the directory you pass isn't on your
 PATH, it links the shims anyway but tells you so (and prints the exact
 `export PATH=…` line to add) rather than falsely claiming success. Under the hood it just symlinks the bundled
-`bin/fkanban` wrapper (a tiny `bun run src/cli.ts "$@"` script, plus a matching
-`fkanban-mcp` one) — so it's fully local and reversible, nothing is published to
-a registry, and the `rm …` line it prints removes it. Without the shim, run the
+`bin/kanban` wrapper (a tiny `bun run src/cli.ts "$@"` script, plus a matching
+`kanban-mcp` one, with `fkanban` and `fkanban-mcp` aliases kept for compatibility)
+— so it's fully local and reversible, nothing is published to
+a registry, and the `rm …` line it prints removes all four shims. Without the shim, run the
 CLI as `bun run src/cli.ts <cmd>` from inside the repo; the two are equivalent.
 
 ## Quick start
 
 With the prerequisites in place (Bun installed, repo cloned, `bun install` run,
-a folddb node up), from inside the `fkanban` repo:
+a folddb node up), from inside the `kanban` repo:
 
 ```bash
-bun run install-cli   # one-time: put fkanban on PATH (see "Install the global shim")
+bun run install-cli   # one-time: put kanban on PATH (see "Install the global shim")
 
 # Bootstrap the node, LOAD + RESOLVE the published fkanban schemas, seed the
 # default board. Defaults: node http://127.0.0.1:9001, schema service = prod
 # Lambda. On a fresh bootstrap, `init` ends by printing a "Next steps" block —
 # including the `claude mcp add fkanban …` command to register the MCP server
-# (the form is picked for you based on whether the `fkanban` shim is on PATH).
-fkanban init
+# (the form is picked for you based on whether the `kanban` shim is on PATH).
+kanban init
 
 # …or point at an ephemeral dev node. The NODE loads schemas from its own
 # configured schema_service; the CLI's --schema-service-url is recorded in
-# config for diagnostics only (it shows in `fkanban doctor`) and does NOT
+# config for diagnostics only (it shows in `kanban doctor`) and does NOT
 # change where schemas load from.
-fkanban init \
+kanban init \
   --node-url http://127.0.0.1:9105 \
   --schema-service-url https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com
 
-fkanban add ship-login --title "Ship login flow" --tags auth,p1
-fkanban move ship-login doing
-fkanban add fix-typo --column todo
-fkanban list
+kanban add ship-login --title "Ship login flow" --tags auth,p1
+kanban move ship-login doing
+kanban add fix-typo --column todo
+kanban list
 ```
 
-(Haven't installed the shim? Every `fkanban <cmd>` below works as
+(Haven't installed the shim? Every `kanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
 If `init` reports `schemas_not_published`, the **node's** configured
@@ -135,14 +136,14 @@ maintainer step hasn't run against the schema_service the node uses yet.
 
 If `init` reports `schema_not_writable`, the node has a `fkanban/*` schema that
 **resolves but isn't writable for all fields** — usually an older, narrower
-version of the schema (fewer fields than this fkanban build expects), sometimes
+version of the schema (fewer fields than this kanban build expects), sometimes
 loaded *alongside* the current one. `init` now refuses to adopt such a hash
 (it would 400 every subsequent write) and **leaves your existing config
 untouched**, so the board keeps working. The fix is node-side: load/republish
 the current `fkanban/*` schemas (see
 [Republishing the schemas](#republishing-the-schemas-maintainers--one-time)),
-then re-run `fkanban init`. `init` resolves to — and `fkanban doctor`
-write-probes — the schema version whose fields cover the full set fkanban
+then re-run `kanban init`. `init` resolves to — and `kanban doctor`
+write-probes — the schema version whose fields cover the full set kanban
 writes, so a stale duplicate can't silently break writes.
 
 ```
@@ -164,35 +165,35 @@ DONE  (0)
 
 | Command | What it does |
 |---|---|
-| `fkanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
-| `fkanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
-| `fkanban move <slug> <column>` | move a card to a column (`--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
-| `fkanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on existing live card `<dep>`) |
-| `fkanban dep rm <slug> <dep>` | remove a dependency edge |
-| `fkanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
-| `fkanban tag rm <slug> <tag…>` | remove one or more tags from a card |
-| `fkanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
-| `fkanban overlap <slug>` | compare a candidate card's surfaces against doing/review cards in the same repo (exit 2 on declared conflict) |
-| `fkanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
-| `fkanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
-| `fkanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for fkanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
-| `fkanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
-| `fkanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
-| `fkanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
-| `fkanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
-| `fkanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
-| `fkanban board list` | list boards (`--json`) |
-| `fkanban board rm <slug>` | delete a board with native tombstones; always refuses `default`, and refuses non-default boards with live cards unless `--force` |
-| `fkanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
-| `fkanban doctor` | health-check config + node + schemas + a query round-trip |
-| `fkanban mcp` | start an MCP server over stdio |
+| `kanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
+| `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
+| `kanban move <slug> <column>` | move a card to a column (`--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
+| `kanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on existing live card `<dep>`) |
+| `kanban dep rm <slug> <dep>` | remove a dependency edge |
+| `kanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
+| `kanban tag rm <slug> <tag…>` | remove one or more tags from a card |
+| `kanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
+| `kanban overlap <slug>` | compare a candidate card's surfaces against doing/review cards in the same repo (exit 2 on declared conflict) |
+| `kanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
+| `kanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
+| `kanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for kanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
+| `kanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
+| `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
+| `kanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
+| `kanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
+| `kanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
+| `kanban board list` | list boards (`--json`) |
+| `kanban board rm <slug>` | delete a board with native tombstones; always refuses `default`, and refuses non-default boards with live cards unless `--force` |
+| `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
+| `kanban doctor` | health-check config + node + schemas + a query round-trip |
+| `kanban mcp` | start an MCP server over stdio |
 
 Global: `--verbose` (echo HTTP), `--version`, `--help`.
 
 `--json` works on the write commands too — `add`, `move`, `dep add/rm`,
 `tag add/rm`, `rm`, `board create`, and `board rm` echo the write result as a JSON object instead of a prose
 line, so scripts and agents can confirm the outcome machine-readably (e.g.
-`fkanban move ship-login doing --json` → `{"slug":"ship-login","from":"todo","to":"doing"}`).
+`kanban move ship-login doing --json` → `{"slug":"ship-login","from":"todo","to":"doing"}`).
 
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
@@ -208,19 +209,19 @@ complete card bodies.
 
 `--tag <tag>` and `--assignee <name>` apply **exact-match** filters to the
 listing (contrast the fuzzy substring `search` below), e.g.
-`fkanban list --tag fkanban --column doing`.
+`kanban list --tag kanban --column doing`.
 
 For hook-safe scripting, `list` and `search` also accept repeatable
 `--field <name>` projection. It prints TSV with no header and no JSON:
-`fkanban list --column todo --field slug` prints one slug per line, while
-`fkanban list --field slug --field pr` prints `slug<TAB>pr` per card. `pr` is
+`kanban list --column todo --field slug` prints one slug per line, while
+`kanban list --field slug --field pr` prints `slug<TAB>pr` per card. `pr` is
 the shorthand for the stored `pr_url` field. Existing filters such as
 `--board`, `--column`, `--tag`, `--assignee`, `--limit`, and `--all` still
 apply before projection.
 
 `search <query>` finds cards by a case-insensitive substring across slug,
 title, body, assignee, and tags — handy once a board has more cards than fit on
-screen. Space-separated terms are AND-matched (`fkanban search auth p1` needs
+screen. Space-separated terms are AND-matched (`kanban search auth p1` needs
 both), results span columns/boards and are annotated with `[board/column]`,
 and `--board` / `--column` scope the search. Like `list`, the text output caps
 the rendered matches at **20** by default so a busy board doesn't flood the
@@ -236,7 +237,7 @@ set the text view shows.
 `default/todo` is the pickup lane: a `pr` card there must carry clean routing
 data (`Repo: owner/name` and `Base: branch`, or the matching structured
 `--repo`/`--base` fields) so an agent can clone the repo and start once its
-dependencies are done. `fkanban add` and `fkanban move` reject malformed
+dependencies are done. `kanban add` and `kanban move` reject malformed
 default-todo cards by default, including inline-commented `Repo:` headers,
 missing base branches, intentional `block_status` holds, and non-pickup
 `--kind` values. Use `--force` only as an explicit operator override; otherwise
@@ -246,8 +247,8 @@ non-pickup work on a parking surface until it is split into concrete PR work.
 Use `pickup status` before grooming or pickup:
 
 ```bash
-fkanban pickup status
-fkanban pickup status --json
+kanban pickup status
+kanban pickup status --json
 ```
 
 It classifies each active card as `pickup-ready`,
@@ -258,19 +259,19 @@ same counts and per-card reason/suggestion fields for automations.
 The conventional human/parking surface is a board named `human`:
 
 ```bash
-fkanban board create human \
+kanban board create human \
   --title "Human / parked work" \
   --columns todo,waiting,validated,done
 
-fkanban add legal-review \
+kanban add legal-review \
   --board human \
   --column todo \
   --block-status needs_human \
   --block-reason "waiting on legal review"
 ```
 
-Cards on `human` are visible through `fkanban list --board human` and
-`fkanban board list`, but `pickup status` never treats them as pickup-ready.
+Cards on `human` are visible through `kanban list --board human` and
+`kanban board list`, but `pickup status` never treats them as pickup-ready.
 Dependencies still work across boards: a `default/todo` card can depend on a
 human-board prerequisite and remains `blocked-on-dependency` until that
 prerequisite reaches the human board's terminal column (`done` by the convention
@@ -279,9 +280,9 @@ above).
 Return work to the pickup lane only when the human gate is actually cleared:
 
 ```bash
-fkanban add legal-review --board default --column todo \
+kanban add legal-review --board default --column todo \
   --block-status none --block-reason ""
-fkanban rank
+kanban rank
 ```
 
 Migration guidance:
@@ -294,14 +295,14 @@ Migration guidance:
   with their non-`pr` `--kind`; split out a concrete `pr` card when code is
   ready.
 - Do not auto-clear real human gates. Use
-  `fkanban groom stale-blockers` to find generated/stale blocker metadata, then
+  `kanban groom stale-blockers` to find generated/stale blocker metadata, then
   review the dry-run before applying safe generated cleanup.
 
 `groom stale-blockers` is dry-run by default:
 
 ```bash
-fkanban groom stale-blockers
-fkanban groom stale-blockers --apply
+kanban groom stale-blockers
+kanban groom stale-blockers --apply
 ```
 
 It reports stale generated `BLOCKED:` prose, malformed `Repo:` header lines,
@@ -313,12 +314,12 @@ review-only candidates.
 `hygiene orphan-bun` is dry-run by default and does not talk to the folddb node:
 
 ```bash
-fkanban hygiene orphan-bun
-fkanban hygiene orphan-bun --apply
+kanban hygiene orphan-bun
+kanban hygiene orphan-bun --apply
 ```
 
 It only targets PPID-1 Bun processes older than 24 hours whose command path
-matches the explicit agent-tooling allowlist: fkanban MCP (`src/cli.ts mcp` or
+matches the explicit agent-tooling allowlist: kanban MCP (`src/cli.ts mcp` or
 `src/mcp/main.ts`), gstack browse server (`gstack/.../browse/src/server.ts`), or
 gstack terminal-agent (`gstack/.../browse/src/terminal-agent.ts`). It also flags
 same-parent Bun pileups above 100 processes so the machine-hygiene loop can
@@ -343,14 +344,14 @@ Deleting/tombstoning a card with live dependents is refused (the policy landed
 in PR #149) so dependency edges cannot silently turn into missing slugs.
 
 ```bash
-fkanban add api --title "Build API"
-fkanban add ui  --title "Build UI" --deps api   # ui depends on api
-fkanban move ui doing        # ✗ refused: blocked by "api" (not yet done)
-fkanban move api done
-fkanban move ui doing        # ✓ unblocked
-fkanban dep add ui docs      # add another edge incrementally
-fkanban dep rm  ui docs      # …or drop one
-fkanban add ui --deps "" --replace-deps  # explicitly clear all deps
+kanban add api --title "Build API"
+kanban add ui  --title "Build UI" --deps api   # ui depends on api
+kanban move ui doing        # ✗ refused: blocked by "api" (not yet done)
+kanban move api done
+kanban move ui doing        # ✓ unblocked
+kanban dep add ui docs      # add another edge incrementally
+kanban dep rm  ui docs      # …or drop one
+kanban add ui --deps "" --replace-deps  # explicitly clear all deps
 ```
 
 Edges are stored in the Card schema's canonical `deps` array field. They are
@@ -376,7 +377,7 @@ touch. Declare surfaces when filing the card, and update them if the scope
 grows:
 
 ```bash
-fkanban add ship-cli --surfaces "src/cli.ts,src/mcp/**"
+kanban add ship-cli --surfaces "src/cli.ts,src/mcp/**"
 ```
 
 The same data can live in the body for incremental adoption:
@@ -385,7 +386,7 @@ The same data can live in the body for incremental adoption:
 Surfaces: src/cli.ts, src/mcp/**
 ```
 
-Run `fkanban overlap <slug>` before picking up or widening a card. It compares
+Run `kanban overlap <slug>` before picking up or widening a card. It compares
 the candidate against `doing`/`review` cards with the same repo and prints the
 conflicting card slugs plus matched patterns. Declared conflicts exit `2`; cards
 with missing surfaces only warn and exit `0` so older cards do not block
@@ -393,14 +394,14 @@ adoption.
 
 ## Tags
 
-Tags are freeform labels for filtering (`fkanban list --tag <tag>`). There are
+Tags are freeform labels for filtering (`kanban list --tag <tag>`). There are
 two ways to set them, mirroring dependencies exactly:
 
 ```bash
-fkanban add ship-login --tags auth,p1     # REPLACES the whole tag list
-fkanban tag add ship-login blocked        # add one tag, keep the rest
-fkanban tag rm  ship-login blocked        # drop one tag, keep the rest
-fkanban tag add ship-login p1 needs-review  # add several at once
+kanban add ship-login --tags auth,p1     # REPLACES the whole tag list
+kanban tag add ship-login blocked        # add one tag, keep the rest
+kanban tag rm  ship-login blocked        # drop one tag, keep the rest
+kanban tag add ship-login p1 needs-review  # add several at once
 ```
 
 `--tags a,b,c` on `add` overwrites the entire list — supplying it drops any tag
@@ -415,13 +416,13 @@ the card's separate `deps` field, not in tags.
 ## Priority
 
 A card has an optional **priority** — `P0` (most urgent) … `P3` (least). It lets
-`fkanban rank` order a column so the `fkanban-pickup` routine (which works the
+`kanban rank` order a column so the `fkanban-pickup` routine (which works the
 **lowest `position` first**) picks up the most urgent cards first.
 
 ```bash
-fkanban add ship-login --priority P0      # stored as a `p0` tag
-fkanban rank                              # reorder the `todo` column by priority
-fkanban rank --board roadmap --column backlog
+kanban add ship-login --priority P0      # stored as a `p0` tag
+kanban rank                              # reorder the `todo` column by priority
+kanban rank --board roadmap --column backlog
 ```
 
 Priority is read, in precedence order, from **(1)** a line-anchored
@@ -455,11 +456,11 @@ already be an existing live card. Prefer `fkanban_dep_add` and `fkanban_dep_rm`
 for ordinary edge edits.
 
 Register it with Claude Code (the `--` separates the `claude mcp add` flags from
-the command it runs). With the global `fkanban` shim on PATH, use the short
+the command it runs). With the global `kanban` shim on PATH, use the short
 form:
 
 ```bash
-claude mcp add fkanban -- fkanban mcp
+claude mcp add fkanban -- kanban mcp
 ```
 
 Otherwise point bun at this repo's entrypoint:
@@ -468,9 +469,9 @@ Otherwise point bun at this repo's entrypoint:
 claude mcp add fkanban -- bun "$PWD/src/mcp/main.ts"
 ```
 
-`fkanban doctor` prints whichever of these applies to your setup. It reads the
-same `~/.fkanban/config.json` the CLI writes (override the path with
-`$FKANBAN_CONFIG`).
+`kanban doctor` prints whichever of these applies to your setup. It reads the
+same `~/.kanban/config.json` the CLI writes (override the path with
+`$KANBAN_CONFIG`, or the compatibility `$FKANBAN_CONFIG`).
 
 ### Token economy (list / search)
 
@@ -495,14 +496,14 @@ or not-yet-complete cards expose it as an empty string.
 
 ## Republishing the schemas (maintainers / one-time)
 
-> You do **not** need this to use fkanban — the `fkanban/*` schemas are already
-> published, and `fkanban init` just loads + resolves them. This section is for
+> You do **not** need this to use kanban — the `fkanban/*` schemas are already
+> published, and `kanban init` just loads + resolves them. This section is for
 > a maintainer standing the schemas up against a *new* schema_service.
 
 Under app_identity v3.1 a schema claim under the `fkanban/*` namespace must be
 signed by an enrolled developer's DevCert, so the schemas are published to the
 schema_service **once**, out of band, via the exemem app-creation flow. After
-that, `fkanban init` just loads + resolves them — it never self-publishes.
+that, `kanban init` just loads + resolves them — it never self-publishes.
 
 ```bash
 # 0. Enroll a developer once (see the app-identity-dev-enroll skill / runbook):
@@ -541,10 +542,10 @@ confirm.)
   deletion refuses while live dependents still point at the card; `board rm
   --force` has the same guard for cards outside the board being removed. Read
   paths still hide the historical `__fkanban_deleted__` tag written by older
-  fkanban builds.
+  kanban builds.
 - **Append-with-gaps positions.** New cards land at `maxPosition + 10` so a
   card can later be inserted between two others.
 - **Priority is a signal over `position`.** A card's priority (`Priority:` header
-  or `p0`..`p3` tag) does nothing on its own; `fkanban rank` is what turns it into
+  or `p0`..`p3` tag) does nothing on its own; `kanban rank` is what turns it into
   the `position` field pickup/list/sort already order by. Keeps priority
   republish-free (rides on `tags`) and keeps one ordering primitive (`position`).

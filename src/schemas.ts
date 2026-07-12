@@ -221,7 +221,7 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
   board: { type: "board", schema: boardSchema },
 };
 
-// One entry per schema `fkanban init` must register. Binds a config-key
+// One entry per schema `kanban init` must register. Binds a config-key
 // (where init writes the canonical hash) to the AddSchemaRequest.
 export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }> = [
   { key: "card", schema: cardSchema },
