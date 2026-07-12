@@ -1675,30 +1675,56 @@ function isOptionalSurfacesWriteMiss(err: unknown): boolean {
   return err instanceof FkanbanError && err.code === "unknown_fields" && err.message.includes("surfaces");
 }
 
+// The minimal node (lastdb_node builds without fold_db_node's unknown-fields
+// gate) rejects a mutation naming a field its schema lacks with a bare,
+// content-free 500 instead of the structured `unknown_fields` 400
+// (fbrain `papercut-lastdbd-post-cutover-board-mutation-500`). A mutation 500
+// is therefore AMBIGUOUS: it may be that same optional-`surfaces` miss. Worth
+// exactly one retry with the legacy body-header form; the retry is a no-op
+// cost when the 500 had a different cause (it fails the same way and the
+// caller sees the original error).
+function isPossibleOptionalSurfacesWriteMiss(err: unknown): boolean {
+  return (
+    isOptionalSurfacesWriteMiss(err) ||
+    (err instanceof FkanbanError && err.code === "node_http_500")
+  );
+}
+
+type CardWriteOp = "createRecord" | "updateRecord";
+
+async function writeCardRecordWithSurfacesFallback(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+  op: CardWriteOp,
+): Promise<void> {
+  const hash = schemaHashFor("card", opts.cfg);
+  try {
+    await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug });
+  } catch (err) {
+    if (!isPossibleOptionalSurfacesWriteMiss(err)) throw err;
+    try {
+      await opts.node[op]({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug });
+    } catch (retryErr) {
+      // A structured unknown_fields miss makes the RETRY's error the
+      // informative one; after an ambiguous bare 500, the original error is —
+      // the retry most likely failed for the same unrelated reason.
+      throw isOptionalSurfacesWriteMiss(err) ? retryErr : err;
+    }
+  }
+}
+
 export async function createCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
 ): Promise<void> {
-  const hash = schemaHashFor("card", opts.cfg);
-  try {
-    await opts.node.createRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug });
-  } catch (err) {
-    if (!isOptionalSurfacesWriteMiss(err)) throw err;
-    await opts.node.createRecord({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug });
-  }
+  await writeCardRecordWithSurfacesFallback(opts, card, "createRecord");
 }
 
 export async function updateCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
 ): Promise<void> {
-  const hash = schemaHashFor("card", opts.cfg);
-  try {
-    await opts.node.updateRecord({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug });
-  } catch (err) {
-    if (!isOptionalSurfacesWriteMiss(err)) throw err;
-    await opts.node.updateRecord({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug });
-  }
+  await writeCardRecordWithSurfacesFallback(opts, card, "updateRecord");
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of
