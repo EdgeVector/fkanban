@@ -23,17 +23,39 @@ export type Config = {
   nodeSocketPath?: string;
 };
 
+const SOCKET_FILE_NAME = "folddb.sock";
+
+// Resolve the node data-home when no explicit socket/home override is set.
+// The FoldDB→LastDB rebrand (node v0.15.1+) moved the brew/CLI node's data home
+// from `~/.folddb` to `~/.lastdb`, while the legacy desktop app still uses
+// `~/.folddb`. Prefer whichever default home has a LIVE control socket on disk
+// (that's the node actually running), `~/.lastdb` first; fall back to directory
+// existence, `~/.lastdb` first, so a pre-launch machine still points somewhere
+// real. Mirrors fbrain's `resolveDefaultNodeHome` so all three CLIs derive the
+// same root on a mixed-version machine.
+function resolveDefaultNodeHome(base: string): string {
+  const lastdb = join(base, ".lastdb");
+  const folddb = join(base, ".folddb");
+  if (existsSync(join(lastdb, "data", SOCKET_FILE_NAME))) return lastdb;
+  if (existsSync(join(folddb, "data", SOCKET_FILE_NAME))) return folddb;
+  if (existsSync(lastdb)) return lastdb;
+  return folddb;
+}
+
 // The node's app-isolation control socket lives under its data dir — for a
 // socket-only local node this IS the transport, not a fallback. The primary
-// local brain uses ~/.folddb/data; an ephemeral dev node sets FOLDDB_HOME to a
-// temp dir. `FOLDDB_SOCKET_PATH` overrides everything; then the config field;
-// then the FOLDDB_HOME-derived default.
+// local brain uses ~/.lastdb/data (a v0.15.1+ brew/CLI node) or ~/.folddb/data
+// (the legacy desktop app); an ephemeral dev node sets FOLDDB_HOME to a temp
+// dir. `FOLDDB_SOCKET_PATH` overrides everything; then the config field; then
+// the LASTDB_HOME/FOLDDB_HOME override; then a probe for the live default home.
 export function resolveSocketPath(cfg?: { nodeSocketPath?: string }): string {
   const envOverride = process.env.FOLDDB_SOCKET_PATH;
   if (envOverride && envOverride.length > 0) return envOverride;
   if (cfg?.nodeSocketPath && cfg.nodeSocketPath.length > 0) return cfg.nodeSocketPath;
-  const home = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
-  return join(home, "data", "folddb.sock");
+  const homeOverride = process.env.LASTDB_HOME ?? process.env.FOLDDB_HOME;
+  const home =
+    homeOverride && homeOverride.length > 0 ? homeOverride : resolveDefaultNodeHome(homedir());
+  return join(home, "data", SOCKET_FILE_NAME);
 }
 
 export function defaultConfigPath(): string {
