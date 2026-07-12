@@ -1,4 +1,4 @@
-// `fkanban doctor` — health-check the local setup: config present, node
+// `kanban doctor` — health-check the local setup: config present, node
 // reachable + provisioned, both schemas resolved on the node, a query
 // round-trips.
 
@@ -28,8 +28,8 @@ export type DoctorOptions = {
 
 // The machine-readable doctor report — the single shape shared by the CLI
 // `doctor --json` path and the MCP `fkanban_doctor` tool's `structuredContent`,
-// so the two can't diverge. `version` is the installed fkanban CLI version
-// (from package.json, the same source as `fkanban --version`) — a report field,
+// so the two can't diverge. `version` is the installed kanban CLI version
+// (from package.json, the same source as `kanban --version`) — a report field,
 // not a check, so it never affects `ok`. `lines` is the human report (joined
 // ✓/✗ output) for callers that also want the text (the MCP tool surfaces it as
 // `content`).
@@ -61,8 +61,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     onCheck?.({ name: label, status: "info", detail });
   };
 
-  // Report the installed fkanban version up front — the one fact a bug report
-  // most needs. Sourced from package.json (same as `fkanban --version`), it's a
+  // Report the installed kanban version up front — the one fact a bug report
+  // most needs. Sourced from package.json (same as `kanban --version`), it's a
   // report line, not a check, so it never flips `ok`.
   print(`  fkanban v${pkg.version}`);
 
@@ -71,7 +71,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   await reportShim(print, onCheck);
 
   const cfg = tryReadConfig(opts.configPath);
-  check(cfg !== null, "config present", cfg ? undefined : "run `fkanban init`");
+  check(cfg !== null, "config present", cfg ? undefined : "run `kanban init`");
   if (!cfg) return false;
 
   const socketPath = resolveSocketPath(cfg);
@@ -167,7 +167,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         check(
           false,
           `${OWNER_APP_ID}/${descriptive} config hash is the writable version`,
-          `config is pinned to ${configHash} but the node's write-compatible ${descriptive} is ${resolution.hash} — run \`fkanban init\` to adopt it`,
+          `config is pinned to ${configHash} but the node's write-compatible ${descriptive} is ${resolution.hash} — run \`kanban init\` to adopt it`,
         );
         continue;
       }
@@ -217,7 +217,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
 
 function formatDoctorError(err: unknown): string {
   if (err instanceof FkanbanError) {
-    let detail = err.message.replace(/ — run `fkanban doctor` for a diagnosis\.$/, "");
+    let detail = err.message.replace(/ — run `kanban doctor` for a diagnosis\.$/, "");
     if (err.hint) detail += ` — ${err.hint}`;
     return detail;
   }
@@ -267,31 +267,33 @@ function reportMcpEntrypoint(
   onCheck?.({ name, status: "info", detail });
 }
 
-// Resolve the global `fkanban` shim on PATH, or `null` if bare `fkanban`
-// doesn't resolve. Shared by `doctor` (advisory check) and `init` (to print
-// the `claude mcp add` form that will actually work for this dev).
-export function resolveFkanbanShim(): string | null {
+// Resolve the preferred global kanban shim on PATH, falling back to the legacy
+// fkanban shim while Phase A aliases are in force.
+export function resolveKanbanShim(): { name: "kanban" | "fkanban"; path: string } | null {
   try {
-    const which = Bun.spawnSync(["sh", "-c", "command -v fkanban"]);
-    const out = which.stdout.toString().trim();
-    if (which.exitCode === 0 && out) return out;
+    for (const name of ["kanban", "fkanban"] as const) {
+      const which = Bun.spawnSync(["sh", "-c", `command -v ${name}`]);
+      const out = which.stdout.toString().trim();
+      if (which.exitCode === 0 && out) return { name, path: out };
+    }
   } catch {
     // `command -v` unavailable — treat as not found.
   }
   return null;
 }
 
-// Is bare `fkanban` resolvable on PATH? Purely informational — prints a ✓ if a
-// `fkanban` shim is found, or a · hint with the one-line install if not.
+// Is bare `kanban` resolvable on PATH? Purely informational — prints a ✓ if a
+// kanban shim is found, or a · hint with the one-line install if not. The legacy
+// fkanban shim remains accepted during the alias window.
 async function reportShim(
   print: (line: string) => void,
   onCheck?: (check: DoctorCheck) => void,
 ): Promise<void> {
-  const resolved = resolveFkanbanShim();
+  const resolved = resolveKanbanShim();
 
   if (resolved) {
-    print(`✓ global \`fkanban\` shim on PATH — ${resolved}`);
-    onCheck?.({ name: "global `fkanban` shim on PATH", status: "info", detail: resolved });
+    print(`✓ global \`${resolved.name}\` shim on PATH — ${resolved.path}`);
+    onCheck?.({ name: "global `kanban` shim on PATH", status: "info", detail: resolved.path });
     return;
   }
 
@@ -300,9 +302,9 @@ async function reportShim(
   const cliPath = fileURLToPath(import.meta.url); // .../src/commands/doctor.ts
   const repoRoot = cliPath.replace(/\/src\/commands\/doctor\.ts$/, "");
   const hint = `(cd "${repoRoot}" && bun run install-cli)`;
-  print(`· no global \`fkanban\` shim on PATH (optional) — install with: ` + hint);
+  print(`· no global \`kanban\` shim on PATH (optional) — install with: ` + hint);
   onCheck?.({
-    name: "global `fkanban` shim on PATH",
+    name: "global `kanban` shim on PATH",
     status: "info",
     detail: `not found (optional) — install with: ${hint}`,
   });

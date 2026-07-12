@@ -270,7 +270,7 @@ function errorResult(err: unknown): ToolResult {
 //   - not-yet-configured: `{ configError }` — the server still starts and
 //     completes the MCP handshake so the client connects and can list tools,
 //     but every config-dependent tool short-circuits to a clean `isError`
-//     result carrying the "Run `fkanban init` first." hint. `fkanban_doctor`
+//     result carrying the "Run `kanban init` first." hint. `fkanban_doctor`
 //     stays usable in this state (it reads config itself via `tryReadConfig`),
 //     so an agent can self-diagnose the missing config.
 export function createFkanbanMcpServer(
@@ -287,7 +287,7 @@ export function createFkanbanMcpServer(
       throw new FkanbanError({
         code: "config_unavailable",
         message: configError ? configError.message : "config unavailable",
-        hint: "Run `fkanban init` first.",
+        hint: "Run `kanban init` first.",
       });
     }
     const node = explicitNode ?? newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
@@ -913,7 +913,7 @@ export function createFkanbanMcpServer(
     {
       title: "Health-check fkanban",
       description:
-        "Diagnose the fkanban setup the same way the `fkanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring.",
+        "Diagnose the fkanban setup the same way the `kanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring.",
       annotations: { title: "Health-check fkanban", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
       // Mirrors the doctor result: the overall boolean plus the ordered checks,
@@ -951,7 +951,7 @@ export function createFkanbanMcpServer(
 // can never diverge. Reads the same config as the CLI; on a missing/invalid
 // config it starts in the not-yet-configured state — the handshake + listTools
 // still succeed so the client connects, and each config-dependent tool degrades
-// to a clean `isError` "Run `fkanban init` first." per call (see
+// to a clean `isError` "Run `kanban init` first." per call (see
 // `createFkanbanMcpServer`), matching the bin's behavior.
 //
 // Default idle-reap window: exit an MCP server that has received NO request for
@@ -1008,7 +1008,7 @@ export async function startMcpServer(opts: { verbose?: Verbose } = {}): Promise<
   } catch (err) {
     if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
       // Start anyway so the handshake succeeds and the client connects; tools
-      // degrade per call to the "Run `fkanban init` first." hint.
+      // degrade per call to the "Run `kanban init` first." hint.
       server = createFkanbanMcpServer({ configError: err });
     } else {
       throw err;

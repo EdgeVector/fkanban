@@ -153,7 +153,7 @@ export function classifyPickupCard(
   }
 
   if (card.board === HUMAN_BOARD_SLUG) {
-    return out("human-gated", "card is parked on the human board", "Return it with `fkanban add <slug> --board default --column todo --block-status none` once runnable.");
+    return out("human-gated", "card is parked on the human board", "Return it with `kanban add <slug> --board default --column todo --block-status none` once runnable.");
   }
   if (blockStatus === "needs_human" || blockStatus === "design_first") {
     return out("human-gated", `intentional hold: ${blockStatus}`, "Move true human-gated work to `--board human`; clear the hold only when pickup-ready.");

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# bin/install.sh — put the `fkanban` (+ `fkanban-mcp`) shims on PATH in one
-# step, so a bare `fkanban <cmd>` resolves from any directory.
+# bin/install.sh — put the `kanban` (+ compatibility `fkanban`) shims on PATH
+# in one step, so a bare `kanban <cmd>` resolves from any directory.
 #
 #   bun run install-cli            # auto-pick a PATH dir, symlink both shims
 #   bun run install-cli ~/bin      # …or install into an explicit dir
@@ -55,25 +55,25 @@ fi
 
 mkdir -p "$target_dir"
 
-for name in fkanban fkanban-mcp; do
+for name in kanban kanban-mcp fkanban fkanban-mcp; do
   ln -sf "$repo_root/bin/$name" "$target_dir/$name"
   echo "linked $target_dir/$name -> $repo_root/bin/$name"
 done
 
 echo
 if on_path "$target_dir"; then
-  echo "Done. \`fkanban\` and \`fkanban-mcp\` are now on PATH."
-  echo "Verify:  which fkanban && fkanban doctor"
-  echo "Remove:  rm $target_dir/fkanban $target_dir/fkanban-mcp"
+  echo "Done. \`kanban\`, \`kanban-mcp\`, \`fkanban\`, and \`fkanban-mcp\` are now on PATH."
+  echo "Verify:  which kanban && kanban doctor && which fkanban"
+  echo "Remove:  rm $target_dir/kanban $target_dir/kanban-mcp $target_dir/fkanban $target_dir/fkanban-mcp"
 else
   # Honest warning: the shims are linked, but the dir isn't on PATH, so a bare
   # `fkanban` still won't resolve. Don't claim success we can't back up.
   cat >&2 <<EOF
-Linked the fkanban + fkanban-mcp shims into $target_dir, but $target_dir is not on your PATH.
+Linked the kanban + compatibility fkanban shims into $target_dir, but $target_dir is not on your PATH.
 Add it (current shell):   export PATH="$target_dir:\$PATH"
 Make it permanent:        add that line to ~/.zshrc (or ~/.bashrc), then restart your shell.
-Then verify:              which fkanban && fkanban doctor
-Remove:                   rm $target_dir/fkanban $target_dir/fkanban-mcp
+Then verify:              which kanban && kanban doctor && which fkanban
+Remove:                   rm $target_dir/kanban $target_dir/kanban-mcp $target_dir/fkanban $target_dir/fkanban-mcp
 EOF
   # Exit non-zero so scripted installs detect the not-yet-usable state.
   exit 2

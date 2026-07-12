@@ -33,7 +33,7 @@ describe("numeric-flag validation", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain('got "abc"');
-    expect(stderr).toContain("fkanban list --help");
+    expect(stderr).toContain("kanban list --help");
   });
 
   test("list: --limit 12abc (partial-numeric) is rejected, not coerced to 12", async () => {
@@ -54,7 +54,7 @@ describe("numeric-flag validation", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("--position must be an integer >= 0");
     expect(stderr).toContain('got "abc"');
-    expect(stderr).toContain("fkanban move --help");
+    expect(stderr).toContain("kanban move --help");
   });
 
   test("move: a negative --position is rejected (positions are non-negative)", async () => {

@@ -32,7 +32,7 @@ describe("surplus positional rejection", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("Too many arguments");
     expect(stderr).toContain('"done"');
-    expect(stderr).toContain("fkanban move <slug> <column>");
+    expect(stderr).toContain("kanban move <slug> <column>");
   });
 
   test("a valid move invocation is not rejected as a usage error", async () => {

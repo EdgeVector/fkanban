@@ -235,7 +235,7 @@ export type NodeClient = {
   // the loopback TCP control plane was retired — so when no socket file is
   // present this returns `unavailable`: requests have no live transport and
   // will fail, NOT silently fall back to TCP. `socketPath` echoes the path
-  // consulted (so `fkanban doctor` can name it). Re-evaluates `existsSync` on
+  // consulted (so `kanban doctor` can name it). Re-evaluates `existsSync` on
   // each call so a socket that appears/vanishes between calls is reported
   // accurately.
   nodeTransport(): { transport: "socket" | "unavailable"; socketPath?: string };
@@ -504,7 +504,7 @@ export function newNodeClient(opts: {
         `drive them. ${why}`,
       hint:
         "The control socket lives at <node data-dir>/folddb.sock. Point fkanban at it with " +
-        "`--node-socket-path <path>` or `FOLDDB_SOCKET_PATH=<path>` and re-run `fkanban init` " +
+        "`--node-socket-path <path>` or `FOLDDB_SOCKET_PATH=<path>` and re-run `kanban init` " +
         "(by default fkanban looks under $FOLDDB_HOME/data, which only matches a node started " +
         "with --data-dir $FOLDDB_HOME/data). Alternatively, drive the node via the desktop app " +
         "or a browser paired with `folddb ui`.",
@@ -1304,11 +1304,11 @@ function connectionError(
   const routeKind = path === "/api/mutation" ? "write" : path === "/api/query" ? "read" : "request";
   return new FkanbanError({
     code: "service_unreachable",
-    message: `${which} ${routeKind} route not reachable ${where}${route} — run \`fkanban doctor\` for a diagnosis.`,
+    message: `${which} ${routeKind} route not reachable ${where}${route} — run \`kanban doctor\` for a diagnosis.`,
     hint:
       service === "node"
-        ? "Is a folddb node running? The local node is reached only over its Unix socket (the legacy loopback TCP port is retired), so an absent or unresponsive socket means it isn't up. Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `fkanban init`."
-        : "Check the schema-service URL in ~/.fkanban/config.json.",
+        ? "Is a folddb node running? The local node is reached only over its Unix socket (the legacy loopback TCP port is retired), so an absent or unresponsive socket means it isn't up. Start one with `brew services start folddb` (Homebrew install) or `cd fold/fold_db_node && ./run.sh --local --dev` (from the fold monorepo), then re-run `kanban init`."
+        : "Check the schema-service URL in ~/.kanban/config.json.",
     cause,
   });
 }
@@ -1354,14 +1354,14 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
     return new FkanbanError({
       code: "missing_user_context",
       message: `Node rejected ${path}: missing X-User-Hash.`,
-      hint: "Re-run `fkanban init` so the config's userHash is regenerated.",
+      hint: "Re-run `kanban init` so the config's userHash is regenerated.",
     });
   }
   if (status === 503 && errCode === "node_not_provisioned") {
     return new FkanbanError({
       code: "node_not_provisioned",
       message: `Node not set up.`,
-      hint: "Run `fkanban init` to bootstrap the node.",
+      hint: "Run `kanban init` to bootstrap the node.",
     });
   }
   // A transient-busy 503 that survived the in-client retries (callJson tried
@@ -1381,7 +1381,7 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
     // fields aren't writable and which ARE available, and `unknown_fields` /
     // `available_fields` arrays may add detail the message omits. Without this
     // the user only saw "Node /api/mutation returned HTTP 400." with no reason
-    // (fkanban #94). Do NOT advise `fkanban init` here: when the pinned hash is
+    // (fkanban #94). Do NOT advise `kanban init` here: when the pinned hash is
     // a stale, narrower schema version (the #94 footgun), re-running init can
     // RE-ADOPT it and keep writes broken. Point at doctor's write-probe instead.
     const unknown = bodyStringArray(body, "unknown_fields");
@@ -1397,7 +1397,7 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
       hint:
         "The pinned card schema hash doesn't accept these fields — the node has a " +
         "different (likely stale, narrower) schema version pinned in config. Run " +
-        "`fkanban doctor` to write-probe the pinned hash; do NOT blindly `fkanban init` " +
+        "`kanban doctor` to write-probe the pinned hash; do NOT blindly `kanban init` " +
         "(it can re-adopt the same broken hash).",
     });
   }

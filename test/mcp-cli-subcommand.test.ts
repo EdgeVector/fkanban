@@ -61,7 +61,7 @@ describe("`fkanban mcp` CLI subcommand starts gracefully on a missing config", (
     const res = await client.callTool({ name: "fkanban_list", arguments: {} });
     expect(res.isError).toBe(true);
     const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
-    expect(text).toContain("Run `fkanban init` first.");
+    expect(text).toContain("Run `kanban init` first.");
   });
 
   test("a write tool also short-circuits to the same actionable hint", async () => {
@@ -70,7 +70,7 @@ describe("`fkanban mcp` CLI subcommand starts gracefully on a missing config", (
     const res = await client.callTool({ name: "fkanban_add", arguments: { slug: "x" } });
     expect(res.isError).toBe(true);
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
-      "Run `fkanban init` first.",
+      "Run `kanban init` first.",
     );
   });
 });

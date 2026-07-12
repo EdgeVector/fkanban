@@ -1,11 +1,11 @@
-// `fkanban init` — bring a node to the point where the CLI/MCP can read +
+// `kanban init` — bring a node to the point where the CLI/MCP can read +
 // write the board:
 //
 //   1. probe identity, bootstrap the node if needed
 //   2. load schemas into the node (it pulls the published `fkanban/*` schemas
 //      from the schema_service)
 //   3. resolve each schema's canonical hash from the node's loaded set
-//   4. persist ~/.fkanban/config.json
+//   4. persist ~/.kanban/config.json
 //   5. seed the default board (idempotent)
 //
 // fkanban does NOT publish its own schemas. Under app_identity v3.1 a schema
@@ -13,7 +13,7 @@
 // developer's DevCert — that's a one-time out-of-band step done via the
 // exemem app-creation flow (`folddb-dev app publish` + `folddb-dev schema
 // publish --app fkanban`; see README "Republishing the schemas"). After that, every
-// `fkanban init` just loads + resolves the already-published schemas.
+// `kanban init` just loads + resolves the already-published schemas.
 
 import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
 import { existsSync } from "node:fs";
@@ -228,7 +228,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
         "fkanban/* schema version (with all fields) loaded. Either the current " +
         "version isn't published to the schema_service the node uses, or only a " +
         "stale version is loaded. Republish/load the current fkanban/* schemas " +
-        "(README → \"Republishing the schemas\"), then re-run `fkanban init`. " +
+        "(README → \"Republishing the schemas\"), then re-run `kanban init`. " +
         "Your existing config was left untouched, so current writes keep working.",
     });
   }
@@ -243,13 +243,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
         "uses just doesn't have the fkanban/* schemas published yet.\n" +
         "Fix (node-side): publish fkanban/* to the schema_service the node is " +
         "configured to use, or point the node at a schema_service where fkanban/* " +
-        "already lives, then re-run `fkanban init`. The fkanban/* schemas are " +
+        "already lives, then re-run `kanban init`. The fkanban/* schemas are " +
         "already published on the default prod schema_service.\n" +
         `(For reference, the schema_service URL recorded in config is ${schemaServiceUrl}; ` +
         "it's informational/diagnostic only — the node, not the CLI, decides where schemas load from.)\n" +
         "\n" +
         "Maintainer only — standing the schemas up on a *new* schema_service:\n" +
-        "  Publish fkanban/* via the exemem app-creation flow, then re-run `fkanban init`.\n" +
+        "  Publish fkanban/* via the exemem app-creation flow, then re-run `kanban init`.\n" +
         "  See README → \"Republishing the schemas\" (needs a DevCert + enrolled developer + em_… API key).",
     });
   }
@@ -284,7 +284,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       hint:
         "The node has a schema version that resolves but isn't writable for all " +
         "fields. Load/republish the current fkanban/* schemas on the node " +
-        "(README → \"Republishing the schemas\"), then re-run `fkanban init`. " +
+        "(README → \"Republishing the schemas\"), then re-run `kanban init`. " +
         "Your existing config was left untouched — current writes keep working.",
     });
   }
@@ -324,7 +324,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   print(`[init] ok`);
   // Surface the full Next steps block (incl. the `claude mcp add` registration
   // line) on a genuine FIRST-TIME fkanban setup — `existing === null` means no
-  // `~/.fkanban/config.json` pre-existed — OR a fresh node bootstrap. A
+// `~/.kanban/config.json` pre-existed — OR a fresh node bootstrap. A
   // first-time `init` pointed at an *already-provisioned* node leaves
   // `bootstrapped` false, but it's still first-time fkanban setup and the dev
   // most needs the MCP hint, so don't hide it. A true re-init (config already
@@ -350,7 +350,7 @@ function freshSetupSocketError(err: unknown, socketPath: string, route: string):
     hint:
       "This node appears to expose only the narrow data/attestation socket. Use a node build " +
       "or startup mode that creates <data>/folddb-full.sock for setup writes, then re-run " +
-      "`fkanban init --node-socket-path <data>/folddb.sock`. Existing provisioned nodes can " +
+      "`kanban init --node-socket-path <data>/folddb.sock`. Existing provisioned nodes can " +
       "still be used over the narrow socket; fresh bootstrap/schema-load needs the full surface.",
     cause: err,
   });
@@ -455,7 +455,7 @@ async function tryInitSocketOnly(args: {
 }
 
 // Guide the next action. On a genuine first-time fkanban setup — no prior
-// `~/.fkanban/config.json`, OR a freshly bootstrapped node — emit a
+// `~/.kanban/config.json`, OR a freshly bootstrapped node — emit a
 // copy-pasteable Next steps block (list the board, add a card, register the MCP
 // server). This is the natural moment to surface the `claude mcp add` command,
 // which is otherwise discoverable only by reading the README; it must NOT be

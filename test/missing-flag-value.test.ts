@@ -1,6 +1,6 @@
 // A flag fed a missing or dash-leading value via the SPACE form
 // (`add --title --column todo`, `list --limit -5`) must produce a clean
-// fkanban-styled one-line error — never Node's raw `parseArgs` internals
+// kanban-styled one-line error — never Node's raw `parseArgs` internals
 // (the `-XYZ` placeholder advice) and never a visible `..` double-period.
 // Exit code stays 2. The `=` form (`--limit=-5`) keeps its own #34 validation
 // path and must remain unchanged. See card `clean-parseargs-missing-value-error`.
@@ -36,9 +36,9 @@ describe("missing / dash-leading flag value (clean message, not parseArgs intern
     expect(stderr).not.toContain("..");
     // One non-empty line on stderr.
     expect(stderr.trim().split("\n").length).toBe(1);
-    // fkanban voice: names the flag and points at help.
+    // kanban voice: names the flag and points at help.
     expect(stderr).toContain("--title");
-    expect(stderr).toContain("fkanban add --help");
+    expect(stderr).toContain("kanban add --help");
   });
 
   test("list: --limit -5 (dash-leading value, space form) → clean one-liner, exit 2", async () => {
@@ -47,7 +47,7 @@ describe("missing / dash-leading flag value (clean message, not parseArgs intern
     expect(stderr).not.toContain("-XYZ");
     expect(stderr).not.toContain("..");
     expect(stderr.trim().split("\n").length).toBe(1);
-    expect(stderr).toContain("fkanban list --help");
+    expect(stderr).toContain("kanban list --help");
   });
 
   test("list: --limit=-5 (=-form) keeps the #34 validation message, unchanged", async () => {

@@ -177,7 +177,7 @@ export async function searchResult(
   if (queryTerms(opts.query).length === 0) {
     throw new FkanbanError({
       code: "missing_arg",
-      message: "Missing search query — usage: fkanban search <query>",
+      message: "Missing search query — usage: kanban search <query>",
     });
   }
   // An explicitly-passed board must exist — a typo'd name should error loudly
