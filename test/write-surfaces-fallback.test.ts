@@ -38,6 +38,7 @@ function testCard(): Card {
     surfaces: ["src/record.ts"],
     created_at: ts,
     updated_at: ts,
+    done_at: "",
     repo: "EdgeVector/fkanban",
     base: "main",
     kind: "pr",
@@ -46,7 +47,7 @@ function testCard(): Card {
     north_star: "",
     pr_url: "",
     branch: "",
-  } as Card;
+  };
 }
 
 const bare500 = () =>
