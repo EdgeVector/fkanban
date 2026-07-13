@@ -167,6 +167,7 @@ DONE  (0)
 |---|---|
 | `kanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
 | `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
+| `kanban mark <slug> <line>` | append one marker line to an existing card body, idempotently (`--json`) |
 | `kanban move <slug> <column>` | move a card to a column (`--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
 | `kanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on existing live card `<dep>`) |
 | `kanban dep rm <slug> <dep>` | remove a dependency edge |
@@ -391,6 +392,10 @@ the candidate against `doing`/`review` cards with the same repo and prints the
 conflicting card slugs plus matched patterns. Declared conflicts exit `2`; cards
 with missing surfaces only warn and exit `0` so older cards do not block
 adoption.
+
+Use `kanban mark <slug> "<line>"` for routine annotations. `kanban add --body`
+replaces the full body, and refuses a body made only of a newline-joined list of
+existing card slugs to catch accidental candidate-list clobbers.
 
 ## Tags
 
