@@ -14,6 +14,13 @@ export interface AddResult {
   column: string;
 }
 
+export interface MarkResult {
+  slug: string;
+  action: "created" | "updated";
+  board: string;
+  column: string;
+}
+
 export interface MoveResult {
   slug: string;
   from: string;
@@ -86,6 +93,10 @@ export function formatError(err: { code: string; message: string; hint?: string 
 
 export function formatAdd(res: AddResult, json?: boolean): string {
   return emit(res, `${res.action} card ${res.slug} → ${res.board}/${res.column}`, json);
+}
+
+export function formatMark(res: MarkResult, json?: boolean): string {
+  return emit(res, `marked card ${res.slug} → ${res.board}/${res.column}`, json);
 }
 
 export function formatMove(res: MoveResult, json?: boolean): string {

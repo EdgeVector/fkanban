@@ -183,9 +183,31 @@ function suppressDefaultTodoWarning(card: Pick<Card, "board" | "column">, force?
   return !force && card.board === "default" && card.column === "todo";
 }
 
+async function assertBodyIsNotExistingSlugList(opts: AddOptions): Promise<void> {
+  if (opts.body === undefined) return;
+  const normalized = opts.body.replace(/\r\n/g, "\n").replace(/\n$/, "");
+  const lines = normalized.split("\n");
+  if (lines.length < 2 || lines.some((line) => line.length === 0 || line.trim() !== line)) return;
+  try {
+    for (const line of lines) validateSlug(line);
+  } catch {
+    return;
+  }
+
+  const existing = await Promise.all(lines.map((slug) => findCard(opts.node, opts.cfg, slug)));
+  if (existing.every((card) => card !== null)) {
+    throw new FkanbanError({
+      code: "body_slug_list_tripwire",
+      message: "`add --body` was given only a newline-joined list of existing card slugs.",
+      hint: "Use `fkanban mark <slug> \"<line>\"` for annotations, or dump the existing body and concatenate intentionally.",
+    });
+  }
+}
+
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
+  await assertBodyIsNotExistingSlugList(opts);
 
   // Resolve the card BEFORE the board context: on update we must honor the
   // card's existing board when no explicit `--board` is given. An explicit

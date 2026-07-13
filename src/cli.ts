@@ -12,6 +12,7 @@ import { ConfigMissingError, ConfigInvalidError } from "./config.ts";
 import { loadAppCtx, loadCtx } from "./context.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
+import { markCmd } from "./commands/mark.ts";
 import { moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
 import { rankCmd } from "./commands/rank.ts";
@@ -32,6 +33,7 @@ import { FKANBAN_APP_ID, declareGatesLink, gatesCmd } from "./commands/gates.ts"
 import { suggestClosest } from "./suggest.ts";
 import {
   formatAdd,
+  formatMark,
   formatMove,
   formatDep,
   formatTag,
@@ -52,6 +54,7 @@ Commands:
   init                 bootstrap a node + load/resolve schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
+  mark <slug> <line>   append one marker line to a card body, idempotently
   move <slug> <col>    move a card to a column (--position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
@@ -175,6 +178,21 @@ Multi-line bodies — pipe via stdin, don't inline:
 
 Example:
   kanban add ship-login --title "Ship login" --column todo --priority P1 --tags auth`),
+
+  mark: withFooter(`kanban mark — append one marker line to an existing card body
+
+Usage:
+  kanban mark <slug> "<line>" [--json]
+
+Appends the line only if it is not already present. This preserves the card's
+board, column, tags, kind, and other metadata; it never replaces the full body.
+Use this for routine annotations instead of \`add --body\`.
+
+Options:
+  --json                echo the write result as JSON
+
+Example:
+  kanban mark ship-login "NEEDS-HUMAN: missing DONE-WHEN"`),
 
   move: withFooter(`kanban move — move a card to another column
 
@@ -717,7 +735,7 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
 
 // Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
 // names as COMMAND_HELP. Derived from each command's `--help` text and the
-// flags its dispatch branch actually reads. Commands absent here (e.g. `show`,
+// flags its dispatch branch actually reads. Commands absent here (e.g. `mark`, `show`,
 // `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
@@ -1022,9 +1040,39 @@ async function dispatch(
             err.code === "deps_replace_requires_explicit" ||
             err.code === "invalid_kind" ||
             err.code === "invalid_block_status" ||
+            err.code === "body_slug_list_tripwire" ||
             err.code === "stdin_body_unavailable"
           )
         ) {
+          if (values.json) {
+            console.log(formatError(err));
+          } else {
+            console.error(`kanban: ${err.message}`);
+            if (err.hint) console.error(`  hint: ${err.hint}`);
+          }
+          return 2;
+        }
+        throw err;
+      }
+    }
+
+    case "mark": {
+      const slug = requirePositional(positionals[1], "mark <slug> <line>");
+      const line = requirePositional(positionals[2], "mark <slug> <line>");
+      const extra = rejectExtraPositionals(positionals, 3, "mark <slug> <line>");
+      if (extra !== undefined) return extra;
+      const ctx = loadCtx({ verbose });
+      try {
+        const res = await markCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug,
+          line,
+        });
+        console.log(formatMark(res, values.json as boolean | undefined));
+        return 0;
+      } catch (err) {
+        if (err instanceof FkanbanError && err.code === "invalid_mark_line") {
           if (values.json) {
             console.log(formatError(err));
           } else {

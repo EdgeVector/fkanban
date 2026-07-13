@@ -21,6 +21,7 @@ import type { Config } from "../src/config.ts";
 import { boardToFields, cardToFields, findCard, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
+import { markCmd } from "../src/commands/mark.ts";
 import { depAddCmd } from "../src/commands/dep.ts";
 import { showCmd } from "../src/commands/show.ts";
 import { readStdinBodyForAdd } from "../src/cli.ts";
@@ -324,6 +325,50 @@ describe("add stdin body replacement", () => {
     } finally {
       stream.destroy();
     }
+  });
+});
+
+describe("mark command and add --body slug-list tripwire", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
+  });
+
+  test("mark appends once and preserves card metadata", async () => {
+    const originalBody = "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this intact.\n\n## STEPS\nAlso intact.";
+    await addCmd({
+      cfg,
+      node,
+      slug: "mark-target",
+      title: "Mark target",
+      column: "todo",
+      tags: ["fkanban", "p1"],
+      kind: "pr",
+      body: originalBody,
+    });
+
+    await markCmd({ cfg, node, slug: "mark-target", line: "NEEDS-HUMAN: x" });
+    await markCmd({ cfg, node, slug: "mark-target", line: "NEEDS-HUMAN: x" });
+
+    const after = await findCard(node, cfg, "mark-target");
+    expect(after?.body.startsWith(originalBody)).toBe(true);
+    expect(after?.body.match(/^NEEDS-HUMAN: x$/gm)?.length).toBe(1);
+    expect(after?.body).toContain("## GOAL\nKeep this intact.");
+    expect(after?.body).toContain("## STEPS\nAlso intact.");
+    expect(after?.column).toBe("todo");
+    expect(after?.tags).toEqual(["fkanban", "p1"]);
+    expect(after?.kind).toBe("pr");
+  });
+
+  test("add --body rejects a body made only of existing card slugs", async () => {
+    await addCmd({ cfg, node, slug: "slug-one", column: "todo", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "slug-two", column: "todo", body: validPickupBody });
+
+    await expect(
+      addCmd({ cfg, node, slug: "victim", body: "slug-one\nslug-two" }),
+    ).rejects.toMatchObject({ code: "body_slug_list_tripwire" });
   });
 });
 
