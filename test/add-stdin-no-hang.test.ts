@@ -100,5 +100,5 @@ test("add without --body gives up on a silent never-EOF stdin instead of hanging
     "--column",
     "backlog",
   ]);
-  expect(result).not.toBe("HUNG");
+  expect(result).toBe(2);
 }, 12000);

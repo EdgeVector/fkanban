@@ -13,6 +13,7 @@
 // read-board-validation.test.ts — exercises the real addCmd with no live node.
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import { PassThrough } from "node:stream";
 
 import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
@@ -22,6 +23,7 @@ import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { depAddCmd } from "../src/commands/dep.ts";
 import { showCmd } from "../src/commands/show.ts";
+import { readStdinBodyForAdd } from "../src/cli.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -269,6 +271,59 @@ describe("add update preserves the card's board", () => {
     expect(shown.body).toBe("Repo: EdgeVector/fold\nBase: main\n\nx");
     expect(shown.repo).toBe("EdgeVector/fold");
     expect(shown.base).toBe("main");
+  });
+});
+
+describe("add stdin body replacement", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
+  });
+
+  async function readPipe(body: string, delayMs = 0): Promise<string> {
+    const stream = new PassThrough();
+    setTimeout(() => stream.end(body), delayMs);
+    const read = await readStdinBodyForAdd(stream as unknown as NodeJS.ReadStream, {} as NodeJS.ProcessEnv);
+    expect(read).toBe(body);
+    return read!;
+  }
+
+  test("create-via-stdin persists the piped body exactly", async () => {
+    const body = await readPipe("Repo: EdgeVector/fkanban\nBase: main\n\nCreated from stdin.\n", 25);
+    const created = await addCmd({ cfg, node, slug: "stdin-create", column: "todo", body });
+    expect(created).toMatchObject({ action: "created" });
+    expect((await findCard(node, cfg, "stdin-create"))?.body).toBe(body);
+  });
+
+  test("update-via-stdin replaces the existing body exactly", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "stdin-update",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nOld body.\n",
+    });
+
+    const body = await readPipe("Repo: EdgeVector/fkanban\nBase: main\n\nUpdated from stdin.\n\n", 350);
+    const updated = await addCmd({ cfg, node, slug: "stdin-update", body });
+    expect(updated).toMatchObject({ action: "updated" });
+    expect((await findCard(node, cfg, "stdin-update"))?.body).toBe(body);
+  });
+
+  test("silent never-EOF stdin is rejected instead of treated as an empty body", async () => {
+    const stream = new PassThrough();
+    try {
+      await expect(
+        readStdinBodyForAdd(
+          stream as unknown as NodeJS.ReadStream,
+          { FKANBAN_STDIN_IDLE_MS: "20" } as NodeJS.ProcessEnv,
+        ),
+      ).rejects.toMatchObject({ code: "stdin_body_unavailable" });
+    } finally {
+      stream.destroy();
+    }
   });
 });
 

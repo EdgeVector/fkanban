@@ -521,7 +521,10 @@ export function resolveHelp(
 }
 
 // Drain piped stdin to source `add --body` when no `--body` flag is given.
-// Returns "" for a TTY, an empty stream, or a pipe that delivers no data.
+// Returns undefined for a TTY or a stream that cleanly reaches EOF with no
+// bytes. A pipe that neither delivers bytes nor closes within the first-byte
+// grace is a bad invocation: silently treating that as "no body" reports a
+// successful update while dropping the caller's intended piped body.
 //
 // This MUST NOT block on a stdin that never reaches EOF. Under Bun a pipe that
 // a parent opens but never writes to or closes — the shape of a background- or
@@ -531,18 +534,20 @@ export function resolveHelp(
 // persist the card": the await never resolved, so the write below it never ran.
 //
 // Instead we wait a short grace for the first byte; if none arrives we give up
-// and treat stdin as empty (no body). Once bytes do flow we assume a real
-// producer (echo/cat/heredoc) that will close its end, and read through to
-// `end`. The grace is overridable via FKANBAN_STDIN_IDLE_MS (ms).
-async function readStdin(): Promise<string> {
-  if (process.stdin.isTTY) return "";
-  const raw = process.env.FKANBAN_STDIN_IDLE_MS;
+// with an explicit error. Once bytes do flow we assume a real producer
+// (echo/cat/heredoc) that will close its end, and read through to `end`. The
+// grace is overridable via FKANBAN_STDIN_IDLE_MS (ms).
+export async function readStdinBodyForAdd(
+  stdin: NodeJS.ReadStream = process.stdin,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | undefined> {
+  if (stdin.isTTY) return undefined;
+  const raw = env.FKANBAN_STDIN_IDLE_MS;
   const parsed = raw === undefined ? NaN : parseInt(raw, 10);
-  const firstByteMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : 250;
+  const firstByteMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : 2000;
 
-  const stdin = process.stdin;
   const chunks: Uint8Array[] = [];
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let gotData = false;
     let settled = false;
     const finish = () => {
@@ -554,8 +559,20 @@ async function readStdin(): Promise<string> {
       }
       stdin.off("data", onData);
       stdin.off("end", finish);
-      stdin.off("error", finish);
+      stdin.off("error", onError);
       resolve();
+    };
+    const fail = (err: FkanbanError) => {
+      if (settled) return;
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      stdin.off("data", onData);
+      stdin.off("end", finish);
+      stdin.off("error", onError);
+      reject(err);
     };
     const onData = (c: Uint8Array) => {
       gotData = true;
@@ -565,15 +582,30 @@ async function readStdin(): Promise<string> {
       }
       chunks.push(c);
     };
+    const onError = (err: Error) => {
+      fail(new FkanbanError({
+        code: "stdin_body_unavailable",
+        message: `Could not read piped stdin body: ${err.message}`,
+        hint: "Pass the body with --body, or make the producer close stdin after writing the body.",
+        cause: err,
+      }));
+    };
     let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-      // No first byte within the grace: a silent / never-EOF pipe. Give up.
-      if (!gotData) finish();
+      // No first byte within the grace: a silent / never-EOF pipe. Refuse to
+      // report success because an intended piped body would be silently lost.
+      if (!gotData) {
+        fail(new FkanbanError({
+          code: "stdin_body_unavailable",
+          message: `Timed out waiting for piped stdin body after ${firstByteMs}ms.`,
+          hint: "Pass the body with --body, or make the producer write and close stdin before running add.",
+        }));
+      }
     }, firstByteMs);
     stdin.on("data", onData);
     stdin.on("end", finish);
-    stdin.on("error", finish);
+    stdin.on("error", onError);
   });
-  return Buffer.concat(chunks).toString("utf8");
+  return chunks.length > 0 ? Buffer.concat(chunks).toString("utf8") : undefined;
 }
 
 function parseTags(raw: string | undefined): string[] | undefined {
@@ -942,17 +974,16 @@ async function dispatch(
       // spawned `add` that inherits but never closes the pipe) used to block
       // here indefinitely, so the card never persisted. Only consult stdin to
       // source the body when no `--body` flag was given, and even then the read
-      // is bounded (see readStdin) so it can't hang.
+      // is bounded (see readStdinBodyForAdd) so it can't hang.
       let body = values.body as string | undefined;
-      if (body === undefined) {
-        const stdinBody = await readStdin();
-        if (stdinBody.trim().length > 0) body = stdinBody;
-      }
-      // Validate --priority before touching the node, so a bad value reports the
-      // exit-2 flag error rather than a config/node error (same as --position).
-      const priority =
-        values.priority !== undefined ? parsePriorityFlag(values.priority as string, "add") : undefined;
       try {
+        if (body === undefined) {
+          body = await readStdinBodyForAdd();
+        }
+        // Validate --priority before touching the node, so a bad value reports the
+        // exit-2 flag error rather than a config/node error (same as --position).
+        const priority =
+          values.priority !== undefined ? parsePriorityFlag(values.priority as string, "add") : undefined;
         const res = await addCmd({
           cfg: ctx.cfg,
           node: ctx.node,
@@ -990,7 +1021,8 @@ async function dispatch(
             err.code === "missing_dependency" ||
             err.code === "deps_replace_requires_explicit" ||
             err.code === "invalid_kind" ||
-            err.code === "invalid_block_status"
+            err.code === "invalid_block_status" ||
+            err.code === "stdin_body_unavailable"
           )
         ) {
           if (values.json) {
