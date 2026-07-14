@@ -41,12 +41,12 @@ bun install
 ```
 
 **3. A running folddb node.** kanban is a thin client — it needs a running
-**folddb node** to talk to (`init` defaults to `http://127.0.0.1:9001`). Start
+**folddb node** to talk to (`init` defaults to `Unix socket ~/.lastdb/data/folddb.sock (local)`). Start
 one before `init` in one of two ways:
 
 - **Homebrew (recommended for just using kanban):** install folddb from the
   [EdgeVector/homebrew-folddb](https://github.com/EdgeVector/homebrew-folddb)
-  tap and start the daemon. It listens on **:9001** by default — exactly
+  tap and start the daemon. It serves the Unix socket **~/.lastdb/data/folddb.sock** by default — exactly
   `init`'s default `--node-url`.
 
   ```bash
