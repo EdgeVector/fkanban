@@ -11,6 +11,7 @@ import {
   appendPosition,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
+  applyDbLocatorForWrite,
   BLOCK_STATUSES,
   CARD_KINDS,
   createCardRecord,
@@ -70,6 +71,7 @@ export type AddOptions = {
   northStar?: string;
   prUrl?: string;
   branch?: string;
+  dbLocator?: string;
   surfaces?: string[];
   situationPreflight?: SituationPreflight;
 };
@@ -244,6 +246,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       updated_at: now,
       done_at: doneAtForColumnTransition(existing, targetColumn, columns, now),
     };
+    applyDbLocatorForWrite(updated, opts.dbLocator, "update");
     const rawBody = updated.body;
     // Apply any explicit --field opts before the shared write stamp backfills
     // still-empty structured fields from the body/tags.
@@ -282,6 +285,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     ...emptyStructuredFields(),
   };
   card.done_at = doneAtForColumnTransition(null, targetColumn, columns, now);
+  applyDbLocatorForWrite(card, opts.dbLocator, "create");
   const rawBody = card.body;
   applyExplicitStructuredFields(card, opts);
   await stampCardForWrite(opts.node, opts.cfg, card, {

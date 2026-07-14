@@ -3,6 +3,7 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
+  assertDbLocatorMatchesCard,
   boardTerminalMap,
   depStatus,
   listBoards,
@@ -25,8 +26,10 @@ export async function showResult(opts: {
   cfg: Config;
   node: NodeClient;
   slug: string;
+  dbLocator?: string;
 }): Promise<{ text: string; card: CardDetail }> {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
+  assertDbLocatorMatchesCard(card, opts.dbLocator, "show");
   // Resolve dep done-ness against each dep board's terminal column (a dep may
   // live on a different board than this card), falling back to `done`.
   // POINT-READ only this card's deps rather than scanning the whole card table:
@@ -48,6 +51,7 @@ export async function showCmd(opts: {
   cfg: Config;
   node: NodeClient;
   slug: string;
+  dbLocator?: string;
   json?: boolean;
 }): Promise<string> {
   const { text, card } = await showResult(opts);

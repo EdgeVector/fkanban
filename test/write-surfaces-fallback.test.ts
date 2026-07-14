@@ -4,9 +4,9 @@
 // HTTP 500 — NOT the structured `unknown_fields` 400 the legacy-surfaces
 // fallback in createCardRecord/updateCardRecord matched on. Against such a
 // node every `add`/`move` died with "node_http_500" even though retrying
-// without the optional `surfaces` field (mirrored into a `Surfaces:` body
-// header) succeeds. These tests pin the fallback contract for BOTH node
-// behaviors, plus the rethrow semantics when the retry itself fails.
+// without optional body-mirrored fields (`surfaces`, `db`) succeeds. These
+// tests pin the fallback contract for BOTH node behaviors, plus the rethrow
+// semantics when the retry itself fails.
 
 import { describe, expect, test } from "bun:test";
 
@@ -39,6 +39,7 @@ function testCard(): Card {
     created_at: ts,
     updated_at: ts,
     done_at: "",
+    db: "lastdb://personal",
     repo: "EdgeVector/fkanban",
     base: "main",
     kind: "pr",
@@ -65,12 +66,12 @@ const structured400 = () =>
 const unrelated404 = () =>
   new FkanbanError({ code: "node_http_404", message: "Schema not found" });
 
-// A node stub whose create/update rejects any payload carrying `surfaces` with
-// `err`, and records every accepted payload.
+// A node stub whose create/update rejects any payload carrying optional fields
+// with `err`, and records every accepted payload.
 function strictNode(err: () => FkanbanError, alwaysFail = false) {
   const writes: Array<Record<string, unknown>> = [];
   const write = async ({ fields }: { fields: Record<string, unknown> }) => {
-    if (alwaysFail || "surfaces" in fields) throw err();
+    if (alwaysFail || "surfaces" in fields || "db" in fields) throw err();
     writes.push(fields);
   };
   const node = {
@@ -85,13 +86,15 @@ for (const [name, writeFn] of [
   ["updateCardRecord", updateCardRecord],
 ] as const) {
   describe(name, () => {
-    test("bare minimal-node 500 → retries once without surfaces, mirroring them into a Surfaces: body header", async () => {
+    test("bare minimal-node 500 → retries once without optional fields, mirroring them into body headers", async () => {
       const { node, writes } = strictNode(bare500);
       await writeFn({ cfg, node }, testCard());
       expect(writes.length).toBe(1);
       const accepted = writes[0]!;
       expect("surfaces" in accepted).toBe(false);
+      expect("db" in accepted).toBe(false);
       expect(String(accepted.body)).toContain("Surfaces: src/record.ts");
+      expect(String(accepted.body)).toContain("Db: lastdb://personal");
     });
 
     test("structured unknown_fields 400 still triggers the fallback (existing contract)", async () => {
@@ -99,6 +102,7 @@ for (const [name, writeFn] of [
       await writeFn({ cfg, node }, testCard());
       expect(writes.length).toBe(1);
       expect("surfaces" in writes[0]!).toBe(false);
+      expect("db" in writes[0]!).toBe(false);
     });
 
     test("a 500 with a different cause surfaces the ORIGINAL error after the retry also fails", async () => {
@@ -144,6 +148,7 @@ for (const [name, writeFn] of [
       await writeFn({ cfg, node }, testCard());
       expect(writes.length).toBe(1);
       expect(writes[0]!.surfaces).toEqual(["src/record.ts"]);
+      expect(writes[0]!.db).toBe("lastdb://personal");
     });
   });
 }

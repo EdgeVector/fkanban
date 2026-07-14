@@ -11,6 +11,8 @@ import {
   appendPosition,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
+  applyDbLocatorForWrite,
+  assertDbLocatorMatchesCard,
   boardTerminalMap,
   depStatus,
   doneAtForColumnTransition,
@@ -36,6 +38,7 @@ export type MoveOptions = {
   position?: number;
   // Override the dependency soft-block when moving into a working column.
   force?: boolean;
+  dbLocator?: string;
   situationPreflight?: SituationPreflight;
 };
 
@@ -116,6 +119,7 @@ async function promoteUnblockedBacklogDependents(opts: {
 
 export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
+  assertDbLocatorMatchesCard(card, opts.dbLocator, "move");
   const board = await ensureBoardRecord(opts.node, opts.cfg, card.board);
   const columns = board.columns;
   ensureColumn(opts.column, columns);
@@ -134,6 +138,7 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     updated_at: now,
     done_at: doneAtForColumnTransition(card, opts.column, columns, now),
   };
+  applyDbLocatorForWrite(updated, opts.dbLocator, "move");
   const rawBody = updated.body;
   await stampCardForWrite(opts.node, opts.cfg, updated, {
     warn: !opts.force && updated.board === "default" && updated.column === "todo" ? () => {} : undefined,

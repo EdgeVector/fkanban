@@ -289,6 +289,7 @@ export function renderCardDetail(
   if (c.tags.length > 0) lines.push(`tags: ${c.tags.map((t) => `#${t}`).join(" ")}`);
   // Structured pickup fields — only shown when set, so plain cards stay terse.
   if (c.repo) lines.push(`repo: ${c.repo}${c.base ? ` (base ${c.base})` : ""}`);
+  if (c.db) lines.push(`db: ${c.db}`);
   if (c.kind && c.kind !== "pr") lines.push(`kind: ${c.kind}`);
   if (c.block_status && c.block_status !== "none") {
     lines.push(

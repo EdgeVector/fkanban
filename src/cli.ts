@@ -27,7 +27,7 @@ import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
 import { migrateAreaTagsCmd } from "./commands/migrate.ts";
-import { normalizePriority, PRIORITY_TIERS, type PriorityTier } from "./record.ts";
+import { normalizePriority, PRIORITY_TIERS, writeBodyHeader, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import { FKANBAN_APP_ID, declareGatesLink, gatesCmd } from "./commands/gates.ts";
 import { suggestClosest } from "./suggest.ts";
@@ -1010,10 +1010,7 @@ async function dispatch(
           body = await readStdinBodyForAdd();
         }
         // Explicit DB from org wrapper / --db / LASTDB_DB — stamp home DB on card.
-        const dbLocator =
-          (values.db as string | undefined)?.trim() ||
-          process.env.LASTDB_DB?.trim() ||
-          undefined;
+        const dbLocator = ambientDbLocator(values);
         body = ensureDbHeader(body, dbLocator);
         // Validate --priority before touching the node, so a bad value reports the
         // exit-2 flag error rather than a config/node error (same as --position).
@@ -1042,6 +1039,7 @@ async function dispatch(
           northStar: values["north-star"] as string | undefined,
           prUrl: values["pr-url"] as string | undefined,
           branch: values.branch as string | undefined,
+          dbLocator,
         });
         console.log(formatAdd(res, values.json as boolean | undefined));
         return 0;
@@ -1057,6 +1055,8 @@ async function dispatch(
             err.code === "deps_replace_requires_explicit" ||
             err.code === "invalid_kind" ||
             err.code === "invalid_block_status" ||
+            err.code === "invalid_db_locator" ||
+            err.code === "db_locator_mismatch" ||
             err.code === "body_slug_list_tripwire" ||
             err.code === "stdin_body_unavailable"
           )
@@ -1129,6 +1129,7 @@ async function dispatch(
           expectColumn: from ?? expect,
           position,
           force: values.force as boolean | undefined,
+          dbLocator: ambientDbLocator(values),
         });
         console.log(formatMove(res, values.json as boolean | undefined));
         return 0;
@@ -1427,7 +1428,13 @@ async function dispatch(
       const extra = rejectExtraPositionals(positionals, 2, "show <slug>");
       if (extra !== undefined) return extra;
       const ctx = loadCtx({ verbose });
-      const out = await showCmd({ cfg: ctx.cfg, node: ctx.node, slug, json: values.json as boolean | undefined });
+      const out = await showCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        slug,
+        dbLocator: ambientDbLocator(values),
+        json: values.json as boolean | undefined,
+      });
       console.log(out);
       return 0;
     }
@@ -1531,12 +1538,19 @@ function requirePositional(value: string | undefined, usage: string): string {
   return value;
 }
 
+function ambientDbLocator(values: Record<string, unknown>): string | undefined {
+  return (
+    (values.db as string | undefined)?.trim() ||
+    process.env.LASTDB_DB?.trim() ||
+    undefined
+  );
+}
+
 /** Stamp `Db: <locator>` when org/kanban --db (or LASTDB_DB) provides a write target. */
 export function ensureDbHeader(body: string | undefined, dbLocator: string | undefined): string | undefined {
   if (!dbLocator || dbLocator.length === 0) return body;
   const b = body ?? "";
-  if (/^[ \t]*Db:/m.test(b)) return b;
-  return `Db: ${dbLocator}\n${b}`;
+  return writeBodyHeader(b, "Db", dbLocator);
 }
 
 function rejectExtraPositionals(positionals: string[], max: number, usage: string): number | undefined {
@@ -1595,7 +1609,7 @@ if (import.meta.main) {
         // command or a bad flag — exit 2 ("bad invocation"). Every other
         // FkanbanError (card_not_found, service_unreachable, card_blocked, …)
         // is a genuine operational failure and stays exit 1.
-        process.exit(err.code === "missing_arg" ? 2 : 1);
+        process.exit(["missing_arg", "invalid_db_locator", "db_locator_mismatch"].includes(err.code) ? 2 : 1);
       } else {
         console.error(`kanban: ${err instanceof Error ? err.message : String(err)}`);
       }

@@ -163,6 +163,26 @@ describe("move claim guard", () => {
     expect(second).toMatchObject({ slug: "claim-me", from: "doing", to: "doing" });
   });
 
+  test("move refuses an ambient DB that disagrees with the card home DB", async () => {
+    const node = fakeNode();
+    await seed(node);
+
+    await moveCmd({ cfg, node, slug: "claim-me", column: "doing", dbLocator: "lastdb://personal" });
+    const after = await findCard(node, cfg, "claim-me");
+    expect(after?.db).toBe("lastdb://personal");
+    expect(after?.body.startsWith("Db: lastdb://personal\n")).toBe(true);
+
+    await expect(
+      moveCmd({
+        cfg,
+        node,
+        slug: "claim-me",
+        column: "review",
+        dbLocator: "lastdb://org/edgevector/company",
+      }),
+    ).rejects.toMatchObject({ code: "db_locator_mismatch" });
+  });
+
   test("claim conflict exposes the current column", () => {
     const err = new ClaimConflictError({ slug: "claim-me", expected: "todo", current: "review" });
     expect(err.code).toBe("claim_conflict");
