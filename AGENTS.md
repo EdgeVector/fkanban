@@ -82,19 +82,18 @@ bun run src/cli.ts init --node-url http://127.0.0.1:9105 \
   --schema-service-url <dev-schema-service-url>
 ```
 
-## PR workflow
+## Review workflow
 
-PRs land through the merge queue — let the queue pick the strategy. Use
-`gh pr merge <n>` with no `--squash`/`--merge`/`--rebase`; GitHub queues the PR
-when required checks are green and enables auto-merge while they are pending.
-Do not pass `--delete-branch` to the merge command on merge-queue repos; delete
-the branch after the PR reports `MERGED` if cleanup is needed.
+This repo is homed in LastGit. GitHub is a public read-only mirror for
+clone/browse only; do not open or merge GitHub PRs for repo policy changes.
+Use LastGit CRs against `lastdb:///fkanban` and the committed `.lastgit/ci.sh`
+gate.
 
 ```bash
-git push -u origin HEAD
-gh pr create --fill --base main
-gh pr checks <n> --watch     # block until CI is green
-gh pr merge <n>              # queue it; no strategy or delete-branch flag
+git remote add lastgit lastdb:///fkanban   # once per checkout
+git push lastgit HEAD
+lastgit cr create fkanban --head <branch> --base main \
+  --auto-merge --require-status ci-required
 ```
 
 Keep PRs atomic. README has the full command catalog.

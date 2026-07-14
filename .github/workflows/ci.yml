@@ -1,58 +1,11 @@
-name: CI
+name: ci.yml (mirror-inert)
 
+# GitHub is a read-only mirror. LastGit is source of truth for CR/CI/merge.
 on:
-  push:
-    branches: [main]
-  pull_request:
-  merge_group:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:
 
 jobs:
-  test:
-    name: Typecheck + Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Test
-        run: bun test
-
-  # Single umbrella check the org ruleset requires uniformly across repos
-  # (`required_status_checks: ci-required`). Tolerates `skipped` so path-gated
-  # jobs never fail the umbrella. Mirrors fold's ci-required aggregator.
-  ci-required:
-    name: ci-required
-    needs: [test]
-    if: always()
+  inert:
     runs-on: ubuntu-latest
     steps:
-      - name: All required jobs must succeed
-        env:
-          RESULTS: ${{ join(needs.*.result, ',') }}
-        run: |
-          echo "Required job results: $RESULTS"
-          for r in ${RESULTS//,/ }; do
-            case "$r" in
-              success|skipped) ;;
-              *) echo "::error::A required job did not succeed (result: $r)"; exit 1 ;;
-            esac
-          done
-          echo "All required jobs passed."
+      - run: echo "GitHub mirror - no Actions. Use LastGit lastdb:///fkanban."

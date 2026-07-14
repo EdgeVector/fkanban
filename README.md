@@ -5,6 +5,10 @@ change persists in folddb. Modeled on `fbrain` — a thin Bun/TypeScript client
 of the LastDB/FoldDB node (`/api/mutation` + `/api/query`) using Mini local
 app-schema declaration for its private record shapes.
 
+Development source of truth is LastGit `lastdb:///fkanban`; GitHub
+`EdgeVector/fkanban` is a public read-only mirror for clone/browse. See
+`.lastgit/README.md` before opening review artifacts.
+
 Two schemas, registered under the `fkanban/*` app namespace (so they never
 collide with `fbrain/*` or any other app on a shared daemon):
 
@@ -35,7 +39,7 @@ curl -fsSL https://bun.sh/install | bash   # or: brew install oven-sh/bun/bun
 the Quick start's `cd kanban` comes from.
 
 ```bash
-git clone https://github.com/EdgeVector/kanban.git
+git clone https://github.com/EdgeVector/fkanban.git
 cd kanban
 bun install
 ```
