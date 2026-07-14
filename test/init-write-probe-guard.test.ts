@@ -57,6 +57,11 @@ function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
       if (url.pathname === "/api/system/auto-identity") {
         return Response.json({ user_hash: "stub-user" });
       }
+      if (url.pathname === "/api/apps/declare-schema") {
+        // This fixture exercises the schema_service *load* path; declare is
+        // intentionally unsupported so init falls back to /api/schemas/load.
+        return Response.json({ error: "not_found" }, { status: 404 });
+      }
       if (url.pathname === "/api/schemas/load") {
         return Response.json({
           available_schemas_loaded: 2,
