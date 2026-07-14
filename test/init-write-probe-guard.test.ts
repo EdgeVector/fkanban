@@ -1,8 +1,8 @@
 // `fkanban init` must NOT pin config to a resolved-but-not-writable schema
 // (fkanban #94). These drive the real `runInit` against a stub node and assert:
-//   - happy path: with the full 18-field Card loaded, init resolves it,
+//   - happy path: local declare returns the full 18-field Card hash,
 //     write-probes OK, and writes config pinned to the full hash.
-//   - #94 footgun: with ONLY the stale 10-field Card loaded, init REFUSES — it
+//   - #94 footgun: when declare returns a stale 10-field Card hash, init REFUSES — it
 //     throws a `schema_not_writable` error and leaves any existing config
 //     untouched (so current writes keep working), rather than adopting a hash
 //     that breaks every subsequent `add`.
@@ -32,13 +32,13 @@ const OLD_CARD_FIELDS = [
   "updated_at",
 ];
 
-// A stub node parameterised by which Card schemas it has loaded. Models the #94
-// write split: writes against the stale Card 400 when they carry new fields.
+// A stub node parameterised by which Card hash local declare returns. Models
+// the #94 write split: writes against the stale Card 400 when they carry new fields.
 // Serves over a full-surface UNIX SOCKET (folddb-full.sock) — the only
 // transport a local node speaks now that the client is socket-only and the
-// loopback TCP listener is retired. A full-surface socket carries EVERY node
-// route (incl. /api/schemas/load), so init's control + data calls all land here.
-function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
+// loopback TCP listener is retired. A full-surface socket carries EVERY node route,
+// so init's control + data calls all land here.
+function makeNode(declaredCardHash: string) {
   const store = new Map<string, Record<string, unknown>>();
   const dir = mkdtempSync(join(tmpdir(), "fkanban-init-node-"));
   const socketPath = join(dir, "folddb-full.sock");
@@ -58,25 +58,28 @@ function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
         return Response.json({ user_hash: "stub-user" });
       }
       if (url.pathname === "/api/apps/declare-schema") {
-        // This fixture exercises the schema_service *load* path; declare is
-        // intentionally unsupported so init falls back to /api/schemas/load.
-        return Response.json({ error: "not_found" }, { status: 404 });
-      }
-      if (url.pathname === "/api/schemas/load") {
+        const schema = (body!.schema ?? {}) as { descriptive_name?: string };
+        const canonical = schema.descriptive_name === "Board" ? BOARD_HASH : declaredCardHash;
         return Response.json({
-          available_schemas_loaded: 2,
-          schemas_loaded_to_db: 2,
-          failed_schemas: [],
+          app_id: "fkanban",
+          schema: schema.descriptive_name,
+          canonical,
+          resolution: "mint",
+          decision: "mint",
         });
       }
+      if (url.pathname === "/api/schemas/load") {
+        return Response.json({ error: "schema_service_load_must_not_run" }, { status: 500 });
+      }
       if (url.pathname === "/api/schemas") {
+        const cardFields = declaredCardHash === STALE_CARD_HASH ? OLD_CARD_FIELDS : fieldsFor("card");
         const schemas = [
-          ...cardSchemas.map((c) => ({
-            name: c.name,
+          {
+            name: declaredCardHash,
             descriptive_name: "Card",
             owner_app_id: "fkanban",
-            fields: c.fields,
-          })),
+            fields: cardFields,
+          },
           {
             name: BOARD_HASH,
             descriptive_name: "Board",
@@ -136,11 +139,7 @@ afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 describe("runInit write-probe guard", () => {
   test("happy path: resolves + write-probes the full 18-field Card and pins config to it", async () => {
-    // Stale listed FIRST so a naive resolver would pick the wrong one.
-    const node = makeNode([
-      { name: STALE_CARD_HASH, fields: OLD_CARD_FIELDS },
-      { name: FULL_CARD_HASH, fields: fieldsFor("card") },
-    ]);
+    const node = makeNode(FULL_CARD_HASH);
     const configPath = join(tmp, "happy.json");
     try {
       const { config } = await runInit({
@@ -159,8 +158,8 @@ describe("runInit write-probe guard", () => {
     }
   });
 
-  test("#94 footgun: with only the stale Card loaded, init REFUSES and leaves config untouched", async () => {
-    const node = makeNode([{ name: STALE_CARD_HASH, fields: OLD_CARD_FIELDS }]);
+  test("#94 footgun: when declare returns a stale Card hash, init REFUSES and leaves config untouched", async () => {
+    const node = makeNode(STALE_CARD_HASH);
     const configPath = join(tmp, "refuse.json");
     // Pre-existing config pinned to the GOOD hash — the workaround state. init
     // must not clobber it when it refuses.
@@ -187,7 +186,7 @@ describe("runInit write-probe guard", () => {
       }
       expect(err).toBeInstanceOf(FkanbanError);
       expect((err as FkanbanError).code).toBe("schema_not_writable");
-      // Resolution-stage refusal names the missing fields.
+      // Write-probe refusal names the missing fields.
       expect((err as FkanbanError).message).toContain("repo");
       // Config is UNTOUCHED — the good hash survives, so writes keep working.
       const after = JSON.parse(readFileSync(configPath, "utf8"));
