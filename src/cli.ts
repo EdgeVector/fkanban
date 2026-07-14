@@ -50,6 +50,10 @@ export const TOP_HELP = `kanban — a kanban board over fold_db
 Usage:
   kanban <command> [options]
 
+Global:
+  --db <locator>       write-target DB (lastdb://personal | lastdb://org/<slug>/<db>);
+                       also read from env LASTDB_DB (set by org kanban ...)
+
 Commands:
   init                 bootstrap a node + declare private schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
@@ -733,7 +737,9 @@ function isParseArgsError(err: unknown): err is Error & { code: string } {
 // UNIVERSAL_FLAGS + COMMAND_FLAGS let us re-check each provided flag against
 // the command it was actually given to, and reject the misapplied ones with
 // the same exit-2 + per-command-help contract as a truly unknown flag.
-const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json"]);
+// `db` is set by org kanban ... (or LASTDB_DB) — explicit write-target locator
+// (lastdb://personal | lastdb://org/<slug>/<db>). Stamped on cards as `Db:`.
+const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "db"]);
 
 // Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
 // names as COMMAND_HELP. Derived from each command's `--help` text and the
@@ -807,6 +813,7 @@ async function main(argv: string[]): Promise<number> {
         version: { type: "boolean", short: "V" },
         verbose: { type: "boolean" },
         json: { type: "boolean" },
+        db: { type: "string" },
         title: { type: "string" },
         board: { type: "string" },
         column: { type: "string" },
@@ -1002,6 +1009,12 @@ async function dispatch(
         if (body === undefined) {
           body = await readStdinBodyForAdd();
         }
+        // Explicit DB from org wrapper / --db / LASTDB_DB — stamp home DB on card.
+        const dbLocator =
+          (values.db as string | undefined)?.trim() ||
+          process.env.LASTDB_DB?.trim() ||
+          undefined;
+        body = ensureDbHeader(body, dbLocator);
         // Validate --priority before touching the node, so a bad value reports the
         // exit-2 flag error rather than a config/node error (same as --position).
         const priority =
@@ -1516,6 +1529,14 @@ function requirePositional(value: string | undefined, usage: string): string {
     throw new FkanbanError({ code: "missing_arg", message: `Missing argument — usage: kanban ${usage}` });
   }
   return value;
+}
+
+/** Stamp `Db: <locator>` when org/kanban --db (or LASTDB_DB) provides a write target. */
+export function ensureDbHeader(body: string | undefined, dbLocator: string | undefined): string | undefined {
+  if (!dbLocator || dbLocator.length === 0) return body;
+  const b = body ?? "";
+  if (/^[ \t]*Db:/m.test(b)) return b;
+  return `Db: ${dbLocator}\n${b}`;
 }
 
 function rejectExtraPositionals(positionals: string[], max: number, usage: string): number | undefined {
