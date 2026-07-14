@@ -2,18 +2,15 @@
 // write the board:
 //
 //   1. probe identity, bootstrap the node if needed
-//   2. load schemas into the node (it pulls the published `fkanban/*` schemas
-//      from the schema_service)
-//   3. resolve each schema's canonical hash from the node's loaded set
+//   2. declare fkanban's private schemas locally on the Mini node
+//   3. capture each schema's canonical hash from the local declaration result
 //   4. persist ~/.kanban/config.json
 //   5. seed the default board (idempotent)
 //
-// fkanban does NOT publish its own schemas. Under app_identity v3.1 a schema
-// claim under the `fkanban/*` namespace must be signed by an enrolled
-// developer's DevCert — that's a one-time out-of-band step done via the
-// exemem app-creation flow (`folddb-dev app publish` + `folddb-dev schema
-// publish --app fkanban`; see README "Republishing the schemas"). After that, every
-// `kanban init` just loads + resolves the already-published schemas.
+// fkanban's Card/Board schemas are app-private implementation details. Mini
+// declares them through its local `/api/apps/declare-schema` route and returns
+// deterministic app-namespaced canonical hashes. The schema service is reserved
+// for explicit shared-surface publish/attach flows, not ordinary private init.
 
 import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
 import { existsSync } from "node:fs";
@@ -24,7 +21,6 @@ import {
   OWNER_APP_ID,
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
-  resolveLoadedSchema,
 } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -87,8 +83,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const nodeSocketPath = opts.nodeSocketPath ?? existing?.nodeSocketPath;
   const socketPath = resolveSocketPath({ nodeSocketPath });
 
-  // Step 1: probe identity, bootstrap if needed. The schema-load path below is
-  // an owner verb that 403s `transport_not_attested` on an app-isolation node,
+  // Step 1: probe identity, bootstrap if needed. The private-schema declaration
+  // path below is an owner verb that 403s `transport_not_attested` on an app-isolation node,
   // so every node client here attests an owner session over the control socket
   // (no-op fallback when the node serves no socket).
   print(`[1/${STEPS}] probing node identity at ${nodeUrl}`);
@@ -136,61 +132,17 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
 
   // The probe (step 1) already emitted the one-line "control socket not found"
-  // warning if the socket is missing, so the schema-load client stays quiet on
+  // warning if the socket is missing, so the declaration client stays quiet on
   // that front — it still raises the actionable `node_attestation_unavailable`
   // error if the owner verb 403s.
   const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath });
 
-  // Step 2: load fkanban schemas into the node. Prefer local app-schema
-  // declaration (Mini / modern nodes expose POST /api/apps/declare-schema) so
-  // first-run does not download the entire published catalog (~1.6MB, 20s+).
-  // Fall back to a SCOPED schema_service load by descriptive name (Board/Card)
-  // — never the unscoped full catalog, which wedged Mini first-run init.
-  print(`[2/${STEPS}] loading schemas into the node`);
-  const declaredLocally = await tryDeclareOwnedSchemasLocally(node, print);
-  if (!declaredLocally) {
-    const scope = UNIQUE_SCHEMAS.map((entry) => entry.schema.schema.descriptive_name).filter(
-      (n): n is string => typeof n === "string" && n.length > 0,
-    );
-    let loadResult: Awaited<ReturnType<NodeClient["loadSchemas"]>>;
-    try {
-      print(`        falling back to schema_service load (scoped to ${scope.join(", ")})`);
-      loadResult = await node.loadSchemas(scope);
-    } catch (err) {
-      const degraded = await tryInitSocketOnly({
-        err,
-        existing,
-        nodeUrl,
-        schemaServiceUrl,
-        nodeSocketPath,
-        socketPath,
-        configPath,
-        verbose,
-        print,
-      });
-      if (degraded) return degraded;
-      throw freshSetupSocketError(err, socketPath, "/api/schemas/load") ?? err;
-    }
-    if (loadResult.failed_schemas.length > 0) {
-      throw new Error(
-        `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
-      );
-    }
-    print(
-      `        loaded ${loadResult.schemas_loaded_to_db}/${loadResult.available_schemas_loaded} (failed_schemas empty ✓)`,
-    );
-  }
-
-  // Step 3: resolve each fkanban schema's canonical hash from the node's
-  // loaded set. The node can have MORE THAN ONE schema sharing
-  // owner_app_id + descriptive_name (a stale, narrower version lingering beside
-  // the current one — fkanban #94). `resolveLoadedSchema` therefore prefers the
-  // candidate whose FIELDS superset the local definition, so we never pin config
-  // to a narrower version the node would reject every write against.
-  print(`[3/${STEPS}] resolving ${UNIQUE_SCHEMAS.length} schema hashes for app "${OWNER_APP_ID}"`);
-  let loaded: Awaited<ReturnType<NodeClient["listSchemas"]>>;
+  // Step 2: declare fkanban's app-private schemas locally. This is Mini's
+  // private-schema bootstrap path; it must not call schema_service load.
+  print(`[2/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} private schemas locally`);
+  let schemaHashes: Record<string, string>;
   try {
-    loaded = await node.listSchemas();
+    schemaHashes = await declareOwnedSchemasLocally(node, print);
   } catch (err) {
     const degraded = await tryInitSocketOnly({
       err,
@@ -204,78 +156,14 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       print,
     });
     if (degraded) return degraded;
-    throw err;
-  }
-  const schemaHashes: Record<string, string> = {};
-  const missing: string[] = [];
-  const narrower: string[] = [];
-  for (const entry of UNIQUE_SCHEMAS) {
-    const descriptive = entry.schema.schema.descriptive_name;
-    const resolution = resolveLoadedSchema(entry.key, loaded);
-    if (resolution.kind === "missing") {
-      missing.push(`${OWNER_APP_ID}/${descriptive}`);
-      continue;
-    }
-    if (resolution.kind === "narrower") {
-      // Every loaded `fkanban/<descriptive>` is narrower than the app expects —
-      // adopting it would 400 every write. Refuse, naming the missing fields.
-      narrower.push(
-        `${OWNER_APP_ID}/${descriptive} (loaded hash ${resolution.hash} is missing fields: ${resolution.missingFields.join(", ")})`,
-      );
-      continue;
-    }
-    schemaHashes[entry.key] = resolution.hash;
-    print(
-      `        ${descriptive.padEnd(6)} → ${resolution.hash}` +
-        (resolution.ambiguous ? " (multiple write-compatible versions loaded; picked one)" : ""),
-    );
-  }
-  if (narrower.length > 0) {
-    throw new FkanbanError({
-      code: "schema_not_writable",
-      message:
-        `The node's loaded ${narrower.length === 1 ? "schema is" : "schemas are"} an OLDER, narrower ` +
-        `version than this fkanban build expects — adopting ${narrower.length === 1 ? "it" : "them"} would ` +
-        `reject every write:\n  ${narrower.join("\n  ")}`,
-      hint:
-        "Do NOT pin config to a narrower schema. The node needs the current " +
-        "fkanban/* schema version (with all fields) loaded. Either the current " +
-        "version isn't published to the schema_service the node uses, or only a " +
-        "stale version is loaded. Republish/load the current fkanban/* schemas " +
-        "(README → \"Republishing the schemas\"), then re-run `kanban init`. " +
-        "Your existing config was left untouched, so current writes keep working.",
-    });
-  }
-  if (missing.length > 0) {
-    throw new FkanbanError({
-      code: "schemas_not_published",
-      message: `These fkanban schemas are not registered in the schema service: ${missing.join(", ")}.`,
-      hint:
-        "The NODE loads schemas from its OWN configured schema_service (via " +
-        "/api/schemas/load) — the CLI's --schema-service-url flag does NOT drive " +
-        "this and changing it won't fix the failure. The schema_service the node " +
-        "uses just doesn't have the fkanban/* schemas published yet.\n" +
-        "Fix (node-side): publish fkanban/* to the schema_service the node is " +
-        "configured to use, or point the node at a schema_service where fkanban/* " +
-        "already lives, then re-run `kanban init`. The fkanban/* schemas are " +
-        "already published on the default prod schema_service.\n" +
-        `(For reference, the schema_service URL recorded in config is ${schemaServiceUrl}; ` +
-        "it's informational/diagnostic only — the node, not the CLI, decides where schemas load from.)\n" +
-        "\n" +
-        "Maintainer only — standing the schemas up on a *new* schema_service:\n" +
-        "  Publish fkanban/* via the exemem app-creation flow, then re-run `kanban init`.\n" +
-        "  See README → \"Republishing the schemas\" (needs a DevCert + enrolled developer + em_… API key).",
-    });
+    throw freshSetupSocketError(err, socketPath, "/api/apps/declare-schema") ?? err;
   }
 
-  // Step 3b: WRITE-PROBE each resolved hash before adopting it. The
-  // field-superset resolution above catches a narrower schema only when the
-  // node reports `fields`; this probe is the runtime backstop — it creates +
-  // deletes a throwaway record carrying EVERY field against each resolved hash,
-  // so a hash is adopted only once a real all-fields write round-trips. This is
-  // the guard that closes the #94 footgun where `init` happily pinned a
-  // resolved-but-not-writable hash and broke every subsequent `add`.
-  print(`[3b/${STEPS}] write-probing resolved schema hashes`);
+  // Step 3: WRITE-PROBE each declared hash before adopting it. The declaration
+  // response is the source of truth for the canonical identity; the probe is
+  // the runtime backstop that proves the node will accept fkanban's full field
+  // set before config is updated.
+  print(`[3/${STEPS}] write-probing declared schema hashes`);
   const notWritable: string[] = [];
   for (const entry of UNIQUE_SCHEMAS) {
     const hash = schemaHashes[entry.key];
@@ -296,9 +184,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
         `${notWritable.length === 1 ? "it" : "them"} (this would otherwise break every ` +
         `subsequent write):\n  ${notWritable.join("\n  ")}`,
       hint:
-        "The node has a schema version that resolves but isn't writable for all " +
-        "fields. Load/republish the current fkanban/* schemas on the node " +
-        "(README → \"Republishing the schemas\"), then re-run `kanban init`. " +
+        "The node returned a declared fkanban/* schema hash that is not writable for all " +
+        "fields. Upgrade or repair the Mini local schema declaration path, then re-run `kanban init`. " +
         "Your existing config was left untouched — current writes keep working.",
     });
   }
@@ -350,46 +237,50 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 }
 
 /**
- * Prefer local app-schema declaration (POST /api/apps/declare-schema) when
- * the node supports it — Mini first-run path. Returns true when every
- * UNIQUE_SCHEMAS entry was declared; false when the node 404s (caller falls
- * back to schema_service load).
+ * Declare fkanban's private schemas through Mini's local declaration API.
+ * Private init has no schema_service fallback; older nodes must be upgraded
+ * rather than loading app-private schemas from the shared service registry.
  */
-async function tryDeclareOwnedSchemasLocally(
+async function declareOwnedSchemasLocally(
   node: NodeClient,
   print: (line: string) => void,
-): Promise<boolean> {
+): Promise<Record<string, string>> {
   if (!node.declareAppSchema) {
-    print(`        node client has no declareAppSchema — using schema_service load`);
-    return false;
+    throw appSchemaDeclareUnsupported();
   }
-  print(`        trying local /api/apps/declare-schema for ${UNIQUE_SCHEMAS.length} schemas`);
+  const schemaHashes: Record<string, string> = {};
   for (const entry of UNIQUE_SCHEMAS) {
     const descriptive = entry.schema.schema.descriptive_name ?? entry.key;
     try {
       const declared = await node.declareAppSchema!(OWNER_APP_ID, entry.schema.schema as unknown as Record<string, unknown>);
+      schemaHashes[entry.key] = declared.canonical;
       print(
         `        ${String(descriptive).padEnd(6)} → ${declared.canonical}  (${declared.resolution})`,
       );
     } catch (err) {
-      // Not-supported / not-reachable for declare → fall through to schema_service
-      // load (which has its own full-surface socket diagnostics). A real 4xx/5xx
-      // that is *not* "route missing" still surfaces.
       if (
         err instanceof FkanbanError &&
         (err.code === "node_http_404" ||
-          err.code === "node_http_405" ||
-          err.code === "service_unreachable" ||
-          err.code === "full_surface_socket_unavailable")
+          err.code === "node_http_405")
       ) {
-        print(`        local declare not available (${err.code}); will load from schema_service`);
-        return false;
+        throw appSchemaDeclareUnsupported(err);
       }
       throw err;
     }
   }
-  print(`        local app-schema declarations persisted; schema_service load skipped ✓`);
-  return true;
+  print(`        local app-schema declarations persisted; schema_service load skipped`);
+  return schemaHashes;
+}
+
+function appSchemaDeclareUnsupported(cause?: unknown): FkanbanError {
+  return new FkanbanError({
+    code: "app_schema_declare_unsupported",
+    message: "This node does not support Mini local private schema declaration at /api/apps/declare-schema.",
+    hint:
+      "Upgrade LastDB/fold to a Mini node with local app-schema declaration. " +
+      "fkanban's Card/Board schemas are private implementation schemas and `kanban init` no longer loads them from schema_service.",
+    cause,
+  });
 }
 
 function freshSetupSocketError(err: unknown, socketPath: string, route: string): FkanbanError | null {
@@ -408,7 +299,7 @@ function freshSetupSocketError(err: unknown, socketPath: string, route: string):
       "This node appears to expose only the narrow data/attestation socket. Use a node build " +
       "or startup mode that creates <data>/folddb-full.sock for setup writes, then re-run " +
       "`kanban init --node-socket-path <data>/folddb.sock`. Existing provisioned nodes can " +
-      "still be used over the narrow socket; fresh bootstrap/schema-load needs the full surface.",
+      "still be used over the narrow socket; fresh bootstrap/private schema declaration needs the full surface.",
     cause: err,
   });
 }
@@ -424,8 +315,7 @@ function freshSetupSocketError(err: unknown, socketPath: string, route: string):
 //      so a first-ever init on a socket-only node still can't proceed — but it
 //      gets a socket-aware error from the caller's re-throw path);
 //   3. the socket data-plane actually round-trips a board query (proves the
-//      node is UP + the pinned schemas are loaded), confirming the TCP-only
-//      bootstrap/load/resolve steps are moot.
+//      node is UP + the pinned schemas are usable), confirming setup steps are moot.
 // When all hold, it re-seeds the default board over the socket (idempotent) and
 // reports the node UP via the socket.
 async function tryInitSocketOnly(args: {
@@ -441,9 +331,15 @@ async function tryInitSocketOnly(args: {
 }): Promise<InitResult | null> {
   const { err, existing, nodeUrl, schemaServiceUrl, nodeSocketPath, socketPath, configPath, verbose, print } = args;
 
-  // Only degrade for a genuine "TCP unreachable" — not a real node-side error
-  // (401/500/etc.), which must surface as-is.
-  if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") return null;
+  // Only degrade for transport/route availability while proving an existing
+  // config still works over the data plane. Real node-side errors (401/500/etc.)
+  // must surface as-is.
+  if (
+    !(err instanceof FkanbanError) ||
+    !["service_unreachable", "app_schema_declare_unsupported"].includes(err.code)
+  ) {
+    return null;
+  }
 
   // Without a prior config we have no pinned schema hashes, and the only way to
   // resolve them (the TCP schema-list route) is exactly what's down. Can't
@@ -464,10 +360,10 @@ async function tryInitSocketOnly(args: {
   }
 
   print(
-    `        node TCP control-plane unreachable, but the data-plane socket ` +
+    `        node setup route unavailable, but the data-plane socket ` +
       `${transport.socketPath} is live — degrading to a socket-only re-init`,
   );
-  print(`        (bootstrap + schema load/resolve are TCP-only system routes; ` + `skipping — the node is already provisioned with the fkanban/* schemas loaded)`);
+  print(`        (bootstrap + private schema declaration are setup routes; ` + `skipping — the node is already provisioned with fkanban schema hashes in config)`);
 
   // Persist config unchanged (re-affirm the existing pins). Carry the socket
   // path through if it was explicitly given, mirroring the TCP path.

@@ -1,6 +1,7 @@
 // On a socket-only node (legacy TCP `:9001` retired / connection refused), the
 // owner data socket serves board data-plane routes plus identity/schema reads,
-// but narrower sockets still cannot serve setup writes such as schema load.
+// but narrower sockets still cannot serve setup writes such as private schema
+// declaration.
 // `fkanban init` used to hard-fail there with `node not reachable at
 // http://127.0.0.1:9001`, even though the node is UP.
 //
@@ -37,7 +38,7 @@ function closedTcpUrl(): string {
 
 // A Unix-socket node: by default it behaves like a narrower data socket serving
 // `/api/query`, `/api/mutation`, and `/api/system/auto-identity` (plus the
-// pairing-code mint), but not setup writes like `/api/schemas/load`.
+// pairing-code mint), but not setup writes like `/api/apps/declare-schema`.
 // `fullSurface` models current fold nodes where canonical `folddb.sock` carries
 // the full HTTP app.
 function makeSocketNode(
@@ -74,10 +75,18 @@ function makeSocketNode(
         return Response.json({ user_hash: "stub-user" });
       }
       if (opts.fullSurface && url.pathname === "/api/apps/declare-schema") {
-        return Response.json({ error: "not_found" }, { status: 404 });
+        const schema = (body!.schema ?? {}) as { descriptive_name?: string };
+        const canonical = schema.descriptive_name === "Board" ? BOARD_HASH : CARD_HASH;
+        return Response.json({
+          app_id: OWNER_APP_ID,
+          schema: schema.descriptive_name,
+          canonical,
+          resolution: "mint",
+          decision: "mint",
+        });
       }
       if (opts.fullSurface && url.pathname === "/api/schemas/load") {
-        return Response.json({ available_schemas_loaded: 2, schemas_loaded_to_db: 2, failed_schemas: [] });
+        return Response.json({ error: "schema_service_load_must_not_run" }, { status: 500 });
       }
       if (opts.fullSurface && url.pathname === "/api/schemas") {
         return Response.json({
@@ -245,7 +254,7 @@ describe("runInit socket-only graceful degrade", () => {
       expect(fe.code).toBe("full_surface_socket_unavailable");
       expect(fe.message).toContain("/api/setup/bootstrap");
       expect(fe.message).toContain("folddb-full.sock");
-      expect(fe.hint).toContain("fresh bootstrap/schema-load needs the full surface");
+      expect(fe.hint).toContain("fresh bootstrap/private schema declaration needs the full surface");
     } finally {
       server.stop(true);
     }
@@ -272,8 +281,8 @@ describe("runInit socket-only graceful degrade", () => {
       expect(report).toContain("bootstrap ok");
       expect(report).toContain("[init] ok");
       expect(seen).toContain("/api/setup/bootstrap");
-      expect(seen).toContain("/api/schemas/load");
-      expect(seen).toContain("/api/schemas");
+      expect(seen).toContain("/api/apps/declare-schema");
+      expect(seen).not.toContain("/api/schemas/load");
       expect(seen).toContain("/api/mutation");
     } finally {
       server.stop(true);

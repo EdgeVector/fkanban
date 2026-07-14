@@ -2,8 +2,8 @@
 
 A kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db). Cards move through columns; every
 change persists in folddb. Modeled on `fbrain` — a thin Bun/TypeScript client
-of the `fold_db_node` (`/api/mutation` + `/api/query`) and the `schema_service`
-(`POST /v1/schemas`).
+of the LastDB/FoldDB node (`/api/mutation` + `/api/query`) using Mini local
+app-schema declaration for its private record shapes.
 
 Two schemas, registered under the `fkanban/*` app namespace (so they never
 collide with `fbrain/*` or any other app on a shared daemon):
@@ -16,11 +16,10 @@ Default columns: `backlog → todo → doing → review → done`.
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/test/run/dogfood + PR workflow and the non-obvious gotchas.
 
-> **Just want to use kanban?** The `fkanban/*` schemas are already published —
-> skip straight to [Prerequisites](#prerequisites) + [Quick start](#quick-start);
-> `kanban init` only loads them. (Re-publishing those schemas to a *new*
-> schema_service is a one-time maintainer task — see
-> [Republishing the schemas](#republishing-the-schemas-maintainers--one-time).)
+> **Just want to use kanban?** Skip straight to
+> [Prerequisites](#prerequisites) + [Quick start](#quick-start). `kanban init`
+> declares the private `fkanban/*` schemas locally on the Mini node and seeds
+> the default board.
 
 ## Prerequisites
 
@@ -103,17 +102,15 @@ a folddb node up), from inside the `kanban` repo:
 ```bash
 bun run install-cli   # one-time: put kanban on PATH (see "Install the global shim")
 
-# Bootstrap the node, LOAD + RESOLVE the published fkanban schemas, seed the
-# default board. Defaults: node http://127.0.0.1:9001, schema service = prod
-# Lambda. On a fresh bootstrap, `init` ends by printing a "Next steps" block —
+# Bootstrap the node, declare the private fkanban schemas locally, and seed the
+# default board. On a fresh bootstrap, `init` ends by printing a "Next steps" block —
 # including the `claude mcp add fkanban …` command to register the MCP server
 # (the form is picked for you based on whether the `kanban` shim is on PATH).
 kanban init
 
-# …or point at an ephemeral dev node. The NODE loads schemas from its own
-# configured schema_service; the CLI's --schema-service-url is recorded in
-# config for diagnostics only (it shows in `kanban doctor`) and does NOT
-# change where schemas load from.
+# …or point at an ephemeral dev node. The CLI's --schema-service-url is recorded
+# in config for diagnostics only (it shows in `kanban doctor`) and is not used
+# for private fkanban schema init.
 kanban init \
   --node-url http://127.0.0.1:9105 \
   --schema-service-url https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com
@@ -127,24 +124,20 @@ kanban list
 (Haven't installed the shim? Every `kanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
-If `init` reports `schemas_not_published`, the **node's** configured
-schema_service doesn't have the `fkanban/*` schemas — the node, not the CLI,
-loads schemas (`--schema-service-url` is diagnostic-only and won't fix it). The
-one-time
-[Republishing the schemas](#republishing-the-schemas-maintainers--one-time)
-maintainer step hasn't run against the schema_service the node uses yet.
+If `init` reports `app_schema_declare_unsupported`, the node does not expose
+Mini's local private schema declaration route. Upgrade LastDB/FoldDB to a Mini
+build with `/api/apps/declare-schema`; `--schema-service-url` is diagnostic-only
+and will not fix private fkanban schema setup.
 
 If `init` reports `schema_not_writable`, the node has a `fkanban/*` schema that
 **resolves but isn't writable for all fields** — usually an older, narrower
 version of the schema (fewer fields than this kanban build expects), sometimes
 loaded *alongside* the current one. `init` now refuses to adopt such a hash
 (it would 400 every subsequent write) and **leaves your existing config
-untouched**, so the board keeps working. The fix is node-side: load/republish
-the current `fkanban/*` schemas (see
-[Republishing the schemas](#republishing-the-schemas-maintainers--one-time)),
-then re-run `kanban init`. `init` resolves to — and `kanban doctor`
-write-probes — the schema version whose fields cover the full set kanban
-writes, so a stale duplicate can't silently break writes.
+untouched**, so the board keeps working. The fix is node-side: repair or
+upgrade Mini's local schema declaration path, then re-run `kanban init`. `init`
+and `kanban doctor` write-probe the schema hashes before trusting them, so a
+stale duplicate can't silently break writes.
 
 ```
 Default board  (default)
@@ -165,7 +158,7 @@ DONE  (0)
 
 | Command | What it does |
 |---|---|
-| `kanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
+| `kanban init` | bootstrap node + declare private schemas + seed default board (idempotent) |
 | `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
 | `kanban mark <slug> <line>` | append one marker line to an existing card body, idempotently (`--json`) |
 | `kanban move <slug> <column>` | move a card to a column (`--from/--expect COL` as a compare-and-swap claim guard, `--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
@@ -362,7 +355,7 @@ Edges are stored in the Card schema's canonical `deps` array field. They are
 not part of the body and they are not user tags, so an agent cannot accidentally
 erase or forge a dependency while editing prose or labels. Historical
 `dep:<slug>` tags are still read as a compatibility fallback, but new writes
-strip them and persist edges only in `deps`. The schema_service expands the
+strip them and persist edges only in `deps`. Mini local declaration expands the
 existing `fkanban/Card` schema to add `deps`; no data migration is required.
 
 `add --deps` and `dep add` require every dependency slug to resolve to an
@@ -502,42 +495,15 @@ and each body are capped unless you opt out.
 (usually `done`) and is preserved across later tag/body grooming updates. Legacy
 or not-yet-complete cards expose it as an empty string.
 
-## Republishing the schemas (maintainers / one-time)
+## Private vs Shared Schemas
 
-> You do **not** need this to use kanban — the `fkanban/*` schemas are already
-> published, and `kanban init` just loads + resolves them. This section is for
-> a maintainer standing the schemas up against a *new* schema_service.
+The `fkanban/Card` and `fkanban/Board` schemas are private implementation
+schemas. `kanban init` declares them locally through Mini and persists the
+returned deterministic hashes in config after write-probing them.
 
-Under app_identity v3.1 a schema claim under the `fkanban/*` namespace must be
-signed by an enrolled developer's DevCert, so the schemas are published to the
-schema_service **once**, out of band, via the exemem app-creation flow. After
-that, `kanban init` just loads + resolves them — it never self-publishes.
-
-```bash
-# 0. Enroll a developer once (see the app-identity-dev-enroll skill / runbook):
-#    `folddb-dev developer init` + a row in ExememDevelopers-<env> with
-#    developer_access=true + an EXEMEM_DEV_API_KEY (em_<48 hex>).
-
-# 1. Register the fkanban app namespace.
-folddb-dev app new --id fkanban --metadata-file fkanban.app.json --out app.json
-folddb-dev app publish --app-file app.json \
-  --schema-service-url <schema-service-url> --dev-api-key "$EXEMEM_DEV_API_KEY"
-
-# 2. Emit the schema definitions from the single source of truth, then
-#    register + publish each under the app (start a dev session first):
-bun -e 'import{cardSchema,boardSchema}from"./src/schemas.ts";import{writeFileSync}from"node:fs";
-  writeFileSync("card.schema.json",JSON.stringify(cardSchema.schema,null,2));
-  writeFileSync("board.schema.json",JSON.stringify(boardSchema.schema,null,2));'
-folddb-dev start --name fkanban-pub --schema-service-url <schema-service-url>
-folddb-dev schema register --file card.schema.json  --session fkanban-pub
-folddb-dev schema register --file board.schema.json --session fkanban-pub
-folddb-dev schema publish --schema Card  --app fkanban --schema-service-url <url> --session fkanban-pub
-folddb-dev schema publish --schema Board --app fkanban --schema-service-url <url> --session fkanban-pub
-```
-
-(Schema publishes are async — the app row / schemas take a few seconds to
-appear in the registry. `folddb-dev app list` / `curl .../v1/schema/<hash>`
-confirm.)
+The shared schema service is only for contracts fkanban deliberately exposes to
+another app or an external surface. Ordinary board storage does not register,
+publish, or load private schemas through schema_service.
 
 ## Design notes
 

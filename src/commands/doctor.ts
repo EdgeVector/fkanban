@@ -94,10 +94,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     print(`  node:            ${cfg.nodeUrl}`);
   }
   // The schema_service URL is recorded in config for diagnostics only — unlike
-  // `node:` (reachability-probed below), the CLI never contacts it. The NODE
-  // loads schemas from its own configured schema_service, so don't print this
-  // as if it were a checked/authoritative endpoint.
-  print(`  schema (config): ${cfg.schemaServiceUrl}  (informational — the node loads schemas, not the CLI)`);
+  // `node:` (reachability-probed below), the CLI never contacts it. Private
+  // fkanban schemas declare locally through Mini, so don't print this as if it
+  // were a checked/authoritative endpoint for ordinary board storage.
+  print(`  schema (config): ${cfg.schemaServiceUrl}  (informational — private fkanban schemas declare locally)`);
 
   if (transport.transport === "socket") {
     const fallback = isLoopbackNodeUrl(cfg.nodeUrl)

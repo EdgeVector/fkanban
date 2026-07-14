@@ -7,25 +7,21 @@
 //   - **Board** — a named board with an ordered list of `columns`.
 //
 // How the CLI gets the canonical hashes (the values every mutation/query MUST
-// pin to): the `fkanban/*` schemas are PUBLISHED once, out-of-band, to the
-// schema_service by an enrolled developer (see README "Republishing the
-// schemas"). fkanban itself never registers them — `registerSchema`
-// (`POST /v1/schemas`) exists on the client but is not called from the CLI. At
-// `init` time the NODE pulls the published schemas from its schema_service
-// (`loadSchemas` → `POST /api/schemas/load`); fkanban then reads the node's
-// loaded set (`listSchemas`) and `resolveLoadedSchema` matches each record type
-// to a loaded schema by `owner_app_id` + `descriptive_name`, adopting a
-// write-compatible (field-superset) candidate's `name` as the canonical hash to
-// persist in config. The `descriptive_name` / `purpose_statement` are for human
-// display + the dual-signal canonicalization gate (so Card and Board never
-// collapse onto one canonical hash, and `fkanban/*` never collides with another
-// app).
+// pin to): the `fkanban/*` schemas are app-private implementation schemas. At
+// `init` time the Mini node declares them locally through
+// `/api/apps/declare-schema` and returns deterministic app-namespaced canonical
+// hashes. fkanban then write-probes those hashes before persisting them in
+// config. The shared schema service is reserved for explicit publish/attach
+// workflows, not ordinary private board storage. The `descriptive_name` /
+// `purpose_statement` are for human display + the dual-signal canonicalization
+// gate (so Card and Board never collapse onto one canonical hash, and
+// `fkanban/*` never collides with another app).
 
 // The app id that owns every fkanban schema. Under app_identity v3.1,
 // `owner_app_id` folds into the schema's identity hash, so the
-// schema_service stores these under the canonical names `fkanban/Card` and
-// `fkanban/Board` — distinct from `fbrain/*` or any other app's schemas
-// even when the field shape matches.
+// local declaration stores these under canonical identities equivalent to
+// `fkanban/Card` and `fkanban/Board` — distinct from `fbrain/*` or any other
+// app's schemas even when the field shape matches.
 export const OWNER_APP_ID = "fkanban";
 
 /** Prefix a short schema name with the owning app id → `fkanban/<Name>`. */

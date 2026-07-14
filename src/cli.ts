@@ -51,7 +51,7 @@ Usage:
   kanban <command> [options]
 
 Commands:
-  init                 bootstrap a node + load/resolve schemas + seed default board
+  init                 bootstrap a node + declare private schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
   mark <slug> <line>   append one marker line to a card body, idempotently
@@ -106,7 +106,7 @@ function withFooter(body: string): string {
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
-  init: withFooter(`kanban init — bootstrap a node + load/resolve schemas + seed the default board
+  init: withFooter(`kanban init — bootstrap a node + declare private schemas + seed the default board
 
 Usage:
   kanban init [options]
@@ -114,15 +114,15 @@ Usage:
 Options:
   --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1:9001)
   --schema-service-url <url>  schema_service URL recorded in config for diagnostics
-                              (the NODE loads schemas, not the CLI — see below)
+                              (not used for private fkanban schema init)
   --node-socket-path <path>   unix socket of the node, instead of --node-url
   --name <name>               display name to seed the default board with
 
-Schema loading is performed by the NODE: it pulls the published fkanban/*
-schemas from its own configured schema_service. The CLI never contacts
---schema-service-url; that URL is only recorded in ~/.kanban/config.json
-for diagnostics (it shows up in \`kanban doctor\`). If init fails with
-schemas_not_published, fix it node-side — see that error's hint.
+Private schema setup is performed by the NODE through Mini's local
+/api/apps/declare-schema route. The CLI never contacts --schema-service-url;
+that URL is only recorded in ~/.kanban/config.json for diagnostics (it shows
+up in \`kanban doctor\`). If init fails with app_schema_declare_unsupported,
+upgrade the node to a Mini build with local app-schema declaration.
 
 Example:
   kanban init --node-url http://127.0.0.1:9001 --name "Tom's board"`),
