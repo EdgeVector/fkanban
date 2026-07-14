@@ -43,6 +43,7 @@ export type Card = {
   // via normalizeKind/normalizeBlockStatus so a stale/legacy value never throws.
   // All default to "" for pre-migration cards (rowToCard).
   repo: string; // owner/name a build agent clones; "" = not a code card
+  db: string; // lastdb://... locator for the DB this card belongs to
   base: string; // base branch a PR targets (default "main")
   kind: string; // CardKind: pr|registry|tracker|umbrella|meta|program|capstone|validation
   block_status: string; // BlockStatus: none|needs_human|design_first|deferred
@@ -825,6 +826,62 @@ export function parseBodyHeader(body: string, name: string): string {
   return line.match(/^(\S+)/)?.[1]?.trim() ?? "";
 }
 
+export const DB_LOCATOR_RE =
+  /^lastdb:\/\/(?:personal|org\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)(?:#[A-Za-z0-9_.\/-]+)?$/;
+
+export function normalizeDbLocator(value: string | undefined): string {
+  const locator = value?.trim() ?? "";
+  return locator && DB_LOCATOR_RE.test(locator) ? locator : "";
+}
+
+export function dbLocatorProblem(value: string | undefined): string | null {
+  const locator = value?.trim() ?? "";
+  if (!locator) return null;
+  return DB_LOCATOR_RE.test(locator)
+    ? null
+    : `DB locator must be lastdb://personal or lastdb://org/<slug>/<db>; got "${locator}".`;
+}
+
+export function writeBodyHeader(body: string, name: string, value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return body;
+  const re = new RegExp(`^[ \\t]*${name}:[^\\n]*(?:\\n|$)`, "im");
+  if (re.test(body)) return body;
+  return `${name}: ${trimmed}\n${body}`;
+}
+
+export function resolveCardDb(card: Pick<Card, "db" | "body">): string {
+  return normalizeDbLocator(card.db) || normalizeDbLocator(parseBodyHeader(card.body, "Db"));
+}
+
+export function assertDbLocatorMatchesCard(
+  card: Pick<Card, "slug" | "db" | "body">,
+  ambientDbLocator: string | undefined,
+  verb: string,
+): void {
+  const problem = dbLocatorProblem(ambientDbLocator);
+  if (problem) {
+    throw new FkanbanError({ code: "invalid_db_locator", message: problem });
+  }
+  const ambient = normalizeDbLocator(ambientDbLocator);
+  if (!ambient) return;
+  const home = resolveCardDb(card);
+  if (!home || home === ambient) return;
+  throw new FkanbanError({
+    code: "db_locator_mismatch",
+    message: `Card "${card.slug}" belongs to ${home}; refused ${verb} with ambient DB ${ambient}.`,
+    hint: "Use the card's home DB locator, or use an explicit cross-DB operation once one exists.",
+  });
+}
+
+export function applyDbLocatorForWrite(card: Card, ambientDbLocator: string | undefined, verb: string): void {
+  assertDbLocatorMatchesCard(card, ambientDbLocator, verb);
+  const home = resolveCardDb(card) || normalizeDbLocator(ambientDbLocator);
+  if (!home) return;
+  card.db = home;
+  card.body = writeBodyHeader(card.body, "Db", home);
+}
+
 export function parseBodyListHeader(body: string, name: string): string[] {
   const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
   const m = body.match(re);
@@ -1023,16 +1080,21 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
     const surfaces = parseBodyListHeader(card.body, "Surfaces");
     if (surfaces.length > 0) out.surfaces = surfaces;
   }
+  if (!card.db) {
+    const db = normalizeDbLocator(parseBodyHeader(card.body, "Db"));
+    if (db) out.db = db;
+  }
   return out;
 }
 
 // Fields that default empty on fresh/test Card literals.
 export function emptyStructuredFields(): Pick<
   Card,
-  "done_at" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch" | "surfaces"
+  "done_at" | "db" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch" | "surfaces"
 > {
   return {
     done_at: "",
+    db: "",
     repo: "",
     base: "",
     kind: "",
@@ -1286,6 +1348,7 @@ export function rowToCard(row: QueryRow): Card {
     updated_at: stringField(f, "updated_at"),
     done_at: doneAt,
     // New fields default to "" for cards written before the schema gained them.
+    db: stringField(f, "db") || normalizeDbLocator(parseBodyHeader(body, "Db")),
     repo: stringField(f, "repo"),
     base: stringField(f, "base"),
     kind: stringField(f, "kind"),
@@ -1673,6 +1736,7 @@ export function cardToFields(c: Card): Record<string, unknown> {
     surfaces: normalizeSurfaces(c.surfaces ?? []),
     created_at: c.created_at,
     updated_at: c.updated_at,
+    db: c.db ?? "",
     repo: c.repo ?? "",
     base: c.base ?? "",
     kind: c.kind ?? "",
@@ -1684,17 +1748,19 @@ export function cardToFields(c: Card): Record<string, unknown> {
   };
 }
 
-function cardToLegacySurfaceFields(c: Card): Record<string, unknown> {
+function cardToLegacyOptionalFields(c: Card): Record<string, unknown> {
   const fields = cardToFields({
     ...c,
-    body: writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []),
+    body: writeBodyHeader(writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []), "Db", c.db ?? ""),
   });
-  delete fields.surfaces;
+  for (const field of CARD_OPTIONAL_SCHEMA_FIELDS) delete fields[field];
   return fields;
 }
 
-function isOptionalSurfacesWriteMiss(err: unknown): boolean {
-  return err instanceof FkanbanError && err.code === "unknown_fields" && err.message.includes("surfaces");
+function isOptionalFieldWriteMiss(err: unknown): boolean {
+  return err instanceof FkanbanError &&
+    err.code === "unknown_fields" &&
+    (CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).some((field) => err.message.includes(field));
 }
 
 // The minimal node (lastdb_node builds without fold_db_node's unknown-fields
@@ -1705,16 +1771,16 @@ function isOptionalSurfacesWriteMiss(err: unknown): boolean {
 // exactly one retry with the legacy body-header form; the retry is a no-op
 // cost when the 500 had a different cause (it fails the same way and the
 // caller sees the original error).
-function isPossibleOptionalSurfacesWriteMiss(err: unknown): boolean {
+function isPossibleOptionalFieldWriteMiss(err: unknown): boolean {
   return (
-    isOptionalSurfacesWriteMiss(err) ||
+    isOptionalFieldWriteMiss(err) ||
     (err instanceof FkanbanError && err.code === "node_http_500")
   );
 }
 
 type CardWriteOp = "createRecord" | "updateRecord";
 
-async function writeCardRecordWithSurfacesFallback(
+async function writeCardRecordWithOptionalFieldFallback(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   op: CardWriteOp,
@@ -1724,14 +1790,14 @@ async function writeCardRecordWithSurfacesFallback(
   try {
     await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug, expected });
   } catch (err) {
-    if (!isPossibleOptionalSurfacesWriteMiss(err)) throw err;
+    if (!isPossibleOptionalFieldWriteMiss(err)) throw err;
     try {
-      await opts.node[op]({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug, expected });
+      await opts.node[op]({ schemaHash: hash, fields: cardToLegacyOptionalFields(card), keyHash: card.slug, expected });
     } catch (retryErr) {
       // A structured unknown_fields miss makes the RETRY's error the
       // informative one; after an ambiguous bare 500, the original error is —
       // the retry most likely failed for the same unrelated reason.
-      throw isOptionalSurfacesWriteMiss(err) ? retryErr : err;
+      throw isOptionalFieldWriteMiss(err) ? retryErr : err;
     }
   }
 }
@@ -1740,7 +1806,7 @@ export async function createCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
 ): Promise<void> {
-  await writeCardRecordWithSurfacesFallback(opts, card, "createRecord");
+  await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
 }
 
 export async function updateCardRecord(
@@ -1748,7 +1814,7 @@ export async function updateCardRecord(
   card: Card,
   expected?: CasExpectation,
 ): Promise<void> {
-  await writeCardRecordWithSurfacesFallback(opts, card, "updateRecord", expected);
+  await writeCardRecordWithOptionalFieldFallback(opts, card, "updateRecord", expected);
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of

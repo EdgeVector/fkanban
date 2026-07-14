@@ -77,6 +77,7 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
   test("structured fields survive a write/read cycle", () => {
     const c = card({
       repo: "EdgeVector/fold",
+      db: "lastdb://org/edgevector/company",
       base: "main",
       kind: "pr",
       block_status: "needs_human",
@@ -88,6 +89,7 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
     });
     const back = rowToCard({ fields: cardToFields(c), key: { hash: c.slug, range: null } });
     expect(back.repo).toBe("EdgeVector/fold");
+    expect(back.db).toBe("lastdb://org/edgevector/company");
     expect(back.base).toBe("main");
     expect(back.block_status).toBe("needs_human");
     expect(back.block_reason).toBe("waiting on Tom");
@@ -103,12 +105,38 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
       key: { hash: "old", range: null },
     });
     expect(legacy.repo).toBe("");
+    expect(legacy.db).toBe("");
     expect(legacy.kind).toBe("");
     expect(legacy.block_status).toBe("");
     expect(legacy.surfaces).toEqual([]);
     // normalizers make the empties safe to act on
     expect(normalizeKind(legacy.kind)).toBe("pr");
     expect(normalizeBlockStatus(legacy.block_status)).toBe("none");
+  });
+});
+
+describe("home DB locator", () => {
+  test("derives the structured db field from a Db: body header", () => {
+    const derived = deriveStructuredFields(card({
+      body: "Db: lastdb://org/edgevector/company\nRepo: EdgeVector/fkanban\nBase: main\n\nx",
+    }));
+    expect(derived.db).toBe("lastdb://org/edgevector/company");
+  });
+
+  test("rowToCard falls back to the Db: body header for legacy rows", () => {
+    const legacy = rowToCard({
+      fields: {
+        slug: "old",
+        title: "old",
+        body: "Db: lastdb://personal\nRepo: EdgeVector/fkanban\nBase: main\n\nx",
+        board: "default",
+        column: "todo",
+        position: "1",
+        tags: [],
+      },
+      key: { hash: "old", range: null },
+    });
+    expect(legacy.db).toBe("lastdb://personal");
   });
 });
 

@@ -91,6 +91,7 @@ export const CARD_FIELDS = [
   "surfaces",
   "created_at",
   "updated_at",
+  "db",
   // Structured pickup-decision + reconcile fields (see fbrain design
   // `fkanban-card-structured-fields`). Promote signals a fresh agent needs
   // to decide "what do I pick up?" out of body prose into real fields, so
@@ -110,7 +111,7 @@ export const CARD_FIELDS = [
 // New fields that can be losslessly mirrored through legacy body headers while
 // the published schema catches up. The resolver/doctor can treat a schema
 // missing only these fields as operationally writable.
-export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces"] as const;
+export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces", "db"] as const;
 
 export const BOARD_FIELDS = [
   "slug",
@@ -164,6 +165,7 @@ export const cardSchema: AddSchemaRequest = {
       surfaces: "array of repo-relative path globs or subsystem names this card expects to touch",
       created_at: "RFC 3339 timestamp",
       updated_at: "RFC 3339 timestamp",
+      db: "home LastDB locator for this card, e.g. lastdb://personal or lastdb://org/<slug>/<db>",
       repo: "owner/name of the repo a build agent clones (empty = not a code card)",
       base: "base branch a PR targets (default: main)",
       kind: "pr|registry|tracker|umbrella|meta|program|capstone|validation — pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up",

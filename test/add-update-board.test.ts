@@ -200,6 +200,50 @@ describe("add update preserves the card's board", () => {
     expect(updated?.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
   });
 
+  test("add with a DB locator stamps the home DB field and body header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "db-card",
+      title: "DB card",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.",
+      dbLocator: "lastdb://org/edgevector/company",
+    });
+
+    const created = await findCard(node, cfg, "db-card");
+    expect(created?.db).toBe("lastdb://org/edgevector/company");
+    expect(created?.body.startsWith("Db: lastdb://org/edgevector/company\n")).toBe(true);
+
+    await addCmd({ cfg, node, slug: "db-card", title: "Renamed", dbLocator: "lastdb://org/edgevector/company" });
+    const updated = await findCard(node, cfg, "db-card");
+    expect(updated?.title).toBe("Renamed");
+    expect(updated?.db).toBe("lastdb://org/edgevector/company");
+    expect((updated?.body.match(/^Db:/gm) ?? [])).toHaveLength(1);
+  });
+
+  test("add refuses to update a card through the wrong ambient DB", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "db-mismatch",
+      title: "DB mismatch",
+      column: "todo",
+      body: validPickupBody,
+      dbLocator: "lastdb://personal",
+    });
+
+    await expect(
+      addCmd({
+        cfg,
+        node,
+        slug: "db-mismatch",
+        title: "Wrong DB",
+        dbLocator: "lastdb://org/edgevector/company",
+      }),
+    ).rejects.toMatchObject({ code: "db_locator_mismatch" });
+  });
+
   test("(b) update --column valid on the card's OWN board succeeds", async () => {
     await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
 

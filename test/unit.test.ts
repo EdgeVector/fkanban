@@ -114,6 +114,7 @@ describe("schemas", () => {
       surfaces: { Array: "String" },
       created_at: "String",
       updated_at: "String",
+      db: "String",
       repo: "String",
       base: "String",
       kind: "String",
