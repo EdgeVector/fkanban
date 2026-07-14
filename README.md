@@ -168,7 +168,7 @@ DONE  (0)
 | `kanban init` | bootstrap node + load/resolve published schemas + seed default board (idempotent) |
 | `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
 | `kanban mark <slug> <line>` | append one marker line to an existing card body, idempotently (`--json`) |
-| `kanban move <slug> <column>` | move a card to a column (`--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
+| `kanban move <slug> <column>` | move a card to a column (`--from/--expect COL` as a compare-and-swap claim guard, `--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
 | `kanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on existing live card `<dep>`) |
 | `kanban dep rm <slug> <dep>` | remove a dependency edge |
 | `kanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
@@ -195,6 +195,9 @@ Global: `--verbose` (echo HTTP), `--version`, `--help`.
 `tag add/rm`, `rm`, `board create`, and `board rm` echo the write result as a JSON object instead of a prose
 line, so scripts and agents can confirm the outcome machine-readably (e.g.
 `kanban move ship-login doing --json` → `{"slug":"ship-login","from":"todo","to":"doing"}`).
+Use `kanban move ship-login doing --from todo` when claiming work: if another
+writer moved the card first, the command exits non-zero and `--json` prints
+`{"error":"claim_conflict","current":"<col>"}` without moving it.
 
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`

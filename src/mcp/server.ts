@@ -539,11 +539,13 @@ export function createFkanbanMcpServer(
     {
       title: "Move a card",
       description:
-        "Move a card to a different column on its board. A card blocked by an unfinished dependency cannot move into doing/review/done (or its board's final column) unless `force` is set.",
+        "Move a card to a different column on its board. Pass `from`/`expect` as a compare-and-swap claim guard. A card blocked by an unfinished dependency cannot move into doing/review/done (or its board's final column) unless `force` is set.",
       annotations: { title: "Move a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Card slug."),
         column: z.string().optional().describe("Target column."),
+        from: z.string().optional().describe("Claim guard: only move if the card is currently in this column."),
+        expect: z.string().optional().describe("Alias for `from`."),
         position: z.number().int().optional().describe("Explicit ordering within the column."),
         force: z.boolean().optional().describe("Explicit operator override for dependency blocks and default/todo pickup-readiness policy."),
       },
@@ -557,8 +559,15 @@ export function createFkanbanMcpServer(
       try {
         const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const column = requireArg(args.column, "target column", "Pass a non-empty `column`.");
+        if (args.from !== undefined && args.expect !== undefined && args.from !== args.expect) {
+          throw new FkanbanError({
+            code: "invalid_claim_guard",
+            message: "`from` and `expect` disagree; pass only one expected column.",
+          });
+        }
         const { cfg, node } = requireConfig();
         const o: Parameters<typeof moveCmd>[0] = { cfg, node, slug, column };
+        if (args.from !== undefined || args.expect !== undefined) o.expectColumn = args.from ?? args.expect;
         if (args.position !== undefined) o.position = args.position;
         if (args.force !== undefined) o.force = args.force;
         const res = await moveCmd(o);

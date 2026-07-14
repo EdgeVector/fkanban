@@ -1,7 +1,7 @@
 // Domain helpers: turn fold_db query rows into typed Card / Board records,
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
-import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
+import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import { schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
@@ -1718,14 +1718,15 @@ async function writeCardRecordWithSurfacesFallback(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   op: CardWriteOp,
+  expected?: CasExpectation,
 ): Promise<void> {
   const hash = schemaHashFor("card", opts.cfg);
   try {
-    await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug });
+    await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug, expected });
   } catch (err) {
     if (!isPossibleOptionalSurfacesWriteMiss(err)) throw err;
     try {
-      await opts.node[op]({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug });
+      await opts.node[op]({ schemaHash: hash, fields: cardToLegacySurfaceFields(card), keyHash: card.slug, expected });
     } catch (retryErr) {
       // A structured unknown_fields miss makes the RETRY's error the
       // informative one; after an ambiguous bare 500, the original error is —
@@ -1745,8 +1746,9 @@ export async function createCardRecord(
 export async function updateCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
+  expected?: CasExpectation,
 ): Promise<void> {
-  await writeCardRecordWithSurfacesFallback(opts, card, "updateRecord");
+  await writeCardRecordWithSurfacesFallback(opts, card, "updateRecord", expected);
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of

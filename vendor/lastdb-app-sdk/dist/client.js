@@ -395,6 +395,9 @@ export class LastDbClient {
             key_value: op.key,
             mutation_type: op.mutationType,
         };
+        if (op.expected !== undefined) {
+            body.expected = op.expected;
+        }
         const res = await this.transport.send('POST', '/api/mutation', {
             headers: this.capabilityHeaders(),
             body,
