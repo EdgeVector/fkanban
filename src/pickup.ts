@@ -179,8 +179,15 @@ export function classifyPickupCard(
   if (!base) {
     return out("malformed-routing", "missing Base header/field", "Set `Base: main` or pass `--base main`.");
   }
-  if (card.pr_url || card.branch) {
-    return out("collision", "todo card already has branch/PR metadata", "Reconcile the existing branch/PR before pickup.");
+  // Only an open PR URL means in-flight work. A pre-declared `branch` name alone
+  // is optional metadata (agents often set Branch: kanban/<slug> at file time)
+  // and must NOT block pickup — that false collision stranded ready cards.
+  if (card.pr_url) {
+    return out(
+      "collision",
+      "todo card already has PR metadata",
+      "Reconcile the existing PR (watch/merge or clear pr_url) before pickup.",
+    );
   }
   if (dep.blocked) {
     details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
