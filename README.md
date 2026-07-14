@@ -190,7 +190,8 @@ line, so scripts and agents can confirm the outcome machine-readably (e.g.
 `kanban move ship-login doing --json` → `{"slug":"ship-login","from":"todo","to":"doing"}`).
 Use `kanban move ship-login doing --from todo` when claiming work: if another
 writer moved the card first, the command exits non-zero and `--json` prints
-`{"error":"claim_conflict","current":"<col>"}` without moving it.
+`{"error":"claim_conflict","current":"<col>","expected":"todo"}` without
+moving it.
 
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`

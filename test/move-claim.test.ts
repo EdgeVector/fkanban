@@ -148,6 +148,7 @@ describe("move claim guard", () => {
     ).rejects.toMatchObject({
       code: "claim_conflict",
       current: "doing",
+      expected: "todo",
     });
     expect(await findCard(node, cfg, "claim-me")).toMatchObject({ column: "doing" });
   });
@@ -166,5 +167,6 @@ describe("move claim guard", () => {
     const err = new ClaimConflictError({ slug: "claim-me", expected: "todo", current: "review" });
     expect(err.code).toBe("claim_conflict");
     expect(err.current).toBe("review");
+    expect(err.expected).toBe("todo");
   });
 });
