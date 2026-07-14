@@ -1122,7 +1122,7 @@ async function dispatch(
       } catch (err) {
         if (err instanceof ClaimConflictError) {
           if (values.json) {
-            console.log(JSON.stringify({ error: "claim_conflict", current: err.current }));
+            console.log(JSON.stringify({ error: "claim_conflict", current: err.current, expected: err.expected }));
           } else {
             console.error(`kanban: ${err.message}`);
           }
