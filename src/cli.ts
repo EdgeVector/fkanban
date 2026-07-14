@@ -13,7 +13,7 @@ import { loadAppCtx, loadCtx } from "./context.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
 import { markCmd } from "./commands/mark.ts";
-import { moveCmd } from "./commands/move.ts";
+import { ClaimConflictError, moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
 import { rankCmd } from "./commands/rank.ts";
 import { searchCmd } from "./commands/search.ts";
@@ -55,7 +55,7 @@ Commands:
                        (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
   mark <slug> <line>   append one marker line to a card body, idempotently
-  move <slug> <col>    move a card to a column (--position N, --force past a block)
+  move <slug> <col>    move a card to a column (--from/--expect COL claim guard, --position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
@@ -200,13 +200,15 @@ Usage:
   kanban move <slug> <column> [options]
 
 Options:
+  --from <col>          claim guard: only move if the card is currently in col
+  --expect <col>        alias for --from
   --position <N>        insert at position N within the column
   --force               explicit operator override for dependency blocks and
                         default/todo pickup-readiness policy
   --json                echo the write result as JSON
 
 Example:
-  kanban move ship-login doing`),
+  kanban move ship-login doing --from todo`),
 
   dep: withFooter(`kanban dep — manage dependency edges between cards
 
@@ -745,7 +747,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   ]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
-  move: new Set(["position", "force"]),
+  move: new Set(["from", "expect", "position", "force"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body"]),
   rank: new Set(["board", "column"]),
   search: new Set(["board", "column", "field", "limit", "all"]),
@@ -830,6 +832,8 @@ async function main(argv: string[]): Promise<number> {
         "pileup-threshold": { type: "string" },
         body: { type: "string" },
         columns: { type: "string" },
+        from: { type: "string" },
+        expect: { type: "string" },
         position: { type: "string" },
         limit: { type: "string" },
         "full-body": { type: "boolean" },
@@ -1096,17 +1100,36 @@ async function dispatch(
         values.position !== undefined
           ? parseIntFlag(values.position as string, "position", "move", { min: 0 })
           : undefined;
+      const from = values.from as string | undefined;
+      const expect = values.expect as string | undefined;
+      if (from !== undefined && expect !== undefined && from !== expect) {
+        console.error("kanban: --from and --expect disagree; pass only one expected column.");
+        return 2;
+      }
       const ctx = loadCtx({ verbose });
-      const res = await moveCmd({
-        cfg: ctx.cfg,
-        node: ctx.node,
-        slug,
-        column,
-        position,
-        force: values.force as boolean | undefined,
-      });
-      console.log(formatMove(res, values.json as boolean | undefined));
-      return 0;
+      try {
+        const res = await moveCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug,
+          column,
+          expectColumn: from ?? expect,
+          position,
+          force: values.force as boolean | undefined,
+        });
+        console.log(formatMove(res, values.json as boolean | undefined));
+        return 0;
+      } catch (err) {
+        if (err instanceof ClaimConflictError) {
+          if (values.json) {
+            console.log(JSON.stringify({ error: "claim_conflict", current: err.current }));
+          } else {
+            console.error(`kanban: ${err.message}`);
+          }
+          return 2;
+        }
+        throw err;
+      }
     }
 
     case "dep": {

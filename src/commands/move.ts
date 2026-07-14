@@ -32,6 +32,7 @@ export type MoveOptions = {
   node: NodeClient;
   slug: string;
   column: string;
+  expectColumn?: string;
   position?: number;
   // Override the dependency soft-block when moving into a working column.
   force?: boolean;
@@ -39,6 +40,20 @@ export type MoveOptions = {
 };
 
 export type MoveResult = { slug: string; from: string; to: string; promotedDependents?: string[] };
+
+export class ClaimConflictError extends FkanbanError {
+  readonly current: string;
+  readonly expected: string;
+
+  constructor(opts: { slug: string; expected: string; current: string }) {
+    super({
+      code: "claim_conflict",
+      message: `claim_conflict: Card "${opts.slug}" is in "${opts.current}", expected "${opts.expected}".`,
+    });
+    this.current = opts.current;
+    this.expected = opts.expected;
+  }
+}
 
 function isExpectedPromotionSkip(err: unknown): boolean {
   return err instanceof FkanbanError &&
@@ -106,6 +121,9 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   ensureColumn(opts.column, columns);
 
   const from = card.column;
+  if (opts.expectColumn !== undefined && from !== opts.expectColumn) {
+    throw new ClaimConflictError({ slug: opts.slug, expected: opts.expectColumn, current: from });
+  }
   const position = opts.position !== undefined ? String(opts.position) : appendPosition();
   const now = nowIso();
 
@@ -130,7 +148,28 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     boardColumns: columns,
     reason: "done-transition",
   });
-  await updateCardRecord(opts, updated);
+  try {
+    await updateCardRecord(
+      opts,
+      updated,
+      opts.expectColumn !== undefined
+        ? { type: "value", field: "column", value: opts.expectColumn }
+        : undefined,
+    );
+  } catch (err) {
+    if (err instanceof FkanbanError && err.code === "cas_conflict" && opts.expectColumn !== undefined) {
+      const cause = err.cause;
+      const actual = typeof cause === "object" && cause !== null
+        ? (cause as { actual?: unknown }).actual
+        : undefined;
+      throw new ClaimConflictError({
+        slug: opts.slug,
+        expected: opts.expectColumn,
+        current: typeof actual === "string" ? actual : "unknown",
+      });
+    }
+    throw err;
+  }
   const promotedDependents =
     opts.column === terminalColumn(columns)
       ? await promoteUnblockedBacklogDependents({ cfg: opts.cfg, node: opts.node, dependency: updated })

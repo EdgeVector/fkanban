@@ -88,6 +88,10 @@ export type RawResponse = {
   json: unknown;
 };
 
+export type CasExpectation =
+  | { type: "absent"; field: string }
+  | { type: "value"; field: string; value: JsonValue };
+
 export type AppSchemaDeclaration = {
   app_id: string;
   schema: string;
@@ -223,8 +227,8 @@ export type NodeClient = {
   // out-of-band via the exemem app-creation flow.
   listSchemas(): Promise<LoadedSchema[]>;
   declareAppSchema?(appId: string, schema: Record<string, unknown>): Promise<AppSchemaDeclaration>;
-  createRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string }): Promise<void>;
-  updateRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string }): Promise<void>;
+  createRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string; expected?: CasExpectation }): Promise<void>;
+  updateRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string; expected?: CasExpectation }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
@@ -739,21 +743,23 @@ export function newNodeClient(opts: {
         decision: typeof b.decision === "string" ? b.decision : undefined,
       };
     },
-    async createRecord({ schemaHash, fields, keyHash }) {
+    async createRecord({ schemaHash, fields, keyHash, expected }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
           mutationType: "create",
           fields: fields as RowFields,
           key: hashKey(keyHash),
+          ...(expected !== undefined ? { expected } : {}),
         }),
       );
     },
-    async updateRecord({ schemaHash, fields, keyHash }) {
+    async updateRecord({ schemaHash, fields, keyHash, expected }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
           mutationType: "update",
           fields: fields as RowFields,
           key: hashKey(keyHash),
+          ...(expected !== undefined ? { expected } : {}),
         }),
       );
     },
@@ -1367,6 +1373,13 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
       code: "node_not_provisioned",
       message: `Node not set up.`,
       hint: "Run `kanban init` to bootstrap the node.",
+    });
+  }
+  if (status === 409 && errCode === "cas_conflict") {
+    return new FkanbanError({
+      code: "cas_conflict",
+      message: msg ?? `Node rejected ${path}: CAS precondition failed.`,
+      cause: body,
     });
   }
   // A transient-busy 503 that survived the in-client retries (callJson tried

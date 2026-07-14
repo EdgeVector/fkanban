@@ -28,6 +28,14 @@ export interface KeyValue {
     hash: string | null;
     range: string | null;
 }
+export type CasExpectation = {
+    type: 'absent';
+    field: string;
+} | {
+    type: 'value';
+    field: string;
+    value: JsonValue;
+};
 /**
  * The full per-row envelope the node returns for `/api/query`. The node's
  * `results` array carries one object per result key shaped
@@ -353,6 +361,7 @@ export interface MutationOp {
      * be passed back verbatim to address that exact row.
      */
     key: KeyValue;
+    expected?: CasExpectation;
 }
 /** `POST /api/mutation` success body. */
 export interface MutationResult {
