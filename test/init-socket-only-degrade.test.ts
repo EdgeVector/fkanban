@@ -73,6 +73,9 @@ function makeSocketNode(
         provisioned = true;
         return Response.json({ user_hash: "stub-user" });
       }
+      if (opts.fullSurface && url.pathname === "/api/apps/declare-schema") {
+        return Response.json({ error: "not_found" }, { status: 404 });
+      }
       if (opts.fullSurface && url.pathname === "/api/schemas/load") {
         return Response.json({ available_schemas_loaded: 2, schemas_loaded_to_db: 2, failed_schemas: [] });
       }

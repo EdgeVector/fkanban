@@ -141,31 +141,45 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // error if the owner verb 403s.
   const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath });
 
-  // Step 2: load schemas into the node (it pulls everything published in the
-  // schema_service, including the `fkanban/*` schemas).
+  // Step 2: load fkanban schemas into the node. Prefer local app-schema
+  // declaration (Mini / modern nodes expose POST /api/apps/declare-schema) so
+  // first-run does not download the entire published catalog (~1.6MB, 20s+).
+  // Fall back to a SCOPED schema_service load by descriptive name (Board/Card)
+  // — never the unscoped full catalog, which wedged Mini first-run init.
   print(`[2/${STEPS}] loading schemas into the node`);
-  let loadResult: Awaited<ReturnType<NodeClient["loadSchemas"]>>;
-  try {
-    loadResult = await node.loadSchemas();
-  } catch (err) {
-    const degraded = await tryInitSocketOnly({
-      err,
-      existing,
-      nodeUrl,
-      schemaServiceUrl,
-      nodeSocketPath,
-      socketPath,
-      configPath,
-      verbose,
-      print,
-    });
-    if (degraded) return degraded;
-    throw freshSetupSocketError(err, socketPath, "/api/schemas/load") ?? err;
+  const declaredLocally = await tryDeclareOwnedSchemasLocally(node, print);
+  if (!declaredLocally) {
+    const scope = UNIQUE_SCHEMAS.map((entry) => entry.schema.schema.descriptive_name).filter(
+      (n): n is string => typeof n === "string" && n.length > 0,
+    );
+    let loadResult: Awaited<ReturnType<NodeClient["loadSchemas"]>>;
+    try {
+      print(`        falling back to schema_service load (scoped to ${scope.join(", ")})`);
+      loadResult = await node.loadSchemas(scope);
+    } catch (err) {
+      const degraded = await tryInitSocketOnly({
+        err,
+        existing,
+        nodeUrl,
+        schemaServiceUrl,
+        nodeSocketPath,
+        socketPath,
+        configPath,
+        verbose,
+        print,
+      });
+      if (degraded) return degraded;
+      throw freshSetupSocketError(err, socketPath, "/api/schemas/load") ?? err;
+    }
+    if (loadResult.failed_schemas.length > 0) {
+      throw new Error(
+        `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
+      );
+    }
+    print(
+      `        loaded ${loadResult.schemas_loaded_to_db}/${loadResult.available_schemas_loaded} (failed_schemas empty ✓)`,
+    );
   }
-  if (loadResult.failed_schemas.length > 0) {
-    throw new Error(`partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`);
-  }
-  print(`        loaded ${loadResult.schemas_loaded_to_db}/${loadResult.available_schemas_loaded} (failed_schemas empty ✓)`);
 
   // Step 3: resolve each fkanban schema's canonical hash from the node's
   // loaded set. The node can have MORE THAN ONE schema sharing
@@ -333,6 +347,49 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   printNextSteps(print, bootstrapped || freshFkanbanConfig);
 
   return { config, bootstrapped };
+}
+
+/**
+ * Prefer local app-schema declaration (POST /api/apps/declare-schema) when
+ * the node supports it — Mini first-run path. Returns true when every
+ * UNIQUE_SCHEMAS entry was declared; false when the node 404s (caller falls
+ * back to schema_service load).
+ */
+async function tryDeclareOwnedSchemasLocally(
+  node: NodeClient,
+  print: (line: string) => void,
+): Promise<boolean> {
+  if (!node.declareAppSchema) {
+    print(`        node client has no declareAppSchema — using schema_service load`);
+    return false;
+  }
+  print(`        trying local /api/apps/declare-schema for ${UNIQUE_SCHEMAS.length} schemas`);
+  for (const entry of UNIQUE_SCHEMAS) {
+    const descriptive = entry.schema.schema.descriptive_name ?? entry.key;
+    try {
+      const declared = await node.declareAppSchema!(OWNER_APP_ID, entry.schema.schema as unknown as Record<string, unknown>);
+      print(
+        `        ${String(descriptive).padEnd(6)} → ${declared.canonical}  (${declared.resolution})`,
+      );
+    } catch (err) {
+      // Not-supported / not-reachable for declare → fall through to schema_service
+      // load (which has its own full-surface socket diagnostics). A real 4xx/5xx
+      // that is *not* "route missing" still surfaces.
+      if (
+        err instanceof FkanbanError &&
+        (err.code === "node_http_404" ||
+          err.code === "node_http_405" ||
+          err.code === "service_unreachable" ||
+          err.code === "full_surface_socket_unavailable")
+      ) {
+        print(`        local declare not available (${err.code}); will load from schema_service`);
+        return false;
+      }
+      throw err;
+    }
+  }
+  print(`        local app-schema declarations persisted; schema_service load skipped ✓`);
+  return true;
 }
 
 function freshSetupSocketError(err: unknown, socketPath: string, route: string): FkanbanError | null {

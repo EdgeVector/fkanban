@@ -21,26 +21,46 @@ on_path() {
   esac
 }
 
-# Pick the install dir: an explicit arg wins; otherwise the first existing,
-# writable, already-on-PATH candidate. We never modify PATH itself.
+# Pick the install dir: an explicit arg wins; otherwise the first already-on-PATH
+# candidate we can create/write. Fresh machines often lack ~/.local/bin on disk
+# even when it is on PATH — create it rather than failing first-run install.
 pick_dir() {
   if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
     printf '%s\n' "$1"
     return 0
   fi
   local candidates=("/usr/local/bin" "$HOME/.local/bin" "$HOME/bin")
+  local d
   for d in "${candidates[@]}"; do
-    if on_path "$d" && [ -d "$d" ] && [ -w "$d" ]; then
+    if ! on_path "$d"; then
+      continue
+    fi
+    if [ -d "$d" ] && [ -w "$d" ]; then
       printf '%s\n' "$d"
       return 0
     fi
+    # Create missing user-owned dirs (never invent system paths).
+    case "$d" in
+      "$HOME"/*)
+        if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then
+          printf '%s\n' "$d"
+          return 0
+        fi
+        ;;
+    esac
   done
+  # Last resort for brand-new machines: create ~/.local/bin even if not yet on
+  # PATH (caller gets the PATH hint + exit 2 below).
+  if mkdir -p "$HOME/.local/bin" 2>/dev/null && [ -w "$HOME/.local/bin" ]; then
+    printf '%s\n' "$HOME/.local/bin"
+    return 0
+  fi
   return 1
 }
 
 if ! target_dir="$(pick_dir "$@")"; then
   cat >&2 <<EOF
-fkanban: could not find a writable directory on your PATH to install into.
+fkanban: could not find a writable directory to install into.
 Tried: /usr/local/bin, ~/.local/bin, ~/bin.
 
 Pass one explicitly, e.g.:

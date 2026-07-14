@@ -211,7 +211,7 @@ export type NodeClient = {
     | { provisioned: false; reason: string }
   >;
   bootstrap(name: string): Promise<{ userHash: string }>;
-  loadSchemas(): Promise<{
+  loadSchemas(schemas?: string[]): Promise<{
     available_schemas_loaded: number;
     schemas_loaded_to_db: number;
     failed_schemas: string[];
@@ -684,8 +684,13 @@ export function newNodeClient(opts: {
       }
       throw mapNodeError(status, body, "/api/setup/bootstrap");
     },
-    async loadSchemas() {
-      const { status, body } = await callJson("/api/schemas/load", "POST");
+    async loadSchemas(schemas?: string[]) {
+      // Scope the load when a non-empty list is given (parity with brain /
+      // fold #877): each entry is a canonical identity hash or a
+      // descriptive_name. Empty / omitted → full published catalog (slow).
+      const scope = (schemas ?? []).filter((s) => typeof s === "string" && s.length > 0);
+      const reqBody = scope.length > 0 ? { schemas: scope } : undefined;
+      const { status, body } = await callJson("/api/schemas/load", "POST", reqBody);
       if (status !== 200) throw mapNodeError(status, body, "/api/schemas/load");
       const b = body as Record<string, unknown>;
       const failed = Array.isArray(b.failed_schemas) ? (b.failed_schemas as string[]) : [];
