@@ -116,7 +116,7 @@ Usage:
   kanban init [options]
 
 Options:
-  --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1:9001)
+  --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1)
   --schema-service-url <url>  schema_service URL recorded in config for diagnostics
                               (not used for private fkanban schema init)
   --node-socket-path <path>   unix socket of the node, instead of --node-url
@@ -129,7 +129,7 @@ up in \`kanban doctor\`). If init fails with app_schema_declare_unsupported,
 upgrade the node to a Mini build with local app-schema declaration.
 
 Example:
-  kanban init --node-url http://127.0.0.1:9001 --name "Tom's board"`),
+  kanban init --node-url http://127.0.0.1 --name "Tom's board"`),
 
   add: withFooter(`kanban add — create or update a card (idempotent by slug)
 

@@ -40,14 +40,12 @@ import {
   type Board,
 } from "../record.ts";
 
-// A local fold_db_node is reached over its Unix-domain control socket, NOT over
-// TCP — the loopback `:9001` control plane was retired. This loopback default is
-// only a diagnostic identity string for that local node (the actual transport is
-// the socket resolved by `resolveSocketPath`); it also flags the node as local
-// (loopback) so client requests go socket-only with no TCP fallback. The schema
-// service defaults to the prod cloud Lambda. Override with --node-url /
-// --schema-service-url (e.g. point at an ephemeral dev node + the dev Lambda).
-export const DEFAULT_NODE_URL = "http://127.0.0.1:9001";
+// A local LastDB node is reached over its Unix-domain control socket, NOT over
+// TCP. DEFAULT_NODE_URL is a loopback *marker* (hostname only) so clients select
+// socket transport — it is not a TCP endpoint. The retired :9001 control plane
+// must not appear in new configs. Schema service defaults to the prod cloud
+// Lambda. Override with --node-url / --schema-service-url when needed.
+export const DEFAULT_NODE_URL = "http://127.0.0.1";
 export const DEFAULT_SCHEMA_SERVICE_URL =
   "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
 
@@ -75,7 +73,15 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const configPath = opts.configPath ?? defaultConfigPath();
   const existing = tryReadConfig(configPath);
 
-  const nodeUrl = opts.nodeUrl ?? existing?.nodeUrl ?? DEFAULT_NODE_URL;
+  const STALE_NODE_URLS = new Set([
+    "http://127.0.0.1:9001",
+    "http://localhost:9001",
+  ]);
+  let nodeUrl = opts.nodeUrl ?? existing?.nodeUrl ?? DEFAULT_NODE_URL;
+  if (!opts.nodeUrl && existing?.nodeUrl && STALE_NODE_URLS.has(existing.nodeUrl)) {
+    nodeUrl = DEFAULT_NODE_URL;
+    print(`        healed nodeUrl ${existing.nodeUrl} → ${DEFAULT_NODE_URL} (TCP :9001 retired)`);
+  }
   const schemaServiceUrl =
     opts.schemaServiceUrl ?? existing?.schemaServiceUrl ?? DEFAULT_SCHEMA_SERVICE_URL;
   // Persist the socket path to config only when explicitly given; otherwise
