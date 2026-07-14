@@ -124,7 +124,7 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
   });
 
-  test("two todo cards citing the same fbrain slug, B deps on A → neither is overlap-blocked", async () => {
+  test("two cards citing the same fbrain slug, B deps on A in backlog → neither is overlap-blocked", async () => {
     await addCmd({
       cfg,
       node,
@@ -133,12 +133,13 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
       column: "todo",
       body: sharedAreaBody(),
     });
+    // Dependent stays in backlog until A is done (default/todo is dep-gated).
     await addCmd({
       cfg,
       node,
       slug: "ddn-step-b",
       title: "Delete dev node — step B",
-      column: "todo",
+      column: "backlog",
       body: sharedAreaBody(),
       deps: ["ddn-step-a"], // the dep edge already serializes pickup
     });
@@ -155,6 +156,7 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
     expect(normalizeBlockStatus(b!.block_status)).toBe("none");
     expect(a?.block_reason ?? "").not.toContain(PICKUP_AREA_BLOCK_PREFIX);
     expect(b?.block_reason ?? "").not.toContain(PICKUP_AREA_BLOCK_PREFIX);
+    expect(b?.column).toBe("backlog");
   });
 
   test("same-feature forge CI cards are overlap-held without explicit area tags", async () => {

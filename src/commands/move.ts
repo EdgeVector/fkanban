@@ -11,6 +11,7 @@ import {
   appendPosition,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
+  sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
   assertDbLocatorMatchesCard,
   boardTerminalMap,
@@ -143,6 +144,7 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   await stampCardForWrite(opts.node, opts.cfg, updated, {
     warn: !opts.force && updated.board === "default" && updated.column === "todo" ? () => {} : undefined,
   });
+  sanitizeDefaultTodoLaneMetadata(updated);
   assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);

@@ -157,7 +157,7 @@ export function blockedByMessage(slug: string, blockedBy: string[]): string {
 }
 
 export function blockedByHint(): string {
-  return "Finish its dependencies first (move them to their board's final column), or pass --force to override.";
+  return "Finish its dependencies first (move them to their board's final column), keep the dependent in default/backlog until then, or pass --force to override.";
 }
 
 // The columns at which dependencies actually gate work. A dependency is
@@ -964,9 +964,40 @@ function strictBaseProblem(card: Pick<Card, "base" | "body">): string | null {
   return strictSingleTokenProblem(raw, "Base");
 }
 
+/**
+ * Default/todo is the **pickup claim lane**. In-flight PR/branch metadata and
+ * unfinished deps must not live there — that stranded work for months
+ * (agents filed `Branch: kanban/<slug>` or left `pr_url` after a partial claim,
+ * and pickup classified the card as a collision so it was never claimed).
+ *
+ * Call after applying explicit structured fields. Mutates `card` in place.
+ * Returns true when any field was cleared.
+ */
+export function sanitizeDefaultTodoLaneMetadata(card: Card): boolean {
+  if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return false;
+  let changed = false;
+  // Planned branch names belong in the body brief only until a PR is open AND
+  // the card is in doing. Structured `branch` on todo blocks/collides pickup.
+  if (card.branch.trim()) {
+    card.branch = "";
+    changed = true;
+  }
+  // An open PR on a *todo* card means requeue/incomplete reconcile — not a
+  // claimable unit. Clear so the next pickup can own it (or watch can re-attach
+  // after move to doing). Agents set pr_url after claiming into doing.
+  if (card.pr_url.trim()) {
+    card.pr_url = "";
+    changed = true;
+  }
+  return changed;
+}
+
 export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBody?: string): void {
   if (force) return;
   if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return;
+
+  // Defense in depth if a caller forgot sanitizeDefaultTodoLaneMetadata.
+  sanitizeDefaultTodoLaneMetadata(card);
 
   const blockStatus = normalizeBlockStatus(card.block_status);
   const generatedPickupAreaHold =
@@ -1151,14 +1182,21 @@ function terminalColumnFor(
 // can't be *completed* into its terminal column (`ship`) without --force, even
 // though that board has none of the default working columns. The default board's
 // terminal column is `done`, which is already in WORKING_COLUMNS, so the gating
-// set is unchanged there. This intentionally does NOT gate intermediate custom
-// columns (e.g. `spec → build`) — that needs board-level intake metadata that
-// doesn't exist yet, and is tracked separately.
+// set is unchanged there.
+//
+// Default/`todo` is also gated (Tom 2026-07-14): todo is the pickup claim lane.
+// Unfinished deps belong in `backlog` until the dependency reaches terminal;
+// otherwise cards sit in todo looking "ready" while pickup-status says
+// blocked-on-dependency and agents never pick them up.
+//
+// This intentionally does NOT gate intermediate custom columns (e.g. `spec →
+// build`) — that needs board-level intake metadata that doesn't exist yet.
 export function isDepEnforcedColumn(
   column: string,
   boardSlug: string,
   boardTerminal?: Map<string, string>,
 ): boolean {
+  if (boardSlug === DEFAULT_BOARD_SLUG && column === "todo") return true;
   return isWorkingColumn(column) || column === terminalColumnFor(boardSlug, boardTerminal);
 }
 

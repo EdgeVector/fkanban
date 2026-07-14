@@ -42,7 +42,14 @@ export async function depAddCmd(opts: {
     });
   }
   const deps = normalizeDeps([...card.deps, opts.dep], opts.slug);
-  await writeCardPatch(opts, card, { deps });
+  // Default/todo is the pickup claim lane: unfinished deps belong in backlog.
+  // Adding a live dep while the card sits in todo would leave a non-pickupable
+  // "ready-looking" card; demote automatically (Tom 2026-07-14).
+  const patch: { deps: string[]; column?: string } = { deps };
+  if (card.board === "default" && card.column === "todo") {
+    patch.column = "backlog";
+  }
+  await writeCardPatch(opts, card, patch);
   return { slug: opts.slug, dep: opts.dep, action: "added", deps };
 }
 
