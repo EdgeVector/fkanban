@@ -516,7 +516,12 @@ export function newNodeClient(opts: {
   };
 
   const nodeHeaders = (): Record<string, string> => {
-    const h: Record<string, string> = { "X-User-Hash": userHash };
+    // X-LastDB-Client is a best-effort ops label (not a security boundary).
+    // Mini request telemetry ranks worst offenders by this header.
+    const h: Record<string, string> = {
+      "X-User-Hash": userHash,
+      "X-LastDB-Client": "kanban",
+    };
     if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
     if (appId !== undefined && appId.length > 0) {
       h["X-App-Capability"] = appCapability && appCapability.length > 0
