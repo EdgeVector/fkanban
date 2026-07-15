@@ -1583,6 +1583,23 @@ function writeAllSync(fd: number, data: string): void {
   }
 }
 
+type CaptureSentryException = (error: unknown, tags?: Record<string, string>) => Promise<void>;
+
+async function initCliSentry(): Promise<CaptureSentryException> {
+  if (!process.env.OBS_SENTRY_DSN?.trim()) {
+    return async () => {};
+  }
+  const sentry = await import("./observability/sentry.ts");
+  await sentry.initSentry({
+    service: "fkanban-cli",
+    env: {
+      ...process.env,
+      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fkanban@${pkg.version}`,
+    },
+  });
+  return sentry.captureSentryException;
+}
+
 // Route ALL CLI output through the synchronous writer. We override `console`
 // directly, NOT `process.stdout.write`: in Bun, `console.log` writes to the fd
 // natively and does NOT delegate to `process.stdout.write`, so patching the
@@ -1597,9 +1614,15 @@ if (import.meta.main) {
   console.log = (...args: unknown[]): void => writeAllSync(1, format(...args) + "\n");
   console.error = (...args: unknown[]): void => writeAllSync(2, format(...args) + "\n");
 
-  main(process.argv.slice(2))
+  let captureTopLevel: CaptureSentryException = async () => {};
+
+  initCliSentry()
+    .then((capture) => {
+      captureTopLevel = capture;
+      return main(process.argv.slice(2));
+    })
     .then((code) => process.exit(code))
-    .catch((err) => {
+    .catch(async (err) => {
       if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
         console.error(`kanban: ${err.message}`);
       } else if (err instanceof FkanbanError) {
@@ -1611,6 +1634,7 @@ if (import.meta.main) {
         // is a genuine operational failure and stays exit 1.
         process.exit(["missing_arg", "invalid_db_locator", "db_locator_mismatch"].includes(err.code) ? 2 : 1);
       } else {
+        await captureTopLevel(err, { entrypoint: "cli", top_level: "true" });
         console.error(`kanban: ${err instanceof Error ? err.message : String(err)}`);
       }
       process.exit(1);

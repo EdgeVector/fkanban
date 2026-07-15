@@ -16,6 +16,24 @@
 // new dev may `claude mcp add fkanban …` BEFORE `kanban init`.
 
 import { startMcpServer } from "./server.ts";
+import pkg from "../../package.json" with { type: "json" };
+
+type CaptureSentryException = (error: unknown, tags?: Record<string, string>) => Promise<void>;
+
+async function initMcpSentry(): Promise<CaptureSentryException> {
+  if (!process.env.OBS_SENTRY_DSN?.trim()) {
+    return async () => {};
+  }
+  const sentry = await import("../observability/sentry.ts");
+  await sentry.initSentry({
+    service: "fkanban-mcp",
+    env: {
+      ...process.env,
+      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fkanban@${pkg.version}`,
+    },
+  });
+  return sentry.captureSentryException;
+}
 
 // The `kanban-mcp` and `fkanban-mcp` bins delegate to the single `startMcpServer` implementation
 // shared with the `fkanban mcp` CLI subcommand, so the two entrypoints can never
@@ -28,11 +46,17 @@ export async function runMcp(): Promise<number> {
 }
 
 if (import.meta.main) {
-  runMcp().then(
+  let captureTopLevel: CaptureSentryException = async () => {};
+
+  initMcpSentry().then((capture) => {
+    captureTopLevel = capture;
+    return runMcp();
+  }).then(
     (code) => {
       if (code !== 0) process.exit(code);
     },
-    (err) => {
+    async (err) => {
+      await captureTopLevel(err, { entrypoint: "mcp", top_level: "true" });
       console.error(err);
       process.exit(1);
     },
