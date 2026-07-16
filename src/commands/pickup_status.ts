@@ -23,7 +23,10 @@ export async function pickupStatusResult(opts: PickupStatusOptions): Promise<{
     listCards(opts.node, opts.cfg),
     listBoards(opts.node, opts.cfg),
   ]);
-  const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight);
+  const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight, {
+    cfg: opts.cfg,
+    node: opts.node,
+  });
   return { text: renderPickupStatus(report), report };
 }
 

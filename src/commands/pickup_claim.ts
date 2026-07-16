@@ -19,7 +19,6 @@ import {
   type Card,
 } from "../record.ts";
 import {
-  buildPickupStatusReport,
   buildPickupStatusReportWithSituations,
   type PickupCategory,
   type PickupClassification,
@@ -191,7 +190,10 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   if (opts.maxDoing !== undefined) {
     const doingCount = cards.filter((c) => c.board === board && c.column === "doing").length;
     if (doingCount >= opts.maxDoing) {
-      const report = buildPickupStatusReport(cards, boards);
+      const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight, {
+        cfg: opts.cfg,
+        node: opts.node,
+      });
       return {
         claimed: false,
         reason: "at-capacity",
@@ -211,6 +213,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     cards,
     boards,
     opts.situationPreflight,
+    { cfg: opts.cfg, node: opts.node },
   );
   const diagnostics = claimDiagnostics(report);
 

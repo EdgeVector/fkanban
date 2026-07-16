@@ -212,6 +212,38 @@ describe("pickup-status", () => {
     expect(dependent?.missingDeps).toEqual([]);
   });
 
+  test("point-reads done dependencies omitted from the broad status scan", async () => {
+    await seedCard(node, card({
+      slug: "done-dep",
+      title: "Completed dependency",
+      column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nMerged dependency.",
+    }));
+    await seedCard(node, card({
+      slug: "dependent",
+      title: "Dependent work",
+      deps: ["done-dep"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nDependent work.",
+    }));
+
+    const baseQueryAll = node.queryAll.bind(node);
+    node.queryAll = async (args: Parameters<NodeClient["queryAll"]>[0]) => {
+      const res = await baseQueryAll(args);
+      if (args.schemaHash === cfg.schemaHashes.card && !args.filter) {
+        const results = res.results.filter((row) => row.key.hash !== "done-dep");
+        return { ...res, results, returned_count: results.length };
+      }
+      return res;
+    };
+
+    const { report } = await pickupStatusResult({ cfg, node });
+    const dependent = report.cards.find((c) => c.slug === "dependent");
+
+    expect(dependent?.category).toBe("pickup-ready");
+    expect(dependent?.blockedBy).toEqual([]);
+    expect(dependent?.missingDeps).toEqual([]);
+  });
+
   test("reports stale generated blocker metadata separately from real human gates", async () => {
     await seedCard(node, card({
       slug: "stale",
