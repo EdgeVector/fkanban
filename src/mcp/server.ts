@@ -13,6 +13,7 @@ import { addCmd } from "../commands/add.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
 import { pickupStatusResult } from "../commands/pickup_status.ts";
+import { pickupClaimResult, formatPickupClaim } from "../commands/pickup_claim.ts";
 import { overlapResult, formatOverlap } from "../commands/overlap.ts";
 import { rankCmd } from "../commands/rank.ts";
 import { searchResult } from "../commands/search.ts";
@@ -48,6 +49,7 @@ export const FKANBAN_WRITE_TOOLS = [
   "fkanban_add",
   "fkanban_move",
   "fkanban_rank",
+  "fkanban_pickup_claim",
   "fkanban_rm",
   "fkanban_dep_add",
   "fkanban_dep_rm",
@@ -442,6 +444,73 @@ export function createFkanbanMcpServer(
         const { cfg, node } = requireConfig();
         const { text, report } = await pickupStatusResult({ cfg, node });
         return toolResult(text, report);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_pickup_claim",
+    {
+      title: "Claim the next ready card",
+      description:
+        "Atomic agent claim: walk pickup-ready todo cards in priority order (P0→P3), skip surface overlaps with doing/review in the same repo, and CAS-move the first winner into doing. On claim_conflict try the next candidate. Prefer this over list+overlap+move. Returns claimed=false with skipped reasons when nothing is eligible (idle, not an error).",
+      annotations: { title: "Claim the next ready card", openWorldHint: false },
+      inputSchema: {
+        board: z.string().optional().describe("Board to claim from (default: default)."),
+        worker: z.string().optional().describe("Worker id stamped onto assignee after claim."),
+        prefer_repo: z.array(z.string()).optional().describe("Try these repos first."),
+        exclude_repo: z.array(z.string()).optional().describe("Never claim these repos."),
+        max_doing: z.number().int().min(0).optional().describe("Refuse with at-capacity when doing count ≥ this."),
+        dry_run: z.boolean().optional().describe("Select the next card without moving it."),
+      },
+      outputSchema: {
+        claimed: z.boolean(),
+        reason: z.string(),
+        card: z.object({
+          slug: z.string(),
+          title: z.string(),
+          board: z.string(),
+          column: z.string(),
+          repo: z.string(),
+          base: z.string(),
+          kind: z.string(),
+          priority: z.string(),
+          body: z.string(),
+          tags: z.array(z.string()),
+          deps: z.array(z.string()),
+          surfaces: z.array(z.string()),
+          north_star: z.string(),
+          branch: z.string(),
+          pr_url: z.string(),
+          assignee: z.string(),
+        }).optional(),
+        from: z.string().optional(),
+        to: z.string().optional(),
+        worker: z.string().optional(),
+        scanned_ready: z.number().int(),
+        skipped: z.array(z.object({
+          slug: z.string(),
+          reason: z.string(),
+          detail: z.string().optional(),
+        })),
+      },
+    },
+    async (args) => {
+      try {
+        const { cfg, node } = requireConfig();
+        const result = await pickupClaimResult({
+          cfg,
+          node,
+          board: args.board,
+          worker: args.worker,
+          preferRepo: args.prefer_repo,
+          excludeRepo: args.exclude_repo,
+          maxDoing: args.max_doing,
+          dryRun: args.dry_run,
+        });
+        return toolResult(formatPickupClaim(result), result);
       } catch (err) {
         return errorResult(err);
       }

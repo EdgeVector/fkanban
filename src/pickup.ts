@@ -179,8 +179,15 @@ export function classifyPickupCard(
   if (!base) {
     return out("malformed-routing", "missing Base header/field", "Set `Base: main` or pass `--base main`.");
   }
-  if (card.pr_url || card.branch) {
-    return out("collision", "todo card already has branch/PR metadata", "Reconcile the existing branch/PR before pickup.");
+  // Only an open PR URL means in-flight work. A pre-declared `branch` name alone
+  // is optional metadata (agents often set Branch: kanban/<slug> at file time)
+  // and must NOT block pickup — that false collision stranded ready cards.
+  if (card.pr_url) {
+    return out(
+      "collision",
+      "todo card already has PR metadata",
+      "Reconcile the existing PR (watch/merge or clear pr_url) before pickup.",
+    );
   }
   if (dep.blocked) {
     details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
@@ -252,7 +259,9 @@ export type GroomIssueKind =
   | "stale-block-status"
   | "stale-pickup-area-overlap"
   | "block-status-mismatch"
-  | "human-parking-candidate";
+  | "human-parking-candidate"
+  | "todo-lane-branch-metadata"
+  | "todo-lane-pr-metadata";
 
 export type GroomIssue = {
   kind: GroomIssueKind;
@@ -370,10 +379,35 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
     });
   }
 
+  // Heal the false-collision class: structured branch/pr_url on default/todo
+  // stranded cards that looked "filed" but could never be picked up.
+  if (next.board === "default" && next.column === "todo") {
+    if (next.branch.trim()) {
+      issues.push({
+        kind: "todo-lane-branch-metadata",
+        message: "todo card has structured branch metadata (blocks/collides pickup)",
+        applyable: true,
+        suggestion: "Clear branch; keep Branch: in the body brief only until doing.",
+      });
+      next.branch = "";
+    }
+    if (next.pr_url.trim()) {
+      issues.push({
+        kind: "todo-lane-pr-metadata",
+        message: "todo card has pr_url metadata (blocks pickup claim)",
+        applyable: true,
+        suggestion: "Clear pr_url on todo; re-attach after claim into doing.",
+      });
+      next.pr_url = "";
+    }
+  }
+
   const changed =
     next.body !== card.body ||
     next.block_status !== card.block_status ||
-    next.block_reason !== card.block_reason;
+    next.block_reason !== card.block_reason ||
+    next.branch !== card.branch ||
+    next.pr_url !== card.pr_url;
   return { card: next, issues, changed };
 }
 

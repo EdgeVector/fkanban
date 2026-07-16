@@ -21,6 +21,7 @@ import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
+import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
@@ -67,6 +68,7 @@ Commands:
   list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
   overlap <slug>       report declared surface conflicts with doing/review cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
+  pickup claim         claim the next ready card into doing (priority + overlap + CAS)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for kanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
@@ -292,21 +294,38 @@ Example:
   kanban list --column todo --field slug
   kanban list --wide --column doing`),
 
-  pickup: withFooter(`kanban pickup — report what can be picked up now
+  pickup: withFooter(`kanban pickup — readiness report + atomic next-card claim
 
 Usage:
   kanban pickup status [--json]
+  kanban pickup claim [options]
 
-Classifies every active (non-terminal) card as pickup-ready, blocked-on-dependency,
-human-gated, malformed-routing, parked/non-work, collision, or stale-metadata.
-This is a read-only board hygiene report; it does not start pickup work.
+status — Classifies every active (non-terminal) card as pickup-ready,
+blocked-on-dependency, human-gated, malformed-routing, parked/non-work,
+collision, or stale-metadata. Read-only hygiene report.
 
-Options:
+claim — Give the agent the next workable card: walk pickup-ready todo cards
+in priority order (P0→P3), skip surface conflicts with doing/review in the
+same repo, and CAS-claim the first winner into doing (\`move --from todo\`).
+On claim_conflict (another worker won), try the next candidate. Prefer this
+over hand-rolling list + overlap + move in prompts.
+
+status options:
   --json                machine-readable { scanned, ready, counts, cards }
 
+claim options:
+  --board <slug>        board to claim from (default: default)
+  --worker <id>         stamp card assignee after claim (e.g. last-stack-fkanban-pickup-w2)
+  --prefer-repo a,b     try these repos first (still falls through)
+  --exclude-repo a,b    never claim these repos
+  --max-doing <n>       refuse with at-capacity when board doing count ≥ n
+  --dry-run             select the next card without moving it
+  --json                machine-readable claim result
+
 Example:
-  kanban pickup status
-  kanban pickup status --json`),
+  kanban pickup status --json
+  kanban pickup claim --json --worker last-stack-fkanban-pickup
+  kanban pickup claim --dry-run --prefer-repo EdgeVector/fold`),
 
   rank: withFooter(`kanban rank — reorder a column by card priority
 
@@ -767,6 +786,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   migrate: new Set(["dry-run"]),
   groom: new Set(["apply", "dry-run"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
+  pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
 };
 
 // Closest valid flag for a mistyped option on a known command. Mirrors the
@@ -853,6 +873,10 @@ async function main(argv: string[]): Promise<number> {
         "node-socket-path": { type: "string" },
         "declare-link": { type: "boolean" },
         name: { type: "string" },
+        worker: { type: "string" },
+        "prefer-repo": { type: "string" },
+        "exclude-repo": { type: "string" },
+        "max-doing": { type: "string" },
       },
     });
   } catch (err) {
@@ -1300,20 +1324,56 @@ async function dispatch(
     }
 
     case "pickup":
-    case "pickup-status": {
-      const usage = cmd === "pickup" ? "pickup status" : "pickup-status";
-      if (cmd === "pickup" && positionals[1] !== "status") {
-        console.error(`kanban: Unknown pickup subcommand "${positionals[1] ?? ""}". Try: pickup status`);
+    case "pickup-status":
+    case "pickup-claim": {
+      // Subcommand resolution:
+      //   pickup status | pickup claim | bare `pickup` (= status, back-compat)
+      //   pickup-status / pickup-claim aliases (single positional)
+      let sub: "status" | "claim";
+      if (cmd === "pickup-status") sub = "status";
+      else if (cmd === "pickup-claim") sub = "claim";
+      else if (positionals[1] === undefined || positionals[1] === "status") sub = "status";
+      else if (positionals[1] === "claim") sub = "claim";
+      else {
+        console.error(`kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup claim`);
         return 2;
       }
-      const extra = rejectExtraPositionals(positionals, cmd === "pickup" ? 2 : 1, usage);
+
+      const maxPos = cmd === "pickup" ? (positionals[1] === undefined ? 1 : 2) : 1;
+      const usage = cmd === "pickup" ? `pickup ${sub}` : cmd;
+      const extra = rejectExtraPositionals(positionals, maxPos, usage);
       if (extra !== undefined) return extra;
+
       const ctx = loadCtx({ verbose });
-      console.log(await pickupStatusCmd({
+      if (sub === "status") {
+        console.log(await pickupStatusCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+
+      const maxDoingRaw = values["max-doing"] as string | undefined;
+      const maxDoing = maxDoingRaw !== undefined
+        ? parseIntFlag(maxDoingRaw, "max-doing", "pickup claim", { min: 0 })
+        : undefined;
+      const result = await pickupClaimResult({
         cfg: ctx.cfg,
         node: ctx.node,
-        json: values.json as boolean | undefined,
-      }));
+        board: values.board as string | undefined,
+        worker: values.worker as string | undefined,
+        preferRepo: values["prefer-repo"] !== undefined
+          ? [values["prefer-repo"] as string]
+          : undefined,
+        excludeRepo: values["exclude-repo"] !== undefined
+          ? [values["exclude-repo"] as string]
+          : undefined,
+        maxDoing,
+        dryRun: values["dry-run"] as boolean | undefined,
+      });
+      console.log(formatPickupClaim(result, values.json as boolean | undefined));
+      // 0 even when nothing claimed — idle is a successful outcome for agents.
       return 0;
     }
 

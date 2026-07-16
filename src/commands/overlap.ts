@@ -28,7 +28,7 @@ export type OverlapResult = {
   warnings: string[];
 };
 
-function claimedRepo(card: Card): string {
+export function claimedRepo(card: Card): string {
   return (card.repo || parseBodyHeader(card.body, "Repo")).trim();
 }
 
@@ -83,12 +83,8 @@ function matchedPairs(candidate: string[], other: string[]): Array<{ candidate: 
   return matches;
 }
 
-export async function overlapResult(opts: {
-  cfg: Config;
-  node: NodeClient;
-  slug: string;
-}): Promise<OverlapResult> {
-  const candidate = await requireCard(opts.node, opts.cfg, opts.slug);
+/** Pure overlap check against an in-memory card list (used by pickup claim). */
+export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResult {
   const repo = claimedRepo(candidate);
   const surfaces = claimedSurfaces(candidate);
   const warnings: string[] = [];
@@ -100,7 +96,6 @@ export async function overlapResult(opts: {
     return { slug: candidate.slug, repo, surfaces, conflicts, warnings };
   }
 
-  const cards = await listCards(opts.node, opts.cfg);
   const inFlight = cards.filter((card) =>
     card.slug !== candidate.slug &&
     (card.column === "doing" || card.column === "review") &&
@@ -126,6 +121,16 @@ export async function overlapResult(opts: {
   }
 
   return { slug: candidate.slug, repo, surfaces, conflicts, warnings };
+}
+
+export async function overlapResult(opts: {
+  cfg: Config;
+  node: NodeClient;
+  slug: string;
+}): Promise<OverlapResult> {
+  const candidate = await requireCard(opts.node, opts.cfg, opts.slug);
+  const cards = await listCards(opts.node, opts.cfg);
+  return overlapAgainstCards(candidate, cards);
 }
 
 export function formatOverlap(result: OverlapResult, json?: boolean): string {

@@ -11,6 +11,7 @@ import {
   appendPosition,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
+  sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
   BLOCK_STATUSES,
   CARD_KINDS,
@@ -256,6 +257,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       explicitBlockStatus: opts.blockStatus !== undefined,
       warn: suppressDefaultTodoWarning(updated, opts.force) ? () => {} : undefined,
     });
+    sanitizeDefaultTodoLaneMetadata(updated);
     assertDefaultTodoPickupReady(updated, opts.force, rawBody);
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
@@ -293,6 +295,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     explicitBlockStatus: opts.blockStatus !== undefined,
     warn: suppressDefaultTodoWarning(card, opts.force) ? () => {} : undefined,
   });
+  sanitizeDefaultTodoLaneMetadata(card);
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertSituationPreflightAllowed(card, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
