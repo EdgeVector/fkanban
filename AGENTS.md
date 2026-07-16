@@ -69,16 +69,18 @@ like organic ones; undiverged CoW files make pruning even cheaper.)
 
 ```bash
 bun run src/cli.ts <cmd>     # or the bin/kanban shim once on PATH
-bun run src/cli.ts doctor    # health-check config + node + schemas + round-trip
+bun run src/cli.ts list      # socket-backed health check / smoke read
 ```
 
-The CLI needs a running folddb node. Tom's primary brain runs on **:9001** (the
-local folddb socket) — dogfood by reading/writing **through the CLI/MCP**; NEVER
-`kill`/reset/`brew restart` it or wipe its data. For destructive/migration tests
-spin up an ephemeral node on another port:
+The CLI needs a running LastDB/FoldDB node. Tom's primary brain is reached over
+the configured Unix socket, not the retired TCP `:9001` endpoint. Dogfood by
+reading/writing **through the CLI/MCP**; NEVER `kill`/reset/`brew restart` the
+primary node or wipe its data. A `doctor`/`init` TCP `:9001` failure can be stale
+control-plane behavior, not an outage. For destructive/migration tests spin up an
+ephemeral node with its own socket / isolated data dir:
 
 ```bash
-bun run src/cli.ts init --node-url http://127.0.0.1:9105 \
+bun run src/cli.ts init --node-socket-path /tmp/fkanban-test.sock \
   --schema-service-url <dev-schema-service-url>
 ```
 
