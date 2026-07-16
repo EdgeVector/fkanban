@@ -315,6 +315,29 @@ describe("pickup claim", () => {
     expect(result.scanned_ready).toBe(0);
   });
 
+  test("no-eligible when every ready candidate is skipped", async () => {
+    await seedCard(node, card({
+      slug: "fold-card",
+      repo: "EdgeVector/fold",
+      body: "Repo: EdgeVector/fold\nBase: main\nPriority: P1\n\nFold.",
+    }));
+
+    const result = await pickupClaimResult({
+      cfg,
+      node,
+      excludeRepo: ["EdgeVector/fold"],
+    });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(1);
+    expect(result.skipped).toContainEqual({
+      slug: "fold-card",
+      reason: "exclude-repo",
+      detail: "EdgeVector/fold",
+    });
+  });
+
   test("claim_conflict on first candidate falls through to second", async () => {
     await seedCard(node, card({
       slug: "first",

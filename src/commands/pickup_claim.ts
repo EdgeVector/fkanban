@@ -269,7 +269,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
 
   return {
     claimed: false,
-    reason: readyCards.length === 0 ? "no-eligible" : "no-eligible",
+    reason: "no-eligible",
     scanned_ready: readyCards.length,
     skipped,
     worker: opts.worker,
