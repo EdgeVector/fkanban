@@ -38,7 +38,7 @@ import {
   type Card,
 } from "../src/record.ts";
 import { FkanbanError, type NodeClient, type QueryResponse, type QueryRow } from "../src/client.ts";
-import { listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
+import { DEFAULT_COLUMN_LIMIT, listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
 import {
   GATES_LOCAL_SCHEMA,
   declareGatesLink,
@@ -1183,9 +1183,14 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
   // head/tail slice is deterministic. `todo` is a non-terminal column (head
   // slice); `done` is the terminal column (tail slice — most recent kept).
   const corpus: Card[] = [
-    card({ slug: "t1", column: "todo", position: "1" }),
-    card({ slug: "t2", column: "todo", position: "2" }),
-    card({ slug: "t3", column: "todo", position: "3" }),
+    ...Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) =>
+      card({
+        slug: `t${i + 1}`,
+        column: "todo",
+        position: String(i + 1),
+        body: i === 0 ? "long ".repeat(80) : "",
+      }),
+    ),
     card({ slug: "d1", column: "done", position: "1" }),
     card({ slug: "d2", column: "done", position: "2" }),
     card({ slug: "d3", column: "done", position: "3" }),
@@ -1239,8 +1244,23 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
     return (JSON.parse(out) as Card[]).map((c) => c.slug);
   }
 
-  test("no --limit → JSON is uncapped (full filtered board, no implicit 12-cap)", async () => {
-    expect((await jsonSlugs({})).sort()).toEqual(["d1", "d2", "d3", "t1", "t2", "t3"]);
+  test("no --limit → broad JSON uses the default per-column cap and body previews", async () => {
+    const out = await listCmd({ cfg, node: populatedNode(corpus), json: true });
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed.map((c) => c.slug).sort()).toEqual([
+      "d1",
+      "d2",
+      "d3",
+      ...Array.from({ length: DEFAULT_COLUMN_LIMIT }, (_, i) => `t${i + 1}`),
+    ].sort());
+    expect(parsed.find((c) => c.slug === "t1")!.body.length).toBeLessThanOrEqual(200);
+    expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
+  });
+
+  test("column-filtered JSON stays uncapped for pickup-style narrow reads", async () => {
+    expect(await jsonSlugs({ column: "todo" })).toEqual(
+      Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
+    );
   });
 
   test("explicit --limit caps a single column to N (matches the text head slice)", async () => {
@@ -1260,10 +1280,8 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
       "d1",
       "d2",
       "d3",
-      "t1",
-      "t2",
-      "t3",
-    ]);
+      ...Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
+    ].sort());
   });
 });
 

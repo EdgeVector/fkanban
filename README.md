@@ -176,7 +176,7 @@ DONE  (0)
 | `kanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
 | `kanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for kanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
 | `kanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
-| `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
+| `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json --full-body`) |
 | `kanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `kanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
 | `kanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
@@ -201,13 +201,11 @@ moving it.
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
 everything and `--limit N` sets a custom per-column cap — both apply to text
-**and** `--json`. The 12-card default is a *text display* affordance only:
-`--json` and `--wide` return the complete filtered board by default, and honor
-an explicit `--limit N`/`--all` to mean the same bounded (or unbounded) set the
-text view shows. `--wide` prints one fixed-width row per card with
+**and** `--json`. Broad `--json` reads use the same 12-card-per-column default
+cap and return single-line body previews with `bodyTruncated`; pass `--all` to
+return every row, or `--full-body` / `--full_body` for the historical complete
+card-body JSON surface. `--wide` prints one fixed-width row per card with
 `COLUMN SLUG REPO BASE PR UPDATED TITLE` for agent/reconcile scans.
-`--full-body` and `--full_body` are compatibility aliases for `--json` with
-complete card bodies.
 
 `--tag <tag>` and `--assignee <name>` apply **exact-match** filters to the
 listing (contrast the fuzzy substring `search` below), e.g.
@@ -229,10 +227,10 @@ and `--board` / `--column` scope the search. Like `list`, the text output caps
 the rendered matches at **20** by default so a busy board doesn't flood the
 terminal; the overflow collapses to a dim `… N more (use --limit N or --all)`
 line. `--all` shows every match and `--limit N` sets a custom cap — both apply
-to text **and** `--json`. As with `list`, the 20-match default is a *text
-display* affordance only: `--json` returns the complete match set by default and
-honors an explicit `--limit N`/`--all` to mean the same bounded (or unbounded)
-set the text view shows.
+to text **and** `--json`. Broad `--json` reads use the same 20-match default cap
+and return single-line body previews with `bodyTruncated`; pass `--all` to
+return every match, or `--full-body` / `--full_body` for the historical
+complete-body JSON surface.
 
 ## Pickup Status And Parking
 

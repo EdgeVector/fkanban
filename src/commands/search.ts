@@ -22,7 +22,7 @@ import {
   sortCards,
   type Card,
 } from "../record.ts";
-import { capFlat, DEFAULT_SEARCH_LIMIT, renderSearchResults, resolveLimits } from "../board.ts";
+import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
 
@@ -42,6 +42,9 @@ export type SearchOptions = {
   // default text command may use indexed/native candidates and body-free scans
   // so an interactive search does not download every full card body.
   complete?: boolean;
+  // CLI compatibility escape hatch: `--full-body` asks for the historical
+  // unpreviewed JSON surface. MCP has its own `full_body` option.
+  fullBody?: boolean;
 };
 
 const NATIVE_INDEX_RESULT_CAP = 50;
@@ -150,20 +153,20 @@ async function indexedSearchCards(
 // Both the human text and the structured (`--json`) matches, from a single
 // read. `searchCmd` (CLI) returns one; the MCP tool returns both.
 //
-// `cards` here is the COMPLETE match set — capping is the *caller's* job so each
+// `cards` here is the complete match set — capping is the *caller's* job so each
 // surface applies its own contract:
 //   - The text view caps at DEFAULT_SEARCH_LIMIT as a display affordance only
 //     (`renderSearchResults` applies it and prints a "… N more" footer).
-//   - `searchCmd` (`--json`) applies an *explicit* `--limit` to the serialized
-//     array via `capFlat` (`jsonLimit`); no flag → the full array (the CLI
-//     `--json` consumer asked for it explicitly).
+//   - `searchCmd` (`--json`) applies an explicit `--limit`, and also applies a
+//     safe DEFAULT_SEARCH_LIMIT cap + body previews for broad all-column JSON
+//     reads unless the caller requests `--all` or `--full-body`.
 //   - The `fkanban_search` MCP tool caps the structured array BY DEFAULT
 //     (DEFAULT_SEARCH_LIMIT, via `server.ts`'s `capCards`), because its consumer
 //     is a token-bounded LLM: every match carries its full `body`, so returning
 //     all of them on a real board (160+ cards) overflows the agent's context in
 //     one call. It accepts `limit`/`all` to opt out and reports `total`/
 //     `truncated` so the cap is never silent.
-// `jsonLimit` is the CLI-only knob: 0 = no cap (default and `--all`); >0 =
+// `jsonLimit` is the CLI-only explicit-limit knob: 0 = no explicit cap; >0 =
 // explicit `--limit` cap. Mirrors `list`'s contract exactly.
 export async function searchResult(
   opts: SearchOptions,
@@ -249,11 +252,13 @@ export async function searchCmd(opts: SearchOptions): Promise<string> {
   const projectionFields = opts.fields ?? [];
   const complete = Boolean(opts.json || opts.all || fieldProjectionNeedsFullCards(projectionFields));
   const { text, cards, jsonLimit } = await searchResult({ ...opts, complete });
-  const out = jsonLimit > 0 ? capFlat(cards, jsonLimit) : cards;
-  if (projectionFields.length > 0) return renderFieldProjection(out, projectionFields);
+  const broadJson = opts.column === undefined;
+  const implicitJsonLimit =
+    opts.json && broadJson && !opts.all && !opts.fullBody && opts.limit === undefined ? DEFAULT_SEARCH_LIMIT : 0;
+  const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
+  const capped = effectiveJsonLimit > 0 ? capFlat(cards, effectiveJsonLimit) : cards;
+  if (projectionFields.length > 0) return renderFieldProjection(capped, projectionFields);
   if (!opts.json) return text;
-  // Honor an explicit `--limit` on the machine-readable surface too: cap to the
-  // same matches the text view shows. No explicit limit (jsonLimit 0) → the
-  // full match array, unchanged.
+  const out = broadJson || opts.fullBody ? previewCardBodies(capped, opts.fullBody ?? false) : capped;
   return JSON.stringify(out, null, 2);
 }

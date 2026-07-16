@@ -259,7 +259,9 @@ export type GroomIssueKind =
   | "stale-block-status"
   | "stale-pickup-area-overlap"
   | "block-status-mismatch"
-  | "human-parking-candidate";
+  | "human-parking-candidate"
+  | "todo-lane-branch-metadata"
+  | "todo-lane-pr-metadata";
 
 export type GroomIssue = {
   kind: GroomIssueKind;

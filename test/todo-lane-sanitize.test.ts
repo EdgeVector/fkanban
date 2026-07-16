@@ -21,7 +21,6 @@ function card(partial: Partial<Card> & { slug: string }): Card {
     deps: [],
     created_at: now,
     updated_at: now,
-    done_at: "",
     ...emptyStructuredFields(),
     repo: "EdgeVector/fold",
     base: "main",
