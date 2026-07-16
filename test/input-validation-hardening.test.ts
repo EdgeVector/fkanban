@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const NO_CONFIG = join(tmpdir(), `fkanban-input-validation-no-config-${process.pid}.json`);
 const NO_SOCKET = join(tmpdir(), `fkanban-input-validation-no-socket-${process.pid}.sock`);
+const CLI_SPAWN_LOOP_TIMEOUT_MS = 15_000;
 
 async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(["bun", "run", CLI, ...args], {
@@ -52,7 +53,7 @@ describe("surplus positional rejection", () => {
       expect(code).toBe(2);
       expect(stderr).toContain("Too many arguments");
     }
-  });
+  }, CLI_SPAWN_LOOP_TIMEOUT_MS);
 });
 
 describe("strict decimal integer flags", () => {

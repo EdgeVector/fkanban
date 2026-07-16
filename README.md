@@ -180,7 +180,7 @@ DONE  (0)
 | `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json --full-body`) |
 | `kanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `kanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
-| `kanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
+| `kanban board create <slug>` | create/update a board (`--title`; `--columns` may be omitted or set to `backlog,todo,doing,done`) |
 | `kanban board list` | list boards (`--json`) |
 | `kanban board rm <slug>` | delete a board with native tombstones; always refuses `default`, and refuses non-default boards with live cards unless `--force` |
 | `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
@@ -345,8 +345,8 @@ surface Codex-style process explosions without killing by process name.
 A card can depend on other cards, including cards on another board such as the
 `human` parking board. It stays **🔒 blocked** until every dependency reaches
 its own board's terminal column, and `move` refuses to advance a blocked card
-into a working column (`doing` / `review` / `done`, or a custom board's terminal
-column) unless you pass `--force`. Backlog/todo moves are always allowed.
+into a working column (`doing` / `done`) unless you pass `--force`.
+Backlog/todo moves are always allowed.
 
 Cards marked `--kind tracker`, `--kind umbrella`, `--kind meta`,
 `--kind registry`, `--kind program`, `--kind capstone`, or `--kind validation`
