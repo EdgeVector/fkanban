@@ -19,6 +19,7 @@ import {
   normalizeKind,
   parseBodyHeader,
   parseBodyListHeader,
+  parseBodyTagsHeader,
   PICKUP_AREA_BLOCK_PREFIX,
   resolvePickupRepo,
   rowToCard,
@@ -197,6 +198,20 @@ describe("parseBodyListHeader", () => {
       "src/mcp/**",
       "fold_db_node/src/server/uds_*",
     ]);
+  });
+});
+
+describe("parseBodyTagsHeader", () => {
+  test("reads comma and whitespace separated Tags values", () => {
+    expect(parseBodyTagsHeader("Tags: cli, metadata pickup  cli\n\nbody")).toEqual([
+      "cli",
+      "metadata",
+      "pickup",
+    ]);
+  });
+
+  test("ignores Tags examples inside fenced blocks", () => {
+    expect(parseBodyTagsHeader("```\nTags: example-only\n```\n\nRepo: EdgeVector/fkanban")).toEqual([]);
   });
 });
 

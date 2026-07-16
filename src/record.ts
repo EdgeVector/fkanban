@@ -890,6 +890,14 @@ export function parseBodyListHeader(body: string, name: string): string[] {
   return normalizeSurfaces(line.split(","));
 }
 
+export function parseBodyTagsHeader(body: string): string[] {
+  const re = /^[ \t]*Tags:[ \t]*(.*)$/im;
+  const m = stripFencedCodeBlocks(body).match(re);
+  if (!m) return [];
+  const line = stripTrailingInlineComment(m[1]!.split("\\n")[0]!);
+  return normalizeTags(line.split(/[,\s]+/));
+}
+
 export function writeBodyListHeader(body: string, name: string, values: string[]): string {
   const cleaned = normalizeSurfaces(values);
   const without = body.replace(new RegExp(`^[ \\t]*${name}:[^\\n]*(?:\\n|$)`, "gim"), "");
