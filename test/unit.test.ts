@@ -59,7 +59,7 @@ import {
 import { renderBoard, renderSearchResults, renderWideTable } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
-import { TOP_HELP, COMMAND_HELP, resolveHelp, suggestFlag } from "../src/cli.ts";
+import { TOP_HELP, COMMAND_HELP, commandHelpHint, resolveHelp, suggestFlag } from "../src/cli.ts";
 import { levenshtein, suggestClosest } from "../src/suggest.ts";
 
 function card(partial: Partial<Card>): Card {
@@ -812,6 +812,12 @@ describe("per-command help", () => {
   test("resolveHelp returns undefined when no help flag and a real command runs", () => {
     expect(resolveHelp("add", false)).toBeUndefined();
     expect(resolveHelp("list", false)).toBeUndefined();
+  });
+
+  test("commandHelpHint points known commands at per-command help", () => {
+    expect(commandHelpHint("add")).toBe("add --help");
+    expect(commandHelpHint("bogus")).toBe("help");
+    expect(commandHelpHint(undefined)).toBe("help");
   });
 
   test("resolveHelp routes `help <command>` to that command's help", () => {

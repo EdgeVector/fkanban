@@ -173,6 +173,7 @@ DONE  (0)
 | `kanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
 | `kanban overlap <slug>` | compare a candidate card's surfaces against doing/review cards in the same repo (exit 2 on declared conflict) |
 | `kanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
+| `kanban pickup claim` | atomic next-card claim: priority order + surface-overlap skip + CAS `todo→doing` (`--worker --prefer-repo --exclude-repo --max-doing --dry-run --json`) |
 | `kanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
 | `kanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for kanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
 | `kanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
@@ -250,6 +251,20 @@ Use `pickup status` before grooming or pickup:
 kanban pickup status
 kanban pickup status --json
 ```
+
+**Agents should claim with `pickup claim`**, not hand-roll list → overlap → move:
+
+```bash
+kanban pickup claim --json --worker last-stack-fkanban-pickup-w2
+# dry-run selection only:
+kanban pickup claim --dry-run --json
+```
+
+`pickup claim` walks pickup-ready `todo` cards in priority order (P0→P3), skips
+surface conflicts with `doing`/`review` in the same repo, and CAS-moves the
+first winner into `doing`. Concurrent workers that lose a race get
+`claim_conflict` and the command continues to the next candidate. Idle boards
+return `{ "claimed": false, "reason": "no-eligible" }` with exit 0.
 
 It classifies each active card as `pickup-ready`,
 `blocked-on-dependency`, `human-gated`, `malformed-routing`,
@@ -446,7 +461,7 @@ nothing — and is the step the board groomer runs after promoting cards into
 ## MCP server
 
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
-`fkanban_move`, `fkanban_rank`, `fkanban_overlap`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
+`fkanban_move`, `fkanban_rank`, `fkanban_pickup_claim`, `fkanban_overlap`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
 `fkanban_tag_rm`, `fkanban_show`,
 `fkanban_pickup_status`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,

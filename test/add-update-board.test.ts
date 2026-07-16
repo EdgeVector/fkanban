@@ -204,6 +204,140 @@ describe("add update preserves the card's board", () => {
     expect(updated?.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
   });
 
+  test("create derives structured tags from a body Tags header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "body-tags",
+      title: "Body tags",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: cli, metadata pickup cli\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "body-tags");
+    expect(created?.tags).toEqual(expect.arrayContaining(["cli", "metadata", "pickup"]));
+    expect(created?.tags.filter((tag) => tag === "cli")).toHaveLength(1);
+  });
+
+  test("explicit --tags wins over a body Tags header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "explicit-tags",
+      title: "Explicit tags",
+      column: "todo",
+      tags: ["explicit"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: body-only\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "explicit-tags");
+    expect(created?.tags).toContain("explicit");
+    expect(created?.tags).not.toContain("body-only");
+  });
+
+  test("fenced Tags examples are ignored on create", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "fenced-tags",
+      title: "Fenced tags",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n```\nTags: example-only\n```\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "fenced-tags");
+    expect(created?.tags).not.toContain("example-only");
+  });
+
+  test("update with no explicit tags preserves existing structured tags", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-tags",
+      title: "Preserve tags",
+      column: "todo",
+      tags: ["existing"],
+      body: validPickupBody,
+    });
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-tags",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: replacement\n\nUpdated body.",
+    });
+
+    const updated = await findCard(node, cfg, "preserve-tags");
+    expect(updated?.tags).toContain("existing");
+    expect(updated?.tags).not.toContain("replacement");
+  });
+
+  test("add derives structured branch from a body Branch header outside todo", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "branch-card",
+      title: "Branch card",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "branch-card");
+    expect(created?.branch).toBe("kanban/body-branch");
+  });
+
+  test("explicit --branch wins over the body Branch header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "explicit-branch-card",
+      title: "Explicit branch card",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\nTest fixture work.",
+      branch: "kanban/explicit-branch",
+    });
+
+    const created = await findCard(node, cfg, "explicit-branch-card");
+    expect(created?.branch).toBe("kanban/explicit-branch");
+  });
+
+  test("fenced Branch examples do not populate structured branch", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "fenced-branch-card",
+      title: "Fenced branch card",
+      column: "doing",
+      body:
+        "Repo: EdgeVector/fkanban\nBase: main\n```text\nBranch: kanban/example-only\n```\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "fenced-branch-card");
+    expect(created?.branch).toBe("");
+  });
+
+  test("body-only updates preserve an existing structured branch", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-branch-card",
+      title: "Preserve branch card",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.",
+      branch: "kanban/existing-branch",
+    });
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-branch-card",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nUpdated fixture work.",
+    });
+
+    const updatedBranch = await findCard(node, cfg, "preserve-branch-card");
+    expect(updatedBranch?.branch).toBe("kanban/existing-branch");
+  });
+
   test("add with a DB locator stamps the home DB field and body header", async () => {
     await addCmd({
       cfg,

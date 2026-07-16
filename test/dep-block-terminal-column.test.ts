@@ -97,7 +97,9 @@ describe("isDepEnforcedColumn", () => {
     { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
   ]);
 
-  test("default board: gated set includes the pickup lane plus working columns", () => {
+  test("default board: gated set is working columns + pickup todo (backlog is not)", () => {
+    // Tom 2026-07-14: default/todo is the pickup claim lane — unfinished deps
+    // are refused there so cards don't look "ready" while blocked.
     expect(isDepEnforcedColumn("backlog", "default", terminal)).toBe(false);
     expect(isDepEnforcedColumn("todo", "default", terminal)).toBe(true);
     expect(isDepEnforcedColumn("doing", "default", terminal)).toBe(true);

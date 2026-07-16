@@ -327,6 +327,7 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_add preserves deps unless replace_deps is explicit", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
+    // Unfinished deps must live in backlog (default/todo is dep-gated).
     await client.callTool({
       name: "fkanban_add",
       arguments: { slug: "ui", column: "backlog", deps: ["api"], body: validPickupBody() },
@@ -402,6 +403,7 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_rm refuses to create a dangling dependency", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "dep-x", column: "todo", body: validPickupBody() } });
+    // Dependent with unfinished dep stays in backlog (not todo).
     await client.callTool({
       name: "fkanban_add",
       arguments: { slug: "uses-x", column: "backlog", deps: ["dep-x"], body: validPickupBody() },
