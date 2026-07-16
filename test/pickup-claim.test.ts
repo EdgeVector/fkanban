@@ -285,6 +285,9 @@ describe("pickup claim", () => {
     const result = await pickupClaimResult({ cfg, node, maxDoing: 1 });
     expect(result.claimed).toBe(false);
     expect(result.reason).toBe("at-capacity");
+    expect(result.diagnostics?.scanned_active).toBe(2);
+    expect(result.diagnostics?.counts["collision"]).toBe(1);
+    expect(result.diagnostics?.counts["pickup-ready"]).toBe(1);
   });
 
   test("no-eligible when queue empty of ready work", async () => {
@@ -313,6 +316,9 @@ describe("pickup claim", () => {
     expect(result.claimed).toBe(false);
     expect(result.reason).toBe("no-eligible");
     expect(result.scanned_ready).toBe(0);
+    expect(result.diagnostics?.scanned_active).toBe(1);
+    expect(result.diagnostics?.ready).toBe(0);
+    expect(result.diagnostics?.counts["human-gated"]).toBe(1);
   });
 
   test("no-eligible when every ready candidate is skipped", async () => {
@@ -320,6 +326,11 @@ describe("pickup claim", () => {
       slug: "fold-card",
       repo: "EdgeVector/fold",
       body: "Repo: EdgeVector/fold\nBase: main\nPriority: P1\n\nFold.",
+    }));
+    await seedCard(node, card({
+      slug: "human",
+      block_status: "needs_human",
+      block_reason: "waiting on Tom",
     }));
 
     const result = await pickupClaimResult({
@@ -331,6 +342,10 @@ describe("pickup claim", () => {
     expect(result.claimed).toBe(false);
     expect(result.reason).toBe("no-eligible");
     expect(result.scanned_ready).toBe(1);
+    expect(result.diagnostics?.scanned_active).toBe(2);
+    expect(result.diagnostics?.ready).toBe(1);
+    expect(result.diagnostics?.counts["pickup-ready"]).toBe(1);
+    expect(result.diagnostics?.counts["human-gated"]).toBe(1);
     expect(result.skipped).toContainEqual({
       slug: "fold-card",
       reason: "exclude-repo",

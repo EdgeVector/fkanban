@@ -18,7 +18,12 @@ import {
   updateCardRecord,
   type Card,
 } from "../record.ts";
-import { buildPickupStatusReportWithSituations } from "../pickup.ts";
+import {
+  buildPickupStatusReport,
+  buildPickupStatusReportWithSituations,
+  type PickupCategory,
+  type PickupStatusReport,
+} from "../pickup.ts";
 import { type SituationPreflight } from "../situations.ts";
 import { ClaimConflictError, moveCmd } from "./move.ts";
 import { claimedRepo, overlapAgainstCards } from "./overlap.ts";
@@ -77,6 +82,13 @@ export type PickupClaimResult = {
   worker?: string;
   scanned_ready: number;
   skipped: PickupClaimSkip[];
+  diagnostics?: PickupClaimDiagnostics;
+};
+
+export type PickupClaimDiagnostics = {
+  scanned_active: number;
+  ready: number;
+  counts: Record<PickupCategory, number>;
 };
 
 function normalizeRepoList(repos: string[] | undefined): string[] {
@@ -126,6 +138,14 @@ function orderCandidates(readyCards: Card[], preferRepo: string[]): Card[] {
   return [...preferred, ...rest];
 }
 
+function claimDiagnostics(report: PickupStatusReport): PickupClaimDiagnostics {
+  return {
+    scanned_active: report.scanned,
+    ready: report.ready,
+    counts: report.counts,
+  };
+}
+
 export async function pickupClaimResult(opts: PickupClaimOptions): Promise<PickupClaimResult> {
   const board = opts.board ?? "default";
   const preferRepo = normalizeRepoList(opts.preferRepo);
@@ -140,6 +160,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   if (opts.maxDoing !== undefined) {
     const doingCount = cards.filter((c) => c.board === board && c.column === "doing").length;
     if (doingCount >= opts.maxDoing) {
+      const report = buildPickupStatusReport(cards, boards);
       return {
         claimed: false,
         reason: "at-capacity",
@@ -150,6 +171,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
           detail: `doing=${doingCount} max-doing=${opts.maxDoing}`,
         }],
         worker: opts.worker,
+        diagnostics: claimDiagnostics(report),
       };
     }
   }
@@ -159,6 +181,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     boards,
     opts.situationPreflight,
   );
+  const diagnostics = claimDiagnostics(report);
 
   const readyClassifications = report.cards.filter(
     (c) => c.ready && c.board === board && c.column === "todo",
@@ -273,6 +296,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     scanned_ready: readyCards.length,
     skipped,
     worker: opts.worker,
+    diagnostics,
   };
 }
 
