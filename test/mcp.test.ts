@@ -329,7 +329,7 @@ describe("MCP write tools return structuredContent", () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
     await client.callTool({
       name: "fkanban_add",
-      arguments: { slug: "ui", column: "todo", deps: ["api"], body: validPickupBody() },
+      arguments: { slug: "ui", column: "backlog", deps: ["api"], body: validPickupBody() },
     });
 
     const rejected = await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", deps: [] } });
@@ -342,7 +342,7 @@ describe("MCP write tools return structuredContent", () => {
       name: "fkanban_add",
       arguments: { slug: "ui", deps: [], replace_deps: true },
     });
-    expect(cleared.structuredContent).toEqual({ slug: "ui", action: "updated", board: "default", column: "todo" });
+    expect(cleared.structuredContent).toEqual({ slug: "ui", action: "updated", board: "default", column: "backlog" });
     const shown = await client.callTool({ name: "fkanban_show", arguments: { slug: "ui" } });
     expect((shown.structuredContent as { deps: string[] }).deps).toEqual([]);
   });
@@ -404,7 +404,7 @@ describe("MCP write tools return structuredContent", () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "dep-x", column: "todo", body: validPickupBody() } });
     await client.callTool({
       name: "fkanban_add",
-      arguments: { slug: "uses-x", column: "todo", deps: ["dep-x"], body: validPickupBody() },
+      arguments: { slug: "uses-x", column: "backlog", deps: ["dep-x"], body: validPickupBody() },
     });
     const res = await client.callTool({ name: "fkanban_rm", arguments: { slug: "dep-x" } });
     expect(res.isError).toBe(true);

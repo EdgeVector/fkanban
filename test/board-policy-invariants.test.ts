@@ -222,8 +222,9 @@ describe("board policy invariants", () => {
       blockReason: "Tom must approve the production action",
       body: "Human gate.",
     });
-    await addCmd({ cfg, node, slug: "implementation", column: "todo", body: validBody, deps: ["human-approval"] });
+    await addCmd({ cfg, node, slug: "implementation", column: "backlog", body: validBody, deps: ["human-approval"] });
 
+    await expect(moveCmd({ cfg, node, slug: "implementation", column: "todo" })).rejects.toBeInstanceOf(FkanbanError);
     await expect(moveCmd({ cfg, node, slug: "implementation", column: "doing" })).rejects.toBeInstanceOf(FkanbanError);
     await expect(rmCmd({ cfg, node, slug: "human-approval" })).rejects.toBeInstanceOf(FkanbanError);
 
