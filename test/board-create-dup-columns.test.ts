@@ -1,14 +1,5 @@
-// `board create --columns` must reject a list containing DUPLICATE names,
-// exactly like the rest of fkanban's validate-loudly contract (slugs,
-// `--column` typos, dep cycles). A duplicate would otherwise be stored verbatim
-// and silently corrupt the board: `list` renders the doubled column (and every
-// card in it) TWICE, with a doubled count. The guard lives in `boardCreateCmd`,
-// throws `dup_columns` BEFORE any createRecord/updateRecord (no partial write),
-// and only fires when `--columns` was explicitly supplied — the trim/filter
-// done by parseTags upstream (whitespace padding, empty segments, all-empty →
-// default columns) stays graceful and untouched.
-//
-// Backed by the same in-memory fake NodeClient used in add-update-board.test.ts.
+// Columns are FIXED: backlog → todo → doing → done. `board create` rejects any
+// other list (including duplicates and custom names) before writing.
 
 import { beforeEach, describe, expect, test } from "bun:test";
 
@@ -74,58 +65,46 @@ function fakeNode(): NodeClient {
   };
 }
 
-describe("board create rejects duplicate column names", () => {
+describe("board create uses fixed columns only", () => {
   let node: NodeClient;
 
   beforeEach(() => {
     node = fakeNode();
   });
 
-  test("a duplicate name is rejected and NOTHING is written", async () => {
+  test("duplicate names are rejected as invalid_columns (not written)", async () => {
     await expect(
       boardCreateCmd({ cfg, node, slug: "dup", columns: ["todo", "todo", "done"] }),
-    ).rejects.toMatchObject({ code: "dup_columns" });
-    // No partial write: the board never landed.
+    ).rejects.toMatchObject({ code: "invalid_columns" });
     const boards = await listBoards(node, cfg);
     expect(boards.find((b) => b.slug === "dup")).toBeUndefined();
   });
 
-  test("error message + hint name the offending column", async () => {
+  test("arbitrary custom names are rejected", async () => {
     try {
-      await boardCreateCmd({ cfg, node, slug: "dup", columns: ["todo", "todo", "done"] });
-      throw new Error("expected boardCreateCmd to throw dup_columns");
+      await boardCreateCmd({ cfg, node, slug: "custom", columns: ["alpha", "beta", "ship"] });
+      throw new Error("expected invalid_columns");
     } catch (err) {
       expect(err).toBeInstanceOf(FkanbanError);
       const e = err as FkanbanError;
-      expect(e.code).toBe("dup_columns");
-      expect(e.message).toBe('Duplicate column name "todo" in --columns.');
-      expect(e.hint).toBe('Column names must be unique: "todo".');
+      expect(e.code).toBe("invalid_columns");
+      expect(e.message).toContain("backlog,todo,doing,done");
     }
+    expect((await listBoards(node, cfg)).find((b) => b.slug === "custom")).toBeUndefined();
   });
 
-  test("multiple distinct duplicates are all listed in the hint", async () => {
-    try {
-      await boardCreateCmd({ cfg, node, slug: "dup", columns: ["a", "a", "b", "b", "c"] });
-      throw new Error("expected boardCreateCmd to throw dup_columns");
-    } catch (err) {
-      const e = err as FkanbanError;
-      expect(e.code).toBe("dup_columns");
-      expect(e.message).toBe('Duplicate column name "a" in --columns.');
-      expect(e.hint).toBe('Column names must be unique: "a", "b".');
-    }
+  test("wrong order is rejected", async () => {
+    await expect(
+      boardCreateCmd({
+        cfg,
+        node,
+        slug: "reordered",
+        columns: ["todo", "backlog", "doing", "done"],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_columns" });
   });
 
-  test("duplicates are case-sensitive (exact strings) — Todo vs todo is fine", async () => {
-    const res = await boardCreateCmd({ cfg, node, slug: "mixed", columns: ["Todo", "todo", "Done"] });
-    expect(res).toMatchObject({ action: "created", slug: "mixed" });
-    const boards = await listBoards(node, cfg);
-    expect(boards.find((b) => b.slug === "mixed")?.columns).toEqual(["Todo", "todo", "Done"]);
-  });
-
-  // --- the currently-graceful behaviors must stay intact (parseTags handles
-  // trim/filter upstream; these arrive as the already-cleaned list) ---
-
-  test("a unique explicit list still succeeds", async () => {
+  test("exact fixed list is accepted", async () => {
     const res = await boardCreateCmd({
       cfg,
       node,
@@ -134,50 +113,30 @@ describe("board create rejects duplicate column names", () => {
     });
     expect(res).toMatchObject({ action: "created", slug: "ok" });
     const boards = await listBoards(node, cfg);
-    expect(boards.find((b) => b.slug === "ok")?.columns).toEqual([
-      "backlog",
-      "todo",
-      "doing",
-      "done",
-    ]);
+    expect(boards.find((b) => b.slug === "ok")?.columns).toEqual([...DEFAULT_COLUMNS]);
   });
 
-  test('"a,,b" (empty segment dropped by parseTags) → ["a","b"], accepted', async () => {
-    // parseTags turns "a,,b" into ["a","b"] before boardCreateCmd sees it.
-    const res = await boardCreateCmd({ cfg, node, slug: "gappy", columns: ["a", "b"] });
-    expect(res).toMatchObject({ action: "created" });
-    const boards = await listBoards(node, cfg);
-    expect(boards.find((b) => b.slug === "gappy")?.columns).toEqual(["a", "b"]);
-  });
-
-  test("no columns supplied → default columns, no dup check", async () => {
+  test("no columns supplied → fixed columns", async () => {
     const res = await boardCreateCmd({ cfg, node, slug: "defaulted" });
     expect(res).toMatchObject({ action: "created" });
     const boards = await listBoards(node, cfg);
     expect(boards.find((b) => b.slug === "defaulted")?.columns).toEqual([...DEFAULT_COLUMNS]);
   });
 
-  test("an empty column list → default columns, no dup check", async () => {
-    // parseTags("") → [] → boardCreateCmd falls back to DEFAULT_COLUMNS.
+  test("empty column list → fixed columns", async () => {
     const res = await boardCreateCmd({ cfg, node, slug: "empty", columns: [] });
     expect(res).toMatchObject({ action: "created" });
     const boards = await listBoards(node, cfg);
     expect(boards.find((b) => b.slug === "empty")?.columns).toEqual([...DEFAULT_COLUMNS]);
   });
 
-  test("an empty column list on update preserves an existing custom layout", async () => {
-    await boardCreateCmd({ cfg, node, slug: "custom", columns: ["alpha", "beta", "ship"] });
-    const res = await boardCreateCmd({ cfg, node, slug: "custom", columns: [] });
-    expect(res).toMatchObject({ action: "updated", slug: "custom" });
+  test("update always rewrites to fixed columns", async () => {
+    await boardCreateCmd({ cfg, node, slug: "b1" });
+    const res = await boardCreateCmd({ cfg, node, slug: "b1", title: "Renamed" });
+    expect(res).toMatchObject({ action: "updated", slug: "b1" });
     const boards = await listBoards(node, cfg);
-    expect(boards.find((b) => b.slug === "custom")?.columns).toEqual(["alpha", "beta", "ship"]);
-  });
-
-  test("a non-empty column list on update still replaces columns", async () => {
-    await boardCreateCmd({ cfg, node, slug: "custom", columns: ["alpha", "beta", "ship"] });
-    const res = await boardCreateCmd({ cfg, node, slug: "custom", columns: ["triage", "done"] });
-    expect(res).toMatchObject({ action: "updated", slug: "custom" });
-    const boards = await listBoards(node, cfg);
-    expect(boards.find((b) => b.slug === "custom")?.columns).toEqual(["triage", "done"]);
+    const b = boards.find((x) => x.slug === "b1");
+    expect(b?.title).toBe("Renamed");
+    expect(b?.columns).toEqual([...DEFAULT_COLUMNS]);
   });
 });

@@ -20,7 +20,8 @@ import { checkSituationFence, type SituationFenceResult, type SituationPreflight
 
 export const HUMAN_BOARD_SLUG = "human";
 export const HUMAN_BOARD_TITLE = "Human / parked work";
-export const HUMAN_BOARD_COLUMNS = ["todo", "waiting", "validated", "done"] as const;
+// Human boards use the same fixed column set as every other board.
+export const HUMAN_BOARD_COLUMNS = ["backlog", "todo", "doing", "done"] as const;
 
 export const PICKUP_CATEGORIES = [
   "pickup-ready",

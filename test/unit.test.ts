@@ -152,9 +152,10 @@ describe("column validation", () => {
     expect(() => ensureColumn("doing", [])).not.toThrow();
     expect(() => ensureColumn("nonsense", [])).toThrow(FkanbanError);
   });
-  test("honours a board's custom columns", () => {
-    expect(() => ensureColumn("qa", ["dev", "qa", "ship"])).not.toThrow();
-    expect(() => ensureColumn("doing", ["dev", "qa", "ship"])).toThrow(FkanbanError);
+  test("ignores board custom columns — only fixed set is valid", () => {
+    expect(() => ensureColumn("qa", ["dev", "qa", "ship"])).toThrow(FkanbanError);
+    expect(() => ensureColumn("doing", ["dev", "qa", "ship"])).not.toThrow();
+    expect(() => ensureColumn("todo", [])).not.toThrow();
   });
 });
 
@@ -286,37 +287,35 @@ describe("dependencies", () => {
 
   // --- dep done-ness uses the dep board's TERMINAL column, not literal "done" ---
 
-  test("boardTerminalMap maps each board slug to its last column", () => {
+  test("boardTerminalMap maps every board slug to fixed terminal `done`", () => {
     const m = boardTerminalMap([
       { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
       { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-      // A degenerate empty-columns board contributes no entry (falls back to "done").
       { slug: "empty", title: "E", body: "", columns: [], created_at: "", updated_at: "" },
     ]);
-    expect(m.get("zz")).toBe("ship");
+    expect(m.get("zz")).toBe("done");
     expect(m.get("default")).toBe("done");
-    expect(m.has("empty")).toBe(false);
+    expect(m.get("empty")).toBe("done");
   });
 
-  test("custom-board dep is satisfied once it reaches that board's terminal column", () => {
+  test("dep is satisfied once it reaches fixed terminal column `done`", () => {
     const terminal = boardTerminalMap([
-      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+      { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
     ]);
-    // c1 is in `ship`, the LAST column of board zz — as done as that board allows.
-    const c1 = card({ slug: "c1", board: "zz", column: "ship" });
-    const c2 = card({ slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
+    const c1 = card({ slug: "c1", board: "zz", column: "done" });
+    const c2 = card({ slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
     const all = [c1, c2];
     expect(depStatus(c2, all, terminal).blocked).toBe(false);
     expect(blockedSlugSet([c2], all, terminal).has("c2")).toBe(false);
   });
 
-  test("custom-board dep in a NON-terminal column still blocks", () => {
+  test("dep in a NON-terminal column still blocks", () => {
     const terminal = boardTerminalMap([
-      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+      { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
     ]);
-    // c1 is in `build`, not the last column — so c2 is still blocked.
-    const c1 = card({ slug: "c1", board: "zz", column: "build" });
-    const c2 = card({ slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
+    // c1 is in `doing`, not terminal — so c2 is still blocked.
+    const c1 = card({ slug: "c1", board: "zz", column: "doing" });
+    const c2 = card({ slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
     const s = depStatus(c2, [c1, c2], terminal);
     expect(s.blocked).toBe(true);
     expect(s.blockedBy).toEqual(["c1"]);

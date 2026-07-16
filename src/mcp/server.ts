@@ -898,7 +898,7 @@ export function createFkanbanMcpServer(
     "fkanban_board_create",
     {
       title: "Create or update a board",
-      description: "Create a board (or update it). Columns default to backlog → todo → doing → done.",
+      description: "Create a board (or update it). Columns are fixed: backlog → todo → doing → done (custom names rejected).",
       annotations: { title: "Create or update a board", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Board slug."),
