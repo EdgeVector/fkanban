@@ -73,7 +73,7 @@ Commands:
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for kanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
-  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json)
+  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json --full-body)
   gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card (refuses if live cards depend on it)
@@ -282,8 +282,8 @@ Options:
   --field <name>        project one field as TSV; repeat for multiple fields
                         (e.g. --field slug --field pr)
   --limit <N>           cap cards per column (applies to text AND --json)
-  --all                 show every card (no per-column cap; --json default)
-  --json                machine-readable output (unlimited unless --limit set)
+  --all                 show every card (no per-column cap; --json previews bodies)
+  --json                machine-readable output (broad reads are capped previews)
   --full-body, --full_body
                         compatibility alias for --json with complete bodies
 
@@ -361,13 +361,16 @@ Options:
   --field <name>        project one field as TSV; repeat for multiple fields
                         (e.g. --field slug --field pr)
   --limit <N>           cap rendered matches (applies to text AND --json)
-  --all                 show every match (no cap; --json default)
-  --json                machine-readable output (complete unless --limit set)
+  --all                 show every match (no cap; --json previews bodies)
+  --json                machine-readable output (broad reads are capped previews)
+  --full-body, --full_body
+                        compatibility alias for --json with complete bodies
 
 Example:
   kanban search "auth p1"
   kanban search auth --limit 5
-  kanban search auth --all`),
+  kanban search auth --all
+  kanban search auth --full-body`),
 
   gates: withFooter(`kanban gates — list open human gates from fbrain's open-decisions ledger
 
@@ -779,7 +782,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   move: new Set(["from", "expect", "position", "force"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body"]),
   rank: new Set(["board", "column"]),
-  search: new Set(["board", "column", "field", "limit", "all"]),
+  search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body"]),
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
@@ -1307,6 +1310,7 @@ async function dispatch(
         fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
+        fullBody: fullBodyList,
       });
       console.log(out);
       return 0;
@@ -1450,16 +1454,18 @@ async function dispatch(
           ? parseIntFlag(values.limit as string, "limit", "search", { min: 1 })
           : undefined;
       const ctx = loadCtx({ verbose });
+      const fullBodySearch = Boolean(values["full-body"] || values.full_body);
       const out = await searchCmd({
         cfg: ctx.cfg,
         node: ctx.node,
         query,
         board: values.board as string | undefined,
         column: values.column as string | undefined,
-        json: values.json as boolean | undefined,
+        json: fullBodySearch ? true : values.json as boolean | undefined,
         fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
+        fullBody: fullBodySearch,
       });
       console.log(out);
       return 0;

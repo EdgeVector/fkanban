@@ -239,22 +239,58 @@ describe("search — default text path uses indexed/native candidates", () => {
     expect(fullScans).toHaveLength(0);
   });
 
-  test("--json keeps the exhaustive full-body scan contract", async () => {
+  test("--json keeps exhaustive search while returning capped body previews by default", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
-      cards: [
+      cards: Array.from({ length: 25 }, (_, i) =>
         card({
-          slug: "body-hit",
-          title: "Body hit",
-          body: "needle only appears in this full card body",
+          slug: `body-hit-${i}`,
+          title: `Body hit ${i}`,
+          body: `needle ${"long body ".repeat(50)}`,
+          position: String(i + 1),
         }),
-      ],
+      ),
     });
 
     const out = await searchCmd({ cfg, node, query: "needle", json: true });
-    expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["body-hit"]);
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed).toHaveLength(20);
+    expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
+    expect(parsed[0]!.bodyTruncated).toBe(true);
     const fullScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
     expect(fullScans).toHaveLength(1);
+  });
+
+  test("search --all removes the broad JSON row cap but keeps body previews", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: Array.from({ length: 25 }, (_, i) =>
+        card({
+          slug: `body-hit-${i}`,
+          title: `Body hit ${i}`,
+          body: `needle ${"long body ".repeat(50)}`,
+          position: String(i + 1),
+        }),
+      ),
+    });
+
+    const out = await searchCmd({ cfg, node, query: "needle", json: true, all: true });
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed).toHaveLength(25);
+    expect(parsed[0]!.bodyTruncated).toBe(true);
+  });
+
+  test("search --full-body restores the complete-body JSON surface", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [card({ slug: "body-hit", title: "Body hit", body: `needle ${"long body ".repeat(50)}` })],
+    });
+
+    const out = await searchCmd({ cfg, node, query: "needle", json: true, fullBody: true });
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.body).toContain("long body ".repeat(20));
+    expect(parsed[0]!.bodyTruncated).toBe(false);
   });
 });
 
@@ -273,17 +309,31 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(scan).toContain("column");
   });
 
-  test("--json queries full fields (including body) and returns bodies", async () => {
+  test("--json queries full fields but returns broad body previews by default", async () => {
+    const longBody = "multi-paragraph spec body ".repeat(30);
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
-      cards: [card({ slug: "a", board: "default", title: "Card A" })],
+      cards: [card({ slug: "a", board: "default", title: "Card A", body: longBody })],
     });
     const out = await listCmd({ cfg, node, json: true });
-    const parsed = JSON.parse(out) as Card[];
-    expect(parsed[0]!.body).toContain("multi-paragraph spec body");
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
+    expect(parsed[0]!.bodyTruncated).toBe(true);
     // The full-board card scan for --json fetched `body`.
     const scan = node.cardScanFields.at(-1)!;
     expect(scan).toContain("body");
+  });
+
+  test("--full-body restores complete bodies for broad JSON list output", async () => {
+    const longBody = "multi-paragraph spec body ".repeat(30);
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [card({ slug: "a", board: "default", title: "Card A", body: longBody })],
+    });
+    const out = await listCmd({ cfg, node, json: true, fullBody: true });
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed[0]!.body).toBe(longBody);
+    expect(parsed[0]!.bodyTruncated).toBe(false);
   });
 
   test("--wide queries full fields so repo/base/pr/updated are available", async () => {

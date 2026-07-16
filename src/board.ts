@@ -241,6 +241,27 @@ export function capFlat<T extends Card>(cards: T[], limit: number): T[] {
   return cards.slice(0, limit);
 }
 
+export const BODY_PREVIEW_CHARS = 200;
+
+export function previewBody(body: string): { body: string; bodyTruncated: boolean } {
+  const flattened = body.replace(/\s+/g, " ").trim();
+  if (flattened.length <= BODY_PREVIEW_CHARS) {
+    return { body: flattened, bodyTruncated: false };
+  }
+  return { body: flattened.slice(0, BODY_PREVIEW_CHARS), bodyTruncated: true };
+}
+
+export function previewCardBodies<T extends Card>(
+  cards: T[],
+  fullBody: boolean,
+): Array<T & { bodyTruncated: boolean }> {
+  if (fullBody) return cards.map((c) => ({ ...c, bodyTruncated: false }));
+  return cards.map((c) => {
+    const { body, bodyTruncated } = previewBody(c.body);
+    return { ...c, body, bodyTruncated };
+  });
+}
+
 // Render search hits as a flat list. Unlike the board view, matches can span
 // columns and boards, so each line is annotated with its `[board/column]`.
 // Caps the rendered matches at `limit` (default `DEFAULT_SEARCH_LIMIT`) and
