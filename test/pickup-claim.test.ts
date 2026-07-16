@@ -185,6 +185,38 @@ describe("pickup claim", () => {
     expect(onBoard?.assignee).toBe("worker-a");
   });
 
+  test("claims a todo dependent after its dependency is already done", async () => {
+    await seedCard(node, card({
+      slug: "host-track-shared-driver",
+      title: "Shared driver",
+      column: "done",
+      body: "Repo: EdgeVector/last-stack\nBase: main\n\nMerged dependency.",
+      repo: "EdgeVector/last-stack",
+    }));
+    await seedCard(node, card({
+      slug: "host-track-agent-standing-and-pickup",
+      title: "Dependent work",
+      deps: ["host-track-shared-driver"],
+      body: "Repo: EdgeVector/last-stack\nBase: main\n\nDependent.",
+      repo: "EdgeVector/last-stack",
+    }));
+
+    const result = await pickupClaimResult({
+      cfg,
+      node,
+      worker: "worker-a",
+    });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("host-track-agent-standing-and-pickup");
+    expect(result.scanned_ready).toBe(1);
+    expect(result.diagnostics).toBeUndefined();
+
+    const onBoard = await findCard(node, cfg, "host-track-agent-standing-and-pickup");
+    expect(onBoard?.column).toBe("doing");
+    expect(onBoard?.assignee).toBe("worker-a");
+  });
+
   test("skips surface-overlapping in-flight work and claims the next card", async () => {
     await seedCard(node, card({
       slug: "inflight",
