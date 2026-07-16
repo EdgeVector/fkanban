@@ -186,11 +186,12 @@ export function doneAtForColumnTransition(
   boardColumns: readonly string[],
   now: string,
 ): string {
+  const terminal = terminalColumn(boardColumns);
+  if (targetColumn !== terminal) return "";
   const existing = card?.done_at ?? "";
   if (existing) return existing;
-  const terminal = terminalColumn(boardColumns);
   const fromColumn = card?.column ?? "";
-  return targetColumn === terminal && fromColumn !== terminal ? now : "";
+  return fromColumn !== terminal ? now : "";
 }
 
 // ── Repo/Base header auto-derivation ────────────────────────────────────────
