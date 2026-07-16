@@ -189,6 +189,12 @@ describe("parseBodyHeader", () => {
   test("strips a trailing inline comment before returning the value", () => {
     expect(parseBodyHeader("Repo: EdgeVector/fold  # defaulted — fix if wrong\nBase: main", "Repo")).toBe("EdgeVector/fold");
   });
+
+  test("ignores fenced header examples", () => {
+    const body = "```text\nBranch: kanban/example-only\n```\nBranch: kanban/real\n";
+    expect(parseBodyHeader(body, "Branch")).toBe("kanban/real");
+    expect(parseBodyHeader("```text\nBranch: kanban/example-only\n```\n", "Branch")).toBe("");
+  });
 });
 
 describe("parseBodyListHeader", () => {
@@ -736,18 +742,30 @@ describe("deriveStructuredFields (backfill)", () => {
     expect(deriveStructuredFields(c).surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
   });
 
+  test("pulls branch from the body line", () => {
+    const c = card({ branch: "", body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\nbody" });
+    expect(deriveStructuredFields(c).branch).toBe("kanban/body-branch");
+  });
+
+  test("ignores fenced Branch examples during backfill", () => {
+    const c = card({ branch: "", body: "```text\nBranch: kanban/example-only\n```\n\nbody" });
+    expect(deriveStructuredFields(c).branch).toBeUndefined();
+  });
+
   test("never overwrites an already-set field", () => {
     const c = card({
       repo: "EdgeVector/already",
       base: "set",
       kind: "tracker",
+      branch: "kanban/existing",
       surfaces: ["src/existing.ts"],
-      body: "Repo: EdgeVector/fold\nBase: main\nSurfaces: src/new.ts",
+      body: "Repo: EdgeVector/fold\nBase: main\nBranch: kanban/new\nSurfaces: src/new.ts",
     });
     const d = deriveStructuredFields(c);
     expect(d.repo).toBeUndefined();
     expect(d.base).toBeUndefined();
     expect(d.kind).toBeUndefined();
+    expect(d.branch).toBeUndefined();
     expect(d.surfaces).toBeUndefined();
   });
 });
