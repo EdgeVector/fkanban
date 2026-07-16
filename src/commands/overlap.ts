@@ -98,7 +98,7 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
 
   const inFlight = cards.filter((card) =>
     card.slug !== candidate.slug &&
-    (card.column === "doing" || card.column === "review") &&
+    card.column === "doing" &&
     claimedRepo(card) === repo
   );
 

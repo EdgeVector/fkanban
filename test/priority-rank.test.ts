@@ -267,7 +267,7 @@ describe("rank command", () => {
   });
 
   test("an empty column ranks cleanly (total 0, nothing written)", async () => {
-    const res = await rankCmd({ cfg, node, column: "review" });
+    const res = await rankCmd({ cfg, node, column: "doing" });
     expect(res.total).toBe(0);
     expect(res.reordered).toBe(0);
     expect(res.order).toEqual([]);

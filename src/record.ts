@@ -166,7 +166,9 @@ export function blockedByHint(): string {
 // what `move` refuses (unless --force). NOTE: this gate list is still the
 // default-board column names — generalizing which columns count as "working" on
 // an arbitrary board is tracked separately and intentionally out of scope here.
-export const WORKING_COLUMNS = ["doing", "review", "done"] as const;
+// Working columns that gate dependency enforcement on the default board.
+// (No `review` — incomplete work stays todo/doing; terminal is done.)
+export const WORKING_COLUMNS = ["doing", "done"] as const;
 
 export function isWorkingColumn(column: string): boolean {
   return (WORKING_COLUMNS as readonly string[]).includes(column);
@@ -413,7 +415,7 @@ export type HeaderDerivationResult = {
 // (backlog/todo) auto-stamp the header when derivable, leave no-signal cards
 // headerless, and — only in `todo`, where it blocks pickup — surface a real
 // cross-repo conflict as a needs_human hold (so it's loud, not silently skipped).
-// Working columns (doing/review/done) are left untouched. `warn` is injected so
+// Working columns (doing/done) are left untouched. `warn` is injected so
 // it's testable / silenceable.
 export function applyHeaderDerivation(
   card: { slug: string; body: string; tags: string[]; title: string; column: string },
@@ -474,7 +476,7 @@ export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): 
 // serializes or re-grooms it.
 export const PICKUP_AREA_TAG_PREFIX = "area:";
 export const PICKUP_AREA_BLOCK_PREFIX = "Pickup area overlap:";
-export const PICKUP_AREA_ACTIVE_COLUMNS = ["todo", "doing", "review"] as const;
+export const PICKUP_AREA_ACTIVE_COLUMNS = ["todo", "doing"] as const;
 const PICKUP_AREA_ACTIVE_COLUMN_SET = new Set<string>(PICKUP_AREA_ACTIVE_COLUMNS);
 export const PICKUP_AREA_PEER_FIELDS = [
   "slug",
@@ -1209,7 +1211,7 @@ function terminalColumnFor(
 
 // Whether moving a blocked card INTO `column` (on board `boardSlug`) is gated by
 // the dependency soft-block. A blocked card may not enter a column that is a
-// default-named working column (doing/review/done) OR that is `boardSlug`'s own
+// default-named working column (doing/done) OR that is `boardSlug`'s own
 // terminal column — so on a custom board (e.g. `spec,build,ship`) a blocked card
 // can't be *completed* into its terminal column (`ship`) without --force, even
 // though that board has none of the default working columns. The default board's

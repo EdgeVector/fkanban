@@ -1,7 +1,7 @@
 // The dependency soft-block must actually enforce on a custom-columns board:
 // a card blocked by an undone dep can't be moved/placed into its board's
 // TERMINAL (completion) column without --force. Before #87 the enforcement gate
-// was the hardcoded WORKING_COLUMNS (doing/review/done), so a board whose
+// was the hardcoded WORKING_COLUMNS (doing/done), so a board whose
 // columns are e.g. `spec,build,ship` had NO enforced column — a blocked card
 // could be moved all the way into `ship`, defeating `--deps` on custom boards.
 // PR #84 had already generalized dep DONE-ness to the board's terminal column;
@@ -103,7 +103,7 @@ describe("isDepEnforcedColumn", () => {
     expect(isDepEnforcedColumn("backlog", "default", terminal)).toBe(false);
     expect(isDepEnforcedColumn("todo", "default", terminal)).toBe(true);
     expect(isDepEnforcedColumn("doing", "default", terminal)).toBe(true);
-    expect(isDepEnforcedColumn("review", "default", terminal)).toBe(true);
+    expect(isDepEnforcedColumn("review", "default", terminal)).toBe(false);
     expect(isDepEnforcedColumn("done", "default", terminal)).toBe(true);
   });
 

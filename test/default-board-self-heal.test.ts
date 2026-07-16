@@ -151,7 +151,7 @@ describe("missing referenced board self-heal", () => {
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("board_not_found");
     expect((err as FkanbanError).hint).toBe(
-      "Create it first: `fkanban board create missing --columns backlog,todo,doing,review,done`.",
+      "Create it first: `fkanban board create missing --columns backlog,todo,doing,done`.",
     );
   });
 });

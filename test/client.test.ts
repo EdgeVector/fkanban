@@ -283,7 +283,7 @@ describe("socket-first covers owner data socket routes", () => {
                   slug: "default",
                   title: "Default board",
                   body: "",
-                  columns: ["backlog", "todo", "doing", "review", "done"],
+                  columns: ["backlog", "todo", "doing", "done"],
                   created_at: "2026-01-01T00:00:00.000Z",
                   updated_at: "2026-01-01T00:00:00.000Z",
                 },

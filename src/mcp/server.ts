@@ -75,9 +75,9 @@ export const FKANBAN_MCP_INSTRUCTIONS = [
   `never mutate; the rest (${shortNames(FKANBAN_WRITE_TOOLS)}) write.`,
   "",
   "Board model: a card lives on a board, in one column, at a position. Columns flow",
-  "backlog → todo → doing → review → done.",
+  "backlog → todo → doing → done (no review lane).",
   "",
-  "Blocking: a card with an unfinished dependency cannot enter doing/review/done",
+  "Blocking: a card with an unfinished dependency cannot enter doing/done",
   "(or its board's final column) unless `force:true` is passed.",
   "",
   "Token economy (read this before fetching): fkanban_list and fkanban_search default-cap",
@@ -305,7 +305,7 @@ export function createFkanbanMcpServer(
     {
       title: "Show kanban board",
       description:
-        "Render a kanban board as columns of cards. Cards are grouped under their column (backlog → todo → doing → review → done) in position order. Each card carries its resolved dependency status (`blocked`, `blockedBy`, `missingDeps`) — the same fields `fkanban_show` returns — so a caller can pick the next *workable* card without a per-card show. To keep the payload small, each card's `body` is a short single-line PREVIEW (first ~200 chars) with a `bodyTruncated` flag; call `fkanban_show <slug>` for the full body, or pass `full_body:true` to inline complete bodies.",
+        "Render a kanban board as columns of cards. Cards are grouped under their column (backlog → todo → doing → done) in position order. Each card carries its resolved dependency status (`blocked`, `blockedBy`, `missingDeps`) — the same fields `fkanban_show` returns — so a caller can pick the next *workable* card without a per-card show. To keep the payload small, each card's `body` is a short single-line PREVIEW (first ~200 chars) with a `bodyTruncated` flag; call `fkanban_show <slug>` for the full body, or pass `full_body:true` to inline complete bodies.",
       annotations: { title: "Show kanban board", readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         board: z.string().optional().describe("Board slug (default: `default`)."),
@@ -455,7 +455,7 @@ export function createFkanbanMcpServer(
     {
       title: "Claim the next ready card",
       description:
-        "Atomic agent claim: walk pickup-ready todo cards in priority order (P0→P3), skip surface overlaps with doing/review in the same repo, and CAS-move the first winner into doing. On claim_conflict try the next candidate. Prefer this over list+overlap+move. Returns claimed=false with skipped reasons when nothing is eligible (idle, not an error).",
+        "Atomic agent claim: walk pickup-ready todo cards in priority order (P0→P3), skip surface overlaps with doing in the same repo, and CAS-move the first winner into doing. On claim_conflict try the next candidate. Prefer this over list+overlap+move. Returns claimed=false with skipped reasons when nothing is eligible (idle, not an error).",
       annotations: { title: "Claim the next ready card", openWorldHint: false },
       inputSchema: {
         board: z.string().optional().describe("Board to claim from (default: default)."),
@@ -522,7 +522,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add or update a card",
       description:
-        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. Existing deps are preserved unless `replace_deps` is set. A card blocked by an unfinished dependency cannot be placed in doing/review/done (or its board's final column) unless `force` is set.",
+        "Create a card (or update it if the slug exists). Defaults: board=`default`, column=the board's first column. Existing deps are preserved unless `replace_deps` is set. A card blocked by an unfinished dependency cannot be placed in doing/done (or its board's final column) unless `force` is set.",
       annotations: { title: "Add or update a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Stable card id (lowercase [a-z0-9-_])."),
@@ -608,7 +608,7 @@ export function createFkanbanMcpServer(
     {
       title: "Move a card",
       description:
-        "Move a card to a different column on its board. Pass `from`/`expect` as a compare-and-swap claim guard. A card blocked by an unfinished dependency cannot move into doing/review/done (or its board's final column) unless `force` is set.",
+        "Move a card to a different column on its board. Pass `from`/`expect` as a compare-and-swap claim guard. A card blocked by an unfinished dependency cannot move into doing/done (or its board's final column) unless `force` is set.",
       annotations: { title: "Move a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Card slug."),
@@ -689,7 +689,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add a dependency",
       description:
-        "Make `slug` depend on the existing live card `dep`, updating the canonical deps field without touching tags or body. `slug` is then blocked (cannot enter doing/review/done) until `dep` reaches the `done` column.",
+        "Make `slug` depend on the existing live card `dep`, updating the canonical deps field without touching tags or body. `slug` is then blocked (cannot enter doing/done) until `dep` reaches the `done` column.",
       annotations: { title: "Add a dependency", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("The dependent card."),
@@ -837,7 +837,7 @@ export function createFkanbanMcpServer(
     {
       title: "Check surface overlap",
       description:
-        "Compare a candidate card's declared surfaces against every doing/review card with the same repo. Returns conflicts by slug + matched patterns. Missing surfaces are adoption warnings, not conflicts.",
+        "Compare a candidate card's declared surfaces against every doing card with the same repo. Returns conflicts by slug + matched patterns. Missing surfaces are adoption warnings, not conflicts.",
       annotations: { title: "Check surface overlap", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional().describe("Candidate card slug.") },
       outputSchema: {
@@ -898,7 +898,7 @@ export function createFkanbanMcpServer(
     "fkanban_board_create",
     {
       title: "Create or update a board",
-      description: "Create a board (or update it). Columns default to backlog → todo → doing → review → done.",
+      description: "Create a board (or update it). Columns default to backlog → todo → doing → done.",
       annotations: { title: "Create or update a board", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Board slug."),

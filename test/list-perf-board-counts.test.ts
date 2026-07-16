@@ -33,7 +33,7 @@ function board(partial: Partial<Board>): Board {
     slug: "b",
     title: "B",
     body: "",
-    columns: ["backlog", "todo", "doing", "review", "done"],
+    columns: ["backlog", "todo", "doing", "done"],
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     ...partial,
@@ -192,7 +192,7 @@ describe("board list — per-board live-card counts", () => {
     expect(bySlug.get("default")!.cardCount).toBe(2);
     expect(bySlug.get("scratch")!.cardCount).toBe(0);
     // Additive only — the existing Board shape is intact.
-    expect(bySlug.get("default")!.columns).toEqual(["backlog", "todo", "doing", "review", "done"]);
+    expect(bySlug.get("default")!.columns).toEqual(["backlog", "todo", "doing", "done"]);
   });
 
   test("count scan failure degrades gracefully: boards still render, no counts", async () => {

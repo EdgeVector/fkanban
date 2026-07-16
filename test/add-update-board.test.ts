@@ -736,7 +736,7 @@ describe("add --deps rejects a dependency cycle", () => {
 
 // `add` doubles as a column-changing command (create+update), so it must
 // enforce the SAME dependency soft-block `move` does: a card blocked by an
-// unfinished dep cannot be placed into a working column (doing/review/done)
+// unfinished dep cannot be placed into a working column (doing/done)
 // OR default/todo (the pickup claim lane) unless `--force`. The guard throws
 // `card_blocked` BEFORE any write (no partial state) with the message/hint
 // byte-aligned with move's. Backlog placements remain allowed.
@@ -828,7 +828,7 @@ describe("add enforces the dependency soft-block into working columns", () => {
 
   test("placing a blocked card into `review` and `done` is also refused", async () => {
     await seedBlocked();
-    for (const col of ["review", "done"]) {
+    for (const col of ["doing", "done"]) {
       await expect(addCmd({ cfg, node, slug: "blk", column: col })).rejects.toMatchObject({
         code: "card_blocked",
       });

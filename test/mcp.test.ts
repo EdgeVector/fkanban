@@ -151,7 +151,7 @@ describe("MCP server sends board-level instructions on connect", () => {
     const client = await connectServer(createFkanbanMcpServer({ configError: new ConfigMissingError("/nope") }));
     const text = client.getInstructions() ?? "";
     // Board model: the column flow.
-    expect(text).toContain("backlog → todo → doing → review → done");
+    expect(text).toContain("backlog → todo → doing → done");
     // Blocking rule mentions the force opt-out.
     expect(text.toLowerCase()).toContain("force");
     expect(text.toLowerCase()).toContain("depend");

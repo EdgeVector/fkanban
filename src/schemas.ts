@@ -57,11 +57,15 @@ export type AddSchemaRequest = {
 // status; a card's whole lifecycle is moving left→right across these.
 // A Board may override this ordered list with its own `columns`, but every
 // fresh board and every Card validates against this default set.
+//
+// No `review` lane (Tom 2026-07-16): review was used as a parking lot for
+// incomplete work and false human gates. Incomplete → todo/doing; complete →
+// done. Intentional holds use block_status (needs_human/deferred/design_first),
+// not a separate column.
 export const DEFAULT_COLUMNS = [
   "backlog",
   "todo",
   "doing",
-  "review",
   "done",
 ] as const;
 export type Column = (typeof DEFAULT_COLUMNS)[number];
