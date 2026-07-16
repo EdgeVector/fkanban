@@ -5,6 +5,7 @@
 
 import { parseArgs, format } from "node:util";
 import * as fs from "node:fs";
+import { spawnSync } from "node:child_process";
 
 import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, type Verbose } from "./client.ts";
@@ -83,6 +84,7 @@ Commands:
                        live cards unless --force)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
+  which                print the resolved kanban/fkanban executable path (--json)
   mcp                  start an MCP server over stdio
   version              print the kanban version and exit (alias of --version)
   help                 print this help
@@ -512,6 +514,17 @@ any failed check.
 
 Flags:
   --json               machine-readable { ok, checks } report`),
+
+  which: withFooter(`kanban which — show the PATH shim that will run
+
+Usage:
+  kanban which [kanban|fkanban|kanban-mcp|fkanban-mcp] [--json]
+
+Prints the resolved executable path. With --json, also reports the realpath and
+whether it lives under the expected host-track checkout.
+
+Example:
+  kanban which --json`),
 
   mcp: withFooter(`kanban mcp — start an MCP server over stdio
 
@@ -1022,6 +1035,37 @@ async function dispatch(
       }
       const ok = await doctor({ verbose });
       return ok ? 0 : 1;
+    }
+
+    case "which": {
+      const name = positionals[1] ?? "kanban";
+      const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp"]);
+      if (!allowed.has(name)) {
+        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp`);
+        return 2;
+      }
+      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp]");
+      if (extra !== undefined) return extra;
+      const execPath = resolveCommandPath(name);
+      if (!execPath) {
+        console.error(`kanban: ${name} not found on PATH`);
+        return 1;
+      }
+      if (values.json) {
+        const realPath = safeRealpath(execPath);
+        const home = process.env.HOME ?? "";
+        const hostTrack = home.length > 0 ? `${home}/.host-track/fkanban` : "";
+        console.log(JSON.stringify({
+          command: name,
+          exec_path: execPath,
+          real_path: realPath,
+          host_track: hostTrack,
+          under_host_track: hostTrack.length > 0 && (realPath === hostTrack || realPath.startsWith(`${hostTrack}/`)),
+        }));
+      } else {
+        console.log(execPath);
+      }
+      return 0;
     }
 
     case "add": {
@@ -1614,6 +1658,23 @@ function ambientDbLocator(values: Record<string, unknown>): string | undefined {
     process.env.LASTDB_DB?.trim() ||
     undefined
   );
+}
+
+function resolveCommandPath(name: string): string | undefined {
+  const proc = spawnSync("sh", ["-c", `command -v ${name}`], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const out = proc.stdout.trim();
+  return proc.status === 0 && out.length > 0 ? out : undefined;
+}
+
+function safeRealpath(path: string): string {
+  try {
+    return fs.realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 /** Stamp `Db: <locator>` when org/kanban --db (or LASTDB_DB) provides a write target. */

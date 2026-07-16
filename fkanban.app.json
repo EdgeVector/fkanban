@@ -1,5 +1,23 @@
 {
   "display_name": "fkanban",
   "description": "A kanban board over fold_db. Two record types (Card, Board) under the `fkanban/*` app namespace; cards move through columns (backlog → todo → doing → done) and every change persists in folddb. Ships a CLI and an MCP server.",
-  "homepage_url": "https://github.com/EdgeVector/fkanban"
+  "homepage_url": "https://github.com/EdgeVector/fkanban",
+  "host_track": {
+    "app": "kanban",
+    "kind": "B checkout-shim",
+    "command": "kanban",
+    "aliases": [
+      "fkanban",
+      "kanban-mcp",
+      "fkanban-mcp",
+      "kanban-host-track-refresh"
+    ],
+    "gate": "lastgit",
+    "gate_main": "lastdb:///fkanban#main",
+    "gate_remote": "lastgit",
+    "gate_ref": "refs/heads/main",
+    "host_track": "$HOME/.host-track/fkanban",
+    "refresh": "$HOME/.local/bin/kanban-host-track-refresh",
+    "notes": "Kind B host-track checkout; PATH shims point into ~/.host-track/fkanban/bin."
+  }
 }

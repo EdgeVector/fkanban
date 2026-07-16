@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+dir="$(cd -P "$(dirname "$src")" && pwd)"
+exec "$dir/host-track-refresh" "$@"
