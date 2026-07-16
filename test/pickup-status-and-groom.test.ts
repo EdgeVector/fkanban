@@ -187,6 +187,31 @@ describe("pickup-status", () => {
     }
   });
 
+  test("classifies a todo dependent as ready after its dependency is done", async () => {
+    await seedCard(node, card({
+      slug: "host-track-migrate-brain",
+      title: "Migrate brain",
+      column: "done",
+      body: "Repo: EdgeVector/last-stack\nBase: main\n\nMerged dependency.",
+      repo: "EdgeVector/last-stack",
+    }));
+    await seedCard(node, card({
+      slug: "host-track-multi-app-refresh-agent",
+      title: "Multi-app refresh agent",
+      deps: ["host-track-migrate-brain"],
+      body: "Repo: EdgeVector/last-stack\nBase: main\n\nDependent work.",
+      repo: "EdgeVector/last-stack",
+    }));
+
+    const { report } = await pickupStatusResult({ cfg, node });
+    const dependent = report.cards.find((c) => c.slug === "host-track-multi-app-refresh-agent");
+
+    expect(dependent?.category).toBe("pickup-ready");
+    expect(dependent?.ready).toBe(true);
+    expect(dependent?.blockedBy).toEqual([]);
+    expect(dependent?.missingDeps).toEqual([]);
+  });
+
   test("reports stale generated blocker metadata separately from real human gates", async () => {
     await seedCard(node, card({
       slug: "stale",
