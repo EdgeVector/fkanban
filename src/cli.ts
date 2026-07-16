@@ -563,6 +563,10 @@ export function resolveHelp(
   return undefined;
 }
 
+export function commandHelpHint(cmd: string | undefined): string {
+  return cmd !== undefined && cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+}
+
 // Drain piped stdin to source `add --body` when no `--body` flag is given.
 // Returns undefined for a TTY or a stream that cleanly reaches EOF with no
 // bytes. A pipe that neither delivers bytes nor closes within the first-byte
@@ -699,7 +703,7 @@ function parseIntFlag(
 ): number {
   const trimmed = raw.trim();
   const want = min === 1 ? "a positive integer" : `an integer >= ${min}`;
-  const help = cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+  const help = commandHelpHint(cmd);
   const cleanInteger = /^-?\d+$/.test(trimmed);
   const n = cleanInteger ? Number(trimmed) : NaN;
   if (!cleanInteger || !Number.isSafeInteger(n) || n < min) {
@@ -721,7 +725,7 @@ function parseIntFlag(
 function parsePriorityFlag(raw: string, cmd: string): PriorityTier {
   const tier = normalizePriority(raw);
   if (tier === null) {
-    const help = cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+    const help = commandHelpHint(cmd);
     const msg = `error: --priority must be one of ${PRIORITY_TIERS.join(", ")} (P0 = most urgent), got "${raw}".`;
     console.error(`${msg} Run \`kanban ${help}\` to see this command's flags.`);
     throw new FlagValidationError(msg);
@@ -885,7 +889,7 @@ async function main(argv: string[]): Promise<number> {
       // parseArgs runs before we know the command, but the first arg that isn't
       // a flag is the command name — surface it in the hint when we have it.
       const cmd = argv.find((a) => !a.startsWith("-"));
-      const helpCmd = cmd && cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+      const helpCmd = commandHelpHint(cmd);
       // Node's default message leaks library internals: a multi-line "argument
       // is ambiguous … use '--flag=-XYZ'" advice for a missing/dash-leading
       // value, or a verbose `. To specify a positional …` clause for an unknown
