@@ -3,6 +3,7 @@
 // the end of that column. The hot path is point reads plus one write; if the
 // board record is missing, it scans card statuses once to decide whether the
 // board can be self-healed from existing cards.
+// Routine pickups should prefer `last-stack-card-closeout` for post-merge board closeout.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
