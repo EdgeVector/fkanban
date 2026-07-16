@@ -217,6 +217,45 @@ describe("pickup claim", () => {
     expect(onBoard?.assignee).toBe("worker-a");
   });
 
+  test("claims a dependent when its done dependency is only available by point read", async () => {
+    await seedCard(node, card({
+      slug: "done-dep",
+      title: "Done dependency",
+      column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nMerged dependency.",
+    }));
+    await seedCard(node, card({
+      slug: "dependent",
+      title: "Dependent work",
+      deps: ["done-dep"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nDependent work.",
+    }));
+
+    const baseQueryAll = node.queryAll.bind(node);
+    node.queryAll = async (args: Parameters<NodeClient["queryAll"]>[0]) => {
+      const res = await baseQueryAll(args);
+      if (args.schemaHash === cfg.schemaHashes.card && !args.filter) {
+        const results = res.results.filter((row) => row.key.hash !== "done-dep");
+        return { ...res, results, returned_count: results.length };
+      }
+      return res;
+    };
+
+    const result = await pickupClaimResult({
+      cfg,
+      node,
+      worker: "worker-a",
+    });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("dependent");
+    expect(result.scanned_ready).toBe(1);
+
+    const onBoard = await findCard(node, cfg, "dependent");
+    expect(onBoard?.column).toBe("doing");
+    expect(onBoard?.assignee).toBe("worker-a");
+  });
+
   test("skips surface-overlapping in-flight work and claims the next card", async () => {
     await seedCard(node, card({
       slug: "inflight",
