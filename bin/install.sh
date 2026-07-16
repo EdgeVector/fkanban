@@ -75,16 +75,16 @@ fi
 
 mkdir -p "$target_dir"
 
-for name in kanban kanban-mcp fkanban fkanban-mcp; do
+for name in kanban kanban-mcp fkanban fkanban-mcp kanban-host-track-refresh; do
   ln -sf "$repo_root/bin/$name" "$target_dir/$name"
   echo "linked $target_dir/$name -> $repo_root/bin/$name"
 done
 
 echo
 if on_path "$target_dir"; then
-  echo "Done. \`kanban\`, \`kanban-mcp\`, \`fkanban\`, and \`fkanban-mcp\` are now on PATH."
+  echo "Done. \`kanban\`, \`kanban-mcp\`, \`fkanban\`, \`fkanban-mcp\`, and \`kanban-host-track-refresh\` are now on PATH."
   echo "Verify:  which kanban && kanban doctor && which fkanban"
-  echo "Remove:  rm $target_dir/kanban $target_dir/kanban-mcp $target_dir/fkanban $target_dir/fkanban-mcp"
+  echo "Remove:  rm $target_dir/kanban $target_dir/kanban-mcp $target_dir/fkanban $target_dir/fkanban-mcp $target_dir/kanban-host-track-refresh"
 else
   # Honest warning: the shims are linked, but the dir isn't on PATH, so a bare
   # `fkanban` still won't resolve. Don't claim success we can't back up.
@@ -93,7 +93,7 @@ Linked the kanban + compatibility fkanban shims into $target_dir, but $target_di
 Add it (current shell):   export PATH="$target_dir:\$PATH"
 Make it permanent:        add that line to ~/.zshrc (or ~/.bashrc), then restart your shell.
 Then verify:              which kanban && kanban doctor && which fkanban
-Remove:                   rm $target_dir/kanban $target_dir/kanban-mcp $target_dir/fkanban $target_dir/fkanban-mcp
+Remove:                   rm $target_dir/kanban $target_dir/kanban-mcp $target_dir/fkanban $target_dir/fkanban-mcp $target_dir/kanban-host-track-refresh
 EOF
   # Exit non-zero so scripted installs detect the not-yet-usable state.
   exit 2

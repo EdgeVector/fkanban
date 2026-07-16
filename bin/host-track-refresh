@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Refresh the durable fkanban/kanban host-track checkout and PATH shims.
+set -euo pipefail
+
+remote="${FKANBAN_HOST_TRACK_REMOTE:-lastdb:///fkanban}"
+ref="${FKANBAN_HOST_TRACK_REF:-main}"
+host_track="${FKANBAN_HOST_TRACK_DIR:-$HOME/.host-track/fkanban}"
+bin_dir="${FKANBAN_HOST_TRACK_BIN_DIR:-$HOME/.local/bin}"
+stamp_dir="${FKANBAN_HOST_TRACK_STAMP_DIR:-$HOME/.host-track/stamps}"
+skip_install="${FKANBAN_HOST_TRACK_SKIP_INSTALL:-0}"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  host-track-refresh [--force]
+
+Environment:
+  FKANBAN_HOST_TRACK_REMOTE     git remote, default lastdb:///fkanban
+  FKANBAN_HOST_TRACK_REF        branch/ref to track, default main
+  FKANBAN_HOST_TRACK_DIR        checkout path, default ~/.host-track/fkanban
+  FKANBAN_HOST_TRACK_BIN_DIR    shim directory, default ~/.local/bin
+  FKANBAN_HOST_TRACK_STAMP_DIR  stamp directory, default ~/.host-track/stamps
+EOF
+}
+
+force=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force) force=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "kanban host-track-refresh: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+mkdir -p "$(dirname "$host_track")" "$bin_dir" "$stamp_dir"
+
+if [ ! -d "$host_track/.git" ]; then
+  rm -rf "$host_track"
+  git clone --branch "$ref" "$remote" "$host_track"
+else
+  current_remote="$(git -C "$host_track" remote get-url origin 2>/dev/null || true)"
+  if [ "$current_remote" != "$remote" ]; then
+    git -C "$host_track" remote set-url origin "$remote"
+  fi
+  git -C "$host_track" fetch origin "$ref"
+  if [ "$force" -eq 1 ]; then
+    git -C "$host_track" checkout -B "$ref" "origin/$ref"
+  else
+    git -C "$host_track" checkout "$ref"
+    git -C "$host_track" merge --ff-only "origin/$ref"
+  fi
+fi
+
+if [ -f "$host_track/package.json" ] && [ "$skip_install" != "1" ]; then
+  bun install --cwd "$host_track" --frozen-lockfile
+fi
+
+for name in kanban kanban-mcp fkanban fkanban-mcp host-track-refresh; do
+  ln -sfn "$host_track/bin/$name" "$bin_dir/$name"
+done
+ln -sfn "$host_track/bin/kanban-host-track-refresh" "$bin_dir/kanban-host-track-refresh"
+
+host_head="$(git -C "$host_track" rev-parse HEAD)"
+gate_head="$(git -C "$host_track" ls-remote origin "$ref" 2>/dev/null | awk 'NR == 1 {print $1}')"
+exec_path="$bin_dir/kanban"
+stamp="$stamp_dir/kanban.json"
+
+if command -v jq >/dev/null 2>&1; then
+  jq -n \
+    --arg app "kanban" \
+    --arg command "kanban" \
+    --arg gate "lastgit" \
+    --arg gate_main "$remote#$ref" \
+    --arg host_track "$host_track" \
+    --arg host_head "$host_head" \
+    --arg gate_head "$gate_head" \
+    --arg exec_path "$exec_path" \
+    --arg kind "B checkout-shim" \
+    --arg stamp "$stamp" \
+    --arg refreshed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg notes "fkanban host-track checkout refreshed; PATH shims point into host track." \
+    '{
+      app: $app,
+      command: $command,
+      gate: $gate,
+      gate_main: $gate_main,
+      host_track: $host_track,
+      host_head: $host_head,
+      gate_head: ($gate_head | select(length > 0) // null),
+      exec_path: $exec_path,
+      kind: $kind,
+      stale: ($gate_head != "" and $host_head != $gate_head),
+      stamp: $stamp,
+      refreshed_at: $refreshed_at,
+      notes: $notes
+    }' >"$stamp"
+  cp "$stamp" "$stamp_dir/fkanban.json"
+fi
+
+echo "kanban host-track refreshed: $host_track"
+echo "kanban shim: $bin_dir/kanban -> $host_track/bin/kanban"

@@ -98,6 +98,17 @@ PATH, it links the shims anyway but tells you so (and prints the exact
 a registry, and the `rm …` line it prints removes all four shims. Without the shim, run the
 CLI as `bun run src/cli.ts <cmd>` from inside the repo; the two are equivalent.
 
+For long-lived agent machines, use the host-track refresh helper instead of
+pointing PATH at a workspace checkout:
+
+```bash
+bin/host-track-refresh
+kanban which --json
+```
+
+That maintains `~/.host-track/fkanban` from `lastdb:///fkanban` and repoints
+`~/.local/bin/{kanban,kanban-mcp,fkanban,fkanban-mcp}` at that durable checkout.
+
 ## Quick start
 
 With the prerequisites in place (Bun installed, repo cloned, `bun install` run,
