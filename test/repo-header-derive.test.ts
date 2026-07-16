@@ -271,7 +271,7 @@ describe("applyHeaderDerivation", () => {
     expect(warnings).toHaveLength(0);
   });
 
-  test("leaves working-column cards (doing/review/done) untouched", () => {
+  test("leaves working-column cards (doing/done) untouched", () => {
     const { warn, warnings } = collectWarn();
     const r = applyHeaderDerivation({ slug: "c", body: "x", tags: ["fold"], title: "t", column: "doing" }, warn);
     expect(r.body).toBe("x");

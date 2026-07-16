@@ -15,7 +15,7 @@ collide with `fbrain/*` or any other app on a shared daemon):
 - **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, deps, surfaces, created_at, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
 - **`fkanban/Board`** — `slug, title, body, columns, created_at, updated_at`
 
-Default columns: `backlog → todo → doing → review → done`.
+Default columns: `backlog → todo → doing → done`.
 
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/test/run/dogfood + PR workflow and the non-obvious gotchas.
@@ -171,7 +171,7 @@ DONE  (0)
 | `kanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `kanban tag rm <slug> <tag…>` | remove one or more tags from a card |
 | `kanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
-| `kanban overlap <slug>` | compare a candidate card's surfaces against doing/review cards in the same repo (exit 2 on declared conflict) |
+| `kanban overlap <slug>` | compare a candidate card's surfaces against doing cards in the same repo (exit 2 on declared conflict) |
 | `kanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
 | `kanban pickup claim` | atomic next-card claim: priority order + surface-overlap skip + CAS `todo→doing` (`--worker --prefer-repo --exclude-repo --max-doing --dry-run --json`) |
 | `kanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |

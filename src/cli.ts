@@ -66,7 +66,7 @@ Commands:
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
   list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
-  overlap <slug>       report declared surface conflicts with doing/review cards in the same repo
+  overlap <slug>       report declared surface conflicts with doing cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
   pickup claim         claim the next ready card into doing (priority + overlap + CAS)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
@@ -97,10 +97,10 @@ Global flags:
   --version, -V        print the kanban version and exit
 
 Dependencies: a card with deps is 🔒 blocked until each dep card reaches its
-board's final column. \`move\`/\`add\` into doing/review/done — or the board's own
+board's final column. \`move\`/\`add\` into doing/done — or the board's own
 final column — refuses a blocked card unless --force.
 
-Columns (default board): backlog → todo → doing → review → done`;
+Columns (default board): backlog → todo → doing → done (no review lane)`;
 
 const HELP_FOOTER = "Run `kanban help` for all commands.";
 
@@ -257,7 +257,7 @@ Example:
 Usage:
   kanban overlap <slug> [--json]
 
-Compares the candidate card's surfaces against every doing/review card with the
+Compares the candidate card's surfaces against every doing card with the
 same repo. Surfaces come from the structured field or a body header:
   Surfaces: src/cli.ts, src/mcp/**
 
@@ -305,7 +305,7 @@ blocked-on-dependency, human-gated, malformed-routing, parked/non-work,
 collision, or stale-metadata. Read-only hygiene report.
 
 claim — Give the agent the next workable card: walk pickup-ready todo cards
-in priority order (P0→P3), skip surface conflicts with doing/review in the
+in priority order (P0→P3), skip surface conflicts with doing in the
 same repo, and CAS-claim the first winner into doing (\`move --from todo\`).
 On claim_conflict (another worker won), try the next candidate. Prefer this
 over hand-rolling list + overlap + move in prompts.

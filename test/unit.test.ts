@@ -130,7 +130,7 @@ describe("schemas", () => {
   });
 
   test("default columns are the kanban lifecycle", () => {
-    expect([...DEFAULT_COLUMNS]).toEqual(["backlog", "todo", "doing", "review", "done"]);
+    expect([...DEFAULT_COLUMNS]).toEqual(["backlog", "todo", "doing", "done"]);
     expect(isDefaultColumn("doing")).toBe(true);
     expect(isDefaultColumn("nope")).toBe(false);
   });
@@ -326,11 +326,11 @@ describe("dependencies", () => {
     const terminal = boardTerminalMap([
       { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
     ]);
-    // Identical to the legacy behavior: `review` does NOT satisfy; `done` does.
-    const inReview = card({ slug: "a", column: "review" });
+    // Non-terminal columns (e.g. leftover `review` label) do NOT satisfy; `done` does.
+    const inDoing = card({ slug: "a", column: "doing" });
     const inDone = card({ slug: "b", column: "done" });
     const x = card({ slug: "x", column: "todo", deps: ["a", "b"] });
-    const all = [inReview, inDone, x];
+    const all = [inDoing, inDone, x];
     // With the map AND without it (omitted → falls back to "done") behaves identically.
     expect(depStatus(x, all, terminal).blockedBy).toEqual(["a"]);
     expect(depStatus(x, all).blockedBy).toEqual(["a"]);
@@ -349,11 +349,11 @@ describe("dependencies", () => {
     expect(depStatus(unblocked, all, empty).blocked).toBe(false); // `done` satisfies
   });
 
-  test("only doing/review/done are gating (working) columns", () => {
+  test("only doing/done are gating (working) columns", () => {
     expect(isWorkingColumn("backlog")).toBe(false);
     expect(isWorkingColumn("todo")).toBe(false);
     expect(isWorkingColumn("doing")).toBe(true);
-    expect(isWorkingColumn("review")).toBe(true);
+    expect(isWorkingColumn("review")).toBe(false);
     expect(isWorkingColumn("done")).toBe(true);
   });
 

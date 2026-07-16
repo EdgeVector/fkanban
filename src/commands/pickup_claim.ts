@@ -2,7 +2,7 @@
 //
 // Agents should not reimplement selection (list todo → overlap → move) in
 // prompts. This command walks pickup-ready candidates in priority order,
-// skips surface conflicts with in-flight doing/review work, and CAS-claims
+// skips surface conflicts with in-flight doing work, and CAS-claims
 // the first winner into `doing` (`move --from todo`). Concurrent workers
 // racing the same slug get claim_conflict and continue to the next card.
 

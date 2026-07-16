@@ -1,5 +1,5 @@
 {
   "display_name": "fkanban",
-  "description": "A kanban board over fold_db. Two record types (Card, Board) under the `fkanban/*` app namespace; cards move through columns (backlog → todo → doing → review → done) and every change persists in folddb. Ships a CLI and an MCP server.",
+  "description": "A kanban board over fold_db. Two record types (Card, Board) under the `fkanban/*` app namespace; cards move through columns (backlog → todo → doing → done) and every change persists in folddb. Ships a CLI and an MCP server.",
   "homepage_url": "https://github.com/EdgeVector/fkanban"
 }

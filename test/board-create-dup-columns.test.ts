@@ -130,7 +130,7 @@ describe("board create rejects duplicate column names", () => {
       cfg,
       node,
       slug: "ok",
-      columns: ["backlog", "todo", "doing", "review", "done"],
+      columns: ["backlog", "todo", "doing", "done"],
     });
     expect(res).toMatchObject({ action: "created", slug: "ok" });
     const boards = await listBoards(node, cfg);
@@ -138,7 +138,6 @@ describe("board create rejects duplicate column names", () => {
       "backlog",
       "todo",
       "doing",
-      "review",
       "done",
     ]);
   });

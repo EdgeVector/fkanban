@@ -61,7 +61,7 @@ export type AddOptions = {
   priority?: PriorityTier;
   body?: string;
   // Override the dependency soft-block when placing the card into a working
-  // column (doing/review/done). Mirrors `move`'s --force.
+  // column (doing/done). Mirrors `move`'s --force.
   force?: boolean;
   // Structured pickup-decision + reconcile fields. Any omitted on create is
   // auto-derived from the body/tags (deriveStructuredFields); any omitted on
