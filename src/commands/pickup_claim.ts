@@ -22,6 +22,7 @@ import {
   buildPickupStatusReport,
   buildPickupStatusReportWithSituations,
   type PickupCategory,
+  type PickupClassification,
   type PickupStatusReport,
 } from "../pickup.ts";
 import { type SituationPreflight } from "../situations.ts";
@@ -89,6 +90,14 @@ export type PickupClaimDiagnostics = {
   scanned_active: number;
   ready: number;
   counts: Record<PickupCategory, number>;
+  exemplars?: PickupClaimDiagnosticExemplar[];
+};
+
+export type PickupClaimDiagnosticExemplar = {
+  slug: string;
+  category: PickupCategory;
+  reason: string;
+  suggestion: string;
 };
 
 function normalizeRepoList(repos: string[] | undefined): string[] {
@@ -138,11 +147,33 @@ function orderCandidates(readyCards: Card[], preferRepo: string[]): Card[] {
   return [...preferred, ...rest];
 }
 
+const DIAGNOSTIC_EXEMPLAR_CATEGORIES = [
+  "malformed-routing",
+  "stale-metadata",
+  "blocked-on-dependency",
+] satisfies PickupCategory[];
+const MAX_DIAGNOSTIC_EXEMPLARS = 8;
+
+function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticExemplar {
+  return {
+    slug: card.slug,
+    category: card.category,
+    reason: card.reason,
+    suggestion: card.suggestion,
+  };
+}
+
 function claimDiagnostics(report: PickupStatusReport): PickupClaimDiagnostics {
+  const exemplarCategories = new Set<PickupCategory>(DIAGNOSTIC_EXEMPLAR_CATEGORIES);
+  const exemplars = report.cards
+    .filter((card) => exemplarCategories.has(card.category))
+    .slice(0, MAX_DIAGNOSTIC_EXEMPLARS)
+    .map(diagnosticExemplar);
   return {
     scanned_active: report.scanned,
     ready: report.ready,
     counts: report.counts,
+    ...(exemplars.length > 0 ? { exemplars } : {}),
   };
 }
 

@@ -321,6 +321,27 @@ describe("pickup claim", () => {
     expect(result.diagnostics?.counts["human-gated"]).toBe(1);
   });
 
+  test("no-eligible diagnostics include malformed routing exemplars", async () => {
+    await seedCard(node, card({
+      slug: "bad-repo",
+      repo: "not-a-repo",
+      body: "Base: main\n\nMalformed routing.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.diagnostics?.counts["malformed-routing"]).toBe(1);
+    expect(result.diagnostics?.exemplars).toEqual([{
+      slug: "bad-repo",
+      category: "malformed-routing",
+      reason: "invalid structured repo: not-a-repo",
+      suggestion: "Set a bare `Repo: owner/name` header or `--repo owner/name`.",
+    }]);
+  });
+
   test("no-eligible when every ready candidate is skipped", async () => {
     await seedCard(node, card({
       slug: "fold-card",
