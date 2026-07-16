@@ -12,7 +12,6 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { boardToFields, findCard, isDepEnforcedColumn, boardTerminalMap, nowIso } from "../src/record.ts";
