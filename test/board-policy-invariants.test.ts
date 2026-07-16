@@ -99,7 +99,7 @@ describe("board policy invariants", () => {
   beforeEach(async () => {
     node = fakeNode();
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
-    await seedBoard(node, "human", ["todo", "waiting", "validated", "done"]);
+    await seedBoard(node, "human", [...DEFAULT_COLUMNS]);
   });
 
   test("default todo accepts pickup-ready PR cards, including tag-derived repo/base", async () => {
@@ -162,7 +162,7 @@ describe("board policy invariants", () => {
       node,
       slug: "parked-human",
       board: "human",
-      column: "waiting",
+      column: "todo",
       blockStatus: "needs_human",
       blockReason: "waiting on operator decision",
       body: "Visible parking card.",
@@ -217,7 +217,7 @@ describe("board policy invariants", () => {
       node,
       slug: "human-approval",
       board: "human",
-      column: "waiting",
+      column: "todo",
       blockStatus: "needs_human",
       blockReason: "Tom must approve the production action",
       body: "Human gate.",

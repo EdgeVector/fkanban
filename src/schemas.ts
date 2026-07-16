@@ -53,15 +53,12 @@ export type AddSchemaRequest = {
   mutation_mappers: Record<string, string>;
 };
 
-// The kanban columns a card moves through. `column` is the live kanban
-// status; a card's whole lifecycle is moving left→right across these.
-// A Board may override this ordered list with its own `columns`, but every
-// fresh board and every Card validates against this default set.
-//
-// No `review` lane (Tom 2026-07-16): review was used as a parking lot for
-// incomplete work and false human gates. Incomplete → todo/doing; complete →
-// done. Intentional holds use block_status (needs_human/deferred/design_first),
-// not a separate column.
+// The kanban columns a card moves through. FIXED set (Tom 2026-07-16):
+// backlog → todo → doing → done. No review lane, no custom column names.
+// Incomplete work is todo/doing; complete is done; intentional holds use
+// block_status (needs_human/deferred/design_first), not extra columns.
+// Boards cannot redefine columns — `board create --columns` only accepts
+// this exact list (or omits it and gets the same).
 export const DEFAULT_COLUMNS = [
   "backlog",
   "todo",
@@ -72,12 +69,28 @@ export type Column = (typeof DEFAULT_COLUMNS)[number];
 
 export const DEFAULT_BOARD_SLUG = "default";
 
-// A board's effective ordered column list: its own `columns` when it defines
-// any, else the canonical `DEFAULT_COLUMNS`. Centralizes the
-// `columns.length > 0 ? columns : [...DEFAULT_COLUMNS]` fallback that the board
-// renderer and column validation otherwise each re-spell.
-export function resolveColumns(boardColumns: readonly string[]): string[] {
-  return boardColumns.length > 0 ? [...boardColumns] : [...DEFAULT_COLUMNS];
+/** Exact fixed column list as a mutable string[] (for board records / APIs). */
+export function fixedColumns(): string[] {
+  return [...DEFAULT_COLUMNS];
+}
+
+/**
+ * Whether `columns` is exactly the fixed kanban layout (same names, same order).
+ * Empty / omitted lists are treated as "use fixed" (not a mismatch).
+ */
+export function isFixedColumnList(columns: readonly string[] | undefined | null): boolean {
+  if (!columns || columns.length === 0) return true;
+  if (columns.length !== DEFAULT_COLUMNS.length) return false;
+  return columns.every((c, i) => c === DEFAULT_COLUMNS[i]);
+}
+
+/**
+ * Always the fixed column set. `boardColumns` is ignored so a stale board
+ * record (or an old custom layout) cannot reopen arbitrary column names for
+ * move/add/list validation. Kept as a function so call sites stay stable.
+ */
+export function resolveColumns(_boardColumns?: readonly string[]): string[] {
+  return fixedColumns();
 }
 
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };

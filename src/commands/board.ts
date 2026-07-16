@@ -13,7 +13,12 @@ import {
   validateSlug,
   type Board,
 } from "../record.ts";
-import { DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "../schemas.ts";
+import {
+  DEFAULT_BOARD_SLUG,
+  DEFAULT_COLUMNS,
+  fixedColumns,
+  isFixedColumnList,
+} from "../schemas.ts";
 
 export async function boardCreateCmd(opts: {
   cfg: Config;
@@ -24,40 +29,26 @@ export async function boardCreateCmd(opts: {
   body?: string;
 }): Promise<{ slug: string; action: "created" | "updated" }> {
   validateSlug(opts.slug);
-  // Only when columns were explicitly supplied: reject DUPLICATE names. The
-  // list is already trim/filter-cleaned by parseTags, so an empty/all-empty
-  // string falls back to DEFAULT_COLUMNS below and is never checked here.
-  // A duplicate would otherwise be stored verbatim and silently corrupt the
-  // board — `list` renders the doubled column (and its cards) twice. This is
-  // the same validate-loudly contract slugs / `--column` typos / dep cycles
-  // already enforce; column names are compared as exact strings (matching how
-  // `ensureColumn` does `boardColumns.includes(column)` elsewhere).
-  if (opts.columns && opts.columns.length > 0) {
-    const seen = new Set<string>();
-    const dups = new Set<string>();
-    for (const name of opts.columns) {
-      if (seen.has(name)) dups.add(name);
-      seen.add(name);
-    }
-    if (dups.size > 0) {
-      const list = [...dups].map((d) => `"${d}"`).join(", ");
-      const first = [...dups][0]!;
-      throw new FkanbanError({
-        code: "dup_columns",
-        message: `Duplicate column name "${first}" in --columns.`,
-        hint: `Column names must be unique: ${list}.`,
-      });
-    }
+  // Columns are FIXED: backlog → todo → doing → done only (Tom 2026-07-16).
+  // Callers may omit --columns or pass the exact fixed list; anything else is
+  // rejected before any write. Custom layouts / arbitrary names are not allowed.
+  if (opts.columns && opts.columns.length > 0 && !isFixedColumnList(opts.columns)) {
+    const got = opts.columns.join(",");
+    const want = DEFAULT_COLUMNS.join(",");
+    throw new FkanbanError({
+      code: "invalid_columns",
+      message: `Column list must be exactly ${want} (got ${got}).`,
+      hint: "Kanban columns are fixed: backlog → todo → doing → done. Omit --columns or pass that exact list.",
+    });
   }
-  const columnsSupplied = opts.columns !== undefined && opts.columns.length > 0;
-  const columns = columnsSupplied ? opts.columns! : [...DEFAULT_COLUMNS];
+  const columns = fixedColumns();
   const existing = await findBoard(opts.node, opts.cfg, opts.slug);
   const now = nowIso();
   const board: Board = {
     slug: opts.slug,
     title: opts.title ?? existing?.title ?? opts.slug,
     body: opts.body ?? existing?.body ?? "",
-    columns: columnsSupplied ? columns : existing?.columns ?? columns,
+    columns,
     created_at: existing?.created_at ?? now,
     updated_at: now,
   };

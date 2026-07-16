@@ -122,9 +122,9 @@ describe("done_at stamping", () => {
   });
 
   test("custom-board terminal column is used", async () => {
-    await seedBoard(node, "custom", ["spec", "build", "ship"]);
-    await addCmd({ cfg, node, slug: "custom-card", board: "custom", column: "spec" });
-    await moveCmd({ cfg, node, slug: "custom-card", column: "ship" });
+    await seedBoard(node, "custom", [...DEFAULT_COLUMNS]);
+    await addCmd({ cfg, node, slug: "custom-card", board: "custom", column: "todo" });
+    await moveCmd({ cfg, node, slug: "custom-card", column: "done" });
     expect((await findCard(node, cfg, "custom-card"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });

@@ -106,7 +106,7 @@ describe("add update preserves the card's board", () => {
     node = fakeNode();
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
     // A board with a custom column set, to also catch column mis-validation.
-    await seedBoard(node, "other", ["icebox", "wip", "shipped"]);
+    await seedBoard(node, "other", [...DEFAULT_COLUMNS]);
   });
 
   test("(a) update with NO --board keeps the card on its non-default board", async () => {
@@ -116,18 +116,18 @@ describe("add update preserves the card's board", () => {
       slug: "probe",
       title: "probe v1",
       board: "other",
-      column: "wip",
+      column: "todo",
     });
-    expect(created).toMatchObject({ action: "created", board: "other", column: "wip" });
+    expect(created).toMatchObject({ action: "created", board: "other", column: "todo" });
 
     // Edit just the title, no --board — must NOT teleport to "default".
     const updated = await addCmd({ cfg, node, slug: "probe", title: "probe v2 EDITED" });
-    expect(updated).toMatchObject({ action: "updated", board: "other", column: "wip" });
+    expect(updated).toMatchObject({ action: "updated", board: "other", column: "todo" });
 
     const after = await findCard(node, cfg, "probe");
     expect(after?.board).toBe("other");
     expect(after?.title).toBe("probe v2 EDITED");
-    expect(after?.column).toBe("wip");
+    expect(after?.column).toBe("todo");
   });
 
   test("(a') priority-only update with NO --column keeps the card in its current column", async () => {
@@ -383,26 +383,26 @@ describe("add update preserves the card's board", () => {
   });
 
   test("(b) update --column valid on the card's OWN board succeeds", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo", body: validPickupBody });
 
-    // "shipped" is a column on "other" but NOT on the default board. Before the
-    // fix this validated against the default board's columns and would throw.
-    const updated = await addCmd({ cfg, node, slug: "probe", column: "shipped" });
-    expect(updated).toMatchObject({ action: "updated", board: "other", column: "shipped" });
+    // All boards share fixed columns; move within that set on the card's board.
+    const updated = await addCmd({ cfg, node, slug: "probe", column: "doing" });
+    expect(updated).toMatchObject({ action: "updated", board: "other", column: "doing" });
 
     const after = await findCard(node, cfg, "probe");
     expect(after?.board).toBe("other");
-    expect(after?.column).toBe("shipped");
+    expect(after?.column).toBe("doing");
   });
 
-  test("(b') update --column invalid on the card's own board is rejected", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip" });
-    // "todo" is a default-board column but not on "other".
-    expect(addCmd({ cfg, node, slug: "probe", column: "todo" })).rejects.toBeInstanceOf(FkanbanError);
+  test("(b') update --column inventing a name is rejected", async () => {
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo" });
+    await expect(addCmd({ cfg, node, slug: "probe", column: "shipped" })).rejects.toBeInstanceOf(
+      FkanbanError,
+    );
   });
 
   test("(c) explicit --board still moves the card (intended)", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo", body: validPickupBody });
 
     const moved = await addCmd({ cfg, node, slug: "probe", board: "default", column: "todo" });
     expect(moved).toMatchObject({ action: "updated", board: "default", column: "todo" });
@@ -425,9 +425,9 @@ describe("add update preserves the card's board", () => {
     expect(after?.column).toBe(DEFAULT_COLUMNS[0]);
   });
 
-  test("(d') create with explicit --board honors it", async () => {
-    const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "icebox" });
-    expect(created).toMatchObject({ action: "created", board: "other", column: "icebox" });
+  test("(d') create with explicit --board honors it (fixed columns)", async () => {
+    const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "todo" });
+    expect(created).toMatchObject({ action: "created", board: "other", column: "todo" });
   });
 
   test("add/show round-trip persists a sanitized dirty Repo header only with explicit force", async () => {

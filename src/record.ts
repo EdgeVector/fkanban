@@ -8,6 +8,7 @@ import {
   DEFAULT_COLUMNS,
   CARD_OPTIONAL_SCHEMA_FIELDS,
   fieldsFor,
+  fixedColumns,
   isDefaultColumn,
   resolveColumns,
   schemaFor,
@@ -1187,15 +1188,14 @@ export type DepStatus = {
 // `done`, so nothing regresses when the board context is unavailable.
 export const FALLBACK_TERMINAL_COLUMN = "done";
 
-// Map of board slug → that board's terminal (last) column. A dependency is
-// "done" once its card reaches this column on the dep card's OWN board, so a
-// board whose final column isn't named `done` (e.g. `spec,build,ship`) can
-// still unblock dependents. Built once per command from `listBoards`.
+// Map of board slug → that board's terminal column. Columns are fixed
+// (backlog → todo → doing → done), so every board's terminal is `done`.
+// Built once per command from `listBoards` for callers that still key by board.
 export function boardTerminalMap(boards: Board[]): Map<string, string> {
   const m = new Map<string, string>();
+  const terminal = terminalColumn(fixedColumns());
   for (const b of boards) {
-    const terminal = b.columns[b.columns.length - 1];
-    if (terminal) m.set(b.slug, terminal);
+    m.set(b.slug, terminal);
   }
   return m;
 }
@@ -1980,14 +1980,15 @@ export function validateSlug(slug: string): void {
   }
 }
 
-// A card's column must be one of the board's columns (or, when the board has
-// no explicit column list, one of the default columns).
-export function ensureColumn(column: string, boardColumns: string[]): void {
+// A card's column must be one of the FIXED kanban columns
+// (backlog | todo | doing | done). `boardColumns` is ignored — boards cannot
+// invent extra column names.
+export function ensureColumn(column: string, boardColumns?: string[]): void {
   const valid = resolveColumns(boardColumns);
   if (!valid.includes(column)) {
     throw new FkanbanError({
       code: "invalid_column",
-      message: `"${column}" is not a column on this board.`,
+      message: `"${column}" is not a valid kanban column.`,
       hint: `Valid columns: ${valid.join(" | ")}`,
     });
   }

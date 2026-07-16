@@ -93,7 +93,7 @@ function seedBoard(node: NodeClient, slug: string, columns: string[]) {
 
 describe("isDepEnforcedColumn", () => {
   const terminal = boardTerminalMap([
-    { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+    { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
     { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
   ]);
 
@@ -107,60 +107,58 @@ describe("isDepEnforcedColumn", () => {
     expect(isDepEnforcedColumn("done", "default", terminal)).toBe(true);
   });
 
-  test("custom board: the board's terminal column is gated, intermediate ones are not", () => {
-    expect(isDepEnforcedColumn("spec", "zz", terminal)).toBe(false);
-    expect(isDepEnforcedColumn("build", "zz", terminal)).toBe(false); // out of scope: intermediate
-    expect(isDepEnforcedColumn("ship", "zz", terminal)).toBe(true); // terminal/completion column
+  test("non-default board: working columns + terminal are gated (todo is default-only)", () => {
+    // Fixed columns everywhere; todo pickup gate is default-board only.
+    expect(isDepEnforcedColumn("backlog", "zz", terminal)).toBe(false);
+    expect(isDepEnforcedColumn("todo", "zz", terminal)).toBe(false);
+    expect(isDepEnforcedColumn("doing", "zz", terminal)).toBe(true);
+    expect(isDepEnforcedColumn("done", "zz", terminal)).toBe(true);
   });
 
   test("unresolvable board falls back to literal `done` as the terminal gate", () => {
     const empty = new Map<string, string>();
-    expect(isDepEnforcedColumn("ship", "gone", empty)).toBe(false);
+    expect(isDepEnforcedColumn("ship", "gone", empty)).toBe(false); // unknown name not working
     expect(isDepEnforcedColumn("done", "gone", empty)).toBe(true);
   });
 });
 
-describe("move: blocked card can't reach a custom board's terminal column", () => {
+describe("move: blocked card can't reach done on a non-default board", () => {
   let node: NodeClient;
 
   beforeEach(async () => {
     node = fakeNode();
-    await seedBoard(node, "zz", ["spec", "build", "ship"]);
+    await seedBoard(node, "zz", [...DEFAULT_COLUMNS]);
   });
 
-  test("move into `ship` is refused while the dep is unfinished, voiced + no write", async () => {
-    await addCmd({ cfg, node, slug: "c1", board: "zz", column: "spec" });
-    await addCmd({ cfg, node, slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
+  test("move into `done` is refused while the dep is unfinished, voiced + no write", async () => {
+    await addCmd({ cfg, node, slug: "c1", board: "zz", column: "todo" });
+    await addCmd({ cfg, node, slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
 
-    const promise = moveCmd({ cfg, node, slug: "c2", column: "ship" });
-    await expect(promise).rejects.toMatchObject({ code: "card_blocked" });
-    try {
-      await moveCmd({ cfg, node, slug: "c2", column: "ship" });
-    } catch (err) {
-      const e = err as FkanbanError;
-      expect(e.message).toBe('Card "c2" is blocked by "c1" (not yet done).');
-      // Hint no longer hardcodes the literal word `done`.
-      expect(e.hint).toContain("board's final column");
-    }
-    // No write: c2 is still in `spec`.
-    expect((await findCard(node, cfg, "c2"))?.column).toBe("spec");
+    // Place c2 in doing (allowed on non-default while blocked? doing is working → blocked)
+    await expect(moveCmd({ cfg, node, slug: "c2", column: "doing" })).rejects.toMatchObject({
+      code: "card_blocked",
+    });
+    await expect(moveCmd({ cfg, node, slug: "c2", column: "done" })).rejects.toMatchObject({
+      code: "card_blocked",
+    });
+    expect((await findCard(node, cfg, "c2"))?.column).toBe("todo");
   });
 
   test("--force overrides the terminal-column block", async () => {
-    await addCmd({ cfg, node, slug: "c1", board: "zz", column: "spec" });
-    await addCmd({ cfg, node, slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
-    const res = await moveCmd({ cfg, node, slug: "c2", column: "ship", force: true });
-    expect(res).toMatchObject({ to: "ship" });
-    expect((await findCard(node, cfg, "c2"))?.column).toBe("ship");
+    await addCmd({ cfg, node, slug: "c1", board: "zz", column: "todo" });
+    await addCmd({ cfg, node, slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
+    const res = await moveCmd({ cfg, node, slug: "c2", column: "done", force: true });
+    expect(res).toMatchObject({ to: "done" });
+    expect((await findCard(node, cfg, "c2"))?.column).toBe("done");
   });
 
   test("once the dep reaches the terminal column, the move succeeds", async () => {
-    await addCmd({ cfg, node, slug: "c1", board: "zz", column: "spec" });
-    await addCmd({ cfg, node, slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
-    await moveCmd({ cfg, node, slug: "c1", column: "ship" }); // dep now done (terminal)
-    const res = await moveCmd({ cfg, node, slug: "c2", column: "ship" });
-    expect(res).toMatchObject({ to: "ship" });
-    expect((await findCard(node, cfg, "c2"))?.column).toBe("ship");
+    await addCmd({ cfg, node, slug: "c1", board: "zz", column: "todo" });
+    await addCmd({ cfg, node, slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
+    await moveCmd({ cfg, node, slug: "c1", column: "done" });
+    const res = await moveCmd({ cfg, node, slug: "c2", column: "done" });
+    expect(res).toMatchObject({ to: "done" });
+    expect((await findCard(node, cfg, "c2"))?.column).toBe("done");
   });
 });
 

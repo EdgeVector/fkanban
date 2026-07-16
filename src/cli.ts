@@ -77,7 +77,7 @@ Commands:
   gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card (refuses if live cards depend on it)
-  board create <slug>  create/update a board (--title --columns a,b,c)
+  board create <slug>  create/update a board (--title; columns fixed)
   board list           list boards (--json)
   board rm <slug>      soft-delete a board (always refuses default; refuses
                        live cards unless --force)
@@ -100,7 +100,7 @@ Dependencies: a card with deps is 🔒 blocked until each dep card reaches its
 board's final column. \`move\`/\`add\` into doing/done — or the board's own
 final column — refuses a blocked card unless --force.
 
-Columns (default board): backlog → todo → doing → done (no review lane)`;
+Columns (fixed on every board): backlog → todo → doing → done`;
 
 const HELP_FOOTER = "Run `kanban help` for all commands.";
 
@@ -429,14 +429,14 @@ Usage:
 
 Options:
   --title <text>        board title (create)
-  --columns a,b,c       comma-separated column names (create)
+  --columns a,b,c       must be exactly backlog,todo,doing,done (or omit)
   --body <text>         board body (create)
   --force               soft-delete a board with live cards (rm); refuses if
                         outside live cards depend on cards being deleted
   --json                machine-readable output
 
 Examples:
-  kanban board create sprint --title "Sprint 1" --columns todo,doing,done
+  kanban board create sprint --title "Sprint 1"
   kanban board rm sprint`),
 
   migrate: withFooter(`kanban migrate — one-time board data migrations
