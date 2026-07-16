@@ -816,8 +816,18 @@ export const OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 // into the value (observed corrupting a backfill of existing cards). A trailing
 // inline `# ...` comment is stripped before the token is read.
 export function parseBodyHeader(body: string, name: string): string {
-  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
-  const m = body.match(re);
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "i");
+  let m: RegExpMatchArray | null = null;
+  let inFence = false;
+  for (const line of body.split("\n")) {
+    if (/^[ \t]*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    m = line.match(re);
+    if (m) break;
+  }
   if (!m) return "";
   // Cut at a literal escaped newline ("o/n\nBase:") for bodies stored that way,
   // remove an inline comment, then take the first token so space-joined headers
@@ -883,8 +893,18 @@ export function applyDbLocatorForWrite(card: Card, ambientDbLocator: string | un
 }
 
 export function parseBodyListHeader(body: string, name: string): string[] {
-  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
-  const m = body.match(re);
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "i");
+  let m: RegExpMatchArray | null = null;
+  let inFence = false;
+  for (const line of body.split("\n")) {
+    if (/^[ \t]*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    m = line.match(re);
+    if (m) break;
+  }
   if (!m) return [];
   const line = stripTrailingInlineComment(m[1]!.split("\\n")[0]!);
   return normalizeSurfaces(line.split(","));
@@ -1118,6 +1138,10 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
   if (card.surfaces.length === 0) {
     const surfaces = parseBodyListHeader(card.body, "Surfaces");
     if (surfaces.length > 0) out.surfaces = surfaces;
+  }
+  if (!card.branch) {
+    const branch = parseBodyHeader(card.body, "Branch");
+    if (branch) out.branch = branch;
   }
   if (!card.db) {
     const db = normalizeDbLocator(parseBodyHeader(card.body, "Db"));
