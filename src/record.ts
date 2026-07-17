@@ -1475,23 +1475,45 @@ function isOnlyOptionalFieldMiss(err: unknown, fields: string[]): boolean {
   );
 }
 
-function canFallbackColumnFilter(err: unknown): boolean {
-  return (
-    err instanceof FkanbanError &&
-    (err.code === "node_http_400" || err.code === "node_http_422" || err.code === "unknown_fields")
-  );
+// The node's /api/query `filter` is a fold_db HashRangeFilter (HashKey /
+// range-key shapes only) — field-equality filters like `{column: "todo"}` are
+// NOT a node capability and 400 on every call. All field filtering therefore
+// happens CLIENT-SIDE. Before 2026-07-17 each filtered list sent the doomed
+// filter anyway and only then fell back (one guaranteed 400 per list; ~21
+// node queries per `list --column todo`; rows=1 Card point-read storms were
+// the primary node's top load). Only `{HashKey: slug}` remains a real
+// server-side filter (point reads).
+function withRequiredFields(fields: string[], required: string[]): string[] {
+  const missing = required.filter((f) => !fields.includes(f));
+  return missing.length === 0 ? fields : [...fields, ...missing];
 }
 
-async function listCardsByColumnFallbackScan(
+// Client-side field-equality list. Body-free field sets resolve in ONE bulk
+// read. Body-inclusive sets keep the standing "never bulk-read every card's
+// body" rule: one body-free scan, then HashKey point-reads for the MATCHING
+// cards only.
+async function listCardsClientFiltered(
   node: NodeClient,
   cfg: Config,
-  column: string,
   fields: string[],
+  predicate: Record<string, string>,
 ): Promise<Card[]> {
-  const summaries = await listCardsWithFields(node, cfg, CARD_STATUS_FIELDS);
-  const slugs = summaries.filter((c) => c.column === column).map((c) => c.slug);
-  const hydrated = await Promise.all(slugs.map((slug) => findCardWithFields(node, cfg, slug, fields)));
-  return hydrated.filter((c): c is Card => c !== null && c.column === column);
+  const required = Object.keys(predicate);
+  const matches = (c: Card): boolean =>
+    required.every((field) => {
+      const actual = (c as unknown as Record<string, unknown>)[field];
+      return typeof actual === "string" && actual === predicate[field];
+    });
+  if (!fields.includes("body")) {
+    const cards = await listCardsWithFields(node, cfg, withRequiredFields(fields, required));
+    return cards.filter(matches);
+  }
+  const scanFields = withRequiredFields(fields.filter((f) => f !== "body"), required);
+  const summaries = (await listCardsWithFields(node, cfg, scanFields)).filter(matches);
+  const hydrated = await Promise.all(
+    summaries.map((c) => findCardWithFields(node, cfg, c.slug, fields)),
+  );
+  return hydrated.filter((c): c is Card => c !== null && matches(c));
 }
 
 export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
@@ -1564,22 +1586,14 @@ export async function listPickupAreaPeers(node: NodeClient, cfg: Config, card: C
   const targetAreas = new Set(pickupAreaTagsForCard(card));
   if (!targetRepo || targetAreas.size === 0) return [];
 
-  const fields = [...PICKUP_AREA_PEER_FIELDS];
-  const summaries: Card[] = [];
-  try {
-    for (const column of PICKUP_AREA_ACTIVE_COLUMNS) {
-      for (const card of await listCardsWithFields(node, cfg, fields, { column })) {
-        summaries.push(card);
-      }
-    }
-    return filterPickupAreaPeers(node, cfg, summaries, targetRepo, targetAreas);
-  } catch (err) {
-    if (!canFallbackColumnFilter(err)) throw err;
-    // Pickup-area overlap is an advisory coordination hint. On nodes without
-    // secondary field filters, falling back to an unfiltered board scan puts the
-    // deterministic O(N) latency back on every `add --column todo`.
-    return [];
-  }
+  // One bulk read; the previous per-column filtered reads sent the node an
+  // unsupported field filter (three 400s per `add --column todo`) and then
+  // disabled this advisory feature entirely on the live node.
+  const fields = withRequiredFields([...PICKUP_AREA_PEER_FIELDS], ["column"]);
+  const summaries = (await listCardsWithFields(node, cfg, fields)).filter((c) =>
+    PICKUP_AREA_ACTIVE_COLUMN_SET.has(c.column),
+  );
+  return filterPickupAreaPeers(node, cfg, summaries, targetRepo, targetAreas);
 }
 
 export async function listCardsByColumn(
@@ -1588,13 +1602,7 @@ export async function listCardsByColumn(
   column: string,
   fields: string[],
 ): Promise<Card[]> {
-  try {
-    const cards = await listCardsWithFields(node, cfg, fields, { column });
-    return cards.filter((c) => c.column === column);
-  } catch (err) {
-    if (!canFallbackColumnFilter(err)) throw err;
-    return listCardsByColumnFallbackScan(node, cfg, column, fields);
-  }
+  return listCardsClientFiltered(node, cfg, fields, { column });
 }
 
 export async function listCardsByFilter(
@@ -1607,31 +1615,10 @@ export async function listCardsByFilter(
   if (entries.length === 0) {
     return { cards: await listCardsWithFields(node, cfg, fields), indexed: false };
   }
-
-  const effectiveFilter = Object.fromEntries(entries);
-  try {
-    const cards = await listCardsWithFields(node, cfg, fields, effectiveFilter);
-    return {
-      cards: cards.filter((c) =>
-        entries.every(([field, value]) => {
-          const actual = (c as unknown as Record<string, unknown>)[field];
-          return typeof actual === "string" && actual === value;
-        })
-      ),
-      indexed: true,
-    };
-  } catch (err) {
-    if (!canFallbackColumnFilter(err)) throw err;
-    return {
-      cards: (await listCardsWithFields(node, cfg, fields)).filter((c) =>
-        entries.every(([field, value]) => {
-          const actual = (c as unknown as Record<string, unknown>)[field];
-          return typeof actual === "string" && actual === value;
-        })
-      ),
-      indexed: false,
-    };
-  }
+  return {
+    cards: await listCardsClientFiltered(node, cfg, fields, Object.fromEntries(entries)),
+    indexed: false,
+  };
 }
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {

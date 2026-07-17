@@ -15,7 +15,6 @@ import {
   findCard,
   normalizeBlockStatus,
   nowIso,
-  PICKUP_AREA_ACTIVE_COLUMNS,
   PICKUP_AREA_BLOCK_PREFIX,
   PICKUP_AREA_PEER_FIELDS,
 } from "../src/record.ts";
@@ -226,10 +225,15 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
       body: sharedAreaBody(),
     });
 
-    const peerQueries = node.cardQueries.filter((q) => q.filter?.column !== undefined);
-    expect(peerQueries.map((q) => q.filter!.column)).toEqual([...PICKUP_AREA_ACTIVE_COLUMNS]);
-    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
-    for (const q of peerQueries) {
+    // Field filters are never sent (the live node 400s them); the peer read
+    // is ONE unfiltered body-free scan of the minimal peer fields, filtered
+    // client-side to the active columns.
+    expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
+    const peerScans = node.cardQueries.filter(
+      (q) => q.filter === undefined && !q.fields.includes("body"),
+    );
+    expect(peerScans.length).toBeGreaterThan(0);
+    for (const q of peerScans) {
       expect(q.fields).toEqual([...PICKUP_AREA_PEER_FIELDS]);
     }
 
@@ -239,7 +243,7 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
     expect(todo?.block_reason).toContain("active-fbrain-list");
   });
 
-  test("unsupported pickup column filters do not fall back to an unfiltered card scan", async () => {
+  test("pickup-area overlap works on nodes that reject column filters (no field filter sent)", async () => {
     node = fakeNode({ rejectColumnFilter: true });
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
     await addCmd({
@@ -261,10 +265,13 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
       body: sharedAreaBody(),
     });
 
-    expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(true);
-    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
+    // Previously the doomed server filter fired here and the overlap gate
+    // silently disabled itself on the live node; now no filter is sent and
+    // the advisory gate works everywhere.
+    expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
     const todo = await findCard(node, cfg, "todo-fbrain-list");
-    expect(normalizeBlockStatus(todo!.block_status)).toBe("none");
+    expect(normalizeBlockStatus(todo!.block_status)).toBe("needs_human");
+    expect(todo?.block_reason).toContain(PICKUP_AREA_BLOCK_PREFIX);
   });
 
   test("add and move apply the same pickup-area overlap gate for todo-bound cards", async () => {
