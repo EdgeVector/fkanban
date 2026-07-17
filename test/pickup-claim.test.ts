@@ -572,6 +572,42 @@ describe("pickup claim", () => {
     }]);
   });
 
+  test("no-eligible diagnostics do not call legacy registry fallback non-pickup kind pr", async () => {
+    await seedCard(node, card({
+      slug: "legacy-registry",
+      kind: "",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nTarget: fbrain record `dogfood-registry`.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.diagnostics?.counts["parked/non-work"]).toBe(1);
+    expect(result.diagnostics?.exemplars).toEqual([{
+      slug: "legacy-registry",
+      category: "parked/non-work",
+      reason: "registry/recipe card",
+      suggestion: "Registry/recipe cards target brain records, not code PRs; file a concrete PR card with explicit kind: pr when code is ready.",
+    }]);
+  });
+
+  test("pickup claims explicit pr cards even when their body mentions registry keywords", async () => {
+    await seedCard(node, card({
+      slug: "explicit-pr-registry-keyword",
+      kind: "pr",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nUpdate dogfood-registry via code.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.reason).toBe("claimed");
+    expect(result.card?.slug).toBe("explicit-pr-registry-keyword");
+    expect(result.card?.kind).toBe("pr");
+  });
+
   test("no-eligible diagnostics sample every non-ready blocker category", async () => {
     await seedCard(node, card({
       slug: "dep-in-progress",

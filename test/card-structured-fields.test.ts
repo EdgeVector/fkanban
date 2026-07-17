@@ -145,6 +145,16 @@ describe("isPickupEligible", () => {
   test("a pr card with repo+base+no block is eligible", () => {
     expect(isPickupEligible(card({ kind: "pr", repo: "EdgeVector/fold", base: "main" }))).toBe(true);
   });
+  test("an explicit pr card is eligible even when body mentions registry keywords", () => {
+    expect(
+      isPickupEligible(card({
+        kind: "pr",
+        repo: "EdgeVector/fold",
+        base: "main",
+        body: "Repo: EdgeVector/fold\nBase: main\n\nUpdate dogfood-registry via code.",
+      })),
+    ).toBe(true);
+  });
   test("missing repo or base → not eligible", () => {
     expect(isPickupEligible(card({ kind: "pr", repo: "", base: "main" }))).toBe(false);
     expect(isPickupEligible(card({ kind: "pr", repo: "EdgeVector/fold", base: "" }))).toBe(false);

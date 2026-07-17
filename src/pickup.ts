@@ -2,6 +2,7 @@ import { type NodeClient } from "./client.ts";
 import { type Config } from "./config.ts";
 import {
   depStatus,
+  isCardKind,
   isRegistryCard,
   normalizeBlockStatus,
   normalizeKind,
@@ -174,8 +175,11 @@ export function classifyPickupCard(
   if (blockStatus === "deferred") {
     return out("parked/non-work", "deferred hold", "Keep deferred work outside default todo until its sequence opens.");
   }
-  if (kind !== "pr" || isRegistryCard(card.body, card.title)) {
+  if (kind !== "pr") {
     return out("parked/non-work", `non-pickup kind: ${kind}`, "Leave grouping/tracker/program/capstone/validation cards out of default todo, or split a concrete PR card.");
+  }
+  if (!isCardKind(card.kind) && isRegistryCard(card.body, card.title)) {
+    return out("parked/non-work", "registry/recipe card", "Registry/recipe cards target brain records, not code PRs; file a concrete PR card with explicit kind: pr when code is ready.");
   }
   if (card.board !== "default") {
     return out("parked/non-work", `card is on non-default board ${card.board}`, "Move to default/todo only when an agent should pick it up.");
