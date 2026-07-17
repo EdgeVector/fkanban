@@ -2,7 +2,7 @@
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
-import { schemaHashFor, type Config } from "./config.ts";
+import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
@@ -1857,6 +1857,13 @@ async function writeCardRecordWithOptionalFieldFallback(
   expected?: CasExpectation,
 ): Promise<void> {
   const hash = schemaHashFor("card", opts.cfg);
+  // A hash already proven to reject the optional fields writes the legacy
+  // shape directly — the full-shape attempt would fail the same way it did
+  // when the memo was recorded (same hash ⇒ same field set).
+  if (opts.cfg.cardLegacyWriteHash === hash) {
+    await opts.node[op]({ schemaHash: hash, fields: cardToLegacyOptionalFields(card), keyHash: card.slug, expected });
+    return;
+  }
   try {
     await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug, expected });
   } catch (err) {
@@ -1869,6 +1876,10 @@ async function writeCardRecordWithOptionalFieldFallback(
       // the retry most likely failed for the same unrelated reason.
       throw isOptionalFieldWriteMiss(err) ? retryErr : err;
     }
+    // Full shape failed AND the legacy shape succeeded on the same op — the
+    // schema provably lacks the optional fields. Remember, so later processes
+    // stop paying a failed mutation (and a polluted error tally) per write.
+    rememberCardLegacyWriteHash(opts.cfg, hash);
   }
 }
 

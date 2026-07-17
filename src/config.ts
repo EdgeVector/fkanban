@@ -24,6 +24,17 @@ export type Config = {
   // owner-session attestation against an app-isolation node. When absent the
   // path is derived from FOLDDB_HOME (see `resolveSocketPath`).
   nodeSocketPath?: string;
+  // Card schema hash PROVEN (by a live write) to reject the optional card
+  // fields (CARD_OPTIONAL_SCHEMA_FIELDS). While it matches schemaHashes.card,
+  // card writes go straight to the legacy body-header shape instead of paying
+  // a failed full-shape mutation on every write (the node 500s on unknown
+  // fields; ~45% of all card mutations, 2026-07-17 request-ops investigation).
+  // Self-invalidates when the adopted card schema changes: a new hash means a
+  // new field set, so the memo no longer applies.
+  cardLegacyWriteHash?: string;
+  // Where this config was read from; never serialized. Lets a write-shape
+  // discovery persist without re-deriving the env-dependent path.
+  configPath?: string;
 };
 
 const SOCKET_FILE_NAME = "folddb.sock";
@@ -104,7 +115,7 @@ export function readConfig(path: string = defaultReadConfigPath()): Config {
     const msg = err instanceof Error ? err.message : String(err);
     throw new ConfigInvalidError(path, `not valid JSON (${msg})`);
   }
-  return assertConfigShape(path, parsed);
+  return { ...assertConfigShape(path, parsed), configPath: path };
 }
 
 export function tryReadConfig(path: string = defaultReadConfigPath()): Config | null {
@@ -117,7 +128,25 @@ export function writeConfig(
   path: string = defaultConfigPath(),
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+  const { configPath: _omit, ...persisted } = config;
+  writeFileSync(path, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+}
+
+/**
+ * Record that the currently adopted card schema rejects the optional card
+ * fields, so every later process writes the legacy shape first instead of
+ * failing a full-shape mutation per write. Best-effort: an unpersistable
+ * config (read-only disk, test cfg with no configPath) still gets the
+ * in-process memo and must never fail the card write that discovered it.
+ */
+export function rememberCardLegacyWriteHash(cfg: Config, hash: string): void {
+  cfg.cardLegacyWriteHash = hash;
+  if (!cfg.configPath) return;
+  try {
+    writeConfig(cfg, cfg.configPath);
+  } catch {
+    /* in-process memo still applies */
+  }
 }
 
 export function schemaHashFor(
@@ -169,6 +198,11 @@ function assertConfigShape(path: string, raw: unknown): Config {
       ? (r.nodeSocketPath as string)
       : undefined;
 
+  const cardLegacyWriteHash =
+    typeof r.cardLegacyWriteHash === "string" && r.cardLegacyWriteHash.length > 0
+      ? (r.cardLegacyWriteHash as string)
+      : undefined;
+
   return {
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
@@ -176,5 +210,6 @@ function assertConfigShape(path: string, raw: unknown): Config {
     userHash: r.userHash as string,
     schemaHashes,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
+    ...(cardLegacyWriteHash !== undefined ? { cardLegacyWriteHash } : {}),
   };
 }

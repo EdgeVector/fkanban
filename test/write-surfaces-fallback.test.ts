@@ -15,13 +15,19 @@ import type { NodeClient } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { createCardRecord, updateCardRecord, nowIso, type Card } from "../src/record.ts";
 
-const cfg: Config = {
-  configVersion: 1,
-  nodeUrl: "http://unused.invalid",
-  schemaServiceUrl: "http://unused.invalid",
-  userHash: "test-user",
-  schemaHashes: { card: "cardhash", board: "boardhash" },
-};
+// Fresh per test: a first optional-field miss now stamps
+// `cfg.cardLegacyWriteHash` (the legacy-write memo, see
+// test/card-legacy-write-memo.test.ts), and a shared cfg would leak that memo
+// into the happy-path tests.
+function freshCfg(): Config {
+  return {
+    configVersion: 1,
+    nodeUrl: "http://unused.invalid",
+    schemaServiceUrl: "http://unused.invalid",
+    userHash: "test-user",
+    schemaHashes: { card: "cardhash", board: "boardhash" },
+  };
+}
 
 function testCard(): Card {
   const ts = nowIso();
@@ -88,7 +94,7 @@ for (const [name, writeFn] of [
   describe(name, () => {
     test("bare minimal-node 500 → retries once without optional fields, mirroring them into body headers", async () => {
       const { node, writes } = strictNode(bare500);
-      await writeFn({ cfg, node }, testCard());
+      await writeFn({ cfg: freshCfg(), node }, testCard());
       expect(writes.length).toBe(1);
       const accepted = writes[0]!;
       expect("surfaces" in accepted).toBe(false);
@@ -99,7 +105,7 @@ for (const [name, writeFn] of [
 
     test("structured unknown_fields 400 still triggers the fallback (existing contract)", async () => {
       const { node, writes } = strictNode(structured400);
-      await writeFn({ cfg, node }, testCard());
+      await writeFn({ cfg: freshCfg(), node }, testCard());
       expect(writes.length).toBe(1);
       expect("surfaces" in writes[0]!).toBe(false);
       expect("db" in writes[0]!).toBe(false);
@@ -107,7 +113,7 @@ for (const [name, writeFn] of [
 
     test("a 500 with a different cause surfaces the ORIGINAL error after the retry also fails", async () => {
       const { node } = strictNode(bare500, /* alwaysFail */ true);
-      const err = await writeFn({ cfg, node }, testCard()).then(
+      const err = await writeFn({ cfg: freshCfg(), node }, testCard()).then(
         () => null,
         (e: unknown) => e,
       );
@@ -127,7 +133,7 @@ for (const [name, writeFn] of [
           throw unrelated404();
         },
       } as unknown as NodeClient;
-      const err = await writeFn({ cfg, node }, testCard()).then(
+      const err = await writeFn({ cfg: freshCfg(), node }, testCard()).then(
         () => null,
         (e: unknown) => e,
       );
@@ -145,7 +151,7 @@ for (const [name, writeFn] of [
           writes.push(fields);
         },
       } as unknown as NodeClient;
-      await writeFn({ cfg, node }, testCard());
+      await writeFn({ cfg: freshCfg(), node }, testCard());
       expect(writes.length).toBe(1);
       expect(writes[0]!.surfaces).toEqual(["src/record.ts"]);
       expect(writes[0]!.db).toBe("lastdb://personal");
