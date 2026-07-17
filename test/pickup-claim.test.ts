@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { pickupClaimResult } from "../src/commands/pickup_claim.ts";
+import { showResult } from "../src/commands/show.ts";
 import {
   boardToFields,
   cardToFields,
@@ -240,6 +241,40 @@ describe("pickup claim", () => {
       }
       return res;
     };
+
+    const result = await pickupClaimResult({
+      cfg,
+      node,
+      worker: "worker-a",
+    });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("dependent");
+    expect(result.scanned_ready).toBe(1);
+
+    const onBoard = await findCard(node, cfg, "dependent");
+    expect(onBoard?.column).toBe("doing");
+    expect(onBoard?.assignee).toBe("worker-a");
+  });
+
+  test("claims a dependency-ready todo card that show reports unblocked", async () => {
+    await seedCard(node, card({
+      slug: "done-dep",
+      title: "Done dependency",
+      column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nMerged dependency.",
+    }));
+    await seedCard(node, card({
+      slug: "dependent",
+      title: "Dependent work",
+      deps: ["done-dep"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nDependent work.",
+    }));
+
+    const shown = await showResult({ cfg, node, slug: "dependent" });
+    expect(shown.card.blocked).toBe(false);
+    expect(shown.card.blockedBy).toEqual([]);
+    expect(shown.card.missingDeps).toEqual([]);
 
     const result = await pickupClaimResult({
       cfg,
