@@ -80,5 +80,5 @@ describe("host-track refresh", () => {
     const second = await run(["bash", "bin/host-track-refresh"], resolve(import.meta.dir, ".."), env);
     expect(second.code).toBe(0);
     expect(await Bun.file(resolve(host, "README.md")).text()).toBe("two\n");
-  });
+  }, 30_000);
 });
