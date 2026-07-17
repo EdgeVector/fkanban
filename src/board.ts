@@ -3,6 +3,10 @@
 
 import { DEFAULT_BOARD_SLUG, resolveColumns } from "./schemas.ts";
 import { normalizeKind, sortCards, type Board, type Card, type DepStatus } from "./record.ts";
+import {
+  formatPipelineStatusLines,
+  type PipelineAttachResult,
+} from "./pipeline_status.ts";
 
 export type RenderOptions = {
   // Restrict to a single column.
@@ -301,6 +305,7 @@ export function renderCardDetail(
   c: Card,
   color = defaultColor(),
   status?: DepStatus,
+  pipeline?: PipelineAttachResult,
 ): string {
   const lines: string[] = [];
   const blocked = status?.blocked ? paint(color, "yellow", " 🔒 blocked") : "";
@@ -325,6 +330,11 @@ export function renderCardDetail(
     lines.push(`deps: ${c.deps.map((d) => renderDep(d, color, status)).join("  ")}`);
     if (status && status.missing.length > 0) {
       lines.push(paint(color, "dim", `  (no card found for: ${status.missing.join(", ")})`));
+    }
+  }
+  if (pipeline) {
+    for (const line of formatPipelineStatusLines(pipeline, color)) {
+      lines.push(line);
     }
   }
   lines.push(paint(color, "dim", `created ${c.created_at} · updated ${c.updated_at}`));
