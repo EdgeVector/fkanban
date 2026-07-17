@@ -72,6 +72,14 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const bootstrapName = opts.bootstrapName ?? "fkanban";
   const configPath = opts.configPath ?? defaultConfigPath();
   const existing = tryReadConfig(configPath);
+  assertSafePrimaryConfigRepoint({
+    existing,
+    requestedNodeSocketPath: opts.nodeSocketPath,
+    configPath,
+    hasExplicitConfigPath:
+      opts.configPath !== undefined ||
+      Boolean(process.env.KANBAN_CONFIG || process.env.FKANBAN_CONFIG),
+  });
 
   const STALE_NODE_URLS = new Set([
     "http://127.0.0.1:9001",
@@ -240,6 +248,31 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   printNextSteps(print, bootstrapped || freshFkanbanConfig);
 
   return { config, bootstrapped };
+}
+
+export function assertSafePrimaryConfigRepoint(args: {
+  existing: Config | null;
+  requestedNodeSocketPath: string | undefined;
+  configPath: string;
+  hasExplicitConfigPath: boolean;
+}): void {
+  const { existing, requestedNodeSocketPath, configPath, hasExplicitConfigPath } = args;
+  if (!existing || !requestedNodeSocketPath) return;
+  if (hasExplicitConfigPath) return;
+
+  const currentSocketPath = resolveSocketPath({ nodeSocketPath: existing.nodeSocketPath });
+  const requestedSocketPath = resolveSocketPath({ nodeSocketPath: requestedNodeSocketPath });
+  if (requestedSocketPath === currentSocketPath) return;
+
+  throw new FkanbanError({
+    code: "unsafe_primary_config_repoint",
+    message:
+      `Refusing to rewrite primary config ${configPath} from socket ` +
+      `${currentSocketPath} to ${requestedSocketPath}.`,
+    hint:
+      "Use KANBAN_CONFIG or FKANBAN_CONFIG to write an alternate config for " +
+      "test-node init, or re-run against the configured primary socket.",
+  });
 }
 
 /**
