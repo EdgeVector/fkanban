@@ -1832,13 +1832,18 @@ if (import.meta.main) {
   console.log = (...args: unknown[]): void => writeAllSync(1, format(...args) + "\n");
   console.error = (...args: unknown[]): void => writeAllSync(2, format(...args) + "\n");
 
+  const argv = process.argv.slice(2);
   let captureTopLevel: CaptureSentryException = async () => {};
+  const dispatch =
+    argv[0] === "add"
+      ? main(argv)
+      : initCliSentry()
+        .then((capture) => {
+          captureTopLevel = capture;
+          return main(argv);
+        });
 
-  initCliSentry()
-    .then((capture) => {
-      captureTopLevel = capture;
-      return main(process.argv.slice(2));
-    })
+  dispatch
     .then((code) => process.exit(code))
     .catch(async (err) => {
       if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
