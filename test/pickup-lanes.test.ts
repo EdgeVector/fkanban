@@ -27,7 +27,7 @@ function card(partial: Partial<Card> & { slug: string; title?: string }): Card {
     tags: partial.tags ?? [],
     deps: partial.deps ?? [],
     surfaces: partial.surfaces ?? [],
-    position: partial.position ?? 0,
+    position: partial.position ?? "0",
     created_at: partial.created_at ?? now,
     updated_at: partial.updated_at ?? now,
     repo: partial.repo ?? "EdgeVector/fold",
