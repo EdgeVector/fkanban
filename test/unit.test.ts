@@ -38,7 +38,7 @@ import {
   type Card,
 } from "../src/record.ts";
 import { FkanbanError, type NodeClient, type QueryResponse, type QueryRow } from "../src/client.ts";
-import { listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
+import { DEFAULT_COLUMN_LIMIT, listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
 import {
   GATES_LOCAL_SCHEMA,
   declareGatesLink,
@@ -59,7 +59,7 @@ import {
 import { renderBoard, renderSearchResults, renderWideTable } from "../src/board.ts";
 import { doctor } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
-import { TOP_HELP, COMMAND_HELP, resolveHelp, suggestFlag } from "../src/cli.ts";
+import { TOP_HELP, COMMAND_HELP, commandHelpHint, resolveHelp, suggestFlag } from "../src/cli.ts";
 import { levenshtein, suggestClosest } from "../src/suggest.ts";
 
 function card(partial: Partial<Card>): Card {
@@ -130,7 +130,7 @@ describe("schemas", () => {
   });
 
   test("default columns are the kanban lifecycle", () => {
-    expect([...DEFAULT_COLUMNS]).toEqual(["backlog", "todo", "doing", "review", "done"]);
+    expect([...DEFAULT_COLUMNS]).toEqual(["backlog", "todo", "doing", "done"]);
     expect(isDefaultColumn("doing")).toBe(true);
     expect(isDefaultColumn("nope")).toBe(false);
   });
@@ -152,9 +152,10 @@ describe("column validation", () => {
     expect(() => ensureColumn("doing", [])).not.toThrow();
     expect(() => ensureColumn("nonsense", [])).toThrow(FkanbanError);
   });
-  test("honours a board's custom columns", () => {
-    expect(() => ensureColumn("qa", ["dev", "qa", "ship"])).not.toThrow();
-    expect(() => ensureColumn("doing", ["dev", "qa", "ship"])).toThrow(FkanbanError);
+  test("ignores board custom columns — only fixed set is valid", () => {
+    expect(() => ensureColumn("qa", ["dev", "qa", "ship"])).toThrow(FkanbanError);
+    expect(() => ensureColumn("doing", ["dev", "qa", "ship"])).not.toThrow();
+    expect(() => ensureColumn("todo", [])).not.toThrow();
   });
 });
 
@@ -286,37 +287,35 @@ describe("dependencies", () => {
 
   // --- dep done-ness uses the dep board's TERMINAL column, not literal "done" ---
 
-  test("boardTerminalMap maps each board slug to its last column", () => {
+  test("boardTerminalMap maps every board slug to fixed terminal `done`", () => {
     const m = boardTerminalMap([
       { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
       { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-      // A degenerate empty-columns board contributes no entry (falls back to "done").
       { slug: "empty", title: "E", body: "", columns: [], created_at: "", updated_at: "" },
     ]);
-    expect(m.get("zz")).toBe("ship");
+    expect(m.get("zz")).toBe("done");
     expect(m.get("default")).toBe("done");
-    expect(m.has("empty")).toBe(false);
+    expect(m.get("empty")).toBe("done");
   });
 
-  test("custom-board dep is satisfied once it reaches that board's terminal column", () => {
+  test("dep is satisfied once it reaches fixed terminal column `done`", () => {
     const terminal = boardTerminalMap([
-      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+      { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
     ]);
-    // c1 is in `ship`, the LAST column of board zz — as done as that board allows.
-    const c1 = card({ slug: "c1", board: "zz", column: "ship" });
-    const c2 = card({ slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
+    const c1 = card({ slug: "c1", board: "zz", column: "done" });
+    const c2 = card({ slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
     const all = [c1, c2];
     expect(depStatus(c2, all, terminal).blocked).toBe(false);
     expect(blockedSlugSet([c2], all, terminal).has("c2")).toBe(false);
   });
 
-  test("custom-board dep in a NON-terminal column still blocks", () => {
+  test("dep in a NON-terminal column still blocks", () => {
     const terminal = boardTerminalMap([
-      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
+      { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
     ]);
-    // c1 is in `build`, not the last column — so c2 is still blocked.
-    const c1 = card({ slug: "c1", board: "zz", column: "build" });
-    const c2 = card({ slug: "c2", board: "zz", column: "spec", deps: ["c1"] });
+    // c1 is in `doing`, not terminal — so c2 is still blocked.
+    const c1 = card({ slug: "c1", board: "zz", column: "doing" });
+    const c2 = card({ slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
     const s = depStatus(c2, [c1, c2], terminal);
     expect(s.blocked).toBe(true);
     expect(s.blockedBy).toEqual(["c1"]);
@@ -326,11 +325,11 @@ describe("dependencies", () => {
     const terminal = boardTerminalMap([
       { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
     ]);
-    // Identical to the legacy behavior: `review` does NOT satisfy; `done` does.
-    const inReview = card({ slug: "a", column: "review" });
+    // Non-terminal columns (e.g. leftover `review` label) do NOT satisfy; `done` does.
+    const inDoing = card({ slug: "a", column: "doing" });
     const inDone = card({ slug: "b", column: "done" });
     const x = card({ slug: "x", column: "todo", deps: ["a", "b"] });
-    const all = [inReview, inDone, x];
+    const all = [inDoing, inDone, x];
     // With the map AND without it (omitted → falls back to "done") behaves identically.
     expect(depStatus(x, all, terminal).blockedBy).toEqual(["a"]);
     expect(depStatus(x, all).blockedBy).toEqual(["a"]);
@@ -349,11 +348,11 @@ describe("dependencies", () => {
     expect(depStatus(unblocked, all, empty).blocked).toBe(false); // `done` satisfies
   });
 
-  test("only doing/review/done are gating (working) columns", () => {
+  test("only doing/done are gating (working) columns", () => {
     expect(isWorkingColumn("backlog")).toBe(false);
     expect(isWorkingColumn("todo")).toBe(false);
     expect(isWorkingColumn("doing")).toBe(true);
-    expect(isWorkingColumn("review")).toBe(true);
+    expect(isWorkingColumn("review")).toBe(false);
     expect(isWorkingColumn("done")).toBe(true);
   });
 
@@ -782,9 +781,9 @@ describe("per-command help", () => {
 
   test("each entry names its command, shows a Usage line + an example, and the footer", () => {
     for (const [cmd, text] of Object.entries(COMMAND_HELP)) {
-      expect(text).toContain(`kanban ${cmd}`);
+      expect(text).toContain(`fkanban ${cmd}`);
       expect(text).toContain("Usage:");
-      expect(text).toContain("Run `kanban help` for all commands.");
+      expect(text).toContain("Run `fkanban help` for all commands.");
     }
   });
 
@@ -814,6 +813,12 @@ describe("per-command help", () => {
     expect(resolveHelp("list", false)).toBeUndefined();
   });
 
+  test("commandHelpHint points known commands at per-command help", () => {
+    expect(commandHelpHint("add")).toBe("add --help");
+    expect(commandHelpHint("bogus")).toBe("help");
+    expect(commandHelpHint(undefined)).toBe("help");
+  });
+
   test("resolveHelp routes `help <command>` to that command's help", () => {
     // `fkanban help add` is byte-identical to `fkanban add --help`.
     expect(resolveHelp("help", false, "add")).toBe(COMMAND_HELP.add!);
@@ -835,8 +840,17 @@ describe("per-command help", () => {
   });
 
   test("TOP_HELP advertises per-command help discovery", () => {
-    expect(TOP_HELP).toContain("kanban help <command>");
-    expect(TOP_HELP).toContain("kanban <command> --help");
+    expect(TOP_HELP).toContain("fkanban help <command>");
+    expect(TOP_HELP).toContain("fkanban <command> --help");
+    expect(TOP_HELP).not.toMatch(/(^|[^f])kanban <command>/);
+  });
+
+  test("help copy uses the current command name and no-review column model", () => {
+    const helpText = [TOP_HELP, ...Object.values(COMMAND_HELP)].join("\n\n");
+    expect(TOP_HELP).toContain("Columns (fixed on every board): backlog → todo → doing → done");
+    expect(helpText).not.toMatch(/doing\/review\/done|doing\/review cards|doing → review → done/);
+    expect(helpText).not.toContain("Run `kanban help`");
+    expect(helpText).not.toMatch(/(^|[^f])kanban <command>/);
   });
 
   test("list help advertises the wide table view", () => {
@@ -1183,9 +1197,14 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
   // head/tail slice is deterministic. `todo` is a non-terminal column (head
   // slice); `done` is the terminal column (tail slice — most recent kept).
   const corpus: Card[] = [
-    card({ slug: "t1", column: "todo", position: "1" }),
-    card({ slug: "t2", column: "todo", position: "2" }),
-    card({ slug: "t3", column: "todo", position: "3" }),
+    ...Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) =>
+      card({
+        slug: `t${i + 1}`,
+        column: "todo",
+        position: String(i + 1),
+        body: i === 0 ? "long ".repeat(80) : "",
+      }),
+    ),
     card({ slug: "d1", column: "done", position: "1" }),
     card({ slug: "d2", column: "done", position: "2" }),
     card({ slug: "d3", column: "done", position: "3" }),
@@ -1239,8 +1258,23 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
     return (JSON.parse(out) as Card[]).map((c) => c.slug);
   }
 
-  test("no --limit → JSON is uncapped (full filtered board, no implicit 12-cap)", async () => {
-    expect((await jsonSlugs({})).sort()).toEqual(["d1", "d2", "d3", "t1", "t2", "t3"]);
+  test("no --limit → broad JSON uses the default per-column cap and body previews", async () => {
+    const out = await listCmd({ cfg, node: populatedNode(corpus), json: true });
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed.map((c) => c.slug).sort()).toEqual([
+      "d1",
+      "d2",
+      "d3",
+      ...Array.from({ length: DEFAULT_COLUMN_LIMIT }, (_, i) => `t${i + 1}`),
+    ].sort());
+    expect(parsed.find((c) => c.slug === "t1")!.body.length).toBeLessThanOrEqual(200);
+    expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
+  });
+
+  test("column-filtered JSON stays uncapped for pickup-style narrow reads", async () => {
+    expect(await jsonSlugs({ column: "todo" })).toEqual(
+      Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
+    );
   });
 
   test("explicit --limit caps a single column to N (matches the text head slice)", async () => {
@@ -1260,10 +1294,8 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
       "d1",
       "d2",
       "d3",
-      "t1",
-      "t2",
-      "t3",
-    ]);
+      ...Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
+    ].sort());
   });
 });
 

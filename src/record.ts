@@ -8,6 +8,7 @@ import {
   DEFAULT_COLUMNS,
   CARD_OPTIONAL_SCHEMA_FIELDS,
   fieldsFor,
+  fixedColumns,
   isDefaultColumn,
   resolveColumns,
   schemaFor,
@@ -166,7 +167,9 @@ export function blockedByHint(): string {
 // what `move` refuses (unless --force). NOTE: this gate list is still the
 // default-board column names — generalizing which columns count as "working" on
 // an arbitrary board is tracked separately and intentionally out of scope here.
-export const WORKING_COLUMNS = ["doing", "review", "done"] as const;
+// Working columns that gate dependency enforcement on the default board.
+// (No `review` — incomplete work stays todo/doing; terminal is done.)
+export const WORKING_COLUMNS = ["doing", "done"] as const;
 
 export function isWorkingColumn(column: string): boolean {
   return (WORKING_COLUMNS as readonly string[]).includes(column);
@@ -183,11 +186,12 @@ export function doneAtForColumnTransition(
   boardColumns: readonly string[],
   now: string,
 ): string {
+  const terminal = terminalColumn(boardColumns);
+  if (targetColumn !== terminal) return "";
   const existing = card?.done_at ?? "";
   if (existing) return existing;
-  const terminal = terminalColumn(boardColumns);
   const fromColumn = card?.column ?? "";
-  return targetColumn === terminal && fromColumn !== terminal ? now : "";
+  return fromColumn !== terminal ? now : "";
 }
 
 // ── Repo/Base header auto-derivation ────────────────────────────────────────
@@ -413,7 +417,7 @@ export type HeaderDerivationResult = {
 // (backlog/todo) auto-stamp the header when derivable, leave no-signal cards
 // headerless, and — only in `todo`, where it blocks pickup — surface a real
 // cross-repo conflict as a needs_human hold (so it's loud, not silently skipped).
-// Working columns (doing/review/done) are left untouched. `warn` is injected so
+// Working columns (doing/done) are left untouched. `warn` is injected so
 // it's testable / silenceable.
 export function applyHeaderDerivation(
   card: { slug: string; body: string; tags: string[]; title: string; column: string },
@@ -474,7 +478,7 @@ export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): 
 // serializes or re-grooms it.
 export const PICKUP_AREA_TAG_PREFIX = "area:";
 export const PICKUP_AREA_BLOCK_PREFIX = "Pickup area overlap:";
-export const PICKUP_AREA_ACTIVE_COLUMNS = ["todo", "doing", "review"] as const;
+export const PICKUP_AREA_ACTIVE_COLUMNS = ["todo", "doing"] as const;
 const PICKUP_AREA_ACTIVE_COLUMN_SET = new Set<string>(PICKUP_AREA_ACTIVE_COLUMNS);
 export const PICKUP_AREA_PEER_FIELDS = [
   "slug",
@@ -816,8 +820,18 @@ export const OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 // into the value (observed corrupting a backfill of existing cards). A trailing
 // inline `# ...` comment is stripped before the token is read.
 export function parseBodyHeader(body: string, name: string): string {
-  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
-  const m = body.match(re);
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "i");
+  let m: RegExpMatchArray | null = null;
+  let inFence = false;
+  for (const line of body.split("\n")) {
+    if (/^[ \t]*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    m = line.match(re);
+    if (m) break;
+  }
   if (!m) return "";
   // Cut at a literal escaped newline ("o/n\nBase:") for bodies stored that way,
   // remove an inline comment, then take the first token so space-joined headers
@@ -883,11 +897,29 @@ export function applyDbLocatorForWrite(card: Card, ambientDbLocator: string | un
 }
 
 export function parseBodyListHeader(body: string, name: string): string[] {
-  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "im");
-  const m = body.match(re);
+  const re = new RegExp(`^[ \\t]*${name}:[ \\t]*(.*)$`, "i");
+  let m: RegExpMatchArray | null = null;
+  let inFence = false;
+  for (const line of body.split("\n")) {
+    if (/^[ \t]*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    m = line.match(re);
+    if (m) break;
+  }
   if (!m) return [];
   const line = stripTrailingInlineComment(m[1]!.split("\\n")[0]!);
   return normalizeSurfaces(line.split(","));
+}
+
+export function parseBodyTagsHeader(body: string): string[] {
+  const re = /^[ \t]*Tags:[ \t]*(.*)$/im;
+  const m = stripFencedCodeBlocks(body).match(re);
+  if (!m) return [];
+  const line = stripTrailingInlineComment(m[1]!.split("\\n")[0]!);
+  return normalizeTags(line.split(/[,\s]+/));
 }
 
 export function writeBodyListHeader(body: string, name: string, values: string[]): string {
@@ -1111,6 +1143,10 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
     const surfaces = parseBodyListHeader(card.body, "Surfaces");
     if (surfaces.length > 0) out.surfaces = surfaces;
   }
+  if (!card.branch) {
+    const branch = parseBodyHeader(card.body, "Branch");
+    if (branch) out.branch = branch;
+  }
   if (!card.db) {
     const db = normalizeDbLocator(parseBodyHeader(card.body, "Db"));
     if (db) out.db = db;
@@ -1153,15 +1189,14 @@ export type DepStatus = {
 // `done`, so nothing regresses when the board context is unavailable.
 export const FALLBACK_TERMINAL_COLUMN = "done";
 
-// Map of board slug → that board's terminal (last) column. A dependency is
-// "done" once its card reaches this column on the dep card's OWN board, so a
-// board whose final column isn't named `done` (e.g. `spec,build,ship`) can
-// still unblock dependents. Built once per command from `listBoards`.
+// Map of board slug → that board's terminal column. Columns are fixed
+// (backlog → todo → doing → done), so every board's terminal is `done`.
+// Built once per command from `listBoards` for callers that still key by board.
 export function boardTerminalMap(boards: Board[]): Map<string, string> {
   const m = new Map<string, string>();
+  const terminal = terminalColumn(fixedColumns());
   for (const b of boards) {
-    const terminal = b.columns[b.columns.length - 1];
-    if (terminal) m.set(b.slug, terminal);
+    m.set(b.slug, terminal);
   }
   return m;
 }
@@ -1177,7 +1212,7 @@ function terminalColumnFor(
 
 // Whether moving a blocked card INTO `column` (on board `boardSlug`) is gated by
 // the dependency soft-block. A blocked card may not enter a column that is a
-// default-named working column (doing/review/done) OR that is `boardSlug`'s own
+// default-named working column (doing/done) OR that is `boardSlug`'s own
 // terminal column — so on a custom board (e.g. `spec,build,ship`) a blocked card
 // can't be *completed* into its terminal column (`ship`) without --force, even
 // though that board has none of the default working columns. The default board's
@@ -1946,14 +1981,15 @@ export function validateSlug(slug: string): void {
   }
 }
 
-// A card's column must be one of the board's columns (or, when the board has
-// no explicit column list, one of the default columns).
-export function ensureColumn(column: string, boardColumns: string[]): void {
+// A card's column must be one of the FIXED kanban columns
+// (backlog | todo | doing | done). `boardColumns` is ignored — boards cannot
+// invent extra column names.
+export function ensureColumn(column: string, boardColumns?: string[]): void {
   const valid = resolveColumns(boardColumns);
   if (!valid.includes(column)) {
     throw new FkanbanError({
       code: "invalid_column",
-      message: `"${column}" is not a column on this board.`,
+      message: `"${column}" is not a valid kanban column.`,
       hint: `Valid columns: ${valid.join(" | ")}`,
     });
   }

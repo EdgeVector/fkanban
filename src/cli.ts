@@ -7,6 +7,7 @@ import { parseArgs, format } from "node:util";
 import * as fs from "node:fs";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, type Verbose } from "./client.ts";
@@ -23,6 +24,7 @@ import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
+import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
@@ -47,14 +49,14 @@ import {
   formatError,
 } from "./format.ts";
 
-export const TOP_HELP = `kanban — a kanban board over fold_db
+export const TOP_HELP = `fkanban — a kanban board over fold_db
 
 Usage:
-  kanban <command> [options]
+  fkanban <command> [options]
 
 Global:
   --db <locator>       write-target DB (lastdb://personal | lastdb://org/<slug>/<db>);
-                       also read from env LASTDB_DB (set by org kanban ...)
+                       also read from env LASTDB_DB (set by org/fkanban wrappers ...)
 
 Commands:
   init                 bootstrap a node + declare private schemas + seed default board
@@ -67,56 +69,57 @@ Commands:
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
   list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
-  overlap <slug>       report declared surface conflicts with doing/review cards in the same repo
+  overlap <slug>       report declared surface conflicts with doing cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
+  pickup claim         claim the next ready card into doing (priority + overlap + CAS)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
-  hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for kanban/gstack
+  hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
-  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json)
+  search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json --full-body)
   gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card (refuses if live cards depend on it)
-  board create <slug>  create/update a board (--title --columns a,b,c)
+  board create <slug>  create/update a board (--title; columns fixed)
   board list           list boards (--json)
   board rm <slug>      soft-delete a board (always refuses default; refuses
                        live cards unless --force)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
+  which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
   mcp                  start an MCP server over stdio
-  version              print the kanban version and exit (alias of --version)
-  which                print CLI executable/source provenance (--json)
+  version              print the fkanban version and exit (alias of --version)
   help                 print this help
 
-Run \`kanban help <command>\` or \`kanban <command> --help\` for command details.
+Run \`fkanban help <command>\` or \`fkanban <command> --help\` for command details.
 
 Global flags:
   --verbose            echo HTTP requests + responses
   --json               machine-readable output (add/move/dep/rm/board create/
                        board rm echo the write result as JSON; read commands too)
   --help, -h           print this help
-  --version, -V        print the kanban version and exit
+  --version, -V        print the fkanban version and exit
 
 Dependencies: a card with deps is 🔒 blocked until each dep card reaches its
-board's final column. \`move\`/\`add\` into doing/review/done — or the board's own
+board's final column. \`move\`/\`add\` into doing/done — or the board's own
 final column — refuses a blocked card unless --force.
 
-Columns (default board): backlog → todo → doing → review → done`;
+Columns (fixed on every board): backlog → todo → doing → done`;
 
-const HELP_FOOTER = "Run `kanban help` for all commands.";
+const HELP_FOOTER = "Run `fkanban help` for all commands.";
 
 function withFooter(body: string): string {
   return `${body}\n\n${HELP_FOOTER}`;
 }
 
-// Per-command usage. `kanban <cmd> --help` (or `-h`) prints the matching
+// Per-command usage. `fkanban <cmd> --help` (or `-h`) prints the matching
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
-  init: withFooter(`kanban init — bootstrap a node + declare private schemas + seed the default board
+  init: withFooter(`fkanban init — bootstrap a node + declare private schemas + seed the default board
 
 Usage:
-  kanban init [options]
+  fkanban init [options]
 
 Options:
   --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1)
@@ -127,17 +130,17 @@ Options:
 
 Private schema setup is performed by the NODE through Mini's local
 /api/apps/declare-schema route. The CLI never contacts --schema-service-url;
-that URL is only recorded in ~/.kanban/config.json for diagnostics (it shows
-up in \`kanban doctor\`). If init fails with app_schema_declare_unsupported,
+that URL is only recorded in ~/.fkanban/config.json for diagnostics (it shows
+up in \`fkanban doctor\`). If init fails with app_schema_declare_unsupported,
 upgrade the node to a Mini build with local app-schema declaration.
 
 Example:
-  kanban init --node-url http://127.0.0.1 --name "Tom's board"`),
+  fkanban init --node-url http://127.0.0.1 --name "Tom's board"`),
 
-  add: withFooter(`kanban add — create or update a card (idempotent by slug)
+  add: withFooter(`fkanban add — create or update a card (idempotent by slug)
 
 Usage:
-  kanban add <slug> [options]            # --body also reads stdin if piped
+  fkanban add <slug> [options]            # --body also reads stdin if piped
 
 Options:
   --title <text>        card title
@@ -153,7 +156,7 @@ Options:
   --surfaces a,b        comma-separated repo-relative path globs or subsystem
                         names this card expects to touch
   --priority <P0-P3>    card priority (P0 = most urgent … P3 = least); stored as
-                        a p0–p3 tag. \`kanban rank\` orders a column by this so
+                        a p0–p3 tag. \`fkanban rank\` orders a column by this so
                         fkanban-pickup works urgent cards first.
   --body <text>         card body (Markdown); replaces the whole body.
                         Also reads the body from piped stdin when no --body
@@ -181,15 +184,15 @@ Multi-line bodies — pipe via stdin, don't inline:
   run as commands ((eval): command not found: <word>) and the written body
   is silently corrupted/truncated. The stdin path never puts the body on the
   command line, so it is verbatim and immune.
-  printf '%s' "$BODY" | kanban add ship-login --title "Ship login" --column todo
+  printf '%s' "$BODY" | fkanban add ship-login --title "Ship login" --column todo
 
 Example:
-  kanban add ship-login --title "Ship login" --column todo --priority P1 --tags auth`),
+  fkanban add ship-login --title "Ship login" --column todo --priority P1 --tags auth`),
 
-  mark: withFooter(`kanban mark — append one marker line to an existing card body
+  mark: withFooter(`fkanban mark — append one marker line to an existing card body
 
 Usage:
-  kanban mark <slug> "<line>" [--json]
+  fkanban mark <slug> "<line>" [--json]
 
 Appends the line only if it is not already present. This preserves the card's
 board, column, tags, kind, and other metadata; it never replaces the full body.
@@ -199,12 +202,12 @@ Options:
   --json                echo the write result as JSON
 
 Example:
-  kanban mark ship-login "NEEDS-HUMAN: missing DONE-WHEN"`),
+  fkanban mark ship-login "NEEDS-HUMAN: missing DONE-WHEN"`),
 
-  move: withFooter(`kanban move — move a card to another column
+  move: withFooter(`fkanban move — move a card to another column
 
 Usage:
-  kanban move <slug> <column> [options]
+  fkanban move <slug> <column> [options]
 
 Options:
   --from <col>          claim guard: only move if the card is currently in col
@@ -215,13 +218,13 @@ Options:
   --json                echo the write result as JSON
 
 Example:
-  kanban move ship-login doing --from todo`),
+  fkanban move ship-login doing --from todo`),
 
-  dep: withFooter(`kanban dep — manage dependency edges between cards
+  dep: withFooter(`fkanban dep — manage dependency edges between cards
 
 Usage:
-  kanban dep add <slug> <dep>     # card <slug> depends on <dep>
-  kanban dep rm  <slug> <dep>     # remove the edge
+  fkanban dep add <slug> <dep>     # card <slug> depends on <dep>
+  fkanban dep rm  <slug> <dep>     # remove the edge
 
 Options:
   --json                echo the write result as JSON
@@ -232,13 +235,13 @@ body. The dependency card must already exist, and edges that would form a cycle
 (direct or transitive) are rejected (exit 2).
 
 Example:
-  kanban dep add ui api`),
+  fkanban dep add ui api`),
 
-  tag: withFooter(`kanban tag — add or remove tags on a card, incrementally
+  tag: withFooter(`fkanban tag — add or remove tags on a card, incrementally
 
 Usage:
-  kanban tag add <slug> <tag> [tag...]   # union into the card's tags
-  kanban tag rm  <slug> <tag> [tag...]   # remove from the card's tags
+  fkanban tag add <slug> <tag> [tag...]   # union into the card's tags
+  fkanban tag rm  <slug> <tag> [tag...]   # remove from the card's tags
 
 Options:
   --json                echo the write result as JSON
@@ -250,15 +253,15 @@ Reserved tags (\`dep:<slug>\` legacy dependency tags, the delete tombstone) are
 rejected — use \`dep\`/\`rm\`. Dependency edges live in the separate deps field.
 
 Example:
-  kanban tag add ship-login p1
-  kanban tag rm  ship-login blocked`),
+  fkanban tag add ship-login p1
+  fkanban tag rm  ship-login blocked`),
 
-  overlap: withFooter(`kanban overlap — report declared file-surface conflicts
+  overlap: withFooter(`fkanban overlap — report declared file-surface conflicts
 
 Usage:
-  kanban overlap <slug> [--json]
+  fkanban overlap <slug> [--json]
 
-Compares the candidate card's surfaces against every doing/review card with the
+Compares the candidate card's surfaces against every doing card with the
 same repo. Surfaces come from the structured field or a body header:
   Surfaces: src/cli.ts, src/mcp/**
 
@@ -266,12 +269,12 @@ Missing surfaces are adoption warnings, not conflicts: the command exits 0 when
 the answer is unknown. Declared conflicts exit 2 and name the matching patterns.
 
 Example:
-  kanban overlap ship-login`),
+  fkanban overlap ship-login`),
 
-  list: withFooter(`kanban list — render a board as columns of cards
+  list: withFooter(`fkanban list — render a board as columns of cards
 
 Usage:
-  kanban list [options]
+  fkanban list [options]
 
 Options:
   --board <slug>        board to render (default: default)
@@ -283,38 +286,56 @@ Options:
   --field <name>        project one field as TSV; repeat for multiple fields
                         (e.g. --field slug --field pr)
   --limit <N>           cap cards per column (applies to text AND --json)
-  --all                 show every card (no per-column cap; --json default)
-  --json                machine-readable output (unlimited unless --limit set)
+  --all                 show every card (no per-column cap; --json previews bodies)
+  --json                machine-readable output (broad reads are capped previews)
   --full-body, --full_body
                         compatibility alias for --json with complete bodies
 
 Example:
-  kanban list --board default --limit 10
-  kanban list --full-body
-  kanban list --tag kanban --column doing
-  kanban list --column todo --field slug
-  kanban list --wide --column doing`),
+  fkanban list --board default --limit 10
+  fkanban list --full-body
+  fkanban list --tag fkanban --column doing
+  fkanban list --column todo --field slug
+  fkanban list --wide --column doing`),
 
-  pickup: withFooter(`kanban pickup — report what can be picked up now
+  pickup: withFooter(`fkanban pickup — readiness report + atomic next-card claim
 
 Usage:
-  kanban pickup status [--json]
+  fkanban pickup status [--json]
+  fkanban pickup claim [options]
 
-Classifies every active (non-terminal) card as pickup-ready, blocked-on-dependency,
-human-gated, malformed-routing, parked/non-work, collision, or stale-metadata.
-This is a read-only board hygiene report; it does not start pickup work.
+status — Classifies every active (non-terminal) card as pickup-ready,
+blocked-on-dependency, human-gated, malformed-routing, parked/non-work,
+collision, or stale-metadata. Read-only hygiene report.
 
-Options:
+claim — Give the agent the next workable card: walk pickup-ready todo cards
+in priority order (P0→P3), skip surface conflicts with doing in the
+same repo, and CAS-claim the first winner into doing (\`move --from todo\`).
+On claim_conflict (another worker won), try the next candidate. Prefer this
+over hand-rolling list + overlap + move in prompts.
+
+status options:
   --json                machine-readable { scanned, ready, counts, cards }
 
-Example:
-  kanban pickup status
-  kanban pickup status --json`),
+claim options:
+  --board <slug>        board to claim from (default: default)
+  --worker <id>         stamp card assignee after claim (e.g. last-stack-fkanban-pickup-w2)
+  --prefer-repo a,b     try these repos first (still falls through)
+  --exclude-repo a,b    never claim these repos
+  --max-doing <n>       refuse with at-capacity when board doing count ≥ n
+  --dry-run             select the next card without moving it
+  --json                machine-readable claim result
 
-  rank: withFooter(`kanban rank — reorder a column by card priority
+Example:
+  fkanban pickup status
+  fkanban pickup status --json
+  fkanban pickup claim --json --worker last-stack-fkanban-pickup
+  fkanban pickup claim --dry-run --prefer-repo EdgeVector/fold`),
+
+  rank: withFooter(`fkanban rank — reorder a column by card priority
 
 Usage:
-  kanban rank [options]
+  fkanban rank [options]
 
 Reassigns each work card's \`position\` in priority order so \`fkanban-pickup\` (which
 drains the LOWEST position first) works the most urgent cards first. Priority is
@@ -331,13 +352,13 @@ Options:
   --json                echo the resulting order as JSON
 
 Example:
-  kanban rank
-  kanban rank --board roadmap --column backlog`),
+  fkanban rank
+  fkanban rank --board roadmap --column backlog`),
 
-  search: withFooter(`kanban search — find cards by text across slug/title/body/tags/assignee
+  search: withFooter(`fkanban search — find cards by text across slug/title/body/tags/assignee
 
 Usage:
-  kanban search <query> [options]        # multi-word queries are AND-matched
+  fkanban search <query> [options]        # multi-word queries are AND-matched
 
 Options:
   --board <slug>        restrict to one board
@@ -345,18 +366,21 @@ Options:
   --field <name>        project one field as TSV; repeat for multiple fields
                         (e.g. --field slug --field pr)
   --limit <N>           cap rendered matches (applies to text AND --json)
-  --all                 show every match (no cap; --json default)
-  --json                machine-readable output (complete unless --limit set)
+  --all                 show every match (no cap; --json previews bodies)
+  --json                machine-readable output (broad reads are capped previews)
+  --full-body, --full_body
+                        compatibility alias for --json with complete bodies
 
 Example:
-  kanban search "auth p1"
-  kanban search auth --limit 5
-  kanban search auth --all`),
+  fkanban search "auth p1"
+  fkanban search auth --limit 5
+  fkanban search auth --all
+  fkanban search auth --full-body`),
 
-  gates: withFooter(`kanban gates — list open human gates from fbrain's open-decisions ledger
+  gates: withFooter(`fkanban gates — list open human gates from fbrain's open-decisions ledger
 
 Usage:
-  kanban gates [options]
+  fkanban gates [options]
 
 Options:
   --declare-link       ask the node to declare fkanban's local Reference schema
@@ -364,33 +388,33 @@ Options:
                        (setup/proof step; requires the dev node matcher)
   --json               machine-readable open gate array
 
-Plain \`kanban gates\` is read-only: it queries kanban's app-local Reference
+Plain \`fkanban gates\` is read-only: it queries fkanban's app-local Reference
 schema, which the node translates through the persisted read-only LINK. It does
 not copy, write, clear, or own gate state.
 
-On app-isolation nodes, set FKANBAN_APP_CAPABILITY to a granted kanban
+On app-isolation nodes, set FKANBAN_APP_CAPABILITY to a granted fkanban
 CapabilityToken blob so the node treats the request as the fkanban app.
 
 Example:
-  kanban gates
-  kanban gates --declare-link`),
+  fkanban gates
+  fkanban gates --declare-link`),
 
-  show: withFooter(`kanban show — print one card in detail (deps + blocked state)
+  show: withFooter(`fkanban show — print one card in detail (deps + blocked state)
 
 Usage:
-  kanban show <slug> [options]
+  fkanban show <slug> [options]
 
 Options:
   --json                machine-readable output
   --board <slug>        accepted as a compatibility no-op; card slugs are global
 
 Example:
-  kanban show ship-login`),
+  fkanban show ship-login`),
 
-  rm: withFooter(`kanban rm — soft-delete a card (refuses while live cards depend on it)
+  rm: withFooter(`fkanban rm — soft-delete a card (refuses while live cards depend on it)
 
 Usage:
-  kanban rm <slug> [options]
+  fkanban rm <slug> [options]
 
 Options:
   --json                echo the write result as JSON
@@ -399,31 +423,31 @@ Deletion uses the node's native tombstone path. It refuses if any live card stil
 depends on the target; remove or retarget those dependency edges first.
 
 Example:
-  kanban rm ship-login`),
+  fkanban rm ship-login`),
 
-  board: withFooter(`kanban board — create/update, list, or remove boards
+  board: withFooter(`fkanban board — create/update, list, or remove boards
 
 Usage:
-  kanban board create <slug> [options]
-  kanban board list [options]
-  kanban board rm <slug> [options]
+  fkanban board create <slug> [options]
+  fkanban board list [options]
+  fkanban board rm <slug> [options]
 
 Options:
   --title <text>        board title (create)
-  --columns a,b,c       comma-separated column names (create)
+  --columns a,b,c       must be exactly backlog,todo,doing,done (or omit)
   --body <text>         board body (create)
   --force               soft-delete a board with live cards (rm); refuses if
                         outside live cards depend on cards being deleted
   --json                machine-readable output
 
 Examples:
-  kanban board create sprint --title "Sprint 1" --columns todo,doing,done
-  kanban board rm sprint`),
+  fkanban board create sprint --title "Sprint 1"
+  fkanban board rm sprint`),
 
-  migrate: withFooter(`kanban migrate — one-time board data migrations
+  migrate: withFooter(`fkanban migrate — one-time board data migrations
 
 Usage:
-  kanban migrate area-tags [--dry-run] [--json]
+  fkanban migrate area-tags [--dry-run] [--json]
 
 Subcommands:
   area-tags            re-derive the pickup \`area:*\` tags on every active
@@ -439,13 +463,13 @@ Flags:
   --json               machine-readable { scanned, changed, skippedDone, cards }
 
 Example:
-  kanban migrate area-tags --dry-run   # preview
-  kanban migrate area-tags             # apply`),
+  fkanban migrate area-tags --dry-run   # preview
+  fkanban migrate area-tags             # apply`),
 
-  groom: withFooter(`kanban groom — board hygiene reports and safe repairs
+  groom: withFooter(`fkanban groom — board hygiene reports and safe repairs
 
 Usage:
-  kanban groom stale-blockers [--apply] [--json]
+  fkanban groom stale-blockers [--apply] [--json]
 
 Subcommands:
   stale-blockers       detect stale generated pickup/blocker metadata, malformed
@@ -458,18 +482,18 @@ Flags:
   --json               machine-readable { scanned, candidates, changed, cards }
 
 Examples:
-  kanban groom stale-blockers
-  kanban groom stale-blockers --apply`),
+  fkanban groom stale-blockers
+  fkanban groom stale-blockers --apply`),
 
-  hygiene: withFooter(`kanban hygiene — local machine-hygiene helpers
+  hygiene: withFooter(`fkanban hygiene — local machine-hygiene helpers
 
 Usage:
-  kanban hygiene orphan-bun [--apply] [--min-age-hours N] [--pileup-threshold N] [--json]
+  fkanban hygiene orphan-bun [--apply] [--min-age-hours N] [--pileup-threshold N] [--json]
 
 Subcommands:
   orphan-bun           list or signal stale PPID-1 Bun helper processes whose
-                       command path matches the explicit kanban/gstack
-                       allowlist: kanban MCP, gstack browse server, and
+                       command path matches the explicit fkanban/gstack
+                       allowlist: fkanban MCP, gstack browse server, and
                        gstack terminal-agent. Dry-run by default.
 
 Flags:
@@ -480,13 +504,13 @@ Flags:
   --json               machine-readable report
 
 Examples:
-  kanban hygiene orphan-bun
-  kanban hygiene orphan-bun --apply`),
+  fkanban hygiene orphan-bun
+  fkanban hygiene orphan-bun --apply`),
 
-  doctor: withFooter(`kanban doctor — health-check the local setup
+  doctor: withFooter(`fkanban doctor — health-check the local setup
 
 Usage:
-  kanban doctor [--json]
+  fkanban doctor [--json]
 
 Verifies config, node reachability, and resolved schemas. Exits non-zero on
 any failed check.
@@ -494,47 +518,48 @@ any failed check.
 Flags:
   --json               machine-readable { ok, checks } report`),
 
-  mcp: withFooter(`kanban mcp — start an MCP server over stdio
+  which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
 Usage:
-  kanban mcp
+  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp] [--json]
+
+Without a target, prints the running CLI entrypoint, package version, source
+root, Bun runtime, and current working directory. This never contacts the board
+node, so it is safe for host-track and pickup preflight diagnostics.
+
+With a target, prints the resolved executable path. With --json, also reports
+the realpath and whether it lives under the expected host-track checkout.
+
+Example:
+  fkanban which
+  fkanban which --json
+  fkanban which fkanban-mcp --json`),
+
+  mcp: withFooter(`fkanban mcp — start an MCP server over stdio
+
+Usage:
+  fkanban mcp
 
 Exposes the board to MCP clients (e.g. Claude). Speaks JSON-RPC on
 stdin/stdout; not meant to be run interactively.
 
 Register with Claude Code (the \`--\` separates \`claude mcp add\` flags from
 the command):
-  claude mcp add fkanban -- kanban mcp
+  claude mcp add fkanban -- fkanban mcp
 
-Run \`kanban doctor\` to print the exact \`claude mcp add\` line for your setup
+Run \`fkanban doctor\` to print the exact \`claude mcp add\` line for your setup
 (it resolves the shim-on-PATH vs bun-entrypoint form automatically).`),
 
-  version: withFooter(`kanban version — print the kanban version and exit
+  version: withFooter(`fkanban version — print the fkanban version and exit
 
 Usage:
-  kanban version
+  fkanban version
 
 An alias of the \`--version\`/\`-V\` flag: prints just the version (from
 package.json) to stdout and exits 0.
 
 Example:
-  kanban version`),
-
-  which: withFooter(`kanban which — print CLI executable/source provenance
-
-Usage:
-  kanban which [--json]
-
-Prints the running CLI entrypoint, package version, source root, Bun runtime,
-and current working directory. This command never contacts the board node; it is
-safe for host-track and pickup preflight diagnostics.
-
-Options:
-  --json                machine-readable provenance report
-
-Example:
-  kanban which
-  kanban which --json`),
+  fkanban version`),
 };
 
 // Resolve which help text to print for the parsed argv. `cmd` is positionals[0],
@@ -561,6 +586,10 @@ export function resolveHelp(
     return cmd in COMMAND_HELP ? COMMAND_HELP[cmd] : TOP_HELP;
   }
   return undefined;
+}
+
+export function commandHelpHint(cmd: string | undefined): string {
+  return cmd !== undefined && cmd in COMMAND_HELP ? `${cmd} --help` : "help";
 }
 
 // Drain piped stdin to source `add --body` when no `--body` flag is given.
@@ -699,7 +728,7 @@ function parseIntFlag(
 ): number {
   const trimmed = raw.trim();
   const want = min === 1 ? "a positive integer" : `an integer >= ${min}`;
-  const help = cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+  const help = commandHelpHint(cmd);
   const cleanInteger = /^-?\d+$/.test(trimmed);
   const n = cleanInteger ? Number(trimmed) : NaN;
   if (!cleanInteger || !Number.isSafeInteger(n) || n < min) {
@@ -721,7 +750,7 @@ function parseIntFlag(
 function parsePriorityFlag(raw: string, cmd: string): PriorityTier {
   const tier = normalizePriority(raw);
   if (tier === null) {
-    const help = cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+    const help = commandHelpHint(cmd);
     const msg = `error: --priority must be one of ${PRIORITY_TIERS.join(", ")} (P0 = most urgent), got "${raw}".`;
     console.error(`${msg} Run \`kanban ${help}\` to see this command's flags.`);
     throw new FlagValidationError(msg);
@@ -775,7 +804,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   move: new Set(["from", "expect", "position", "force"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body"]),
   rank: new Set(["board", "column"]),
-  search: new Set(["board", "column", "field", "limit", "all"]),
+  search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body"]),
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
@@ -786,6 +815,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   migrate: new Set(["dry-run"]),
   groom: new Set(["apply", "dry-run"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
+  pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
 };
 
 type WhichReport = {
@@ -921,6 +951,10 @@ async function main(argv: string[]): Promise<number> {
         "node-socket-path": { type: "string" },
         "declare-link": { type: "boolean" },
         name: { type: "string" },
+        worker: { type: "string" },
+        "prefer-repo": { type: "string" },
+        "exclude-repo": { type: "string" },
+        "max-doing": { type: "string" },
       },
     });
   } catch (err) {
@@ -929,7 +963,7 @@ async function main(argv: string[]): Promise<number> {
       // parseArgs runs before we know the command, but the first arg that isn't
       // a flag is the command name — surface it in the hint when we have it.
       const cmd = argv.find((a) => !a.startsWith("-"));
-      const helpCmd = cmd && cmd in COMMAND_HELP ? `${cmd} --help` : "help";
+      const helpCmd = commandHelpHint(cmd);
       // Node's default message leaks library internals: a multi-line "argument
       // is ambiguous … use '--flag=-XYZ'" advice for a missing/dash-leading
       // value, or a verbose `. To specify a positional …` clause for an unknown
@@ -1046,14 +1080,6 @@ async function dispatch(
       return 0;
     }
 
-    case "which": {
-      const extra = rejectExtraPositionals(positionals, 1, "which");
-      if (extra !== undefined) return extra;
-      const report = whichReport();
-      console.log(values.json ? JSON.stringify(report) : formatWhichReport(report));
-      return 0;
-    }
-
     case "doctor": {
       const extra = rejectExtraPositionals(positionals, 1, "doctor");
       if (extra !== undefined) return extra;
@@ -1067,6 +1093,42 @@ async function dispatch(
       }
       const ok = await doctor({ verbose });
       return ok ? 0 : 1;
+    }
+
+    case "which": {
+      const name = positionals[1];
+      if (name === undefined) {
+        const report = whichReport();
+        console.log(values.json ? JSON.stringify(report) : formatWhichReport(report));
+        return 0;
+      }
+      const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp"]);
+      if (!allowed.has(name)) {
+        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp`);
+        return 2;
+      }
+      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp]");
+      if (extra !== undefined) return extra;
+      const execPath = resolveCommandPath(name);
+      if (!execPath) {
+        console.error(`kanban: ${name} not found on PATH`);
+        return 1;
+      }
+      if (values.json) {
+        const realPath = safeRealpath(execPath);
+        const home = process.env.HOME ?? "";
+        const hostTrack = home.length > 0 ? `${home}/.host-track/fkanban` : "";
+        console.log(JSON.stringify({
+          command: name,
+          exec_path: execPath,
+          real_path: realPath,
+          host_track: hostTrack,
+          under_host_track: hostTrack.length > 0 && (realPath === hostTrack || realPath.startsWith(`${hostTrack}/`)),
+        }));
+      } else {
+        console.log(execPath);
+      }
+      return 0;
     }
 
     case "add": {
@@ -1355,6 +1417,7 @@ async function dispatch(
         fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
+        fullBody: fullBodyList,
       });
       console.log(out);
       return 0;
@@ -1376,20 +1439,56 @@ async function dispatch(
     }
 
     case "pickup":
-    case "pickup-status": {
-      const usage = cmd === "pickup" ? "pickup status" : "pickup-status";
-      if (cmd === "pickup" && positionals[1] !== "status") {
-        console.error(`kanban: Unknown pickup subcommand "${positionals[1] ?? ""}". Try: pickup status`);
+    case "pickup-status":
+    case "pickup-claim": {
+      // Subcommand resolution:
+      //   pickup status | pickup claim | bare `pickup` (= status, back-compat)
+      //   pickup-status / pickup-claim aliases (single positional)
+      let sub: "status" | "claim";
+      if (cmd === "pickup-status") sub = "status";
+      else if (cmd === "pickup-claim") sub = "claim";
+      else if (positionals[1] === undefined || positionals[1] === "status") sub = "status";
+      else if (positionals[1] === "claim") sub = "claim";
+      else {
+        console.error(`kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup claim`);
         return 2;
       }
-      const extra = rejectExtraPositionals(positionals, cmd === "pickup" ? 2 : 1, usage);
+
+      const maxPos = cmd === "pickup" ? (positionals[1] === undefined ? 1 : 2) : 1;
+      const usage = cmd === "pickup" ? `pickup ${sub}` : cmd;
+      const extra = rejectExtraPositionals(positionals, maxPos, usage);
       if (extra !== undefined) return extra;
+
       const ctx = loadCtx({ verbose });
-      console.log(await pickupStatusCmd({
+      if (sub === "status") {
+        console.log(await pickupStatusCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+
+      const maxDoingRaw = values["max-doing"] as string | undefined;
+      const maxDoing = maxDoingRaw !== undefined
+        ? parseIntFlag(maxDoingRaw, "max-doing", "pickup claim", { min: 0 })
+        : undefined;
+      const result = await pickupClaimResult({
         cfg: ctx.cfg,
         node: ctx.node,
-        json: values.json as boolean | undefined,
-      }));
+        board: values.board as string | undefined,
+        worker: values.worker as string | undefined,
+        preferRepo: values["prefer-repo"] !== undefined
+          ? [values["prefer-repo"] as string]
+          : undefined,
+        excludeRepo: values["exclude-repo"] !== undefined
+          ? [values["exclude-repo"] as string]
+          : undefined,
+        maxDoing,
+        dryRun: values["dry-run"] as boolean | undefined,
+      });
+      console.log(formatPickupClaim(result, values.json as boolean | undefined));
+      // 0 even when nothing claimed — idle is a successful outcome for agents.
       return 0;
     }
 
@@ -1462,16 +1561,18 @@ async function dispatch(
           ? parseIntFlag(values.limit as string, "limit", "search", { min: 1 })
           : undefined;
       const ctx = loadCtx({ verbose });
+      const fullBodySearch = Boolean(values["full-body"] || values.full_body);
       const out = await searchCmd({
         cfg: ctx.cfg,
         node: ctx.node,
         query,
         board: values.board as string | undefined,
         column: values.column as string | undefined,
-        json: values.json as boolean | undefined,
+        json: fullBodySearch ? true : values.json as boolean | undefined,
         fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
+        fullBody: fullBodySearch,
       });
       console.log(out);
       return 0;
@@ -1622,6 +1723,23 @@ function ambientDbLocator(values: Record<string, unknown>): string | undefined {
   );
 }
 
+function resolveCommandPath(name: string): string | undefined {
+  const proc = spawnSync("sh", ["-c", `command -v ${name}`], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const out = proc.stdout.trim();
+  return proc.status === 0 && out.length > 0 ? out : undefined;
+}
+
+function safeRealpath(path: string): string {
+  try {
+    return fs.realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
 /** Stamp `Db: <locator>` when org/kanban --db (or LASTDB_DB) provides a write target. */
 export function ensureDbHeader(body: string | undefined, dbLocator: string | undefined): string | undefined {
   if (!dbLocator || dbLocator.length === 0) return body;
@@ -1659,6 +1777,23 @@ function writeAllSync(fd: number, data: string): void {
   }
 }
 
+type CaptureSentryException = (error: unknown, tags?: Record<string, string>) => Promise<void>;
+
+async function initCliSentry(): Promise<CaptureSentryException> {
+  if (!process.env.OBS_SENTRY_DSN?.trim()) {
+    return async () => {};
+  }
+  const sentry = await import("./observability/sentry.ts");
+  await sentry.initSentry({
+    service: "fkanban-cli",
+    env: {
+      ...process.env,
+      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fkanban@${pkg.version}`,
+    },
+  });
+  return sentry.captureSentryException;
+}
+
 // Route ALL CLI output through the synchronous writer. We override `console`
 // directly, NOT `process.stdout.write`: in Bun, `console.log` writes to the fd
 // natively and does NOT delegate to `process.stdout.write`, so patching the
@@ -1673,9 +1808,15 @@ if (import.meta.main) {
   console.log = (...args: unknown[]): void => writeAllSync(1, format(...args) + "\n");
   console.error = (...args: unknown[]): void => writeAllSync(2, format(...args) + "\n");
 
-  main(process.argv.slice(2))
+  let captureTopLevel: CaptureSentryException = async () => {};
+
+  initCliSentry()
+    .then((capture) => {
+      captureTopLevel = capture;
+      return main(process.argv.slice(2));
+    })
     .then((code) => process.exit(code))
-    .catch((err) => {
+    .catch(async (err) => {
       if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
         console.error(`kanban: ${err.message}`);
       } else if (err instanceof FkanbanError) {
@@ -1687,6 +1828,7 @@ if (import.meta.main) {
         // is a genuine operational failure and stays exit 1.
         process.exit(["missing_arg", "invalid_db_locator", "db_locator_mismatch"].includes(err.code) ? 2 : 1);
       } else {
+        await captureTopLevel(err, { entrypoint: "cli", top_level: "true" });
         console.error(`kanban: ${err instanceof Error ? err.message : String(err)}`);
       }
       process.exit(1);

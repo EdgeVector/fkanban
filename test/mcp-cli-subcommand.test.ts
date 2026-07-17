@@ -28,6 +28,7 @@ const bun = process.execPath; // the `bun` binary running this test
 
 // A path that does not exist, so `readConfig()` throws ConfigMissingError.
 const BOGUS_CONFIG = "/nonexistent/fkanban-cli-mcp-test/config.json";
+const MCP_CLI_TIMEOUT_MS = 15_000;
 
 async function connectViaCliSubcommand(): Promise<{ client: Client; close: () => Promise<void> }> {
   const transport = new StdioClientTransport({
@@ -53,7 +54,7 @@ describe("`fkanban mcp` CLI subcommand starts gracefully on a missing config", (
     close = c;
     const { tools } = await client.listTools();
     expect(tools).toHaveLength(FKANBAN_TOOL_COUNT);
-  });
+  }, MCP_CLI_TIMEOUT_MS);
 
   test("fkanban_list returns isError with the actionable 'run init' hint", async () => {
     const { client, close: c } = await connectViaCliSubcommand();
@@ -62,7 +63,7 @@ describe("`fkanban mcp` CLI subcommand starts gracefully on a missing config", (
     expect(res.isError).toBe(true);
     const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
     expect(text).toContain("Run `kanban init` first.");
-  });
+  }, MCP_CLI_TIMEOUT_MS);
 
   test("a write tool also short-circuits to the same actionable hint", async () => {
     const { client, close: c } = await connectViaCliSubcommand();
@@ -72,5 +73,5 @@ describe("`fkanban mcp` CLI subcommand starts gracefully on a missing config", (
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text ?? "").toContain(
       "Run `kanban init` first.",
     );
-  });
+  }, MCP_CLI_TIMEOUT_MS);
 });

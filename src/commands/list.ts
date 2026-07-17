@@ -1,5 +1,5 @@
 // `fkanban list` — render a board (default board unless --board) as columns
-// of cards. `--json` dumps the raw cards instead.
+// of cards. Broad `--json` reads default to bounded body previews.
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
@@ -20,7 +20,14 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
-import { capPerColumn, renderBoard, renderWideTable, resolveLimits, type RenderOptions } from "../board.ts";
+import {
+  capPerColumn,
+  previewCardBodies,
+  renderBoard,
+  renderWideTable,
+  resolveLimits,
+  type RenderOptions,
+} from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
@@ -94,6 +101,9 @@ export type ListOptions = {
   // surface bodies (the MCP previews/inlines them). The returned `cards` array
   // then carries empty `body` strings — safe only when no caller reads them.
   displayOnly?: boolean;
+  // CLI compatibility escape hatch: `--full-body` asks for the historical
+  // unpreviewed JSON surface. MCP has its own `full_body` option.
+  fullBody?: boolean;
 };
 
 // Both the human text and the structured (`--json`) payload, built from a
@@ -101,14 +111,10 @@ export type ListOptions = {
 // tool returns both, so it computes the data once and hands the structured
 // `cards` array straight to `structuredContent`.
 //
-// `cards` is the FULL filtered set (the implicit DEFAULT_COLUMN_LIMIT is a
-// text *display* affordance only — `renderBoard` applies it to `text` and
-// shows a "… N more" footer, but the structured array stays complete so
-// machine consumers get every card). An *explicit* `--limit`/`--all` is
-// different: it's an intentional per-column cap that should mean the same
-// thing on both surfaces, so it's surfaced as `jsonLimit` for callers that
-// serialize `cards` (`listCmd` for `--json`) to apply via `capPerColumn`.
-// `jsonLimit`: 0 = no cap (default, and `--all`); >0 = explicit `--limit` cap.
+// `cards` is the full filtered set. Callers decide whether to apply an
+// implicit text cap, an explicit `--limit`, or the CLI broad-JSON safe default.
+// `jsonLimit`: 0 = no explicit cap (`--all` also resolves to 0); >0 = explicit
+// `--limit` cap.
 //
 // Each returned card is enriched with its resolved dependency status (`blocked`,
 // `blockedBy`, `missingDeps`) — the SAME shape `show --json` emits — so the
@@ -192,9 +198,8 @@ export async function listResult(
     const status = depStatus(c, allCards, boardTerminal);
     return { ...c, blocked: status.blocked, blockedBy: status.blockedBy, missingDeps: status.missing };
   });
-  // JSON cap: ONLY an *explicit* `--limit` caps the structured array; `--all`
-  // and the no-flag default leave it uncapped (0). The implicit
-  // DEFAULT_COLUMN_LIMIT never applies to JSON.
+  // `jsonLimit` only reflects an explicit `--limit`; the CLI broad-JSON default
+  // cap is applied in listCmd so MCP structuredContent keeps its own contract.
   // Multi-board discoverability footer: if any OTHER board holds live cards,
   // append a one-line hint so a card created on a non-default board (and thus
   // absent from this view) is still discoverable. Text surface ONLY — the
@@ -233,10 +238,12 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     return renderWideTable(out);
   }
   if (!opts.json) return text;
-  // Honor an explicit `--limit` on the machine-readable surface too: cap each
-  // column to the same cards the text view shows. No explicit limit (jsonLimit
-  // 0) → the full filtered board, unchanged.
-  const out = jsonLimit > 0 ? capPerColumn(board, cards, jsonLimit, opts.column) : cards;
+  const broadJson = opts.column === undefined;
+  const implicitJsonLimit =
+    broadJson && !opts.all && !opts.fullBody && opts.limit === undefined ? DEFAULT_COLUMN_LIMIT : 0;
+  const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
+  const capped = effectiveJsonLimit > 0 ? capPerColumn(board, cards, effectiveJsonLimit, opts.column) : cards;
+  const out = broadJson || opts.fullBody ? previewCardBodies(capped, opts.fullBody ?? false) : capped;
   return JSON.stringify(out, null, 2);
 }
 

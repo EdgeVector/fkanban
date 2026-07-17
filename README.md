@@ -15,7 +15,7 @@ collide with `fbrain/*` or any other app on a shared daemon):
 - **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, deps, surfaces, created_at, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
 - **`fkanban/Board`** — `slug, title, body, columns, created_at, updated_at`
 
-Default columns: `backlog → todo → doing → review → done`.
+Default columns: `backlog → todo → doing → done`.
 
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/test/run/dogfood + PR workflow and the non-obvious gotchas.
@@ -98,6 +98,17 @@ PATH, it links the shims anyway but tells you so (and prints the exact
 a registry, and the `rm …` line it prints removes all four shims. Without the shim, run the
 CLI as `bun run src/cli.ts <cmd>` from inside the repo; the two are equivalent.
 
+For long-lived agent machines, use the host-track refresh helper instead of
+pointing PATH at a workspace checkout:
+
+```bash
+bin/host-track-refresh
+kanban which --json
+```
+
+That maintains `~/.host-track/fkanban` from `lastdb:///fkanban` and repoints
+`~/.local/bin/{kanban,kanban-mcp,fkanban,fkanban-mcp}` at that durable checkout.
+
 ## Quick start
 
 With the prerequisites in place (Bun installed, repo cloned, `bun install` run,
@@ -171,15 +182,16 @@ DONE  (0)
 | `kanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `kanban tag rm <slug> <tag…>` | remove one or more tags from a card |
 | `kanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
-| `kanban overlap <slug>` | compare a candidate card's surfaces against doing/review cards in the same repo (exit 2 on declared conflict) |
+| `kanban overlap <slug>` | compare a candidate card's surfaces against doing cards in the same repo (exit 2 on declared conflict) |
 | `kanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
+| `kanban pickup claim` | atomic next-card claim: priority order + surface-overlap skip + CAS `todo→doing` (`--worker --prefer-repo --exclude-repo --max-doing --dry-run --json`) |
 | `kanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
 | `kanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for kanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
 | `kanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
-| `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json`) |
+| `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json --full-body`) |
 | `kanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `kanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
-| `kanban board create <slug>` | create/update a board (`--title --columns a,b,c`) |
+| `kanban board create <slug>` | create/update a board (`--title`; `--columns` may be omitted or set to `backlog,todo,doing,done`) |
 | `kanban board list` | list boards (`--json`) |
 | `kanban board rm <slug>` | delete a board with native tombstones; always refuses `default`, and refuses non-default boards with live cards unless `--force` |
 | `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
@@ -201,13 +213,11 @@ moving it.
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
 everything and `--limit N` sets a custom per-column cap — both apply to text
-**and** `--json`. The 12-card default is a *text display* affordance only:
-`--json` and `--wide` return the complete filtered board by default, and honor
-an explicit `--limit N`/`--all` to mean the same bounded (or unbounded) set the
-text view shows. `--wide` prints one fixed-width row per card with
+**and** `--json`. Broad `--json` reads use the same 12-card-per-column default
+cap and return single-line body previews with `bodyTruncated`; pass `--all` to
+return every row, or `--full-body` / `--full_body` for the historical complete
+card-body JSON surface. `--wide` prints one fixed-width row per card with
 `COLUMN SLUG REPO BASE PR UPDATED TITLE` for agent/reconcile scans.
-`--full-body` and `--full_body` are compatibility aliases for `--json` with
-complete card bodies.
 
 `--tag <tag>` and `--assignee <name>` apply **exact-match** filters to the
 listing (contrast the fuzzy substring `search` below), e.g.
@@ -229,10 +239,10 @@ and `--board` / `--column` scope the search. Like `list`, the text output caps
 the rendered matches at **20** by default so a busy board doesn't flood the
 terminal; the overflow collapses to a dim `… N more (use --limit N or --all)`
 line. `--all` shows every match and `--limit N` sets a custom cap — both apply
-to text **and** `--json`. As with `list`, the 20-match default is a *text
-display* affordance only: `--json` returns the complete match set by default and
-honors an explicit `--limit N`/`--all` to mean the same bounded (or unbounded)
-set the text view shows.
+to text **and** `--json`. Broad `--json` reads use the same 20-match default cap
+and return single-line body previews with `bodyTruncated`; pass `--all` to
+return every match, or `--full-body` / `--full_body` for the historical
+complete-body JSON surface.
 
 ## Pickup Status And Parking
 
@@ -252,6 +262,22 @@ Use `pickup status` before grooming or pickup:
 kanban pickup status
 kanban pickup status --json
 ```
+
+**Agents should claim with `pickup claim`**, not hand-roll list → overlap → move:
+
+```bash
+kanban pickup claim --json --worker last-stack-fkanban-pickup-w2
+# dry-run selection only:
+kanban pickup claim --dry-run --json
+```
+
+`pickup claim` walks pickup-ready `todo` cards in priority order (P0→P3), skips
+surface conflicts with `doing` cards in the same repo, and CAS-moves the first
+winner into `doing`. Concurrent workers that lose a race get `claim_conflict`
+and the command continues to the next candidate. Idle boards return
+`{ "claimed": false, "reason": "no-eligible" }` with exit 0. JSON responses
+include bounded `diagnostics.exemplars` for non-ready categories so automations
+can report concrete blockers without broad board scans.
 
 It classifies each active card as `pickup-ready`,
 `blocked-on-dependency`, `human-gated`, `malformed-routing`,
@@ -332,8 +358,8 @@ surface Codex-style process explosions without killing by process name.
 A card can depend on other cards, including cards on another board such as the
 `human` parking board. It stays **🔒 blocked** until every dependency reaches
 its own board's terminal column, and `move` refuses to advance a blocked card
-into a working column (`doing` / `review` / `done`, or a custom board's terminal
-column) unless you pass `--force`. Backlog/todo moves are always allowed.
+into a working column (`doing` / `done`) unless you pass `--force`.
+Backlog/todo moves are always allowed.
 
 Cards marked `--kind tracker`, `--kind umbrella`, `--kind meta`,
 `--kind registry`, `--kind program`, `--kind capstone`, or `--kind validation`
@@ -448,7 +474,7 @@ nothing — and is the step the board groomer runs after promoting cards into
 ## MCP server
 
 Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
-`fkanban_move`, `fkanban_rank`, `fkanban_overlap`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
+`fkanban_move`, `fkanban_rank`, `fkanban_pickup_claim`, `fkanban_overlap`, `fkanban_dep_add`, `fkanban_dep_rm`, `fkanban_tag_add`,
 `fkanban_tag_rm`, `fkanban_show`,
 `fkanban_pickup_status`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,

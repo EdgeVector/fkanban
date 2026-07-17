@@ -151,7 +151,7 @@ describe("MCP server sends board-level instructions on connect", () => {
     const client = await connectServer(createFkanbanMcpServer({ configError: new ConfigMissingError("/nope") }));
     const text = client.getInstructions() ?? "";
     // Board model: the column flow.
-    expect(text).toContain("backlog → todo → doing → review → done");
+    expect(text).toContain("backlog → todo → doing → done");
     // Blocking rule mentions the force opt-out.
     expect(text.toLowerCase()).toContain("force");
     expect(text.toLowerCase()).toContain("depend");
@@ -310,7 +310,7 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_dep_add / fkanban_dep_rm echo { slug, dep, action, deps }", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo", body: validPickupBody() } });
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "done", body: validPickupBody() } });
 
     const added = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "api" } });
     expect(added.structuredContent).toEqual({ slug: "ui", dep: "api", action: "added", deps: ["api"] });
@@ -327,6 +327,7 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_add preserves deps unless replace_deps is explicit", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
+    // Unfinished deps must live in backlog (default/todo is dep-gated).
     await client.callTool({
       name: "fkanban_add",
       arguments: { slug: "ui", column: "backlog", deps: ["api"], body: validPickupBody() },
@@ -402,6 +403,7 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_rm refuses to create a dangling dependency", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "dep-x", column: "todo", body: validPickupBody() } });
+    // Dependent with unfinished dep stays in backlog (not todo).
     await client.callTool({
       name: "fkanban_add",
       arguments: { slug: "uses-x", column: "backlog", deps: ["dep-x"], body: validPickupBody() },

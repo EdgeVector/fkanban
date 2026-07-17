@@ -8,6 +8,7 @@ import {
   nowIso,
   PICKUP_AREA_ACTIVE_COLUMNS,
   PICKUP_AREA_BLOCK_PREFIX,
+  listDependencyStatusesForCards,
   resolvePickupRepo,
   sanitizeRepoValue,
   sortCards,
@@ -20,7 +21,8 @@ import { checkSituationFence, type SituationFenceResult, type SituationPreflight
 
 export const HUMAN_BOARD_SLUG = "human";
 export const HUMAN_BOARD_TITLE = "Human / parked work";
-export const HUMAN_BOARD_COLUMNS = ["todo", "waiting", "validated", "done"] as const;
+// Human boards use the same fixed column set as every other board.
+export const HUMAN_BOARD_COLUMNS = ["backlog", "todo", "doing", "done"] as const;
 
 export const PICKUP_CATEGORIES = [
   "pickup-ready",
@@ -209,7 +211,7 @@ export function buildPickupStatusReport(
   const active = sortCards(activeCards(cards, boards));
   const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
   const classifications = active.map((card) =>
-    classifyPickupCard(card, active, depStatus(card, active, terminalByBoard), situationFences.get(card.slug)),
+    classifyPickupCard(card, cards, depStatus(card, cards, terminalByBoard), situationFences.get(card.slug)),
   );
   const counts = Object.fromEntries(PICKUP_CATEGORIES.map((category) => [category, 0])) as Record<PickupCategory, number>;
   for (const c of classifications) counts[c.category] += 1;
@@ -221,13 +223,22 @@ export function buildPickupStatusReport(
   };
 }
 
+async function withDependencyStatuses(
+  opts: { cfg: Config; node: NodeClient } | undefined,
+  cards: Card[],
+): Promise<Card[]> {
+  return opts ? listDependencyStatusesForCards(opts.node, opts.cfg, cards) : cards;
+}
+
 export async function buildPickupStatusReportWithSituations(
   cards: Card[],
   boards: Board[],
   preflight?: SituationPreflight,
+  depsContext?: { cfg: Config; node: NodeClient },
 ): Promise<PickupStatusReport> {
-  const local = buildPickupStatusReport(cards, boards);
-  const activeBySlug = new Map(activeCards(cards, boards).map((card) => [card.slug, card]));
+  const cardsWithDeps = await withDependencyStatuses(depsContext, cards);
+  const local = buildPickupStatusReport(cardsWithDeps, boards);
+  const activeBySlug = new Map(activeCards(cardsWithDeps, boards).map((card) => [card.slug, card]));
   const fences = new Map<string, SituationFenceResult>();
   await Promise.all(local.cards
     .filter((card) => card.category === "pickup-ready")
@@ -237,7 +248,7 @@ export async function buildPickupStatusReportWithSituations(
       const result = await checkSituationFence(card, preflight);
       if (!result.allowed) fences.set(card.slug, result);
     }));
-  return fences.size > 0 ? buildPickupStatusReport(cards, boards, fences) : local;
+  return fences.size > 0 ? buildPickupStatusReport(cardsWithDeps, boards, fences) : local;
 }
 
 export function renderPickupStatus(report: PickupStatusReport): string {

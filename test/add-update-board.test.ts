@@ -106,7 +106,7 @@ describe("add update preserves the card's board", () => {
     node = fakeNode();
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
     // A board with a custom column set, to also catch column mis-validation.
-    await seedBoard(node, "other", ["icebox", "wip", "shipped"]);
+    await seedBoard(node, "other", [...DEFAULT_COLUMNS]);
   });
 
   test("(a) update with NO --board keeps the card on its non-default board", async () => {
@@ -116,18 +116,18 @@ describe("add update preserves the card's board", () => {
       slug: "probe",
       title: "probe v1",
       board: "other",
-      column: "wip",
+      column: "todo",
     });
-    expect(created).toMatchObject({ action: "created", board: "other", column: "wip" });
+    expect(created).toMatchObject({ action: "created", board: "other", column: "todo" });
 
     // Edit just the title, no --board — must NOT teleport to "default".
     const updated = await addCmd({ cfg, node, slug: "probe", title: "probe v2 EDITED" });
-    expect(updated).toMatchObject({ action: "updated", board: "other", column: "wip" });
+    expect(updated).toMatchObject({ action: "updated", board: "other", column: "todo" });
 
     const after = await findCard(node, cfg, "probe");
     expect(after?.board).toBe("other");
     expect(after?.title).toBe("probe v2 EDITED");
-    expect(after?.column).toBe("wip");
+    expect(after?.column).toBe("todo");
   });
 
   test("(a') priority-only update with NO --column keeps the card in its current column", async () => {
@@ -204,6 +204,140 @@ describe("add update preserves the card's board", () => {
     expect(updated?.surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
   });
 
+  test("create derives structured tags from a body Tags header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "body-tags",
+      title: "Body tags",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: cli, metadata pickup cli\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "body-tags");
+    expect(created?.tags).toEqual(expect.arrayContaining(["cli", "metadata", "pickup"]));
+    expect(created?.tags.filter((tag) => tag === "cli")).toHaveLength(1);
+  });
+
+  test("explicit --tags wins over a body Tags header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "explicit-tags",
+      title: "Explicit tags",
+      column: "todo",
+      tags: ["explicit"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: body-only\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "explicit-tags");
+    expect(created?.tags).toContain("explicit");
+    expect(created?.tags).not.toContain("body-only");
+  });
+
+  test("fenced Tags examples are ignored on create", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "fenced-tags",
+      title: "Fenced tags",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n```\nTags: example-only\n```\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "fenced-tags");
+    expect(created?.tags).not.toContain("example-only");
+  });
+
+  test("update with no explicit tags preserves existing structured tags", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-tags",
+      title: "Preserve tags",
+      column: "todo",
+      tags: ["existing"],
+      body: validPickupBody,
+    });
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-tags",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: replacement\n\nUpdated body.",
+    });
+
+    const updated = await findCard(node, cfg, "preserve-tags");
+    expect(updated?.tags).toContain("existing");
+    expect(updated?.tags).not.toContain("replacement");
+  });
+
+  test("add derives structured branch from a body Branch header outside todo", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "branch-card",
+      title: "Branch card",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "branch-card");
+    expect(created?.branch).toBe("kanban/body-branch");
+  });
+
+  test("explicit --branch wins over the body Branch header", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "explicit-branch-card",
+      title: "Explicit branch card",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\nTest fixture work.",
+      branch: "kanban/explicit-branch",
+    });
+
+    const created = await findCard(node, cfg, "explicit-branch-card");
+    expect(created?.branch).toBe("kanban/explicit-branch");
+  });
+
+  test("fenced Branch examples do not populate structured branch", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "fenced-branch-card",
+      title: "Fenced branch card",
+      column: "doing",
+      body:
+        "Repo: EdgeVector/fkanban\nBase: main\n```text\nBranch: kanban/example-only\n```\n\nTest fixture work.",
+    });
+
+    const created = await findCard(node, cfg, "fenced-branch-card");
+    expect(created?.branch).toBe("");
+  });
+
+  test("body-only updates preserve an existing structured branch", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-branch-card",
+      title: "Preserve branch card",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.",
+      branch: "kanban/existing-branch",
+    });
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "preserve-branch-card",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nUpdated fixture work.",
+    });
+
+    const updatedBranch = await findCard(node, cfg, "preserve-branch-card");
+    expect(updatedBranch?.branch).toBe("kanban/existing-branch");
+  });
+
   test("add with a DB locator stamps the home DB field and body header", async () => {
     await addCmd({
       cfg,
@@ -249,26 +383,26 @@ describe("add update preserves the card's board", () => {
   });
 
   test("(b) update --column valid on the card's OWN board succeeds", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo", body: validPickupBody });
 
-    // "shipped" is a column on "other" but NOT on the default board. Before the
-    // fix this validated against the default board's columns and would throw.
-    const updated = await addCmd({ cfg, node, slug: "probe", column: "shipped" });
-    expect(updated).toMatchObject({ action: "updated", board: "other", column: "shipped" });
+    // All boards share fixed columns; move within that set on the card's board.
+    const updated = await addCmd({ cfg, node, slug: "probe", column: "doing" });
+    expect(updated).toMatchObject({ action: "updated", board: "other", column: "doing" });
 
     const after = await findCard(node, cfg, "probe");
     expect(after?.board).toBe("other");
-    expect(after?.column).toBe("shipped");
+    expect(after?.column).toBe("doing");
   });
 
-  test("(b') update --column invalid on the card's own board is rejected", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip" });
-    // "todo" is a default-board column but not on "other".
-    expect(addCmd({ cfg, node, slug: "probe", column: "todo" })).rejects.toBeInstanceOf(FkanbanError);
+  test("(b') update --column inventing a name is rejected", async () => {
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo" });
+    await expect(addCmd({ cfg, node, slug: "probe", column: "shipped" })).rejects.toBeInstanceOf(
+      FkanbanError,
+    );
   });
 
   test("(c) explicit --board still moves the card (intended)", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "wip", body: validPickupBody });
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo", body: validPickupBody });
 
     const moved = await addCmd({ cfg, node, slug: "probe", board: "default", column: "todo" });
     expect(moved).toMatchObject({ action: "updated", board: "default", column: "todo" });
@@ -291,9 +425,9 @@ describe("add update preserves the card's board", () => {
     expect(after?.column).toBe(DEFAULT_COLUMNS[0]);
   });
 
-  test("(d') create with explicit --board honors it", async () => {
-    const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "icebox" });
-    expect(created).toMatchObject({ action: "created", board: "other", column: "icebox" });
+  test("(d') create with explicit --board honors it (fixed columns)", async () => {
+    const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "todo" });
+    expect(created).toMatchObject({ action: "created", board: "other", column: "todo" });
   });
 
   test("add/show round-trip persists a sanitized dirty Repo header only with explicit force", async () => {
@@ -602,7 +736,7 @@ describe("add --deps rejects a dependency cycle", () => {
 
 // `add` doubles as a column-changing command (create+update), so it must
 // enforce the SAME dependency soft-block `move` does: a card blocked by an
-// unfinished dep cannot be placed into a working column (doing/review/done)
+// unfinished dep cannot be placed into a working column (doing/done)
 // OR default/todo (the pickup claim lane) unless `--force`. The guard throws
 // `card_blocked` BEFORE any write (no partial state) with the message/hint
 // byte-aligned with move's. Backlog placements remain allowed.
@@ -694,7 +828,7 @@ describe("add enforces the dependency soft-block into working columns", () => {
 
   test("placing a blocked card into `review` and `done` is also refused", async () => {
     await seedBlocked();
-    for (const col of ["review", "done"]) {
+    for (const col of ["doing", "done"]) {
       await expect(addCmd({ cfg, node, slug: "blk", column: col })).rejects.toMatchObject({
         code: "card_blocked",
       });

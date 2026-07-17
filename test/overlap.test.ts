@@ -99,7 +99,7 @@ describe("overlapResult", () => {
     ];
   });
 
-  test("reports doing/review cards in the same repo with intersecting surfaces", async () => {
+  test("reports doing cards in the same repo with intersecting surfaces", async () => {
     const result = await overlapResult({ cfg, node: fakeNode(baseCards), slug: "candidate" });
     expect(result.conflicts).toHaveLength(1);
     expect(result.conflicts[0]?.slug).toBe("peer");
@@ -136,7 +136,7 @@ describe("overlapResult", () => {
         surfaces: [],
         body: "Repo: EdgeVector/fkanban\nBase: main\nSurfaces: src/mcp/server.ts\n",
       }),
-      card({ slug: "peer", column: "review", surfaces: [], body: "Repo: EdgeVector/fkanban\nBase: main\nSurfaces: src/mcp/**\n" }),
+      card({ slug: "peer", column: "doing", surfaces: [], body: "Repo: EdgeVector/fkanban\nBase: main\nSurfaces: src/mcp/**\n" }),
     ];
     const result = await overlapResult({ cfg, node: fakeNode(cards), slug: "candidate" });
     expect(result.conflicts[0]?.slug).toBe("peer");

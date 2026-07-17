@@ -97,7 +97,7 @@ function expectedBoardNotFound(slug: string): FkanbanError {
   return new FkanbanError({
     code: "board_not_found",
     message: `Board "${slug}" does not exist.`,
-    hint: `Create it first: \`fkanban board create ${slug} --columns backlog,todo,doing,review,done\`.`,
+    hint: `Create it first: \`fkanban board create ${slug} --columns backlog,todo,doing,done\`.`,
   });
 }
 
@@ -174,7 +174,7 @@ describe("list validates an explicit --column", () => {
   test("list --column <bogus> throws invalid_column (message + hint)", async () => {
     expect(listCmd({ cfg, node, column: "notacolumn" })).rejects.toMatchObject({
       code: "invalid_column",
-      message: `"notacolumn" is not a column on this board.`,
+      message: `"notacolumn" is not a valid kanban column.`,
       hint: `Valid columns: ${[...DEFAULT_COLUMNS].join(" | ")}`,
     });
   });
@@ -222,7 +222,7 @@ describe("search validates an explicit --column", () => {
   test("search --column <bogus> throws invalid_column (message + hint)", async () => {
     expect(searchCmd({ cfg, node, query: "card", column: "notacolumn" })).rejects.toMatchObject({
       code: "invalid_column",
-      message: `"notacolumn" is not a column on this board.`,
+      message: `"notacolumn" is not a valid kanban column.`,
       hint: `Valid columns: ${[...DEFAULT_COLUMNS].join(" | ")}`,
     });
   });

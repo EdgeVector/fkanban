@@ -99,7 +99,7 @@ describe("board policy invariants", () => {
   beforeEach(async () => {
     node = fakeNode();
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
-    await seedBoard(node, "human", ["todo", "waiting", "validated", "done"]);
+    await seedBoard(node, "human", [...DEFAULT_COLUMNS]);
   });
 
   test("default todo accepts pickup-ready PR cards, including tag-derived repo/base", async () => {
@@ -162,7 +162,7 @@ describe("board policy invariants", () => {
       node,
       slug: "parked-human",
       board: "human",
-      column: "waiting",
+      column: "todo",
       blockStatus: "needs_human",
       blockReason: "waiting on operator decision",
       body: "Visible parking card.",
@@ -217,17 +217,20 @@ describe("board policy invariants", () => {
       node,
       slug: "human-approval",
       board: "human",
-      column: "waiting",
+      column: "todo",
       blockStatus: "needs_human",
       blockReason: "Tom must approve the production action",
       body: "Human gate.",
     });
+    // Unfinished deps belong in backlog (default/todo is dep-gated for pickup).
     await addCmd({ cfg, node, slug: "implementation", column: "backlog", body: validBody, deps: ["human-approval"] });
 
+    await expect(moveCmd({ cfg, node, slug: "implementation", column: "todo" })).rejects.toBeInstanceOf(FkanbanError);
     await expect(moveCmd({ cfg, node, slug: "implementation", column: "doing" })).rejects.toBeInstanceOf(FkanbanError);
     await expect(rmCmd({ cfg, node, slug: "human-approval" })).rejects.toBeInstanceOf(FkanbanError);
 
     await moveCmd({ cfg, node, slug: "human-approval", column: "done" });
+    await moveCmd({ cfg, node, slug: "implementation", column: "todo" });
     await moveCmd({ cfg, node, slug: "implementation", column: "doing" });
     expect((await findCard(node, cfg, "implementation"))?.column).toBe("doing");
   });

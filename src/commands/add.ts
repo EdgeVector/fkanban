@@ -3,6 +3,7 @@
 // the end of that column. The hot path is point reads plus one write; if the
 // board record is missing, it scans card statuses once to decide whether the
 // board can be self-healed from existing cards.
+// Routine pickups should prefer `last-stack-card-closeout` for post-merge board closeout.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
@@ -26,6 +27,7 @@ import {
   listCardStatuses,
   missingDepError,
   normalizeDeps,
+  parseBodyTagsHeader,
   nowIso,
   stampCardForWrite,
   updateCardRecord,
@@ -59,7 +61,7 @@ export type AddOptions = {
   priority?: PriorityTier;
   body?: string;
   // Override the dependency soft-block when placing the card into a working
-  // column (doing/review/done). Mirrors `move`'s --force.
+  // column (doing/done). Mirrors `move`'s --force.
   force?: boolean;
   // Structured pickup-decision + reconcile fields. Any omitted on create is
   // auto-derived from the body/tags (deriveStructuredFields); any omitted on
@@ -280,7 +282,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     column: targetColumn,
     position: appendPosition(),
     assignee: opts.assignee ?? "",
-    tags: applyPriority(opts.tags ?? [], opts.priority),
+    tags: applyPriority(opts.tags ?? parseBodyTagsHeader(opts.body ?? ""), opts.priority),
     deps: opts.deps !== undefined ? await prepareDeps(opts, opts.deps, opts.slug, []) : [],
     created_at: now,
     updated_at: now,

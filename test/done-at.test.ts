@@ -1,6 +1,6 @@
-// `done_at` is lifecycle history, not last-edit history: stamp it once when a
-// card first enters its board's terminal column, then preserve it across later
-// grooming/tag/body updates.
+// `done_at` is terminal lifecycle history, not last-edit history: stamp it once
+// when a card first enters its board's terminal column, preserve it across later
+// terminal grooming/tag/body updates, and clear it when the card is reopened.
 
 import { beforeEach, describe, expect, test } from "bun:test";
 
@@ -98,7 +98,7 @@ describe("done_at stamping", () => {
     expect(doneAtForColumnTransition({ column: "done", done_at: "" }, "done", [...DEFAULT_COLUMNS], now)).toBe("");
     expect(
       doneAtForColumnTransition({ column: "done", done_at: "2026-07-02T00:00:00.000Z" }, "todo", [...DEFAULT_COLUMNS], now),
-    ).toBe("2026-07-02T00:00:00.000Z");
+    ).toBe("");
   });
 
   test("move to done stamps done_at and tag/body updates keep it stable", async () => {
@@ -116,15 +116,30 @@ describe("done_at stamping", () => {
     expect((await findCard(node, cfg, "probe"))?.done_at).toBe(stamped);
   });
 
+  test("moving or re-adding a done card back to todo clears done_at", async () => {
+    await addCmd({ cfg, node, slug: "reopen-move", title: "Reopen move", column: "todo", body: validPickupBody });
+    await moveCmd({ cfg, node, slug: "reopen-move", column: "done" });
+    expect((await findCard(node, cfg, "reopen-move"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    await moveCmd({ cfg, node, slug: "reopen-move", column: "todo" });
+    expect((await findCard(node, cfg, "reopen-move"))?.done_at).toBe("");
+
+    await addCmd({ cfg, node, slug: "reopen-add", title: "Reopen add", column: "done", body: validPickupBody });
+    expect((await findCard(node, cfg, "reopen-add"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    await addCmd({ cfg, node, slug: "reopen-add", column: "todo" });
+    expect((await findCard(node, cfg, "reopen-add"))?.done_at).toBe("");
+  });
+
   test("create directly in the terminal column stamps done_at", async () => {
     await addCmd({ cfg, node, slug: "already-done", column: "done" });
     expect((await findCard(node, cfg, "already-done"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   test("custom-board terminal column is used", async () => {
-    await seedBoard(node, "custom", ["spec", "build", "ship"]);
-    await addCmd({ cfg, node, slug: "custom-card", board: "custom", column: "spec" });
-    await moveCmd({ cfg, node, slug: "custom-card", column: "ship" });
+    await seedBoard(node, "custom", [...DEFAULT_COLUMNS]);
+    await addCmd({ cfg, node, slug: "custom-card", board: "custom", column: "todo" });
+    await moveCmd({ cfg, node, slug: "custom-card", column: "done" });
     expect((await findCard(node, cfg, "custom-card"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });
