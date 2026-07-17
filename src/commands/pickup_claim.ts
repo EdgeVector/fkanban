@@ -82,6 +82,8 @@ export type PickupClaimResult = {
   to?: string;
   worker?: string;
   scanned_ready: number;
+  /** Count of cards currently in the target board's todo column. */
+  todo_count: number;
   skipped: PickupClaimSkip[];
   diagnostics?: PickupClaimDiagnostics;
 };
@@ -187,6 +189,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     listCards(opts.node, opts.cfg),
     listBoards(opts.node, opts.cfg),
   ]);
+  const todoCount = cards.filter((c) => c.board === board && c.column === "todo").length;
 
   if (opts.maxDoing !== undefined) {
     const doingCount = cards.filter((c) => c.board === board && c.column === "doing").length;
@@ -199,6 +202,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         claimed: false,
         reason: "at-capacity",
         scanned_ready: 0,
+        todo_count: todoCount,
         skipped: [{
           slug: "*",
           reason: "at-capacity",
@@ -261,6 +265,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         to: "doing",
         worker: opts.worker,
         scanned_ready: readyCards.length,
+        todo_count: todoCount,
         skipped,
       };
     }
@@ -294,6 +299,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         to: moved.to,
         worker: opts.worker,
         scanned_ready: readyCards.length,
+        todo_count: todoCount,
         skipped,
       };
     } catch (err) {
@@ -329,6 +335,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     claimed: false,
     reason: "no-eligible",
     scanned_ready: readyCards.length,
+    todo_count: todoCount,
     skipped,
     worker: opts.worker,
     diagnostics,
@@ -358,6 +365,7 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
   const lines = [
     `no claim: ${result.reason}`,
     `  scanned_ready: ${result.scanned_ready}`,
+    `  todo_count: ${result.todo_count}`,
   ];
   if (result.skipped.length > 0) {
     lines.push("  skipped:");

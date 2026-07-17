@@ -438,6 +438,40 @@ describe("pickup claim", () => {
     expect(result.diagnostics?.counts["human-gated"]).toBe(1);
   });
 
+  test("no-eligible reports zero todo count when todo queue is empty", async () => {
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.todo_count).toBe(0);
+    expect(result.diagnostics?.scanned_active).toBe(0);
+    expect(result.diagnostics?.ready).toBe(0);
+  });
+
+  test("no-eligible reports zero todo count for backlog and doing only", async () => {
+    await seedCard(node, card({
+      slug: "parked",
+      column: "backlog",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nParked work.",
+    }));
+    await seedCard(node, card({
+      slug: "inflight",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nIn flight.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.todo_count).toBe(0);
+    expect(result.diagnostics?.scanned_active).toBe(2);
+    expect(result.diagnostics?.counts["parked/non-work"]).toBe(1);
+    expect(result.diagnostics?.counts.collision).toBe(1);
+  });
+
   test("no-eligible diagnostics include malformed routing exemplars", async () => {
     await seedCard(node, card({
       slug: "bad-repo",
