@@ -7,13 +7,14 @@
 // racing the same slug get claim_conflict and continue to the next card.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
-import { type Config } from "../config.ts";
+import { type Config, schemaHashFor } from "../config.ts";
 import {
+  boardToFields,
+  findBoard,
   listBoards,
   listCards,
   nowIso,
   priorityOf,
-  rankCards,
   requireCard,
   updateCardRecord,
   type Card,
@@ -25,6 +26,14 @@ import {
   type PickupClassification,
   type PickupStatusReport,
 } from "../pickup.ts";
+import {
+  laneOf,
+  orderCandidatesByLanes,
+  parsePickupLaneState,
+  recordLaneClaim,
+  upsertPickupLaneStateInBody,
+  type LaneId,
+} from "../pickup_lanes.ts";
 import { type SituationPreflight } from "../situations.ts";
 import { ClaimConflictError, moveCmd } from "./move.ts";
 import { claimedRepo, overlapAgainstCards } from "./overlap.ts";
@@ -63,6 +72,8 @@ export type PickupClaimCardSummary = {
   base: string;
   kind: string;
   priority: string;
+  /** Derived logical lane for fair-share pickup (p0-now / program:… / papercut / unlaned). */
+  lane: string;
   body: string;
   tags: string[];
   deps: string[];
@@ -126,6 +137,7 @@ function cardSummary(card: Card, priority: string): PickupClaimCardSummary {
     base: card.base || "",
     kind: card.kind || "pr",
     priority,
+    lane: laneOf(card),
     body: card.body,
     tags: card.tags,
     deps: card.deps,
@@ -137,18 +149,31 @@ function cardSummary(card: Card, priority: string): PickupClaimCardSummary {
   };
 }
 
-function orderCandidates(readyCards: Card[], preferRepo: string[]): Card[] {
-  const ranked = rankCards(readyCards);
-  if (preferRepo.length === 0) return ranked;
-  const prefer = new Set(preferRepo.map((r) => r.toLowerCase()));
-  const preferred: Card[] = [];
-  const rest: Card[] = [];
-  for (const c of ranked) {
-    const repo = claimedRepo(c).toLowerCase();
-    if (prefer.has(repo)) preferred.push(c);
-    else rest.push(c);
+async function persistLaneClaimState(opts: {
+  cfg: Config;
+  node: NodeClient;
+  board: string;
+  lane: LaneId;
+  slug: string;
+}): Promise<void> {
+  // Best-effort: fair-share still works from live doing counts if this write
+  // loses a race. Cursor/state is for diagnostics + finer round-robin.
+  try {
+    const boardRec = await findBoard(opts.node, opts.cfg, opts.board);
+    if (!boardRec) return;
+    const prev = parsePickupLaneState(boardRec.body);
+    const next = recordLaneClaim(prev, opts.lane, opts.slug, nowIso());
+    const body = upsertPickupLaneStateInBody(boardRec.body, next);
+    if (body === boardRec.body) return;
+    const updated = { ...boardRec, body, updated_at: nowIso() };
+    await opts.node.updateRecord({
+      schemaHash: schemaHashFor("board", opts.cfg),
+      fields: boardToFields(updated),
+      keyHash: updated.slug,
+    });
+  } catch {
+    // ignore
   }
-  return [...preferred, ...rest];
 }
 
 const DIAGNOSTIC_EXEMPLARS_PER_CATEGORY = 3;
@@ -249,7 +274,15 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     if (full) readyCards.push(full);
   }
 
-  const candidates = orderCandidates(readyCards, preferRepo);
+  const boardRec = boards.find((b) => b.slug === board);
+  const laneState = parsePickupLaneState(boardRec?.body ?? "");
+  const candidates = orderCandidatesByLanes(
+    readyCards,
+    cards,
+    laneState,
+    board,
+    preferRepo,
+  );
 
   // Working copy of board state so we can mark a CAS conflict as no longer todo
   // without re-listing (and so overlap sees concurrent skips consistently).
@@ -307,6 +340,15 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         await updateCardRecord({ cfg: opts.cfg, node: opts.node }, stamped);
         claimedCard = stamped;
       }
+
+      const lane = laneOf(claimedCard);
+      await persistLaneClaimState({
+        cfg: opts.cfg,
+        node: opts.node,
+        board,
+        lane,
+        slug: claimedCard.slug,
+      });
 
       return {
         claimed: true,
@@ -366,7 +408,7 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
     const mode = result.reason === "dry-run" ? "would claim" : "claimed";
     const lines = [
       `${mode}: ${result.card.slug}`,
-      `  repo: ${result.card.repo || "(none)"}  base: ${result.card.base || "(none)"}  priority: ${result.card.priority}`,
+      `  repo: ${result.card.repo || "(none)"}  base: ${result.card.base || "(none)"}  priority: ${result.card.priority}  lane: ${result.card.lane}`,
       `  title: ${result.card.title}`,
     ];
     if (result.worker) lines.push(`  worker: ${result.worker}`);

@@ -391,8 +391,33 @@ describe("pickup claim", () => {
       node,
       preferRepo: ["EdgeVector/fold"],
     });
-    // prefer-repo wins over pure priority: fold P2 before kanban P0
-    expect(preferred.card?.slug).toBe("fold-card");
+    // Lane policy: p0-now always beats prefer-repo (kanban P0 before fold P2).
+    expect(preferred.card?.slug).toBe("kanban-card");
+    expect(preferred.card?.lane).toBe("p0-now");
+
+    // Among non-p0, prefer-repo still soft-boosts.
+    node = fakeNode();
+    await seedBoard(node, board());
+    await seedCard(node, card({
+      slug: "fold-card",
+      repo: "EdgeVector/fold",
+      tags: ["p2"],
+      body: "Repo: EdgeVector/fold\nBase: main\nPriority: P2\n\nFold.",
+      created_at: "2026-01-01T00:00:00.000Z",
+    }));
+    await seedCard(node, card({
+      slug: "kanban-card",
+      repo: "EdgeVector/kanban",
+      tags: ["p2"],
+      body: "Repo: EdgeVector/kanban\nBase: main\nPriority: P2\n\nKanban.",
+      created_at: "2026-01-02T00:00:00.000Z",
+    }));
+    const preferredNonP0 = await pickupClaimResult({
+      cfg,
+      node,
+      preferRepo: ["EdgeVector/fold"],
+    });
+    expect(preferredNonP0.card?.slug).toBe("fold-card");
   });
 
   test("at-capacity when doing count hits max-doing", async () => {
