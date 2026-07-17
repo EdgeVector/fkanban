@@ -459,6 +459,27 @@ describe("pickup claim", () => {
     }]);
   });
 
+  test("no-eligible diagnostics include stale done_at exemplars", async () => {
+    await seedCard(node, card({
+      slug: "reopened-with-done-at",
+      column: "backlog",
+      done_at: "2026-07-17T08:00:00.000Z",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.diagnostics?.counts["stale-metadata"]).toBe(1);
+    expect(result.diagnostics?.exemplars).toEqual([{
+      slug: "reopened-with-done-at",
+      category: "stale-metadata",
+      reason: "non-done card still has done_at metadata",
+      suggestion: "Clear done_at on the reopened or parked card so pickup diagnostics reflect its live state.",
+    }]);
+  });
+
   test("no-eligible diagnostics sample every non-ready blocker category", async () => {
     await seedCard(node, card({
       slug: "dep-in-progress",

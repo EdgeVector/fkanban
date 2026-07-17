@@ -117,6 +117,10 @@ function isStaleGeneratedHold(card: Card, allCards: Card[]): boolean {
   return false;
 }
 
+function hasStaleDoneAt(card: Card): boolean {
+  return card.column !== "done" && card.done_at.trim().length > 0;
+}
+
 export function classifyPickupCard(
   card: Card,
   allCards: Card[],
@@ -151,6 +155,13 @@ export function classifyPickupCard(
       "stale-metadata",
       "generated blocker metadata appears stale",
       "Run `fkanban groom stale-blockers --apply` after reviewing the dry-run.",
+    );
+  }
+  if (hasStaleDoneAt(card)) {
+    return out(
+      "stale-metadata",
+      "non-done card still has done_at metadata",
+      "Clear done_at on the reopened or parked card so pickup diagnostics reflect its live state.",
     );
   }
 
