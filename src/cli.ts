@@ -312,12 +312,12 @@ blocked-on-dependency, human-gated, malformed-routing, parked/non-work,
 collision, or stale-metadata. Read-only hygiene report.
 
 lanes — Logical lanes on the default board todo queue: p0-now, program:*,
-papercut, unlaned. Shows ready/doing pressure, starved lanes (ready>0 and
+unlaned, papercut. Shows ready/doing pressure, starved lanes (ready>0 and
 doing=0), claim sequence cursor, and next claim order (fair-share).
 
 claim — Give the agent the next workable card: walk pickup-ready todo cards
-in lane order (p0-now → starved program lanes → papercut → unlaned; P0–P3
-within a band), skip surface conflicts with doing in the same repo, and
+in lane order (p0-now → fair-share among program:* and unlaned → papercut;
+P0–P3 within a band), skip surface conflicts with doing in the same repo, and
 CAS-claim the first winner into doing (\`move --from todo\`). On
 claim_conflict (another worker won), try the next candidate. Prefer this
 over hand-rolling list + overlap + move in prompts.

@@ -56,7 +56,7 @@ export async function pickupLanesResult(opts: {
   return {
     board,
     algorithm:
-      "p0-now first → program lanes fair-share (fewest doing, then oldest last-claim) → papercut → unlaned",
+      "p0-now first → fair-share(program:* + unlaned by fewest doing / oldest last-claim) → papercut",
     state,
     lanes,
     next_claim_order: order.slice(0, 20),

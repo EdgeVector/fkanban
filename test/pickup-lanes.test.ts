@@ -89,6 +89,34 @@ describe("orderCandidatesByLanes", () => {
     expect(ordered.map((c) => c.slug)).toEqual(["p0-fix", "prog-a", "papercut-1"]);
   });
 
+  test("unlaned fair-shares with program lanes (not always last)", () => {
+    const ready = [
+      card({
+        slug: "prog-busy",
+        tags: ["p1"],
+        north_star: "ns-busy",
+        created_at: "2026-07-01T00:00:00Z",
+      }),
+      card({
+        slug: "unlaned-starved",
+        tags: ["p1"],
+        created_at: "2026-07-02T00:00:00Z",
+      }),
+    ];
+    const doing = [
+      card({
+        slug: "doing-busy",
+        column: "doing",
+        tags: ["p1"],
+        north_star: "ns-busy",
+      }),
+    ];
+    const ordered = orderCandidatesByLanes(ready, [...ready, ...doing], emptyPickupLaneState());
+    // unlaned has 0 doing → before program with doing
+    expect(ordered[0]!.slug).toBe("unlaned-starved");
+    expect(ordered[1]!.slug).toBe("prog-busy");
+  });
+
   test("starved program lane (0 doing) beats program with doing", () => {
     const ready = [
       card({

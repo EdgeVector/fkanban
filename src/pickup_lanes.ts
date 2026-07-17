@@ -1,12 +1,12 @@
 // Logical pickup lanes on the default board's shared `todo` queue.
 //
 // Algorithm (Tom 2026-07-17):
-//   1. p0-now          — always first among ready cards
-//   2. program lanes   — fair-share: prefer lanes with fewer in-flight `doing`
-//                        cards (starvation), then least-recent claim, then
-//                        oldest ready card within the lane
-//   3. papercut        — fill remaining capacity
-//   4. unlaned         — last (untagged / no north_star)
+//   1. p0-now              — always first among ready cards (true interrupts)
+//   2. fair-share pool     — each program:* lane AND the unlaned lane compete
+//                            equally: prefer fewer in-flight `doing` cards
+//                            (starvation), then least-recent claim, then
+//                            oldest ready card within the lane
+//   3. papercut            — fill remaining capacity (routine-error / hygiene)
 //
 // Lane *annotation* (lane:program:… tags) is optional. Until annotations are
 // ubiquitous we derive lanes from priority, north_star, and papercut heuristics.
@@ -259,8 +259,9 @@ export function orderProgramLanes(
 }
 
 /**
- * Full candidate order for pickup claim: p0 → fair program lanes → papercut → unlaned.
- * Within each band, cards stay in rankCards order.
+ * Full candidate order for pickup claim:
+ * p0-now → fair-share(program:* + unlaned) → papercut.
+ * Within each lane, cards stay in rankCards order.
  */
 export function orderCandidatesByLanes(
   readyCards: Card[],
@@ -271,15 +272,20 @@ export function orderCandidatesByLanes(
 ): Card[] {
   const buckets = bucketReadyCards(readyCards);
   const doingCounts = doingCountsByLane(allCards, board);
-  const programOrder = orderProgramLanes(buckets.programs, doingCounts, state);
+
+  // Unlaned is a first-class fair-share peer of program lanes (not last).
+  const fairShare = new Map(buckets.programs);
+  if (buckets.unlaned.length > 0) {
+    fairShare.set("unlaned", buckets.unlaned);
+  }
+  const fairOrder = orderProgramLanes(fairShare, doingCounts, state);
 
   const out: Card[] = [];
   out.push(...buckets.p0);
-  for (const lane of programOrder) {
-    out.push(...(buckets.programs.get(lane) ?? []));
+  for (const lane of fairOrder) {
+    out.push(...(fairShare.get(lane) ?? []));
   }
   out.push(...buckets.papercut);
-  out.push(...buckets.unlaned);
 
   if (preferRepo.length === 0) return out;
 
@@ -345,18 +351,22 @@ export function buildLaneStatus(
   };
 
   push("p0-now", buckets.p0);
-  const programOrder = orderProgramLanes(buckets.programs, doingCounts, state);
-  for (const lane of programOrder) {
-    push(lane as LaneId, buckets.programs.get(lane) ?? []);
+
+  const fairShare = new Map(buckets.programs);
+  if (buckets.unlaned.length > 0) fairShare.set("unlaned", buckets.unlaned);
+  const fairOrder = orderProgramLanes(fairShare, doingCounts, state);
+  for (const lane of fairOrder) {
+    push(lane as LaneId, fairShare.get(lane) ?? []);
   }
-  // programs with only doing, no ready
+  // program/unlaned with only doing, no ready
   for (const [lane, n] of doingCounts) {
-    if (laneKind(lane as LaneId) !== "program") continue;
-    if (buckets.programs.has(lane)) continue;
+    const kind = laneKind(lane as LaneId);
+    if (kind !== "program" && kind !== "unlaned") continue;
+    if (fairShare.has(lane)) continue;
     if (n > 0) {
       rows.push({
         lane: lane as LaneId,
-        kind: "program",
+        kind,
         ready: 0,
         doing: n,
         starved: false,
@@ -365,7 +375,6 @@ export function buildLaneStatus(
     }
   }
   push("papercut", buckets.papercut);
-  push("unlaned", buckets.unlaned);
 
   return rows;
 }
