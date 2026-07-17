@@ -169,10 +169,6 @@ export function classifyPickupCard(
   if (card.board !== "default") {
     return out("parked/non-work", `card is on non-default board ${card.board}`, "Move to default/todo only when an agent should pick it up.");
   }
-  if (card.column !== "todo") {
-    return out("collision", `card is already in ${card.column}`, "Do not pick up again; reconcile the existing branch/PR or move it back to todo.");
-  }
-
   const repoResolution = resolvePickupRepo(card);
   if (!repoResolution.ok) {
     details.push(repoResolution.reason);
@@ -194,6 +190,12 @@ export function classifyPickupCard(
   if (dep.blocked) {
     details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
     return out("blocked-on-dependency", "unfinished dependency", "Finish or retarget the dependency before pickup.");
+  }
+  if (card.column === "doing") {
+    return out("collision", "card is already in doing", "Do not pick up again; reconcile the existing branch/PR or move it back to todo.");
+  }
+  if (card.column !== "todo") {
+    return out("parked/non-work", `card is parked in ${card.column}`, "Move to default/todo only when an agent should pick it up.");
   }
   if (situationFence && !situationFence.allowed) {
     details.push(...situationFence.details);

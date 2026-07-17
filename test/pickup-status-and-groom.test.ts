@@ -171,6 +171,8 @@ describe("pickup-status", () => {
     await seedCard(node, card({ slug: "human", board: "human", repo: "EdgeVector/fkanban", base: "main", block_status: "needs_human" }));
     await seedCard(node, card({ slug: "malformed", repo: "", base: "main", body: "No routing header" }));
     await seedCard(node, card({ slug: "tracker", kind: "tracker", repo: "EdgeVector/fkanban", base: "main" }));
+    await seedCard(node, card({ slug: "backlog", repo: "EdgeVector/fkanban", base: "main", column: "backlog" }));
+    await seedCard(node, card({ slug: "backlog-blocked", repo: "EdgeVector/fkanban", base: "main", column: "backlog", deps: ["dep"] }));
     await seedCard(node, card({ slug: "inflight", repo: "EdgeVector/fkanban", base: "main", column: "doing", branch: "fkanban/inflight" }));
 
     const { report } = await pickupStatusResult({ cfg, node });
@@ -181,6 +183,9 @@ describe("pickup-status", () => {
     expect(bySlug.get("human")?.category).toBe("human-gated");
     expect(bySlug.get("malformed")?.category).toBe("malformed-routing");
     expect(bySlug.get("tracker")?.category).toBe("parked/non-work");
+    expect(bySlug.get("backlog")?.category).toBe("parked/non-work");
+    expect(bySlug.get("backlog")?.reason).toBe("card is parked in backlog");
+    expect(bySlug.get("backlog-blocked")?.category).toBe("blocked-on-dependency");
     expect(bySlug.get("inflight")?.category).toBe("collision");
     for (const category of PICKUP_CATEGORIES) {
       expect(report.counts[category]).toBeGreaterThanOrEqual(0);
