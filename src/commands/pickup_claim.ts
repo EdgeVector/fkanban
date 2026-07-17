@@ -20,6 +20,7 @@ import {
 } from "../record.ts";
 import {
   buildPickupStatusReportWithSituations,
+  PICKUP_CATEGORIES,
   type PickupCategory,
   type PickupClassification,
   type PickupStatusReport,
@@ -146,12 +147,7 @@ function orderCandidates(readyCards: Card[], preferRepo: string[]): Card[] {
   return [...preferred, ...rest];
 }
 
-const DIAGNOSTIC_EXEMPLAR_CATEGORIES = [
-  "malformed-routing",
-  "stale-metadata",
-  "blocked-on-dependency",
-] satisfies PickupCategory[];
-const MAX_DIAGNOSTIC_EXEMPLARS = 8;
+const DIAGNOSTIC_EXEMPLARS_PER_CATEGORY = 3;
 
 function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticExemplar {
   return {
@@ -163,11 +159,16 @@ function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticEx
 }
 
 function claimDiagnostics(report: PickupStatusReport): PickupClaimDiagnostics {
-  const exemplarCategories = new Set<PickupCategory>(DIAGNOSTIC_EXEMPLAR_CATEGORIES);
-  const exemplars = report.cards
-    .filter((card) => exemplarCategories.has(card.category))
-    .slice(0, MAX_DIAGNOSTIC_EXEMPLARS)
-    .map(diagnosticExemplar);
+  const exemplars: PickupClaimDiagnosticExemplar[] = [];
+  for (const category of PICKUP_CATEGORIES) {
+    if (category === "pickup-ready") continue;
+    exemplars.push(
+      ...report.cards
+        .filter((card) => card.category === category)
+        .slice(0, DIAGNOSTIC_EXEMPLARS_PER_CATEGORY)
+        .map(diagnosticExemplar),
+    );
+  }
   return {
     scanned_active: report.scanned,
     ready: report.ready,

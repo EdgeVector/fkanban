@@ -272,10 +272,12 @@ kanban pickup claim --dry-run --json
 ```
 
 `pickup claim` walks pickup-ready `todo` cards in priority order (P0→P3), skips
-surface conflicts with `doing`/`review` in the same repo, and CAS-moves the
-first winner into `doing`. Concurrent workers that lose a race get
-`claim_conflict` and the command continues to the next candidate. Idle boards
-return `{ "claimed": false, "reason": "no-eligible" }` with exit 0.
+surface conflicts with `doing` cards in the same repo, and CAS-moves the first
+winner into `doing`. Concurrent workers that lose a race get `claim_conflict`
+and the command continues to the next candidate. Idle boards return
+`{ "claimed": false, "reason": "no-eligible" }` with exit 0. JSON responses
+include bounded `diagnostics.exemplars` for non-ready categories so automations
+can report concrete blockers without broad board scans.
 
 It classifies each active card as `pickup-ready`,
 `blocked-on-dependency`, `human-gated`, `malformed-routing`,
