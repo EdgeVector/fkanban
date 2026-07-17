@@ -495,6 +495,17 @@ export function createFkanbanMcpServer(
           reason: z.string(),
           detail: z.string().optional(),
         })),
+        diagnostics: z.object({
+          scanned_active: z.number().int(),
+          ready: z.number().int(),
+          counts: z.record(z.string(), z.number().int()),
+          exemplars: z.array(z.object({
+            slug: z.string(),
+            category: z.string(),
+            reason: z.string(),
+            suggestion: z.string(),
+          })).optional(),
+        }).optional(),
       },
     },
     async (args) => {

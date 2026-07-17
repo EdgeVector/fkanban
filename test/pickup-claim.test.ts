@@ -459,6 +459,67 @@ describe("pickup claim", () => {
     }]);
   });
 
+  test("no-eligible diagnostics sample every non-ready blocker category", async () => {
+    await seedCard(node, card({
+      slug: "dep-in-progress",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nDependency in progress.",
+    }));
+    await seedCard(node, card({
+      slug: "blocked-child",
+      deps: ["dep-in-progress"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nBlocked on dep.",
+    }));
+    await seedCard(node, card({
+      slug: "human-hold",
+      block_status: "needs_human",
+      block_reason: "waiting on Tom",
+    }));
+    await seedCard(node, card({
+      slug: "parked-tracker",
+      kind: "tracker",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nTracker.",
+    }));
+    await seedCard(node, card({
+      slug: "inflight",
+      column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nAlready claimed.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.skipped).toEqual([]);
+    expect(result.diagnostics?.counts["blocked-on-dependency"]).toBe(1);
+    expect(result.diagnostics?.counts["human-gated"]).toBe(1);
+    expect(result.diagnostics?.counts["parked/non-work"]).toBe(1);
+    expect(result.diagnostics?.counts.collision).toBe(2);
+    expect(result.diagnostics?.exemplars).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        slug: "blocked-child",
+        category: "blocked-on-dependency",
+        reason: "unfinished dependency",
+      }),
+      expect.objectContaining({
+        slug: "human-hold",
+        category: "human-gated",
+        reason: "intentional hold: needs_human",
+      }),
+      expect.objectContaining({
+        slug: "parked-tracker",
+        category: "parked/non-work",
+        reason: "non-pickup kind: tracker",
+      }),
+      expect.objectContaining({
+        slug: "dep-in-progress",
+        category: "collision",
+        reason: "card is already in doing",
+      }),
+    ]));
+  });
+
   test("no-eligible when every ready candidate is skipped", async () => {
     await seedCard(node, card({
       slug: "fold-card",
