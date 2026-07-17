@@ -47,14 +47,14 @@ import {
   formatError,
 } from "./format.ts";
 
-export const TOP_HELP = `kanban — a kanban board over fold_db
+export const TOP_HELP = `fkanban — a kanban board over fold_db
 
 Usage:
-  kanban <command> [options]
+  fkanban <command> [options]
 
 Global:
   --db <locator>       write-target DB (lastdb://personal | lastdb://org/<slug>/<db>);
-                       also read from env LASTDB_DB (set by org kanban ...)
+                       also read from env LASTDB_DB (set by org/fkanban wrappers ...)
 
 Commands:
   init                 bootstrap a node + declare private schemas + seed default board
@@ -71,7 +71,7 @@ Commands:
   pickup status        classify active cards by pickup eligibility (--json)
   pickup claim         claim the next ready card into doing (priority + overlap + CAS)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
-  hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for kanban/gstack
+  hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json --full-body)
@@ -86,17 +86,17 @@ Commands:
   doctor               health-check the local setup (--json)
   which                print the resolved kanban/fkanban executable path (--json)
   mcp                  start an MCP server over stdio
-  version              print the kanban version and exit (alias of --version)
+  version              print the fkanban version and exit (alias of --version)
   help                 print this help
 
-Run \`kanban help <command>\` or \`kanban <command> --help\` for command details.
+Run \`fkanban help <command>\` or \`fkanban <command> --help\` for command details.
 
 Global flags:
   --verbose            echo HTTP requests + responses
   --json               machine-readable output (add/move/dep/rm/board create/
                        board rm echo the write result as JSON; read commands too)
   --help, -h           print this help
-  --version, -V        print the kanban version and exit
+  --version, -V        print the fkanban version and exit
 
 Dependencies: a card with deps is 🔒 blocked until each dep card reaches its
 board's final column. \`move\`/\`add\` into doing/done — or the board's own
@@ -104,20 +104,20 @@ final column — refuses a blocked card unless --force.
 
 Columns (fixed on every board): backlog → todo → doing → done`;
 
-const HELP_FOOTER = "Run `kanban help` for all commands.";
+const HELP_FOOTER = "Run `fkanban help` for all commands.";
 
 function withFooter(body: string): string {
   return `${body}\n\n${HELP_FOOTER}`;
 }
 
-// Per-command usage. `kanban <cmd> --help` (or `-h`) prints the matching
+// Per-command usage. `fkanban <cmd> --help` (or `-h`) prints the matching
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
-  init: withFooter(`kanban init — bootstrap a node + declare private schemas + seed the default board
+  init: withFooter(`fkanban init — bootstrap a node + declare private schemas + seed the default board
 
 Usage:
-  kanban init [options]
+  fkanban init [options]
 
 Options:
   --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1)
@@ -128,17 +128,17 @@ Options:
 
 Private schema setup is performed by the NODE through Mini's local
 /api/apps/declare-schema route. The CLI never contacts --schema-service-url;
-that URL is only recorded in ~/.kanban/config.json for diagnostics (it shows
-up in \`kanban doctor\`). If init fails with app_schema_declare_unsupported,
+that URL is only recorded in ~/.fkanban/config.json for diagnostics (it shows
+up in \`fkanban doctor\`). If init fails with app_schema_declare_unsupported,
 upgrade the node to a Mini build with local app-schema declaration.
 
 Example:
-  kanban init --node-url http://127.0.0.1 --name "Tom's board"`),
+  fkanban init --node-url http://127.0.0.1 --name "Tom's board"`),
 
-  add: withFooter(`kanban add — create or update a card (idempotent by slug)
+  add: withFooter(`fkanban add — create or update a card (idempotent by slug)
 
 Usage:
-  kanban add <slug> [options]            # --body also reads stdin if piped
+  fkanban add <slug> [options]            # --body also reads stdin if piped
 
 Options:
   --title <text>        card title
@@ -154,7 +154,7 @@ Options:
   --surfaces a,b        comma-separated repo-relative path globs or subsystem
                         names this card expects to touch
   --priority <P0-P3>    card priority (P0 = most urgent … P3 = least); stored as
-                        a p0–p3 tag. \`kanban rank\` orders a column by this so
+                        a p0–p3 tag. \`fkanban rank\` orders a column by this so
                         fkanban-pickup works urgent cards first.
   --body <text>         card body (Markdown); replaces the whole body.
                         Also reads the body from piped stdin when no --body
@@ -182,15 +182,15 @@ Multi-line bodies — pipe via stdin, don't inline:
   run as commands ((eval): command not found: <word>) and the written body
   is silently corrupted/truncated. The stdin path never puts the body on the
   command line, so it is verbatim and immune.
-  printf '%s' "$BODY" | kanban add ship-login --title "Ship login" --column todo
+  printf '%s' "$BODY" | fkanban add ship-login --title "Ship login" --column todo
 
 Example:
-  kanban add ship-login --title "Ship login" --column todo --priority P1 --tags auth`),
+  fkanban add ship-login --title "Ship login" --column todo --priority P1 --tags auth`),
 
-  mark: withFooter(`kanban mark — append one marker line to an existing card body
+  mark: withFooter(`fkanban mark — append one marker line to an existing card body
 
 Usage:
-  kanban mark <slug> "<line>" [--json]
+  fkanban mark <slug> "<line>" [--json]
 
 Appends the line only if it is not already present. This preserves the card's
 board, column, tags, kind, and other metadata; it never replaces the full body.
@@ -200,12 +200,12 @@ Options:
   --json                echo the write result as JSON
 
 Example:
-  kanban mark ship-login "NEEDS-HUMAN: missing DONE-WHEN"`),
+  fkanban mark ship-login "NEEDS-HUMAN: missing DONE-WHEN"`),
 
-  move: withFooter(`kanban move — move a card to another column
+  move: withFooter(`fkanban move — move a card to another column
 
 Usage:
-  kanban move <slug> <column> [options]
+  fkanban move <slug> <column> [options]
 
 Options:
   --from <col>          claim guard: only move if the card is currently in col
@@ -216,13 +216,13 @@ Options:
   --json                echo the write result as JSON
 
 Example:
-  kanban move ship-login doing --from todo`),
+  fkanban move ship-login doing --from todo`),
 
-  dep: withFooter(`kanban dep — manage dependency edges between cards
+  dep: withFooter(`fkanban dep — manage dependency edges between cards
 
 Usage:
-  kanban dep add <slug> <dep>     # card <slug> depends on <dep>
-  kanban dep rm  <slug> <dep>     # remove the edge
+  fkanban dep add <slug> <dep>     # card <slug> depends on <dep>
+  fkanban dep rm  <slug> <dep>     # remove the edge
 
 Options:
   --json                echo the write result as JSON
@@ -233,13 +233,13 @@ body. The dependency card must already exist, and edges that would form a cycle
 (direct or transitive) are rejected (exit 2).
 
 Example:
-  kanban dep add ui api`),
+  fkanban dep add ui api`),
 
-  tag: withFooter(`kanban tag — add or remove tags on a card, incrementally
+  tag: withFooter(`fkanban tag — add or remove tags on a card, incrementally
 
 Usage:
-  kanban tag add <slug> <tag> [tag...]   # union into the card's tags
-  kanban tag rm  <slug> <tag> [tag...]   # remove from the card's tags
+  fkanban tag add <slug> <tag> [tag...]   # union into the card's tags
+  fkanban tag rm  <slug> <tag> [tag...]   # remove from the card's tags
 
 Options:
   --json                echo the write result as JSON
@@ -251,13 +251,13 @@ Reserved tags (\`dep:<slug>\` legacy dependency tags, the delete tombstone) are
 rejected — use \`dep\`/\`rm\`. Dependency edges live in the separate deps field.
 
 Example:
-  kanban tag add ship-login p1
-  kanban tag rm  ship-login blocked`),
+  fkanban tag add ship-login p1
+  fkanban tag rm  ship-login blocked`),
 
-  overlap: withFooter(`kanban overlap — report declared file-surface conflicts
+  overlap: withFooter(`fkanban overlap — report declared file-surface conflicts
 
 Usage:
-  kanban overlap <slug> [--json]
+  fkanban overlap <slug> [--json]
 
 Compares the candidate card's surfaces against every doing card with the
 same repo. Surfaces come from the structured field or a body header:
@@ -267,12 +267,12 @@ Missing surfaces are adoption warnings, not conflicts: the command exits 0 when
 the answer is unknown. Declared conflicts exit 2 and name the matching patterns.
 
 Example:
-  kanban overlap ship-login`),
+  fkanban overlap ship-login`),
 
-  list: withFooter(`kanban list — render a board as columns of cards
+  list: withFooter(`fkanban list — render a board as columns of cards
 
 Usage:
-  kanban list [options]
+  fkanban list [options]
 
 Options:
   --board <slug>        board to render (default: default)
@@ -290,17 +290,17 @@ Options:
                         compatibility alias for --json with complete bodies
 
 Example:
-  kanban list --board default --limit 10
-  kanban list --full-body
-  kanban list --tag kanban --column doing
-  kanban list --column todo --field slug
-  kanban list --wide --column doing`),
+  fkanban list --board default --limit 10
+  fkanban list --full-body
+  fkanban list --tag fkanban --column doing
+  fkanban list --column todo --field slug
+  fkanban list --wide --column doing`),
 
-  pickup: withFooter(`kanban pickup — readiness report + atomic next-card claim
+  pickup: withFooter(`fkanban pickup — readiness report + atomic next-card claim
 
 Usage:
-  kanban pickup status [--json]
-  kanban pickup claim [options]
+  fkanban pickup status [--json]
+  fkanban pickup claim [options]
 
 status — Classifies every active (non-terminal) card as pickup-ready,
 blocked-on-dependency, human-gated, malformed-routing, parked/non-work,
@@ -325,14 +325,15 @@ claim options:
   --json                machine-readable claim result
 
 Example:
-  kanban pickup status --json
-  kanban pickup claim --json --worker last-stack-fkanban-pickup
-  kanban pickup claim --dry-run --prefer-repo EdgeVector/fold`),
+  fkanban pickup status
+  fkanban pickup status --json
+  fkanban pickup claim --json --worker last-stack-fkanban-pickup
+  fkanban pickup claim --dry-run --prefer-repo EdgeVector/fold`),
 
-  rank: withFooter(`kanban rank — reorder a column by card priority
+  rank: withFooter(`fkanban rank — reorder a column by card priority
 
 Usage:
-  kanban rank [options]
+  fkanban rank [options]
 
 Reassigns each work card's \`position\` in priority order so \`fkanban-pickup\` (which
 drains the LOWEST position first) works the most urgent cards first. Priority is
@@ -349,13 +350,13 @@ Options:
   --json                echo the resulting order as JSON
 
 Example:
-  kanban rank
-  kanban rank --board roadmap --column backlog`),
+  fkanban rank
+  fkanban rank --board roadmap --column backlog`),
 
-  search: withFooter(`kanban search — find cards by text across slug/title/body/tags/assignee
+  search: withFooter(`fkanban search — find cards by text across slug/title/body/tags/assignee
 
 Usage:
-  kanban search <query> [options]        # multi-word queries are AND-matched
+  fkanban search <query> [options]        # multi-word queries are AND-matched
 
 Options:
   --board <slug>        restrict to one board
@@ -369,15 +370,15 @@ Options:
                         compatibility alias for --json with complete bodies
 
 Example:
-  kanban search "auth p1"
-  kanban search auth --limit 5
-  kanban search auth --all
-  kanban search auth --full-body`),
+  fkanban search "auth p1"
+  fkanban search auth --limit 5
+  fkanban search auth --all
+  fkanban search auth --full-body`),
 
-  gates: withFooter(`kanban gates — list open human gates from fbrain's open-decisions ledger
+  gates: withFooter(`fkanban gates — list open human gates from fbrain's open-decisions ledger
 
 Usage:
-  kanban gates [options]
+  fkanban gates [options]
 
 Options:
   --declare-link       ask the node to declare fkanban's local Reference schema
@@ -385,33 +386,33 @@ Options:
                        (setup/proof step; requires the dev node matcher)
   --json               machine-readable open gate array
 
-Plain \`kanban gates\` is read-only: it queries kanban's app-local Reference
+Plain \`fkanban gates\` is read-only: it queries fkanban's app-local Reference
 schema, which the node translates through the persisted read-only LINK. It does
 not copy, write, clear, or own gate state.
 
-On app-isolation nodes, set FKANBAN_APP_CAPABILITY to a granted kanban
+On app-isolation nodes, set FKANBAN_APP_CAPABILITY to a granted fkanban
 CapabilityToken blob so the node treats the request as the fkanban app.
 
 Example:
-  kanban gates
-  kanban gates --declare-link`),
+  fkanban gates
+  fkanban gates --declare-link`),
 
-  show: withFooter(`kanban show — print one card in detail (deps + blocked state)
+  show: withFooter(`fkanban show — print one card in detail (deps + blocked state)
 
 Usage:
-  kanban show <slug> [options]
+  fkanban show <slug> [options]
 
 Options:
   --json                machine-readable output
   --board <slug>        accepted as a compatibility no-op; card slugs are global
 
 Example:
-  kanban show ship-login`),
+  fkanban show ship-login`),
 
-  rm: withFooter(`kanban rm — soft-delete a card (refuses while live cards depend on it)
+  rm: withFooter(`fkanban rm — soft-delete a card (refuses while live cards depend on it)
 
 Usage:
-  kanban rm <slug> [options]
+  fkanban rm <slug> [options]
 
 Options:
   --json                echo the write result as JSON
@@ -420,14 +421,14 @@ Deletion uses the node's native tombstone path. It refuses if any live card stil
 depends on the target; remove or retarget those dependency edges first.
 
 Example:
-  kanban rm ship-login`),
+  fkanban rm ship-login`),
 
-  board: withFooter(`kanban board — create/update, list, or remove boards
+  board: withFooter(`fkanban board — create/update, list, or remove boards
 
 Usage:
-  kanban board create <slug> [options]
-  kanban board list [options]
-  kanban board rm <slug> [options]
+  fkanban board create <slug> [options]
+  fkanban board list [options]
+  fkanban board rm <slug> [options]
 
 Options:
   --title <text>        board title (create)
@@ -438,13 +439,13 @@ Options:
   --json                machine-readable output
 
 Examples:
-  kanban board create sprint --title "Sprint 1"
-  kanban board rm sprint`),
+  fkanban board create sprint --title "Sprint 1"
+  fkanban board rm sprint`),
 
-  migrate: withFooter(`kanban migrate — one-time board data migrations
+  migrate: withFooter(`fkanban migrate — one-time board data migrations
 
 Usage:
-  kanban migrate area-tags [--dry-run] [--json]
+  fkanban migrate area-tags [--dry-run] [--json]
 
 Subcommands:
   area-tags            re-derive the pickup \`area:*\` tags on every active
@@ -460,13 +461,13 @@ Flags:
   --json               machine-readable { scanned, changed, skippedDone, cards }
 
 Example:
-  kanban migrate area-tags --dry-run   # preview
-  kanban migrate area-tags             # apply`),
+  fkanban migrate area-tags --dry-run   # preview
+  fkanban migrate area-tags             # apply`),
 
-  groom: withFooter(`kanban groom — board hygiene reports and safe repairs
+  groom: withFooter(`fkanban groom — board hygiene reports and safe repairs
 
 Usage:
-  kanban groom stale-blockers [--apply] [--json]
+  fkanban groom stale-blockers [--apply] [--json]
 
 Subcommands:
   stale-blockers       detect stale generated pickup/blocker metadata, malformed
@@ -479,18 +480,18 @@ Flags:
   --json               machine-readable { scanned, candidates, changed, cards }
 
 Examples:
-  kanban groom stale-blockers
-  kanban groom stale-blockers --apply`),
+  fkanban groom stale-blockers
+  fkanban groom stale-blockers --apply`),
 
-  hygiene: withFooter(`kanban hygiene — local machine-hygiene helpers
+  hygiene: withFooter(`fkanban hygiene — local machine-hygiene helpers
 
 Usage:
-  kanban hygiene orphan-bun [--apply] [--min-age-hours N] [--pileup-threshold N] [--json]
+  fkanban hygiene orphan-bun [--apply] [--min-age-hours N] [--pileup-threshold N] [--json]
 
 Subcommands:
   orphan-bun           list or signal stale PPID-1 Bun helper processes whose
-                       command path matches the explicit kanban/gstack
-                       allowlist: kanban MCP, gstack browse server, and
+                       command path matches the explicit fkanban/gstack
+                       allowlist: fkanban MCP, gstack browse server, and
                        gstack terminal-agent. Dry-run by default.
 
 Flags:
@@ -501,13 +502,13 @@ Flags:
   --json               machine-readable report
 
 Examples:
-  kanban hygiene orphan-bun
-  kanban hygiene orphan-bun --apply`),
+  fkanban hygiene orphan-bun
+  fkanban hygiene orphan-bun --apply`),
 
-  doctor: withFooter(`kanban doctor — health-check the local setup
+  doctor: withFooter(`fkanban doctor — health-check the local setup
 
 Usage:
-  kanban doctor [--json]
+  fkanban doctor [--json]
 
 Verifies config, node reachability, and resolved schemas. Exits non-zero on
 any failed check.
@@ -515,42 +516,42 @@ any failed check.
 Flags:
   --json               machine-readable { ok, checks } report`),
 
-  which: withFooter(`kanban which — show the PATH shim that will run
+  which: withFooter(`fkanban which — show the PATH shim that will run
 
 Usage:
-  kanban which [kanban|fkanban|kanban-mcp|fkanban-mcp] [--json]
+  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp] [--json]
 
 Prints the resolved executable path. With --json, also reports the realpath and
 whether it lives under the expected host-track checkout.
 
 Example:
-  kanban which --json`),
+  fkanban which --json`),
 
-  mcp: withFooter(`kanban mcp — start an MCP server over stdio
+  mcp: withFooter(`fkanban mcp — start an MCP server over stdio
 
 Usage:
-  kanban mcp
+  fkanban mcp
 
 Exposes the board to MCP clients (e.g. Claude). Speaks JSON-RPC on
 stdin/stdout; not meant to be run interactively.
 
 Register with Claude Code (the \`--\` separates \`claude mcp add\` flags from
 the command):
-  claude mcp add fkanban -- kanban mcp
+  claude mcp add fkanban -- fkanban mcp
 
-Run \`kanban doctor\` to print the exact \`claude mcp add\` line for your setup
+Run \`fkanban doctor\` to print the exact \`claude mcp add\` line for your setup
 (it resolves the shim-on-PATH vs bun-entrypoint form automatically).`),
 
-  version: withFooter(`kanban version — print the kanban version and exit
+  version: withFooter(`fkanban version — print the fkanban version and exit
 
 Usage:
-  kanban version
+  fkanban version
 
 An alias of the \`--version\`/\`-V\` flag: prints just the version (from
 package.json) to stdout and exits 0.
 
 Example:
-  kanban version`),
+  fkanban version`),
 };
 
 // Resolve which help text to print for the parsed argv. `cmd` is positionals[0],
