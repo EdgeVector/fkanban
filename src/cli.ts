@@ -5,6 +5,8 @@
 
 import { parseArgs, format } from "node:util";
 import * as fs from "node:fs";
+import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, type Verbose } from "./client.ts";
@@ -83,6 +85,7 @@ Commands:
   doctor               health-check the local setup (--json)
   mcp                  start an MCP server over stdio
   version              print the kanban version and exit (alias of --version)
+  which                print CLI executable/source provenance (--json)
   help                 print this help
 
 Run \`kanban help <command>\` or \`kanban <command> --help\` for command details.
@@ -516,6 +519,22 @@ package.json) to stdout and exits 0.
 
 Example:
   kanban version`),
+
+  which: withFooter(`kanban which — print CLI executable/source provenance
+
+Usage:
+  kanban which [--json]
+
+Prints the running CLI entrypoint, package version, source root, Bun runtime,
+and current working directory. This command never contacts the board node; it is
+safe for host-track and pickup preflight diagnostics.
+
+Options:
+  --json                machine-readable provenance report
+
+Example:
+  kanban which
+  kanban which --json`),
 };
 
 // Resolve which help text to print for the parsed argv. `cmd` is positionals[0],
@@ -769,6 +788,55 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
 };
 
+type WhichReport = {
+  package: string;
+  version: string;
+  command: string;
+  executable_path: string;
+  source_path: string;
+  source_root: string;
+  bun_path: string;
+  bun_version: string;
+  cwd: string;
+};
+
+function realpathOrSelf(path: string): string {
+  try {
+    return fs.realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
+
+function whichReport(): WhichReport {
+  const sourcePath = fileURLToPath(import.meta.url);
+  const argvPath = process.argv[1] ?? sourcePath;
+  return {
+    package: pkg.name,
+    version: pkg.version,
+    command: basename(argvPath),
+    executable_path: realpathOrSelf(argvPath),
+    source_path: sourcePath,
+    source_root: sourcePath.replace(/\/src\/cli\.ts$/, ""),
+    bun_path: realpathOrSelf(process.execPath),
+    bun_version: Bun.version,
+    cwd: process.cwd(),
+  };
+}
+
+function formatWhichReport(report: WhichReport): string {
+  return [
+    `fkanban v${report.version}`,
+    `command: ${report.command}`,
+    `executable_path: ${report.executable_path}`,
+    `source_path: ${report.source_path}`,
+    `source_root: ${report.source_root}`,
+    `bun_path: ${report.bun_path}`,
+    `bun_version: ${report.bun_version}`,
+    `cwd: ${report.cwd}`,
+  ].join("\n");
+}
+
 // Closest valid flag for a mistyped option on a known command. Mirrors the
 // unknown-COMMAND "did you mean" path (suggestClosest over COMMAND_HELP keys),
 // but over this command's accepted flags (its COMMAND_FLAGS ∪ UNIVERSAL_FLAGS).
@@ -975,6 +1043,14 @@ async function dispatch(
       // and agents reflexively type `<tool> version`). Print just the version
       // from package.json (same source as `--version`/`-V`) and exit 0.
       console.log(pkg.version);
+      return 0;
+    }
+
+    case "which": {
+      const extra = rejectExtraPositionals(positionals, 1, "which");
+      if (extra !== undefined) return extra;
+      const report = whichReport();
+      console.log(values.json ? JSON.stringify(report) : formatWhichReport(report));
       return 0;
     }
 
