@@ -32,6 +32,9 @@ describe("host-track refresh", () => {
     roots.length = 0;
   });
 
+  // Real git clone/fetch/ff work — bun's default 5 s per-test timeout flakes
+  // on a contended machine (two consecutive forge CI runs died at ~5.1 s and
+  // ~6.2 s on 2026-07-17 while rustc/docker builds shared the host).
   test("clones, fast-forwards, and repoints PATH shims", async () => {
     const root = tempRoot();
     const remote = resolve(root, "remote.git");
@@ -80,5 +83,5 @@ describe("host-track refresh", () => {
     const second = await run(["bash", "bin/host-track-refresh"], resolve(import.meta.dir, ".."), env);
     expect(second.code).toBe(0);
     expect(await Bun.file(resolve(host, "README.md")).text()).toBe("two\n");
-  });
+  }, 30_000);
 });
