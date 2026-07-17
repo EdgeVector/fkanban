@@ -270,6 +270,24 @@ describe("pickup-status", () => {
     expect(bySlug.get("real-human")).toBe("human-gated");
   });
 
+  test("reports non-done cards with done_at as stale metadata", async () => {
+    await seedCard(node, card({
+      slug: "reopened-with-done-at",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      column: "backlog",
+      done_at: "2026-07-17T08:00:00.000Z",
+    }));
+
+    const { report } = await pickupStatusResult({ cfg, node });
+    const stale = report.cards.find((c) => c.slug === "reopened-with-done-at");
+
+    expect(stale?.category).toBe("stale-metadata");
+    expect(stale?.reason).toBe("non-done card still has done_at metadata");
+    expect(stale?.suggestion).toContain("Clear done_at");
+    expect(report.counts["stale-metadata"]).toBe(1);
+  });
+
   test("preflights Situation-fenced pickup candidates and allows matching north-star cards", async () => {
     await seedCard(node, card({
       slug: "org-invite",
