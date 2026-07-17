@@ -271,6 +271,16 @@ describe("pickup claim", () => {
       body: "Repo: EdgeVector/fkanban\nBase: main\n\nDependent work.",
     }));
 
+    const baseQueryAll = node.queryAll.bind(node);
+    node.queryAll = async (args: Parameters<NodeClient["queryAll"]>[0]) => {
+      const res = await baseQueryAll(args);
+      if (args.schemaHash === cfg.schemaHashes.card && !args.filter) {
+        const results = res.results.filter((row) => row.key.hash !== "done-dep");
+        return { ...res, results, returned_count: results.length };
+      }
+      return res;
+    };
+
     const shown = await showResult({ cfg, node, slug: "dependent" });
     expect(shown.card.blocked).toBe(false);
     expect(shown.card.blockedBy).toEqual([]);
