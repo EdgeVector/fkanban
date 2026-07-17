@@ -155,10 +155,13 @@ export function laneOf(card: Card): LaneId {
   const explicit = explicitLaneTag(card);
   if (explicit) return explicit;
 
-  // P0 always rides the p0-now lane (pipeline or not). Non-P0 never does.
-  if (priorityOf(card) === "P0" || isPipelineP0(card)) return "p0-now";
-
+  // Papercuts stay in the papercut lane even if mistagged P0 — otherwise a
+  // flood of routine-error P0s starves every program lane.
   if (isPapercutHeuristic(card)) return "papercut";
+
+  // True interrupt lane: explicit p0-now (above), pipeline P0, or generic P0
+  // that is not a papercut.
+  if (priorityOf(card) === "P0" || isPipelineP0(card)) return "p0-now";
 
   if (card.north_star && card.north_star.trim()) {
     return `program:${card.north_star.trim()}`;

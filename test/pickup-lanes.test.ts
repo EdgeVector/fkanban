@@ -56,6 +56,10 @@ describe("laneOf", () => {
     expect(laneOf(card({ slug: "routine-error-foo", tags: ["p1"] }))).toBe("papercut");
   });
 
+  test("routine-error stays papercut even when tagged P0", () => {
+    expect(laneOf(card({ slug: "routine-error-foo", tags: ["p0"] }))).toBe("papercut");
+  });
+
   test("explicit lane tag wins over north_star", () => {
     expect(
       laneOf(
