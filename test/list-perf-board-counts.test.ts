@@ -361,7 +361,13 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(scan).toContain("updated_at");
   });
 
-  test("--column sends an indexed column filter instead of an unfiltered card scan", async () => {
+  // The live node's /api/query filter is a HashRangeFilter — field-equality
+  // filters like {column: "todo"} are not a node capability and 400 on every
+  // call (2026-07-17 request-ops investigation: one guaranteed error plus an
+  // N+1 fallback per column list). The contract is now: NEVER send a field
+  // filter; filter client-side over a body-free scan; keep bodies point-read
+  // per MATCHING card only.
+  test("--column never sends a field filter to the node", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -372,8 +378,8 @@ describe("list — text path fetches body-free fields, structured views keep ful
     const out = await listCmd({ cfg, node, column: "todo", json: true });
     expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
 
-    expect(node.cardQueries.some((q) => q.filter?.column === "todo")).toBe(true);
-    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
+    expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(true);
   });
 
   test("--column point-reads dependency statuses for blocked metadata", async () => {
@@ -391,12 +397,11 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(parsed[0]!.blocked).toBe(true);
     expect(parsed[0]!.blockedBy).toEqual(["dep-a"]);
 
-    expect(node.cardQueries.some((q) => q.filter?.column === "todo")).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "dep-a")).toBe(true);
-    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
   });
 
-  test("--column fallback avoids a full-body board scan when a node rejects column filters", async () => {
+  test("--column still avoids a full-body board scan (bodies point-read per matching card)", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -408,7 +413,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
     const out = await listCmd({ cfg, node, column: "todo", json: true });
     expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
 
-    expect(node.cardQueries[0]!.filter).toEqual({ column: "todo" });
+    expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
     expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(true);
     expect(node.cardQueries.some((q) => q.filter === undefined && q.fields.includes("body"))).toBe(false);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "todo-a" && q.fields.includes("body"))).toBe(true);
