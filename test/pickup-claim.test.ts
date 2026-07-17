@@ -447,6 +447,8 @@ describe("pickup claim", () => {
     expect(result.todo_count).toBe(0);
     expect(result.diagnostics?.scanned_active).toBe(0);
     expect(result.diagnostics?.ready).toBe(0);
+    expect(result.diagnostics?.inflight_without_artifact).toBe(0);
+    expect(result.diagnostics?.inflight_without_artifact_exemplars).toBeUndefined();
   });
 
   test("no-eligible reports zero todo count for backlog and doing only", async () => {
@@ -470,6 +472,37 @@ describe("pickup claim", () => {
     expect(result.diagnostics?.scanned_active).toBe(2);
     expect(result.diagnostics?.counts["parked/non-work"]).toBe(1);
     expect(result.diagnostics?.counts.collision).toBe(1);
+    expect(result.diagnostics?.inflight_without_artifact).toBe(1);
+    expect(result.diagnostics?.inflight_without_artifact_exemplars).toEqual([{
+      slug: "inflight",
+      category: "collision",
+      reason: "card is already in doing",
+      suggestion: "Do not pick up again; reconcile the existing branch/PR or move it back to todo.",
+    }]);
+  });
+
+  test("no-eligible diagnostics ignore doing cards that already have review artifacts", async () => {
+    await seedCard(node, card({
+      slug: "inflight-with-pr",
+      column: "doing",
+      pr_url: "lastgit://fkanban/cr/cr-123",
+      branch: "kanban/inflight-with-pr",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nIn flight with CR.",
+    }));
+    await seedCard(node, card({
+      slug: "inflight-with-branch",
+      column: "doing",
+      branch: "kanban/inflight-with-branch",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nIn flight with branch.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.diagnostics?.counts.collision).toBe(2);
+    expect(result.diagnostics?.inflight_without_artifact).toBe(0);
+    expect(result.diagnostics?.inflight_without_artifact_exemplars).toBeUndefined();
   });
 
   test("no-eligible diagnostics include malformed routing exemplars", async () => {

@@ -92,7 +92,9 @@ export type PickupClaimDiagnostics = {
   scanned_active: number;
   ready: number;
   counts: Record<PickupCategory, number>;
+  inflight_without_artifact: number;
   exemplars?: PickupClaimDiagnosticExemplar[];
+  inflight_without_artifact_exemplars?: PickupClaimDiagnosticExemplar[];
 };
 
 export type PickupClaimDiagnosticExemplar = {
@@ -150,6 +152,7 @@ function orderCandidates(readyCards: Card[], preferRepo: string[]): Card[] {
 }
 
 const DIAGNOSTIC_EXEMPLARS_PER_CATEGORY = 3;
+const INFLIGHT_WITHOUT_ARTIFACT_EXEMPLARS = 3;
 
 function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticExemplar {
   return {
@@ -160,7 +163,7 @@ function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticEx
   };
 }
 
-function claimDiagnostics(report: PickupStatusReport): PickupClaimDiagnostics {
+function claimDiagnostics(report: PickupStatusReport, cards: Card[]): PickupClaimDiagnostics {
   const exemplars: PickupClaimDiagnosticExemplar[] = [];
   for (const category of PICKUP_CATEGORIES) {
     if (category === "pickup-ready") continue;
@@ -171,11 +174,25 @@ function claimDiagnostics(report: PickupStatusReport): PickupClaimDiagnostics {
         .map(diagnosticExemplar),
     );
   }
+  const bySlug = new Map(cards.map((card) => [card.slug, card]));
+  const inflightWithoutArtifact = report.cards.filter((classification) => {
+    if (classification.category !== "collision" || classification.column !== "doing") return false;
+    const card = bySlug.get(classification.slug);
+    return card !== undefined && !card.pr_url && !card.branch;
+  });
   return {
     scanned_active: report.scanned,
     ready: report.ready,
     counts: report.counts,
+    inflight_without_artifact: inflightWithoutArtifact.length,
     ...(exemplars.length > 0 ? { exemplars } : {}),
+    ...(inflightWithoutArtifact.length > 0
+      ? {
+          inflight_without_artifact_exemplars: inflightWithoutArtifact
+            .slice(0, INFLIGHT_WITHOUT_ARTIFACT_EXEMPLARS)
+            .map(diagnosticExemplar),
+        }
+      : {}),
   };
 }
 
@@ -209,7 +226,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
           detail: `doing=${doingCount} max-doing=${opts.maxDoing}`,
         }],
         worker: opts.worker,
-        diagnostics: claimDiagnostics(report),
+        diagnostics: claimDiagnostics(report, cards),
       };
     }
   }
@@ -220,7 +237,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     opts.situationPreflight,
     { cfg: opts.cfg, node: opts.node },
   );
-  const diagnostics = claimDiagnostics(report);
+  const diagnostics = claimDiagnostics(report, cards);
 
   const readyClassifications = report.cards.filter(
     (c) => c.ready && c.board === board && c.column === "todo",
