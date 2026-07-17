@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { pickupClaimResult } from "../src/commands/pickup_claim.ts";
+import { showResult } from "../src/commands/show.ts";
 import {
   boardToFields,
   cardToFields,
@@ -240,6 +241,51 @@ describe("pickup claim", () => {
       }
       return res;
     };
+
+    const result = await pickupClaimResult({
+      cfg,
+      node,
+      worker: "worker-a",
+    });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("dependent");
+    expect(result.scanned_ready).toBe(1);
+
+    const onBoard = await findCard(node, cfg, "dependent");
+    expect(onBoard?.column).toBe("doing");
+    expect(onBoard?.assignee).toBe("worker-a");
+  });
+
+  test("claims a dependency-ready todo card that show reports unblocked", async () => {
+    await seedCard(node, card({
+      slug: "done-dep",
+      title: "Done dependency",
+      column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nMerged dependency.",
+    }));
+    await seedCard(node, card({
+      slug: "dependent",
+      title: "Dependent work",
+      deps: ["done-dep"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nDependent work.",
+    }));
+
+    const baseQueryAll = node.queryAll.bind(node);
+    node.queryAll = async (args: Parameters<NodeClient["queryAll"]>[0]) => {
+      const res = await baseQueryAll(args);
+      if (args.schemaHash === cfg.schemaHashes.card && !args.filter) {
+        const results = res.results.filter((row) => row.key.hash !== "done-dep");
+        return { ...res, results, returned_count: results.length };
+      }
+      return res;
+    };
+
+    const shown = await showResult({ cfg, node, slug: "dependent" });
+    expect(shown.card.blocked).toBe(false);
+    expect(shown.card.blockedBy).toEqual([]);
+    expect(shown.card.missingDeps).toEqual([]);
+    expect(shown.card.deps).toEqual(["done-dep"]);
 
     const result = await pickupClaimResult({
       cfg,
