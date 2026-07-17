@@ -1219,10 +1219,8 @@ function terminalColumnFor(
 // terminal column is `done`, which is already in WORKING_COLUMNS, so the gating
 // set is unchanged there.
 //
-// Default/`todo` is also gated (Tom 2026-07-14): todo is the pickup claim lane.
-// Unfinished deps belong in `backlog` until the dependency reaches terminal;
-// otherwise cards sit in todo looking "ready" while pickup-status says
-// blocked-on-dependency and agents never pick them up.
+// Default/`todo` is intentionally not gated: grooming may surface dependency
+// state there, but the hard block starts when work enters `doing` or terminal.
 //
 // This intentionally does NOT gate intermediate custom columns (e.g. `spec →
 // build`) — that needs board-level intake metadata that doesn't exist yet.
@@ -1231,7 +1229,6 @@ export function isDepEnforcedColumn(
   boardSlug: string,
   boardTerminal?: Map<string, string>,
 ): boolean {
-  if (boardSlug === DEFAULT_BOARD_SLUG && column === "todo") return true;
   return isWorkingColumn(column) || column === terminalColumnFor(boardSlug, boardTerminal);
 }
 

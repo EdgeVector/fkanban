@@ -63,8 +63,8 @@ describe("sanitizeDefaultTodoLaneMetadata", () => {
 });
 
 describe("default/todo dep enforcement", () => {
-  test("todo is dep-enforced on the default board", () => {
-    expect(isDepEnforcedColumn("todo", "default")).toBe(true);
+  test("todo is not dep-enforced on the default board", () => {
+    expect(isDepEnforcedColumn("todo", "default")).toBe(false);
     expect(isDepEnforcedColumn("backlog", "default")).toBe(false);
     expect(isDepEnforcedColumn("doing", "default")).toBe(true);
   });

@@ -133,7 +133,8 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
       column: "todo",
       body: sharedAreaBody(),
     });
-    // Dependent stays in backlog until A is done (default/todo is dep-gated).
+    // Keep the dependent in backlog here to prove the dep edge, not overlap,
+    // serializes pickup until A is done.
     await addCmd({
       cfg,
       node,

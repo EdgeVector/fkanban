@@ -737,9 +737,9 @@ describe("add --deps rejects a dependency cycle", () => {
 // `add` doubles as a column-changing command (create+update), so it must
 // enforce the SAME dependency soft-block `move` does: a card blocked by an
 // unfinished dep cannot be placed into a working column (doing/done)
-// OR default/todo (the pickup claim lane) unless `--force`. The guard throws
+// unless `--force`. The guard throws
 // `card_blocked` BEFORE any write (no partial state) with the message/hint
-// byte-aligned with move's. Backlog placements remain allowed.
+// byte-aligned with move's. Backlog and todo queue placements remain allowed.
 describe("add enforces the dependency soft-block into working columns", () => {
   let node: NodeClient;
 
@@ -837,17 +837,18 @@ describe("add enforces the dependency soft-block into working columns", () => {
     expect(after?.column).toBe("backlog");
   });
 
-  test("a blocked card stays addable to backlog but not default/todo", async () => {
+  test("a blocked card stays addable to backlog and default/todo", async () => {
     await seedBlocked();
     // blk is already in backlog — re-add stays allowed even though blocked.
     const res = await addCmd({ cfg, node, slug: "blk", column: "backlog" });
     expect(res).toMatchObject({ action: "updated", column: "backlog" });
-    // Promoting to todo while still blocked is refused (pickup lane).
-    await expect(addCmd({ cfg, node, slug: "blk", column: "todo" })).rejects.toMatchObject({
-      code: "card_blocked",
+    // Todo remains a queue lane; the hard dependency block starts at doing/done.
+    await expect(addCmd({ cfg, node, slug: "blk", column: "todo" })).resolves.toMatchObject({
+      action: "updated",
+      column: "todo",
     });
     const after = await findCard(node, cfg, "blk");
-    expect(after?.column).toBe("backlog");
+    expect(after?.column).toBe("todo");
   });
 
   test("a legacy dangling dep blocks placement into a working column", async () => {

@@ -274,7 +274,9 @@ export type GroomIssueKind =
   | "block-status-mismatch"
   | "human-parking-candidate"
   | "todo-lane-branch-metadata"
-  | "todo-lane-pr-metadata";
+  | "todo-lane-pr-metadata"
+  | "missing-done-when-predicate"
+  | "malformed-done-when-predicate";
 
 export type GroomIssue = {
   kind: GroomIssueKind;
@@ -287,6 +289,7 @@ export type GroomCardResult = {
   slug: string;
   board: string;
   column: string;
+  kind: string;
   changed: boolean;
   issues: GroomIssue[];
 };
@@ -315,6 +318,26 @@ function removeGeneratedBlockedLines(body: string): { body: string; changed: boo
   const lines = body.split("\n");
   const kept = lines.filter((line) => !GENERATED_BODY_BLOCK_RE.test(line.trim()));
   return { body: kept.join("\n").replace(/\n{3,}/g, "\n\n"), changed: kept.length !== lines.length };
+}
+
+const DONE_WHEN_REQUIRED_KINDS = new Set(["tracker", "validation", "meta"]);
+const DONE_WHEN_LINE_RE = /^[ \t]*DONE-WHEN:[ \t]*(.+?)[ \t]*$/im;
+const DONE_WHEN_SUGGESTION =
+  "Add one supported line, for example `DONE-WHEN: brain <slug> exists`, `DONE-WHEN: routine <name> heartbeat matches /<regex>/ after <YYYY-MM-DD>`, or `DONE-WHEN: file <path> matches /<regex>/`.";
+
+export function doneWhenPredicate(body: string): string {
+  const match = body.match(DONE_WHEN_LINE_RE);
+  return match?.[1]?.trim() ?? "";
+}
+
+export function isSupportedDoneWhenPredicate(predicate: string): boolean {
+  return [
+    /^brain\s+\S+\s+exists$/,
+    /^brain\s+\S+\s+updated-after\s+\d{4}-\d{2}-\d{2}$/,
+    /^routine\s+\S+\s+heartbeat\s+matches\s+\/.+\/\s+after\s+\d{4}-\d{2}-\d{2}$/,
+    /^date\s+>=\s+\d{4}-\d{2}-\d{2}$/,
+    /^file\s+\S+\s+matches\s+\/.+\/$/,
+  ].some((re) => re.test(predicate));
 }
 
 export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: GroomIssue[]; changed: boolean } {
@@ -390,6 +413,26 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
       applyable: false,
       suggestion: "Move true human-gated/deferred work to `--board human` or another parking board.",
     });
+  }
+
+  const kind = normalizeKind(next.kind);
+  if (DONE_WHEN_REQUIRED_KINDS.has(kind) && next.column !== "done") {
+    const predicate = doneWhenPredicate(next.body);
+    if (!predicate) {
+      issues.push({
+        kind: "missing-done-when-predicate",
+        message: "non-PR card has no supported DONE-WHEN predicate",
+        applyable: false,
+        suggestion: DONE_WHEN_SUGGESTION,
+      });
+    } else if (!isSupportedDoneWhenPredicate(predicate)) {
+      issues.push({
+        kind: "malformed-done-when-predicate",
+        message: `DONE-WHEN predicate is not supported: ${predicate}`,
+        applyable: false,
+        suggestion: DONE_WHEN_SUGGESTION,
+      });
+    }
   }
 
   // Heal the false-collision class: structured branch/pr_url on default/todo
