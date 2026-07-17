@@ -22,9 +22,17 @@ function renderGroomReport(report: GroomReport): string {
     const issues = card.issues
       .map((issue) => `${issue.kind}${issue.applyable ? "" : " (review)"}: ${issue.message}`)
       .join("; ");
-    return `  ${card.slug} [${card.board}/${card.column}]${card.changed ? " changed" : ""} — ${issues}`;
+    return `  ${card.slug} [${card.board}/${card.column} kind=${card.kind}]${card.changed ? " changed" : ""} — ${issues}`;
   });
-  return lines.length ? `${head}\n${lines.join("\n")}` : head;
+  const doneWhenFixes = report.cards.flatMap((card) =>
+    card.issues
+      .filter((issue) => issue.kind === "missing-done-when-predicate" || issue.kind === "malformed-done-when-predicate")
+      .map((issue) => `  ${card.slug} kind=${card.kind} column=${card.column} — ${issue.suggestion}`)
+  );
+  const parts = [head];
+  if (lines.length) parts.push(lines.join("\n"));
+  if (doneWhenFixes.length) parts.push(`missing DONE-WHEN fix list:\n${doneWhenFixes.join("\n")}`);
+  return parts.join("\n");
 }
 
 export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions): Promise<{
@@ -54,6 +62,7 @@ export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions):
       slug: card.slug,
       board: card.board,
       column: card.column,
+      kind: card.kind,
       changed: applyableChange,
       issues: groomed.issues,
     });

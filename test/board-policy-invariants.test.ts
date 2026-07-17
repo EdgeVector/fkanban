@@ -222,10 +222,13 @@ describe("board policy invariants", () => {
       blockReason: "Tom must approve the production action",
       body: "Human gate.",
     });
-    // Unfinished deps belong in backlog (default/todo is dep-gated for pickup).
+    // Unfinished deps may queue in todo, but cannot enter doing until terminal.
     await addCmd({ cfg, node, slug: "implementation", column: "backlog", body: validBody, deps: ["human-approval"] });
 
-    await expect(moveCmd({ cfg, node, slug: "implementation", column: "todo" })).rejects.toBeInstanceOf(FkanbanError);
+    await expect(moveCmd({ cfg, node, slug: "implementation", column: "todo" })).resolves.toMatchObject({
+      slug: "implementation",
+      to: "todo",
+    });
     await expect(moveCmd({ cfg, node, slug: "implementation", column: "doing" })).rejects.toBeInstanceOf(FkanbanError);
     await expect(rmCmd({ cfg, node, slug: "human-approval" })).rejects.toBeInstanceOf(FkanbanError);
 

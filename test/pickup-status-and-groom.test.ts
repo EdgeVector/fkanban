@@ -436,4 +436,39 @@ describe("groom stale-blockers", () => {
     expect(humanReport?.changed).toBe(false);
     expect(humanReport?.issues.map((i) => i.kind)).toContain("human-parking-candidate");
   });
+
+  test("reports a copyable missing DONE-WHEN fix list for supported non-PR cards", async () => {
+    await seedCard(node, card({
+      slug: "tracker-missing",
+      kind: "tracker",
+      column: "backlog",
+      body: "Kind: tracker\n\nTrack the rollout.",
+    }));
+    await seedCard(node, card({
+      slug: "validation-malformed",
+      kind: "validation",
+      column: "doing",
+      body: "Kind: validation\nDONE-WHEN: production looks healthy\n",
+    }));
+    await seedCard(node, card({
+      slug: "meta-supported",
+      kind: "meta",
+      column: "backlog",
+      body: "Kind: meta\nDONE-WHEN: brain active-programs updated-after 2026-07-17\n",
+    }));
+
+    const { text, report } = await groomStaleBlockersResult({ cfg, node });
+    const bySlug = new Map(report.cards.map((c) => [c.slug, c]));
+
+    expect(bySlug.get("tracker-missing")?.kind).toBe("tracker");
+    expect(bySlug.get("tracker-missing")?.column).toBe("backlog");
+    expect(bySlug.get("tracker-missing")?.issues.map((i) => i.kind)).toContain("missing-done-when-predicate");
+    expect(bySlug.get("validation-malformed")?.issues.map((i) => i.kind)).toContain("malformed-done-when-predicate");
+    expect(bySlug.has("meta-supported")).toBe(false);
+
+    expect(text).toContain("missing DONE-WHEN fix list:");
+    expect(text).toContain("tracker-missing kind=tracker column=backlog");
+    expect(text).toContain("validation-malformed kind=validation column=doing");
+    expect(text).toContain("DONE-WHEN: brain <slug> exists");
+  });
 });
