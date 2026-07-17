@@ -781,9 +781,9 @@ describe("per-command help", () => {
 
   test("each entry names its command, shows a Usage line + an example, and the footer", () => {
     for (const [cmd, text] of Object.entries(COMMAND_HELP)) {
-      expect(text).toContain(`kanban ${cmd}`);
+      expect(text).toContain(`fkanban ${cmd}`);
       expect(text).toContain("Usage:");
-      expect(text).toContain("Run `kanban help` for all commands.");
+      expect(text).toContain("Run `fkanban help` for all commands.");
     }
   });
 
@@ -840,8 +840,17 @@ describe("per-command help", () => {
   });
 
   test("TOP_HELP advertises per-command help discovery", () => {
-    expect(TOP_HELP).toContain("kanban help <command>");
-    expect(TOP_HELP).toContain("kanban <command> --help");
+    expect(TOP_HELP).toContain("fkanban help <command>");
+    expect(TOP_HELP).toContain("fkanban <command> --help");
+    expect(TOP_HELP).not.toMatch(/(^|[^f])kanban <command>/);
+  });
+
+  test("help copy uses the current command name and no-review column model", () => {
+    const helpText = [TOP_HELP, ...Object.values(COMMAND_HELP)].join("\n\n");
+    expect(TOP_HELP).toContain("Columns (fixed on every board): backlog → todo → doing → done");
+    expect(helpText).not.toMatch(/doing\/review\/done|doing\/review cards|doing → review → done/);
+    expect(helpText).not.toContain("Run `kanban help`");
+    expect(helpText).not.toMatch(/(^|[^f])kanban <command>/);
   });
 
   test("list help advertises the wide table view", () => {
