@@ -211,7 +211,7 @@ export function buildPickupStatusReport(
   const active = sortCards(activeCards(cards, boards));
   const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
   const classifications = active.map((card) =>
-    classifyPickupCard(card, active, depStatus(card, cards, terminalByBoard), situationFences.get(card.slug)),
+    classifyPickupCard(card, cards, depStatus(card, cards, terminalByBoard), situationFences.get(card.slug)),
   );
   const counts = Object.fromEntries(PICKUP_CATEGORIES.map((category) => [category, 0])) as Record<PickupCategory, number>;
   for (const c of classifications) counts[c.category] += 1;
