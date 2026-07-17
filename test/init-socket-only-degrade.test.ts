@@ -13,12 +13,12 @@
 // setup over a narrow-only socket gets a targeted full-surface-socket error.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { FkanbanError } from "../src/client.ts";
-import { runInit } from "../src/commands/init.ts";
+import { assertSafePrimaryConfigRepoint, runInit } from "../src/commands/init.ts";
 import { fieldsFor, OWNER_APP_ID } from "../src/schemas.ts";
 
 const CARD_HASH = "socketcardhash18";
@@ -148,6 +148,91 @@ function writePriorConfig(name: string, nodeUrl: string, socketPath: string): st
 }
 
 describe("runInit socket-only graceful degrade", () => {
+  test("default primary config refuses an explicit different test-node socket", async () => {
+    const primarySocket = join(tmp, "primary.sock");
+    const testSocket = join(tmp, "test-node.sock");
+    const primaryConfigPath = join(tmp, "primary-config.json");
+    const existing = {
+      configVersion: 1,
+      nodeUrl: "http://127.0.0.1",
+      schemaServiceUrl: "http://unused.invalid",
+      userHash: "stub-user",
+      schemaHashes: { card: CARD_HASH, board: BOARD_HASH },
+      nodeSocketPath: primarySocket,
+    };
+
+    let err: unknown;
+    try {
+      assertSafePrimaryConfigRepoint({
+        existing,
+        requestedNodeSocketPath: testSocket,
+        configPath: primaryConfigPath,
+        hasExplicitConfigPath: false,
+      });
+    } catch (e) {
+      err = e;
+    }
+
+    expect(err).toBeInstanceOf(FkanbanError);
+    const fe = err as FkanbanError;
+    expect(fe.code).toBe("unsafe_primary_config_repoint");
+    expect(fe.message).toContain(primaryConfigPath);
+    expect(fe.message).toContain(primarySocket);
+    expect(fe.message).toContain(testSocket);
+    expect(fe.hint).toContain("KANBAN_CONFIG");
+  });
+
+  test("explicit alternate config path may initialize against a different socket without touching primary config", async () => {
+    const oldHome = process.env.HOME;
+    const oldKanbanConfig = process.env.KANBAN_CONFIG;
+    const oldFkanbanConfig = process.env.FKANBAN_CONFIG;
+    const home = mkdtempSync(join(tmpdir(), "fkanban-init-alt-home-"));
+    const socketDir = mkdtempSync(join(tmpdir(), "fkanban-init-alt-socket-"));
+    const socketPath = join(socketDir, "folddb.sock");
+    const { server } = makeSocketNode(socketPath, { fullSurface: true });
+    const primaryConfigPath = join(home, ".kanban", "config.json");
+    const alternateConfigPath = join(tmp, "alternate-config.json");
+    const primarySocket = join(home, ".lastdb", "data", "folddb.sock");
+    try {
+      process.env.HOME = home;
+      process.env.KANBAN_CONFIG = alternateConfigPath;
+      delete process.env.FKANBAN_CONFIG;
+      mkdirSync(dirname(primaryConfigPath), { recursive: true });
+      writeFileSync(
+        primaryConfigPath,
+        JSON.stringify({
+          configVersion: 1,
+          nodeUrl: "http://127.0.0.1",
+          schemaServiceUrl: "http://unused.invalid",
+          userHash: "stub-user",
+          schemaHashes: { card: CARD_HASH, board: BOARD_HASH },
+          nodeSocketPath: primarySocket,
+        }),
+      );
+
+      await runInit({
+        nodeUrl: closedTcpUrl(),
+        nodeSocketPath: socketPath,
+        print: () => {},
+      });
+
+      const primary = JSON.parse(readFileSync(primaryConfigPath, "utf8"));
+      expect(primary.nodeSocketPath).toBe(primarySocket);
+      const alternate = JSON.parse(readFileSync(alternateConfigPath, "utf8"));
+      expect(alternate.nodeSocketPath).toBe(socketPath);
+      expect(alternate.schemaHashes.card).toBe(CARD_HASH);
+    } finally {
+      server.stop(true);
+      process.env.HOME = oldHome;
+      if (oldKanbanConfig === undefined) delete process.env.KANBAN_CONFIG;
+      else process.env.KANBAN_CONFIG = oldKanbanConfig;
+      if (oldFkanbanConfig === undefined) delete process.env.FKANBAN_CONFIG;
+      else process.env.FKANBAN_CONFIG = oldFkanbanConfig;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  });
+
   test("TCP refused + socket live + prior config → degrades, reseeds board, reports UP", async () => {
     const socketPath = join(tmp, "live.sock");
     const { server, seen } = makeSocketNode(socketPath);

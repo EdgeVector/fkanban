@@ -310,7 +310,7 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_dep_add / fkanban_dep_rm echo { slug, dep, action, deps }", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo", body: validPickupBody() } });
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "done", body: validPickupBody() } });
 
     const added = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "api" } });
     expect(added.structuredContent).toEqual({ slug: "ui", dep: "api", action: "added", deps: ["api"] });
