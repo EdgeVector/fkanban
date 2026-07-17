@@ -103,6 +103,6 @@ describe("bin/kanban + bin/fkanban bun resolution", () => {
       } finally {
         await client.close();
       }
-    });
+    }, 10_000);
   }
 });

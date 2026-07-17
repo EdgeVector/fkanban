@@ -5,6 +5,8 @@
 
 import { parseArgs, format } from "node:util";
 import * as fs from "node:fs";
+import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import pkg from "../package.json" with { type: "json" };
@@ -84,7 +86,7 @@ Commands:
                        live cards unless --force)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
-  which                print the resolved kanban/fkanban executable path (--json)
+  which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
   mcp                  start an MCP server over stdio
   version              print the fkanban version and exit (alias of --version)
   help                 print this help
@@ -516,16 +518,22 @@ any failed check.
 Flags:
   --json               machine-readable { ok, checks } report`),
 
-  which: withFooter(`fkanban which — show the PATH shim that will run
+  which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
 Usage:
   fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp] [--json]
 
-Prints the resolved executable path. With --json, also reports the realpath and
-whether it lives under the expected host-track checkout.
+Without a target, prints the running CLI entrypoint, package version, source
+root, Bun runtime, and current working directory. This never contacts the board
+node, so it is safe for host-track and pickup preflight diagnostics.
+
+With a target, prints the resolved executable path. With --json, also reports
+the realpath and whether it lives under the expected host-track checkout.
 
 Example:
-  fkanban which --json`),
+  fkanban which
+  fkanban which --json
+  fkanban which fkanban-mcp --json`),
 
   mcp: withFooter(`fkanban mcp — start an MCP server over stdio
 
@@ -810,6 +818,55 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
 };
 
+type WhichReport = {
+  package: string;
+  version: string;
+  command: string;
+  executable_path: string;
+  source_path: string;
+  source_root: string;
+  bun_path: string;
+  bun_version: string;
+  cwd: string;
+};
+
+function realpathOrSelf(path: string): string {
+  try {
+    return fs.realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
+
+function whichReport(): WhichReport {
+  const sourcePath = fileURLToPath(import.meta.url);
+  const argvPath = process.argv[1] ?? sourcePath;
+  return {
+    package: pkg.name,
+    version: pkg.version,
+    command: basename(argvPath),
+    executable_path: realpathOrSelf(argvPath),
+    source_path: sourcePath,
+    source_root: sourcePath.replace(/\/src\/cli\.ts$/, ""),
+    bun_path: realpathOrSelf(process.execPath),
+    bun_version: Bun.version,
+    cwd: process.cwd(),
+  };
+}
+
+function formatWhichReport(report: WhichReport): string {
+  return [
+    `fkanban v${report.version}`,
+    `command: ${report.command}`,
+    `executable_path: ${report.executable_path}`,
+    `source_path: ${report.source_path}`,
+    `source_root: ${report.source_root}`,
+    `bun_path: ${report.bun_path}`,
+    `bun_version: ${report.bun_version}`,
+    `cwd: ${report.cwd}`,
+  ].join("\n");
+}
+
 // Closest valid flag for a mistyped option on a known command. Mirrors the
 // unknown-COMMAND "did you mean" path (suggestClosest over COMMAND_HELP keys),
 // but over this command's accepted flags (its COMMAND_FLAGS ∪ UNIVERSAL_FLAGS).
@@ -1039,7 +1096,12 @@ async function dispatch(
     }
 
     case "which": {
-      const name = positionals[1] ?? "kanban";
+      const name = positionals[1];
+      if (name === undefined) {
+        const report = whichReport();
+        console.log(values.json ? JSON.stringify(report) : formatWhichReport(report));
+        return 0;
+      }
       const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp"]);
       if (!allowed.has(name)) {
         console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp`);

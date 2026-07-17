@@ -11,6 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import pkg from "../package.json";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -56,6 +57,36 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     const { code, stderr } = await runCli(["frobnicate"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown command");
+  });
+
+  test("which prints CLI provenance without reaching config/node", async () => {
+    const { code, stdout, stderr } = await runCli(["which"]);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain(`fkanban v${pkg.version}`);
+    expect(stdout).toContain("executable_path:");
+    expect(stdout).toContain("source_path:");
+    expect(stdout).toContain("bun_path:");
+  });
+
+  test("which --json prints stable machine-readable provenance", async () => {
+    const { code, stdout, stderr } = await runCli(["which", "--json"]);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    const report = JSON.parse(stdout) as {
+      package: string;
+      version: string;
+      executable_path: string;
+      source_path: string;
+      bun_path: string;
+      bun_version: string;
+    };
+    expect(report.package).toBe(pkg.name);
+    expect(report.version).toBe(pkg.version);
+    expect(report.executable_path).toContain("src/cli.ts");
+    expect(report.source_path).toContain("src/cli.ts");
+    expect(report.bun_path.length).toBeGreaterThan(0);
+    expect(report.bun_version.length).toBeGreaterThan(0);
   });
 
   test("bare invocation prints help and exits 0 (unchanged)", async () => {
