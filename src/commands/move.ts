@@ -29,6 +29,7 @@ import {
   type Card,
 } from "../record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
+import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -148,6 +149,15 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
+  // Opt-in LastgitCiStatus gate: only cards with Requires-Status / Requires-Deploy
+  // headers are checked when moving into the board's terminal column.
+  await assertLifecycleMoveAllowed({
+    node: opts.node,
+    card: updated,
+    targetColumn: opts.column,
+    terminalColumn: terminalColumn(columns),
+    force: opts.force,
+  });
   await checkpointCardCompletion({
     cfg: opts.cfg,
     node: opts.node,

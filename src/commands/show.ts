@@ -12,12 +12,18 @@ import {
   type Card,
 } from "../record.ts";
 import { renderCardDetail } from "../board.ts";
+import {
+  attachPipelineStatus,
+  type PipelineAttachResult,
+} from "../pipeline_status.ts";
 
 // A card plus its resolved dependency status — the shape `show --json` emits.
 export type CardDetail = Card & {
   blocked: boolean;
   blockedBy: string[];
   missingDeps: string[];
+  /** Best-effort LastgitCiStatus join; omitted only when attach throws (should not). */
+  pipeline?: PipelineAttachResult;
 };
 
 // Both the human text and the structured detail, from a single read.
@@ -38,13 +44,25 @@ export async function showResult(opts: {
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
   const relevant = await listDependencyStatusesForCards(opts.node, opts.cfg, [card]);
   const status = depStatus(card, relevant, boardTerminal);
+  // Best-effort LastgitCiStatus join — never fail show if lastgit schemas are
+  // absent or the node is busy on that partition.
+  let pipeline: PipelineAttachResult | undefined;
+  try {
+    pipeline = await attachPipelineStatus(opts.node, card);
+  } catch {
+    pipeline = undefined;
+  }
   const detail: CardDetail = {
     ...card,
     blocked: status.blocked,
     blockedBy: status.blockedBy,
     missingDeps: status.missing,
+    ...(pipeline ? { pipeline } : {}),
   };
-  return { text: renderCardDetail(card, undefined, status), card: detail };
+  return {
+    text: renderCardDetail(card, undefined, status, pipeline),
+    card: detail,
+  };
 }
 
 export async function showCmd(opts: {
