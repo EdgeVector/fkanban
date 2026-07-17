@@ -285,6 +285,7 @@ describe("pickup claim", () => {
     expect(shown.card.blocked).toBe(false);
     expect(shown.card.blockedBy).toEqual([]);
     expect(shown.card.missingDeps).toEqual([]);
+    expect(shown.card.deps).toEqual(["done-dep"]);
 
     const result = await pickupClaimResult({
       cfg,
