@@ -1095,7 +1095,7 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
 export function isPickupEligible(card: Card): boolean {
   return (
     normalizeKind(card.kind) === "pr" &&
-    !isRegistryCard(card.body, card.title) && // fallback for un-backfilled cards
+    (isCardKind(card.kind) || !isRegistryCard(card.body, card.title)) && // fallback for un-backfilled cards
     resolvePickupRepo(card).ok &&
     card.base.trim().length > 0 &&
     normalizeBlockStatus(card.block_status) === "none"
