@@ -1,7 +1,10 @@
 // Unit tests for LastgitCiStatus join + opt-in terminal move gates.
 // Fake NodeClient only — no live LastDB / lastgit.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import { FkanbanError } from "../src/client.ts";
@@ -10,6 +13,7 @@ import { nowIso, type Card } from "../src/record.ts";
 import {
   assertLifecycleMoveAllowed,
   attachPipelineStatus,
+  clearLastgitSchemaHashCache,
   contextsForShow,
   defaultCiContext,
   evaluateLifecycleGate,
@@ -22,8 +26,11 @@ import {
   parseCrId,
   parseHeadOidHeader,
   parseLifecycleRequirements,
+  readLastgitSchemaMap,
   requiredContexts,
   resolveCardOid,
+  resolveLastgitSchemaHash,
+  scoreLastgitSchemaCandidate,
   CI_STATUS_SCHEMA,
   CR_SCHEMA,
   REF_SCHEMA,
@@ -32,6 +39,35 @@ import { showResult } from "../src/commands/show.ts";
 import { moveCmd } from "../src/commands/move.ts";
 import { boardToFields, cardToFields } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
+
+/** Point schema resolution at identity map so fake tables keyed by logical names work. */
+let schemaMapDir = "";
+const prevSchemaMapEnv = process.env.LASTGIT_SCHEMA_MAP;
+
+beforeEach(() => {
+  clearLastgitSchemaHashCache();
+  schemaMapDir = mkdtempSync(join(tmpdir(), "kanban-schema-map-"));
+  const mapPath = join(schemaMapDir, "schema-map.json");
+  writeFileSync(
+    mapPath,
+    JSON.stringify({
+      schemas: {
+        LastgitCiStatus: CI_STATUS_SCHEMA,
+        LastgitRef: REF_SCHEMA,
+        LastgitChangeRequest: CR_SCHEMA,
+      },
+    }),
+  );
+  process.env.LASTGIT_SCHEMA_MAP = mapPath;
+});
+
+afterEach(() => {
+  clearLastgitSchemaHashCache();
+  if (prevSchemaMapEnv === undefined) delete process.env.LASTGIT_SCHEMA_MAP;
+  else process.env.LASTGIT_SCHEMA_MAP = prevSchemaMapEnv;
+  if (schemaMapDir) rmSync(schemaMapDir, { recursive: true, force: true });
+  schemaMapDir = "";
+});
 
 const cfg: Config = {
   configVersion: 1,
@@ -224,6 +260,41 @@ describe("pipeline_status pure helpers", () => {
       if (prev === undefined) delete process.env.LASTGIT_CI_CONTEXT;
       else process.env.LASTGIT_CI_CONTEXT = prev;
     }
+  });
+
+  test("readLastgitSchemaMap + resolveLastgitSchemaHash prefer schema map", async () => {
+    const map = readLastgitSchemaMap();
+    expect(map.LastgitCiStatus).toBe(CI_STATUS_SCHEMA);
+    const node = fakeNode();
+    expect(await resolveLastgitSchemaHash(node, CI_STATUS_SCHEMA)).toBe(CI_STATUS_SCHEMA);
+  });
+
+  test("scoreLastgitSchemaCandidate prefers hashrange CI over CiRed", () => {
+    const red = scoreLastgitSchemaCandidate(CI_STATUS_SCHEMA, {
+      name: "hash-red",
+      descriptive_name: "LastgitCiRed",
+      owner_app_id: "lastgit",
+      fields: ["status_key", "repo", "oid", "context", "state", "updated_at", "log_excerpt"],
+    });
+    const good = scoreLastgitSchemaCandidate(CI_STATUS_SCHEMA, {
+      name: "lastgit/LastgitCiStatus",
+      descriptive_name: "LastgitCiStatus_hashrange_v2",
+      owner_app_id: "lastgit",
+      fields: [
+        "status_key",
+        "repo",
+        "oid",
+        "context",
+        "state",
+        "log_excerpt",
+        "event_id",
+        "updated_at",
+        "schema_version",
+        "layout",
+      ],
+    });
+    expect(good).toBeGreaterThan(red);
+    expect(good).toBeGreaterThan(0);
   });
 });
 

@@ -10,6 +10,14 @@
 // - Default context: process.env.LASTGIT_CI_CONTEXT || "ci-required"
 // - Show enrichment is best-effort (never fails show)
 // - Move gates are opt-in only; --force bypasses (same as dep blocks)
+//
+// Schema identity: lastgit registers schemas under canonical *hashes*, not the
+// short names. Resolve via LASTGIT_SCHEMA_MAP (~/.lastgit/schema-map.json) first,
+// then fall back to listSchemas field/owner matching.
+
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { FkanbanError, type NodeClient, type QueryRow } from "./client.ts";
 import {
@@ -19,9 +27,130 @@ import {
 } from "./record.ts";
 
 export const DEFAULT_CI_CONTEXT = "ci-required";
+/** Logical lastgit schema names (schema-map keys), not node query ids. */
 export const CI_STATUS_SCHEMA = "LastgitCiStatus";
 export const REF_SCHEMA = "LastgitRef";
 export const CR_SCHEMA = "LastgitChangeRequest";
+
+export type LastgitLogicalSchema =
+  | typeof CI_STATUS_SCHEMA
+  | typeof REF_SCHEMA
+  | typeof CR_SCHEMA;
+
+/** Process-local cache of logical name → resolved schema hash for queryAll. */
+const schemaHashCache = new Map<string, string | null>();
+
+/** Test seam: clear schema hash resolution cache. */
+export function clearLastgitSchemaHashCache(): void {
+  schemaHashCache.clear();
+}
+
+/**
+ * Path to lastgit's schema map (logical name → canonical hash).
+ * Mirrors lastgit CLI: LASTGIT_SCHEMA_MAP env, else ~/.lastgit/schema-map.json.
+ */
+export function lastgitSchemaMapPath(): string {
+  const fromEnv = process.env.LASTGIT_SCHEMA_MAP?.trim();
+  if (fromEnv) return fromEnv;
+  return join(homedir(), ".lastgit", "schema-map.json");
+}
+
+/** Read logical→hash entries from the lastgit schema map file (best-effort). */
+export function readLastgitSchemaMap(path = lastgitSchemaMapPath()): Record<string, string> {
+  try {
+    if (!existsSync(path)) return {};
+    const raw = JSON.parse(readFileSync(path, "utf8")) as {
+      schemas?: Record<string, unknown>;
+    };
+    const schemas = raw.schemas ?? {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(schemas)) {
+      if (typeof v === "string" && v.length > 0) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Score a loaded schema as a candidate for a logical lastgit schema.
+ * Higher is better; 0 = not a match.
+ */
+export function scoreLastgitSchemaCandidate(
+  logical: LastgitLogicalSchema,
+  s: { name: string; descriptive_name: string; owner_app_id: string; fields: string[] },
+): number {
+  const fields = new Set(s.fields ?? []);
+  const desc = s.descriptive_name ?? "";
+  const name = s.name ?? "";
+  const owner = s.owner_app_id ?? "";
+  let score = 0;
+  if (owner === "lastgit") score += 10;
+  if (name === logical || name === `lastgit/${logical}`) score += 50;
+  if (name.startsWith("lastgit/") && name.includes(logical)) score += 30;
+
+  if (logical === CI_STATUS_SCHEMA) {
+    if (!(fields.has("status_key") && fields.has("oid") && fields.has("context") && fields.has("state"))) {
+      return 0;
+    }
+    // Prefer the live hashrange_v2 shape lastgit writes (log_excerpt + layout).
+    if (fields.has("log_excerpt")) score += 20;
+    if (fields.has("event_id")) score += 5;
+    if (fields.has("updated_at")) score += 5;
+    if (fields.has("layout")) score += 10;
+    if (/LastgitCiStatus/i.test(desc) || /Lastgit CI Status/i.test(desc)) score += 15;
+    if (/hashrange/i.test(desc)) score += 10;
+    // Deprioritize slim/red projection schemas.
+    if (/CiRed/i.test(desc) || /CiRed/i.test(name)) score -= 40;
+  } else if (logical === REF_SCHEMA) {
+    if (!(fields.has("name") && fields.has("oid") && fields.has("repo"))) return 0;
+    if (/Materialized Ref/i.test(desc) || /LastgitRef/i.test(desc)) score += 20;
+  } else if (logical === CR_SCHEMA) {
+    if (!(fields.has("cr_id") && fields.has("head_oid") && fields.has("repo"))) return 0;
+    if (/Change Request/i.test(desc)) score += 20;
+    if (fields.has("require_status")) score += 5;
+  }
+  return score;
+}
+
+/**
+ * Resolve a logical lastgit schema name to a node query schema hash.
+ * Order: in-memory cache → LASTGIT_SCHEMA_MAP file → listSchemas scoring.
+ */
+export async function resolveLastgitSchemaHash(
+  node: NodeClient,
+  logical: LastgitLogicalSchema,
+): Promise<string | null> {
+  if (schemaHashCache.has(logical)) return schemaHashCache.get(logical) ?? null;
+
+  const fromMap = readLastgitSchemaMap()[logical];
+  if (fromMap) {
+    schemaHashCache.set(logical, fromMap);
+    return fromMap;
+  }
+
+  if (!node.listSchemas) {
+    schemaHashCache.set(logical, null);
+    return null;
+  }
+
+  try {
+    const loaded = await node.listSchemas();
+    let best: { name: string; score: number } | null = null;
+    for (const s of loaded) {
+      const score = scoreLastgitSchemaCandidate(logical, s);
+      if (score <= 0) continue;
+      if (!best || score > best.score) best = { name: s.name, score };
+    }
+    const resolved = best?.name ?? null;
+    schemaHashCache.set(logical, resolved);
+    return resolved;
+  } catch {
+    schemaHashCache.set(logical, null);
+    return null;
+  }
+}
 
 export type CiState = "pending" | "success" | "failure" | "missing" | "unavailable";
 
@@ -205,19 +334,23 @@ function rowToCi(fields: Record<string, unknown>, resolved_via: OidResolution["v
 
 async function querySchema(
   node: NodeClient,
-  schema: string,
+  logical: LastgitLogicalSchema,
   fields: readonly string[],
   filter?: { HashKey: string },
 ): Promise<QueryRow[]> {
+  const schemaHash = await resolveLastgitSchemaHash(node, logical);
+  if (!schemaHash) return [];
   try {
     const res = await node.queryAll({
-      schemaHash: schema,
+      schemaHash,
       fields: [...fields],
       ...(filter ? { filter } : {}),
     });
     return res.results ?? [];
   } catch {
     // Schema missing / permission / busy — treat as unavailable for best-effort paths.
+    // Drop a bad cache entry so a later attempt can re-resolve via listSchemas.
+    schemaHashCache.delete(logical);
     return [];
   }
 }
