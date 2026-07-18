@@ -230,7 +230,7 @@ export type NodeClient = {
   createRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string; expected?: CasExpectation }): Promise<void>;
   updateRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string; expected?: CasExpectation }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
-  queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
+  queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
   // Which transport local node requests take RIGHT NOW: `socket` when an owner
   // socket was threaded in and the file currently exists (the socket carries
@@ -777,7 +777,7 @@ export function newNodeClient(opts: {
         }),
       );
     },
-    async queryAll({ schemaHash, fields, filter }) {
+    async queryAll({ schemaHash, fields, filter, allowFullScan }) {
       const result = await sdkDataPath("/api/query", (client) =>
         client.queryAll(
           schemaHash,
@@ -788,10 +788,8 @@ export function newNodeClient(opts: {
           {
             pageSize: QUERY_PAGE_SIZE,
             maxRows: QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT,
-            // Unfiltered drains require explicit admin opt-in once Mini/SDK
-            // refuse product full-schema scans. Filtered HashKey/HashRange
-            // queries never need this flag.
-            ...(filter === undefined ? { allowFullScan: true } : {}),
+            // Only explicit admin/offline callers may set allowFullScan.
+            ...(allowFullScan === true ? { allowFullScan: true } : {}),
           } as { pageSize: number; maxRows: number; allowFullScan?: boolean },
         ),
       );

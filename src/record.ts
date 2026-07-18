@@ -1479,12 +1479,13 @@ async function listCardsWithFields(
     const hash = schemaHashFor("card", cfg);
     let res;
     try {
-      res = await node.queryAll({ schemaHash: hash, fields });
+      res = await node.queryAll({ schemaHash: hash, fields, allowFullScan: true });
     } catch (err) {
       if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
       res = await node.queryAll({
         schemaHash: hash,
         fields: fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)),
+        allowFullScan: true,
       });
     }
     const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
@@ -1666,7 +1667,7 @@ export async function listCardsByFilter(
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
   const hash = schemaHashFor("board", cfg);
-  const res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("board") });
+  const res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("board"), allowFullScan: true });
   return res.results.map(rowToBoard).filter((b) => !isTombstoned(b.columns) && b.slug.length > 0);
 }
 
