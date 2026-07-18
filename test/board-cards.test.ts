@@ -1,12 +1,39 @@
 import { describe, expect, test } from "bun:test";
+
+import {
+  FkanbanError,
+  type CasExpectation,
+  type NodeClient,
+  type QueryFilter,
+  type QueryResponse,
+  type QueryRow,
+} from "../src/client.ts";
+import type { Config } from "../src/config.ts";
 import {
   boardCardFieldsFromCard,
   boardCardSk,
   cardFromBoardCardFields,
+  listAllBoardCards,
   parseBoardCardSk,
+  preferFresherBoardCard,
+  purgeOtherBoardCardRows,
+  upsertBoardCard,
 } from "../src/board-cards.ts";
-import { BOARD_CARDS_LAYOUT, boardCardsSchema } from "../src/schemas.ts";
+import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
+import { BOARD_CARDS_LAYOUT, boardCardsSchema } from "../src/schemas.ts";
+
+const cfgWithBoardCards: Config = {
+  configVersion: 1,
+  nodeUrl: "http://127.0.0.1:9",
+  userHash: "user",
+  schemaServiceUrl: "http://127.0.0.1:9",
+  schemaHashes: {
+    board: "board-hash",
+    card: "card-hash",
+    board_cards: "board-cards-hash",
+  },
+};
 
 function card(partial: Partial<Card> = {}): Card {
   return {
@@ -27,6 +54,80 @@ function card(partial: Partial<Card> = {}): Card {
     kind: "pr",
     repo: "EdgeVector/fkanban",
     ...partial,
+  };
+}
+
+function casError(actual: unknown): FkanbanError {
+  return new FkanbanError({
+    code: "cas_conflict",
+    message: "CAS precondition failed.",
+    cause: { error: "cas_conflict", field: "column", expected: "todo", actual },
+  });
+}
+
+function fakeNode(): NodeClient {
+  type StoredRecord = { keyHash: string; rangeKey: string | null; fields: Record<string, unknown> };
+  const store = new Map<string, Map<string, StoredRecord>>();
+  const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
+  const tableFor = (schemaHash: string) => {
+    let t = store.get(schemaHash);
+    if (!t) {
+      t = new Map();
+      store.set(schemaHash, t);
+    }
+    return t;
+  };
+  const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
+    const t = tableFor(schemaHash);
+    const entries = filter?.HashKey
+      ? [...t.values()].filter((rec) => rec.keyHash === filter.HashKey)
+      : [...t.values()];
+    return entries.map(({ keyHash, rangeKey, fields }) => ({
+      fields,
+      key: { hash: keyHash, range: rangeKey },
+    }));
+  };
+  const checkExpected = (fields: Record<string, unknown>, expected?: CasExpectation) => {
+    if (expected === undefined) return;
+    const actual = fields[expected.field];
+    if (expected.type === "absent") {
+      if (actual !== undefined && actual !== "") throw casError(actual);
+    } else if (actual !== expected.value) {
+      throw casError(actual);
+    }
+  };
+  const notImpl = (m: string) => async (): Promise<never> => {
+    throw new Error(`fakeNode.${m} not implemented`);
+  };
+  return {
+    baseUrl: cfgWithBoardCards.nodeUrl,
+    userHash: cfgWithBoardCards.userHash,
+    autoIdentity: notImpl("autoIdentity"),
+    bootstrap: notImpl("bootstrap"),
+    loadSchemas: notImpl("loadSchemas"),
+    listSchemas: notImpl("listSchemas"),
+    async createRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
+      const table = tableFor(schemaHash);
+      const key = storeKey(keyHash, rangeKey);
+      checkExpected(table.get(key)?.fields ?? {}, expected);
+      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...fields } });
+    },
+    async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
+      const table = tableFor(schemaHash);
+      const key = storeKey(keyHash, rangeKey);
+      if (!table.has(key)) throw new Error("missing for update");
+      checkExpected(table.get(key)?.fields ?? {}, expected);
+      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...fields } });
+    },
+    async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
+    },
+    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
+      const results = rowsFor(schemaHash, filter);
+      return { ok: true, results, returned_count: results.length, total_count: results.length };
+    },
+    rawCall: notImpl("rawCall") as NodeClient["rawCall"],
+    nodeTransport: () => ({ transport: "unavailable" as const }),
   };
 }
 
@@ -87,99 +188,6 @@ describe("boardCards schema", () => {
     expect(boardCardsSchema.schema.fields).not.toContain("body");
   });
 });
-
-import type { Config } from "../src/config.ts";
-import type { NodeClient, QueryFilter, QueryResponse, QueryRow, CasExpectation } from "../src/client.ts";
-import {
-  boardCardFieldsFromCard,
-  boardCardSk,
-  listAllBoardCards,
-  preferFresherBoardCard,
-  purgeOtherBoardCardRows,
-  upsertBoardCard,
-} from "../src/board-cards.ts";
-import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
-import { FkanbanError } from "../src/client.ts";
-
-const cfgWithBoardCards: Config = {
-  nodeUrl: "http://127.0.0.1:9",
-  userHash: "user",
-  schemaServiceUrl: "http://127.0.0.1:9",
-  schemaHashes: {
-    board: "board-hash",
-    card: "card-hash",
-    board_cards: "board-cards-hash",
-  },
-  nodeSocketPath: "",
-};
-
-function fakeNode(): NodeClient {
-  type StoredRecord = { keyHash: string; rangeKey: string | null; fields: Record<string, unknown> };
-  const store = new Map<string, Map<string, StoredRecord>>();
-  const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
-  const tableFor = (schemaHash: string) => {
-    let t = store.get(schemaHash);
-    if (!t) {
-      t = new Map();
-      store.set(schemaHash, t);
-    }
-    return t;
-  };
-  const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
-    const t = tableFor(schemaHash);
-    const entries = filter?.HashKey
-      ? [...t.values()].filter((rec) => rec.keyHash === filter.HashKey)
-      : [...t.values()];
-    return entries.map(({ keyHash, rangeKey, fields }) => ({
-      fields,
-      key: { hash: keyHash, range: rangeKey },
-    }));
-  };
-  const casError = (actual: unknown) =>
-    new FkanbanError("cas_conflict", "cas", { actual });
-  const checkExpected = (fields: Record<string, unknown>, expected?: CasExpectation) => {
-    if (expected === undefined) return;
-    const actual = fields[expected.field];
-    if (expected.type === "absent") {
-      if (actual !== undefined && actual !== "") throw casError(actual);
-    } else if (actual !== expected.value) {
-      throw casError(actual);
-    }
-  };
-  const notImpl = (m: string) => async (): Promise<never> => {
-    throw new Error(`fakeNode.${m} not implemented`);
-  };
-  return {
-    baseUrl: cfgWithBoardCards.nodeUrl,
-    userHash: cfgWithBoardCards.userHash,
-    autoIdentity: notImpl("autoIdentity"),
-    bootstrap: notImpl("bootstrap"),
-    loadSchemas: notImpl("loadSchemas"),
-    listSchemas: notImpl("listSchemas"),
-    async createRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
-      const table = tableFor(schemaHash);
-      const key = storeKey(keyHash, rangeKey);
-      checkExpected(table.get(key)?.fields ?? {}, expected);
-      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...fields } });
-    },
-    async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
-      const table = tableFor(schemaHash);
-      const key = storeKey(keyHash, rangeKey);
-      if (!table.has(key)) throw new Error("missing for update");
-      checkExpected(table.get(key)?.fields ?? {}, expected);
-      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...fields } });
-    },
-    async deleteRecord({ schemaHash, keyHash, rangeKey }) {
-      tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
-    },
-    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
-      const results = rowsFor(schemaHash, filter);
-      return { ok: true, results, returned_count: results.length, total_count: results.length };
-    },
-    rawCall: notImpl("rawCall") as NodeClient["rawCall"],
-    nodeTransport: () => ({ transport: "unavailable" as const }),
-  };
-}
 
 describe("board-cards membership integrity", () => {
   test("preferFresherBoardCard keeps newer updated_at", () => {
