@@ -1,3 +1,4 @@
+export { CARD_LIST_INDEX_KEY } from "./schemas.ts";
 // Body-free CardListIndex helpers — point-read/write the single `all_cards` row
 // so list/pickup never full-scan the Card schema (design-lastdb-scan-deprecation-path).
 
