@@ -1,12 +1,8 @@
-// Regression for fbrain `papercut-lastdbd-post-cutover-board-mutation-500`:
-// the minimal node (lastdb_node without fold_db_node's unknown-fields gate)
-// rejects a mutation naming a field its schema lacks with a bare, content-free
-// HTTP 500 — NOT the structured `unknown_fields` 400 the legacy-surfaces
-// fallback in createCardRecord/updateCardRecord matched on. Against such a
-// node every `add`/`move` died with "node_http_500" even though retrying
-// without optional body-mirrored fields (`surfaces`, `db`) succeeds. These
-// tests pin the fallback contract for BOTH node behaviors, plus the rethrow
-// semantics when the retry itself fails.
+// Regression coverage for adopted Card schemas that predate optional
+// body-mirrored fields (`surfaces`, `db`). Current nodes reject those writes
+// with structured `unknown_fields`; fkanban retries once with the legacy
+// body-header shape and memoizes that schema hash. Generic HTTP 500s are not
+// optional-field evidence and must bubble without a legacy retry.
 
 import { describe, expect, test } from "bun:test";
 
@@ -57,12 +53,6 @@ function testCard(): Card {
   };
 }
 
-const bare500 = () =>
-  new FkanbanError({
-    code: "node_http_500",
-    message: "Node /api/mutation returned HTTP 500: Internal Server Error.",
-  });
-
 const structured400 = () =>
   new FkanbanError({
     code: "unknown_fields",
@@ -92,8 +82,8 @@ for (const [name, writeFn] of [
   ["updateCardRecord", updateCardRecord],
 ] as const) {
   describe(name, () => {
-    test("bare minimal-node 500 → retries once without optional fields, mirroring them into body headers", async () => {
-      const { node, writes } = strictNode(bare500);
+    test("structured unknown_fields 400 retries once without optional fields, mirroring them into body headers", async () => {
+      const { node, writes } = strictNode(structured400);
       await writeFn({ cfg: freshCfg(), node }, testCard());
       expect(writes.length).toBe(1);
       const accepted = writes[0]!;
@@ -103,22 +93,31 @@ for (const [name, writeFn] of [
       expect(String(accepted.body)).toContain("Db: lastdb://personal");
     });
 
-    test("structured unknown_fields 400 still triggers the fallback (existing contract)", async () => {
-      const { node, writes } = strictNode(structured400);
-      await writeFn({ cfg: freshCfg(), node }, testCard());
-      expect(writes.length).toBe(1);
-      expect("surfaces" in writes[0]!).toBe(false);
-      expect("db" in writes[0]!).toBe(false);
-    });
-
-    test("a 500 with a different cause surfaces the ORIGINAL error after the retry also fails", async () => {
-      const { node } = strictNode(bare500, /* alwaysFail */ true);
+    test("generic node_http_500 is NOT retried as an optional-field miss", async () => {
+      let calls = 0;
+      const node = {
+        createRecord: async () => {
+          calls++;
+          throw new FkanbanError({
+            code: "node_http_500",
+            message: "Node /api/mutation returned HTTP 500: Internal Server Error.",
+          });
+        },
+        updateRecord: async () => {
+          calls++;
+          throw new FkanbanError({
+            code: "node_http_500",
+            message: "Node /api/mutation returned HTTP 500: Internal Server Error.",
+          });
+        },
+      } as unknown as NodeClient;
       const err = await writeFn({ cfg: freshCfg(), node }, testCard()).then(
         () => null,
         (e: unknown) => e,
       );
       expect(err).toBeInstanceOf(FkanbanError);
       expect((err as FkanbanError).code).toBe("node_http_500");
+      expect(calls).toBe(1);
     });
 
     test("non-500, non-unknown_fields errors are NOT retried", async () => {

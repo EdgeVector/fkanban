@@ -1905,21 +1905,6 @@ function isOptionalFieldWriteMiss(err: unknown): boolean {
     (CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).some((field) => err.message.includes(field));
 }
 
-// The minimal node (lastdb_node builds without fold_db_node's unknown-fields
-// gate) rejects a mutation naming a field its schema lacks with a bare,
-// content-free 500 instead of the structured `unknown_fields` 400
-// (fbrain `papercut-lastdbd-post-cutover-board-mutation-500`). A mutation 500
-// is therefore AMBIGUOUS: it may be that same optional-`surfaces` miss. Worth
-// exactly one retry with the legacy body-header form; the retry is a no-op
-// cost when the 500 had a different cause (it fails the same way and the
-// caller sees the original error).
-function isPossibleOptionalFieldWriteMiss(err: unknown): boolean {
-  return (
-    isOptionalFieldWriteMiss(err) ||
-    (err instanceof FkanbanError && err.code === "node_http_500")
-  );
-}
-
 type CardWriteOp = "createRecord" | "updateRecord";
 
 async function writeCardRecordWithOptionalFieldFallback(
@@ -1939,14 +1924,13 @@ async function writeCardRecordWithOptionalFieldFallback(
   try {
     await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug, expected });
   } catch (err) {
-    if (!isPossibleOptionalFieldWriteMiss(err)) throw err;
+    if (!isOptionalFieldWriteMiss(err)) throw err;
     try {
       await opts.node[op]({ schemaHash: hash, fields: cardToLegacyOptionalFields(card), keyHash: card.slug, expected });
     } catch (retryErr) {
-      // A structured unknown_fields miss makes the RETRY's error the
-      // informative one; after an ambiguous bare 500, the original error is —
-      // the retry most likely failed for the same unrelated reason.
-      throw isOptionalFieldWriteMiss(err) ? retryErr : err;
+      // The retry uses the legacy body-header shape, so its error is more
+      // informative than the original optional-field rejection.
+      throw retryErr;
     }
     // Full shape failed AND the legacy shape succeeded on the same op — the
     // schema provably lacks the optional fields. Remember, so later processes

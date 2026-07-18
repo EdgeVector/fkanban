@@ -1,9 +1,9 @@
 // The live node's adopted Card schema can lack the optional card fields
-// (CARD_OPTIONAL_SCHEMA_FIELDS) — the node 500s on the full-shape write and
-// fkanban retries with the legacy body-header shape. Without a memo, EVERY
-// card write pays that failed mutation: 203 of 447 card mutations (~45%) in
-// one lastdbd session were these first-attempt failures (2026-07-17
-// request-ops investigation, fbrain
+// (CARD_OPTIONAL_SCHEMA_FIELDS) — current nodes reject that full-shape write
+// with structured `unknown_fields`, and fkanban retries with the legacy
+// body-header shape. Without a memo, EVERY card write pays that failed
+// mutation: 203 of 447 card mutations (~45%) in one lastdbd session were
+// these first-attempt failures (2026-07-17 request-ops investigation, fbrain
 // `papercut-lastdbd-post-cutover-board-mutation-500`).
 //
 // These tests pin the memo behavior: first miss → legacy retry + remembered
@@ -62,13 +62,16 @@ function baseCfg(overrides: Partial<Config> = {}): Config {
 type WriteCall = { fields: Record<string, unknown> };
 
 // Node whose card schema lacks the optional fields: any write naming
-// `surfaces` fails like the minimal node does (bare 500), the legacy shape
-// succeeds. Records every mutation so tests can count attempts.
+// `surfaces` fails with the current structured unknown-fields shape, and the
+// legacy shape succeeds. Records every mutation so tests can count attempts.
 function optionalFieldRejectingNode(calls: WriteCall[]): NodeClient {
   const write = async ({ fields }: { fields: Record<string, unknown> }) => {
     calls.push({ fields });
     if ("surfaces" in fields) {
-      throw new FkanbanError({ code: "node_http_500", message: "Node /api/mutation returned HTTP 500." });
+      throw new FkanbanError({
+        code: "unknown_fields",
+        message: "Node rejected /api/mutation: Field 'surfaces' not writable on schema 'cardhash'.",
+      });
     }
   };
   return { createRecord: write, updateRecord: write } as unknown as NodeClient;
