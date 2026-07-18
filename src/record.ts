@@ -7,6 +7,8 @@ import {
   readCardListIndex,
   writeCardListIndex,
   toCardSummary,
+  readBoardListIndex,
+  writeBoardListIndex,
 } from "./card-list-index.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
@@ -1666,9 +1668,48 @@ export async function listCardsByFilter(
 }
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
+  const live = (boards: Board[]) =>
+    boards.filter((b) => !isTombstoned(b.columns) && b.slug.length > 0);
+
+  const indexed = await readBoardListIndex(node, cfg);
+  if (indexed !== null) {
+    return live(
+      indexed.map((b) => ({
+        slug: b.slug,
+        title: b.title,
+        body: b.body,
+        columns: b.columns,
+        created_at: b.created_at,
+        updated_at: b.updated_at,
+      })),
+    );
+  }
+
+  // Seed once via admin full scan when index not declared/seeded yet.
   const hash = schemaHashFor("board", cfg);
-  const res = await node.queryAll({ schemaHash: hash, fields: fieldsFor("board"), allowFullScan: true });
-  return res.results.map(rowToBoard).filter((b) => !isTombstoned(b.columns) && b.slug.length > 0);
+  const res = await node.queryAll({
+    schemaHash: hash,
+    fields: fieldsFor("board"),
+    allowFullScan: true,
+  });
+  const boards = live(res.results.map(rowToBoard));
+  try {
+    await writeBoardListIndex(
+      node,
+      cfg,
+      boards.map((b) => ({
+        slug: b.slug,
+        title: b.title,
+        body: b.body,
+        columns: b.columns,
+        created_at: b.created_at,
+        updated_at: b.updated_at,
+      })),
+    );
+  } catch {
+    // best-effort
+  }
+  return boards;
 }
 
 // Fields sufficient to resolve dependency status / card existence — everything
