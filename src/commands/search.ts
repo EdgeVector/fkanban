@@ -12,7 +12,6 @@ import {
   findCard,
   listDependencyStatusesForCards,
   listBoards,
-  listCards,
   listCardsByFilter,
   listCardsForDisplay,
   listCardsWithBodiesForSearch,
@@ -25,7 +24,7 @@ import {
 } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
-import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
+import { DEFAULT_COLUMNS } from "../schemas.ts";
 
 export type SearchOptions = {
   cfg: Config;
