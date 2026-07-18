@@ -309,7 +309,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(scan).toContain("column");
   });
 
-  test("--json queries full fields but returns broad body previews by default", async () => {
+  test("--json list stays body-free over the wire (no board-wide body fetch)", async () => {
     const longBody = "multi-paragraph spec body ".repeat(30);
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
@@ -317,14 +317,12 @@ describe("list — text path fetches body-free fields, structured views keep ful
     });
     const out = await listCmd({ cfg, node, json: true });
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    // Thin list path: empty/preview body without N+1 Card point-reads for body.
     expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
-    expect(parsed[0]!.bodyTruncated).toBe(true);
-    // The full-board card scan for --json fetched `body`.
-    const scan = node.cardScanFields.at(-1)!;
-    expect(scan).toContain("body");
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "a" && q.fields.includes("body"))).toBe(false);
   });
 
-  test("--full-body restores complete bodies for broad JSON list output", async () => {
+  test("--full-body returns complete bodies for the capped page", async () => {
     const longBody = "multi-paragraph spec body ".repeat(30);
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
@@ -401,7 +399,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "dep-a")).toBe(true);
   });
 
-  test("--column still avoids a full-body board scan (bodies point-read per matching card)", async () => {
+  test("--column list stays thin (no per-card body hydrate without --full-body)", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -415,8 +413,8 @@ describe("list — text path fetches body-free fields, structured views keep ful
 
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
     expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(true);
-    expect(node.cardQueries.some((q) => q.filter === undefined && q.fields.includes("body"))).toBe(false);
-    expect(node.cardQueries.some((q) => q.filter?.HashKey === "todo-a" && q.fields.includes("body"))).toBe(true);
+    // Default JSON list does not point-read bodies for matching cards.
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "todo-a" && q.fields.includes("body"))).toBe(false);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "doing-b")).toBe(false);
   });
 });

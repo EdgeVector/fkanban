@@ -227,9 +227,22 @@ export type NodeClient = {
   // out-of-band via the exemem app-creation flow.
   listSchemas(): Promise<LoadedSchema[]>;
   declareAppSchema?(appId: string, schema: Record<string, unknown>): Promise<AppSchemaDeclaration>;
-  createRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string; expected?: CasExpectation }): Promise<void>;
-  updateRecord(opts: { schemaHash: string; fields: Record<string, unknown>; keyHash: string; expected?: CasExpectation }): Promise<void>;
-  deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
+  createRecord(opts: {
+    schemaHash: string;
+    fields: Record<string, unknown>;
+    keyHash: string;
+    /** HashRange range component; omit/null for Hash schemas. */
+    rangeKey?: string | null;
+    expected?: CasExpectation;
+  }): Promise<void>;
+  updateRecord(opts: {
+    schemaHash: string;
+    fields: Record<string, unknown>;
+    keyHash: string;
+    rangeKey?: string | null;
+    expected?: CasExpectation;
+  }): Promise<void>;
+  deleteRecord(opts: { schemaHash: string; keyHash: string; rangeKey?: string | null }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
   // Which transport local node requests take RIGHT NOW: `socket` when an owner
@@ -748,32 +761,32 @@ export function newNodeClient(opts: {
         decision: typeof b.decision === "string" ? b.decision : undefined,
       };
     },
-    async createRecord({ schemaHash, fields, keyHash, expected }) {
+    async createRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
           mutationType: "create",
           fields: fields as RowFields,
-          key: hashKey(keyHash),
+          key: recordKey(keyHash, rangeKey),
           ...(expected !== undefined ? { expected } : {}),
         }),
       );
     },
-    async updateRecord({ schemaHash, fields, keyHash, expected }) {
+    async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
           mutationType: "update",
           fields: fields as RowFields,
-          key: hashKey(keyHash),
+          key: recordKey(keyHash, rangeKey),
           ...(expected !== undefined ? { expected } : {}),
         }),
       );
     },
-    async deleteRecord({ schemaHash, keyHash }) {
+    async deleteRecord({ schemaHash, keyHash, rangeKey }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
           mutationType: "delete",
           fields: {},
-          key: hashKey(keyHash),
+          key: recordKey(keyHash, rangeKey),
         }),
       );
     },
@@ -849,6 +862,14 @@ function recordDedupKey(row: QueryRow): string {
 
 function hashKey(keyHash: string): KeyValue {
   return { hash: keyHash, range: null };
+}
+
+/** Hash or HashRange key for /api/mutation. */
+function recordKey(keyHash: string, rangeKey?: string | null): KeyValue {
+  if (rangeKey !== undefined && rangeKey !== null && rangeKey.length > 0) {
+    return { hash: keyHash, range: rangeKey };
+  }
+  return hashKey(keyHash);
 }
 
 function queryResponseFromSdk(result: SdkQueryResult): QueryResponse {

@@ -10,6 +10,7 @@ import {
   depStatus,
   ensureColumn,
   findBoard,
+  hydrateCardBodies,
   listBoards,
   listCards,
   listCardsByColumn,
@@ -243,7 +244,13 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     broadJson && !opts.all && !opts.fullBody && opts.limit === undefined ? DEFAULT_COLUMN_LIMIT : 0;
   const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
   const capped = effectiveJsonLimit > 0 ? capPerColumn(board, cards, effectiveJsonLimit, opts.column) : cards;
-  const out = broadJson || opts.fullBody ? previewCardBodies(capped, opts.fullBody ?? false) : capped;
+  // Bodies are never loaded for board-wide list (BoardCards thin projection).
+  // --full-body hydrates ONLY the capped page via point-get, not N over the
+  // whole board before limit.
+  const withBodies = opts.fullBody
+    ? await hydrateCardBodies(opts.node, opts.cfg, capped)
+    : capped;
+  const out = broadJson || opts.fullBody ? previewCardBodies(withBodies, opts.fullBody ?? false) : withBodies;
   return JSON.stringify(out, null, 2);
 }
 

@@ -23,7 +23,7 @@ import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.t
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
-import { CARD_KINDS, PRIORITY_TIERS, type Card } from "../record.ts";
+import { CARD_KINDS, PRIORITY_TIERS, hydrateCardBodies, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
@@ -356,9 +356,10 @@ export function createFkanbanMcpServer(
         // position order, so `capFlat` slicing keeps ordering intact). The
         // human `text` is independently capped already.
         const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
-        // Then preview each card's body (the bulk of the payload) unless the
-        // caller opted into full bodies.
-        const previewed = previewBodies(capped, args.full_body ?? false);
+        // List is thin (BoardCards); hydrate ONLY the capped page for previews
+        // / full_body — never N over the whole board.
+        const withBodies = await hydrateCardBodies(node, cfg, capped);
+        const previewed = previewBodies(withBodies, args.full_body ?? false);
         return toolResult(text, { cards: previewed, total, truncated });
       } catch (err) {
         return errorResult(err);
@@ -414,9 +415,8 @@ export function createFkanbanMcpServer(
         // Cap the agent-facing structured array (matches already sorted); the
         // human `text` is independently capped already.
         const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
-        // Then preview each card's body (the bulk of the payload) unless the
-        // caller opted into full bodies.
-        const previewed = previewBodies(capped, args.full_body ?? false);
+        const withBodies = await hydrateCardBodies(node, cfg, capped);
+        const previewed = previewBodies(withBodies, args.full_body ?? false);
         return toolResult(text, { cards: previewed, total, truncated });
       } catch (err) {
         return errorResult(err);

@@ -12,9 +12,9 @@ import {
   findCard,
   listDependencyStatusesForCards,
   listBoards,
-  listCards,
   listCardsByFilter,
   listCardsForDisplay,
+  listCardsWithBodiesForSearch,
   queryTerms,
   requireBoard,
   cardMatchesQuery,
@@ -24,7 +24,7 @@ import {
 } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
-import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
+import { DEFAULT_COLUMNS } from "../schemas.ts";
 
 export type SearchOptions = {
   cfg: Config;
@@ -201,27 +201,23 @@ export async function searchResult(
   let allCards: Card[];
   let matches: Card[];
   if (complete) {
-    const filter: Record<string, string> = {};
-    if (opts.board) filter.board = opts.board;
-    if (opts.column) filter.column = opts.column;
-    const read = Object.keys(filter).length > 0
-      ? await listCardsByFilter(opts.node, opts.cfg, filter, fieldsFor("card"))
-      : { cards: await listCards(opts.node, opts.cfg), indexed: false };
-    allCards = read.cards;
+    // One admin Card scan with bodies (search must match body text). Not N+1.
+    const all = await listCardsWithBodiesForSearch(opts.node, opts.cfg);
+    allCards = all;
     const scoped = allCards.filter(
       (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
     );
     matches = sortCards(searchCards(scoped, opts.query));
     debugSearchPlan("complete-scan", {
       scopedCards: scoped.length,
-      filterIndexed: read.indexed,
-      fullBodyScan: !read.indexed,
+      filterIndexed: false,
+      fullBodyScan: true,
     });
   } else {
     const indexed = await indexedSearchCards(opts);
     if (indexed.fallbackReason !== undefined) {
       debugSearchPlan("complete-scan", { reason: indexed.fallbackReason });
-      const all = await listCards(opts.node, opts.cfg);
+      const all = await listCardsWithBodiesForSearch(opts.node, opts.cfg);
       allCards = all;
       const scoped = all.filter(
         (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
