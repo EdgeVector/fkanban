@@ -36,8 +36,11 @@ export type SchemaDefinition = {
   owner_app_id: string;
   descriptive_name: string;
   purpose_statement?: string;
-  schema_type: "Hash";
-  key: { hash_field: string };
+  // "HashRange" backs CardIndex: a partition (hash_field) plus a range_field
+  // that makes each row unique within its partition. Card/Board stay "Hash"
+  // (point read by a single key field).
+  schema_type: "Hash" | "HashRange";
+  key: { hash_field: string; range_field?: string };
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
@@ -198,6 +201,7 @@ export const cardSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+
 export const boardSchema: AddSchemaRequest = {
   schema: {
     name: "Board",
@@ -236,12 +240,47 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
   board: { type: "board", schema: boardSchema },
 };
 
+
+// Body-free rollup of all live cards (slug+metadata, no body). One Hash-keyed
+// row (`all_cards`) is patched on every card create/update/delete so list/pickup
+// never full-scan the Card schema. Declared at init as fkanban/CardListIndex.
+export const CARD_LIST_INDEX_KEY = "all_cards";
+export const CARD_LIST_INDEX_FIELDS = ["key", "payload_json", "updated_at"] as const;
+
+export const cardListIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "CardListIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "CardListIndex",
+    purpose_statement:
+      "Single-row body-free index of every live card so list/pickup never full-scan Card",
+    schema_type: "Hash",
+    key: { hash_field: "key" },
+    fields: [...CARD_LIST_INDEX_FIELDS],
+    field_types: defaultStringFieldTypes(CARD_LIST_INDEX_FIELDS, []),
+    field_descriptions: {
+      key: "index row id (always all_cards)",
+      payload_json: "JSON array of body-free card summaries",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {},
+    field_data_classifications: generalDataClassifications(CARD_LIST_INDEX_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
 // One entry per schema `kanban init` must register. Binds a config-key
 // (where init writes the canonical hash) to the AddSchemaRequest.
 export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }> = [
   { key: "card", schema: cardSchema },
   { key: "board", schema: boardSchema },
 ];
+
+/** Extra schemas declared at init (not RECORD_TYPES). */
+export const EXTRA_SCHEMAS: Array<{ key: string; schema: AddSchemaRequest }> = [
+  { key: "card_list_index", schema: cardListIndexSchema },
+];
+
 
 export function isRecordType(s: string): s is RecordType {
   return (RECORD_TYPES as readonly string[]).includes(s);

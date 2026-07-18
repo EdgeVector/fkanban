@@ -785,7 +785,14 @@ export function newNodeClient(opts: {
             fields,
             ...(filter !== undefined ? { filter: filter as JsonValue } : {}),
           },
-          { pageSize: QUERY_PAGE_SIZE, maxRows: QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT },
+          {
+            pageSize: QUERY_PAGE_SIZE,
+            maxRows: QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT,
+            // Unfiltered drains require explicit admin opt-in once Mini/SDK
+            // refuse product full-schema scans. Filtered HashKey/HashRange
+            // queries never need this flag.
+            ...(filter === undefined ? { allowFullScan: true } : {}),
+          } as { pageSize: number; maxRows: number; allowFullScan?: boolean },
         ),
       );
       return queryResponseFromSdk(result);

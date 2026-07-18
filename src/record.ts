@@ -2,6 +2,12 @@
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
+import {
+  patchCardListIndex,
+  readCardListIndex,
+  writeCardListIndex,
+  toCardSummary,
+} from "./card-list-index.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
@@ -1451,11 +1457,48 @@ async function listCardsWithFields(
   fields: string[],
   filter?: QueryFilter,
 ): Promise<Card[]> {
+  // Prefer CardListIndex point-read for unfiltered list (product no-scan path).
+  // HashKey filters still go to the Card schema (point reads).
+  if (filter === undefined) {
+    const indexed = await readCardListIndex(node, cfg);
+    if (indexed !== null) {
+      const cards = indexed.filter((c) => !isHiddenCard(c as Card)) as Card[];
+      // Hydrate body when requested (index is body-free).
+      if (fields.includes("body")) {
+        const hydrated = await Promise.all(
+          cards.map(async (c) => {
+            const full = await findCardWithFields(node, cfg, c.slug, fields);
+            return full ?? c;
+          }),
+        );
+        return hydrated.filter((c): c is Card => c !== null && !isHiddenCard(c));
+      }
+      return cards;
+    }
+    // Index missing: one admin full scan seeds it, then returns the set.
+    const hash = schemaHashFor("card", cfg);
+    let res;
+    try {
+      res = await node.queryAll({ schemaHash: hash, fields });
+    } catch (err) {
+      if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
+      res = await node.queryAll({
+        schemaHash: hash,
+        fields: fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)),
+      });
+    }
+    const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+    try {
+      await writeCardListIndex(node, cfg, cards.map(toCardSummary));
+    } catch {
+      // best-effort seed; list still returns
+    }
+    return cards;
+  }
+
   const hash = schemaHashFor("card", cfg);
   const query = (queryFields: string[]) =>
-    filter === undefined
-      ? node.queryAll({ schemaHash: hash, fields: queryFields })
-      : node.queryAll({ schemaHash: hash, fields: queryFields, filter });
+    node.queryAll({ schemaHash: hash, fields: queryFields, filter });
   let res;
   try {
     res = await query(fields);
@@ -1875,6 +1918,7 @@ export async function createCardRecord(
   card: Card,
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
+  await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
 }
 
 export async function updateCardRecord(
@@ -1883,6 +1927,7 @@ export async function updateCardRecord(
   expected?: CasExpectation,
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "updateRecord", expected);
+  await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of
