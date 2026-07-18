@@ -1,17 +1,20 @@
 #!/usr/bin/env bun
 /**
  * Backfill BoardCards HashRange from CardListIndex (preferred) or point Card reads.
+ * Also purges orphan BoardCards rows that no longer match source of truth.
  *
  *   bun scripts/backfill-board-cards.ts
  */
 import { readConfig } from "../src/config.ts";
 import { newNodeClient } from "../src/client.ts";
-import { listBoards, type Card } from "../src/record.ts";
+import { findCard, listBoards, type Card } from "../src/record.ts";
 import { readCardListIndex } from "../src/card-list-index.ts";
 import {
   upsertBoardCard,
   boardCardsHash,
   listBoardCardsPartition,
+  removeBoardCard,
+  boardCardSk,
 } from "../src/board-cards.ts";
 
 async function main() {
@@ -50,7 +53,9 @@ async function main() {
   for (const summary of indexed) {
     const card = summary as Card;
     try {
-      await upsertBoardCard(node, config, card);
+      // Prefer point-read when available so BoardCards tracks Card truth.
+      const truth = (await findCard(node, config, card.slug)) ?? card;
+      await upsertBoardCard(node, config, truth, null);
       ok++;
       if (ok % 50 === 0) console.log(`  … ${ok}/${indexed.length}`);
     } catch (e) {
@@ -61,10 +66,31 @@ async function main() {
 
   console.log("upserted", ok, "failed", fail);
 
+  // Drop orphan BoardCards rows (slug missing, or sk != truth).
+  let orphans = 0;
   for (const b of boards) {
     const part = await listBoardCardsPartition(node, config, b.slug);
     console.log(`partition ${b.slug}: ${part?.length ?? "null"} rows`);
+    if (!part) continue;
+    for (const row of part) {
+      const truth = await findCard(node, config, row.slug);
+      if (!truth) {
+        await removeBoardCard(node, config, row);
+        orphans++;
+        continue;
+      }
+      const truthSk = boardCardSk(truth.column, truth.position, truth.slug);
+      const rowSk = boardCardSk(row.column, row.position, row.slug);
+      const truthBoard = truth.board || "default";
+      if (truthBoard !== (row.board || b.slug) || truthSk !== rowSk) {
+        await removeBoardCard(node, config, row);
+        orphans++;
+        // truth row may already exist from upsert; re-upsert to be sure
+        await upsertBoardCard(node, config, truth, null);
+      }
+    }
   }
+  console.log("orphans_removed", orphans);
   console.log("OK backfill complete");
 }
 
