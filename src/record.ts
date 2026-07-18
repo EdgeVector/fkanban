@@ -9,8 +9,6 @@ import {
   toCardSummary,
   readBoardListIndex,
   writeBoardListIndex,
-  patchBoardListIndex,
-  type BoardSummary,
 } from "./card-list-index.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
