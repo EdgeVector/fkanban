@@ -5,6 +5,7 @@ import { schemaHashFor, type Config } from "../config.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import {
   boardToFields,
+  deleteCardRecord,
   findBoard,
   listBoards,
   listCards,
@@ -175,7 +176,6 @@ export async function boardRmCmd(opts: {
         hint: `Remove or retarget those dependency edges first: ${externalDependents.join(", ")}`,
       });
     }
-    const cardHash = schemaHashFor("card", opts.cfg);
     for (const card of live) {
       await checkpointCardCompletion({
         cfg: opts.cfg,
@@ -184,7 +184,7 @@ export async function boardRmCmd(opts: {
         boardColumns: board.columns,
         reason: "delete-backstop",
       });
-      await opts.node.deleteRecord({ schemaHash: cardHash, keyHash: card.slug });
+      await deleteCardRecord(opts, card);
     }
   }
   const hash = schemaHashFor("board", opts.cfg);

@@ -12,6 +12,11 @@ import {
   patchBoardListIndex,
   type BoardSummary,
 } from "./card-list-index.ts";
+import {
+  listAllBoardCards,
+  removeBoardCard,
+  upsertBoardCard,
+} from "./board-cards.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
@@ -1299,7 +1304,7 @@ export async function writeCardPatch(
   patch: Partial<Card>,
 ): Promise<void> {
   const updated: Card = { ...card, ...patch, updated_at: nowIso() };
-  await updateCardRecord(opts, updated);
+  await updateCardRecord(opts, updated, undefined, card);
 }
 
 // Would adding the edge `fromSlug → toSlug` (fromSlug depends on toSlug) close a
@@ -1461,25 +1466,44 @@ async function listCardsWithFields(
   fields: string[],
   filter?: QueryFilter,
 ): Promise<Card[]> {
-  // Prefer CardListIndex point-read for unfiltered list (product no-scan path).
+  // Prefer BoardCards HashRange partitions (hash=board) — Dynamo-style list.
+  // Never hydrate body for board-wide lists (that was the N+1 storm). Callers
+  // that need body must findCard/show by slug.
   // HashKey filters still go to the Card schema (point reads).
   if (filter === undefined) {
+    // BoardCards first: one partition query per board, thin projection.
+    try {
+      const boards = await listBoards(node, cfg);
+      const partitioned = await listAllBoardCards(node, cfg, boards);
+      if (partitioned !== null && partitioned.length > 0) {
+        // BoardCards rows are already body-free; promote any structured fields.
+        return partitioned
+          .filter((c) => !isHiddenCard(c))
+          .map((c) => Object.assign(c, deriveStructuredFields(c)));
+      }
+      // Empty partition may mean "no cards" OR "not dual-written yet".
+      // Fall through to CardListIndex when partitions are empty so dual-read
+      // still sees legacy boards until backfill.
+      if (partitioned !== null && partitioned.length === 0) {
+        const indexedEmpty = await readCardListIndex(node, cfg);
+        if (indexedEmpty !== null && indexedEmpty.length === 0) {
+          return [];
+        }
+        // indexed has data but BoardCards empty → legacy path below
+      }
+    } catch {
+      // fall through
+    }
+
     const indexed = await readCardListIndex(node, cfg);
     if (indexed !== null) {
-      const cards = indexed.filter((c) => !isHiddenCard(c as Card)) as Card[];
-      // Hydrate body when requested (index is body-free).
-      if (fields.includes("body")) {
-        const hydrated = await Promise.all(
-          cards.map(async (c) => {
-            const full = await findCardWithFields(node, cfg, c.slug, fields);
-            return full ?? c;
-          }),
-        );
-        return hydrated.filter((c): c is Card => c !== null && !isHiddenCard(c));
-      }
-      return cards;
+      // CardListIndex is body-free by construction — never N+1 hydrate.
+      return (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
+        Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
+      );
     }
-    // Index missing: one admin full scan seeds it, then returns the set.
+    // Index missing: one admin full scan seeds indexes (keeps body for this
+    // rare path only — still not N+1). Prefer BoardCards after dual-write.
     const hash = schemaHashFor("card", cfg);
     let res;
     try {
@@ -1497,6 +1521,11 @@ async function listCardsWithFields(
       await writeCardListIndex(node, cfg, cards.map(toCardSummary));
     } catch {
       // best-effort seed; list still returns
+    }
+    try {
+      for (const c of cards) await upsertBoardCard(node, cfg, c);
+    } catch {
+      // best-effort BoardCards seed
     }
     return cards;
   }
@@ -1536,10 +1565,8 @@ function withRequiredFields(fields: string[], required: string[]): string[] {
   return missing.length === 0 ? fields : [...fields, ...missing];
 }
 
-// Client-side field-equality list. Body-free field sets resolve in ONE bulk
-// read. Body-inclusive sets keep the standing "never bulk-read every card's
-// body" rule: one body-free scan, then HashKey point-reads for the MATCHING
-// cards only.
+// Client-side field-equality list over BoardCards / index (no body N+1).
+// Body is never board-wide hydrated — use findCard for full specs.
 async function listCardsClientFiltered(
   node: NodeClient,
   cfg: Config,
@@ -1552,20 +1579,51 @@ async function listCardsClientFiltered(
       const actual = (c as unknown as Record<string, unknown>)[field];
       return typeof actual === "string" && actual === predicate[field];
     });
-  if (!fields.includes("body")) {
-    const cards = await listCardsWithFields(node, cfg, withRequiredFields(fields, required));
-    return cards.filter(matches);
-  }
-  const scanFields = withRequiredFields(fields.filter((f) => f !== "body"), required);
-  const summaries = (await listCardsWithFields(node, cfg, scanFields)).filter(matches);
-  const hydrated = await Promise.all(
-    summaries.map((c) => findCardWithFields(node, cfg, c.slug, fields)),
+  // Prefer column-only path via full list then filter (partition already thin).
+  const cards = await listCardsWithFields(
+    node,
+    cfg,
+    withRequiredFields(
+      fields.includes("body") ? fields.filter((f) => f !== "body") : fields,
+      required,
+    ),
   );
-  return hydrated.filter((c): c is Card => c !== null && matches(c));
+  return cards.filter(matches);
 }
 
 export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
+  // Thin board list — no bodies (BoardCards / index). Use findCard for one body,
+  // or listCardsWithBodiesForSearch for complete-body search (one admin scan).
   return listCardsWithFields(node, cfg, fieldsFor("card"));
+}
+
+/**
+ * Complete-body card set for free-text search only: ONE admin full-scan of Card
+ * (allowFullScan), not N point-gets. Prefer native index / thin list for hot paths.
+ */
+export async function listCardsWithBodiesForSearch(
+  node: NodeClient,
+  cfg: Config,
+): Promise<Card[]> {
+  const hash = schemaHashFor("card", cfg);
+  let res;
+  try {
+    res = await node.queryAll({
+      schemaHash: hash,
+      fields: fieldsFor("card"),
+      allowFullScan: true,
+    });
+  } catch (err) {
+    if (!isOnlyOptionalFieldMiss(err, fieldsFor("card"))) throw err;
+    res = await node.queryAll({
+      schemaHash: hash,
+      fields: fieldsFor("card").filter(
+        (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
+      ),
+      allowFullScan: true,
+    });
+  }
+  return res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
 }
 
 type PickupPeerPlan = { action: "ready"; card: Card } | { action: "hydrate"; card: Card } | { action: "skip" };
@@ -1777,9 +1835,25 @@ export async function findCard(node: NodeClient, cfg: Config, slug: string): Pro
     return await findCardWithFields(node, cfg, slug, fieldsFor("card"));
   } catch (err) {
     if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") throw err;
-    const cards = await listCardsWithFields(node, cfg, fieldsFor("card"));
+    // Transport error on point-read: one admin scan with bodies (not thin list).
+    const cards = await listCardsWithBodiesForSearch(node, cfg);
     return cards.find((c) => c.slug === slug) ?? null;
   }
+}
+
+/** Point-get bodies for a small capped set (MCP preview / list --full-body). */
+export async function hydrateCardBodies(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+): Promise<Card[]> {
+  return Promise.all(
+    cards.map(async (c) => {
+      if (c.body.length > 0) return c;
+      const full = await findCard(node, cfg, c.slug);
+      return full ? { ...c, body: full.body } : c;
+    }),
+  );
 }
 
 // Resolve a card by slug, throwing the canonical `card_not_found` error when
@@ -1963,15 +2037,30 @@ export async function createCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
+  await upsertBoardCard(opts.node, opts.cfg, card);
 }
 
 export async function updateCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   expected?: CasExpectation,
+  /** Prior card state — required to delete old BoardCards sk on move. */
+  previous?: Card,
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "updateRecord", expected);
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
+  await upsertBoardCard(opts.node, opts.cfg, card, previous ?? null);
+}
+
+/** Remove Card + dual indexes (BoardCards + CardListIndex). */
+export async function deleteCardRecord(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+): Promise<void> {
+  const hash = schemaHashFor("card", opts.cfg);
+  await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
+  await patchCardListIndex(opts.node, opts.cfg, card, "remove");
+  await removeBoardCard(opts.node, opts.cfg, card);
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of

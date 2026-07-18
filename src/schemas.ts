@@ -244,6 +244,9 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
 // Body-free rollup of all live cards (slug+metadata, no body). One Hash-keyed
 // row (`all_cards`) is patched on every card create/update/delete so list/pickup
 // never full-scan the Card schema. Declared at init as fkanban/CardListIndex.
+//
+// Prefer BoardCards (HashRange, hash=board) for list; CardListIndex remains a
+// dual-write compatibility index until boards are fully backfilled.
 export const CARD_LIST_INDEX_KEY = "all_cards";
 export const CARD_LIST_INDEX_FIELDS = ["key", "payload_json", "updated_at"] as const;
 
@@ -269,6 +272,76 @@ export const cardListIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// Dynamo-style board membership: partition = board, sort key = column#pos#slug.
+// Thin projection only (no body). List/pickup query one board partition;
+// show still point-reads Card by slug for body.
+export const BOARD_CARDS_LAYOUT = "hashrange_v1_board_partition";
+export const BOARD_CARDS_FIELDS = [
+  "board",
+  "sk",
+  "slug",
+  "title",
+  "column",
+  "position",
+  "assignee",
+  "tags",
+  "deps",
+  "surfaces",
+  "created_at",
+  "updated_at",
+  "db",
+  "repo",
+  "base",
+  "kind",
+  "block_status",
+  "block_reason",
+  "north_star",
+  "pr_url",
+  "branch",
+  "layout",
+] as const;
+
+export const boardCardsSchema: AddSchemaRequest = {
+  schema: {
+    name: "BoardCards",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BoardCards_hashrange_v1",
+    purpose_statement:
+      "Thin per-board card membership (HashRange) so list/pickup never full-scan Card or hydrate bodies",
+    schema_type: "HashRange",
+    key: { hash_field: "board", range_field: "sk" },
+    fields: [...BOARD_CARDS_FIELDS],
+    field_types: defaultStringFieldTypes(BOARD_CARDS_FIELDS, ["tags", "deps", "surfaces"]),
+    field_descriptions: {
+      board: "board slug (HashRange partition key)",
+      sk: "sort key column#position(8)#slug for ordered column lists",
+      slug: "card slug (matches Card hash key)",
+      title: "one-line card name",
+      column: DEFAULT_COLUMNS.join("|"),
+      position: "integer-as-string ordering within the column",
+      assignee: "who owns the card, empty if unassigned",
+      tags: "array of freeform labels",
+      deps: "array of dependency card slugs",
+      surfaces: "array of path globs / subsystem names",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+      db: "home LastDB locator",
+      repo: "owner/name of the code repo",
+      base: "PR base branch",
+      kind: "pr|registry|tracker|…",
+      block_status: "none|needs_human|design_first|deferred",
+      block_reason: "free-text when blocked",
+      north_star: "North Star slug",
+      pr_url: "PR URL when in flight",
+      branch: "feature branch",
+      layout: "identity marker for HashRange layout (do not change without new schema)",
+    },
+    field_classifications: { title: ["word"] },
+    field_data_classifications: generalDataClassifications(BOARD_CARDS_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
 // One entry per schema `kanban init` must register. Binds a config-key
 // (where init writes the canonical hash) to the AddSchemaRequest.
 export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }> = [
@@ -279,6 +352,7 @@ export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }
 /** Extra schemas declared at init (not RECORD_TYPES). */
 export const EXTRA_SCHEMAS: Array<{ key: string; schema: AddSchemaRequest }> = [
   { key: "card_list_index", schema: cardListIndexSchema },
+  { key: "board_cards", schema: boardCardsSchema },
 ];
 
 

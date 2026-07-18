@@ -1,10 +1,10 @@
 // `fkanban rm <slug>` — delete a card with the node's native tombstone mutation.
 
 import { type NodeClient } from "../client.ts";
-import { schemaHashFor, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import { FkanbanError } from "../client.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
-import { ensureBoardRecord, listCardStatuses, requireCard } from "../record.ts";
+import { deleteCardRecord, ensureBoardRecord, listCardStatuses, requireCard } from "../record.ts";
 import { DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "../schemas.ts";
 
 export async function rmCmd(opts: {
@@ -42,7 +42,6 @@ export async function rmCmd(opts: {
     });
   }
 
-  const hash = schemaHashFor("card", opts.cfg);
-  await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
+  await deleteCardRecord(opts, card);
   return { slug: card.slug, orphanedDependents: [] };
 }

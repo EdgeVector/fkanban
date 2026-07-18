@@ -15,6 +15,7 @@ import {
   listCards,
   listCardsByFilter,
   listCardsForDisplay,
+  listCardsWithBodiesForSearch,
   queryTerms,
   requireBoard,
   cardMatchesQuery,
@@ -201,27 +202,23 @@ export async function searchResult(
   let allCards: Card[];
   let matches: Card[];
   if (complete) {
-    const filter: Record<string, string> = {};
-    if (opts.board) filter.board = opts.board;
-    if (opts.column) filter.column = opts.column;
-    const read = Object.keys(filter).length > 0
-      ? await listCardsByFilter(opts.node, opts.cfg, filter, fieldsFor("card"))
-      : { cards: await listCards(opts.node, opts.cfg), indexed: false };
-    allCards = read.cards;
+    // One admin Card scan with bodies (search must match body text). Not N+1.
+    const all = await listCardsWithBodiesForSearch(opts.node, opts.cfg);
+    allCards = all;
     const scoped = allCards.filter(
       (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
     );
     matches = sortCards(searchCards(scoped, opts.query));
     debugSearchPlan("complete-scan", {
       scopedCards: scoped.length,
-      filterIndexed: read.indexed,
-      fullBodyScan: !read.indexed,
+      filterIndexed: false,
+      fullBodyScan: true,
     });
   } else {
     const indexed = await indexedSearchCards(opts);
     if (indexed.fallbackReason !== undefined) {
       debugSearchPlan("complete-scan", { reason: indexed.fallbackReason });
-      const all = await listCards(opts.node, opts.cfg);
+      const all = await listCardsWithBodiesForSearch(opts.node, opts.cfg);
       allCards = all;
       const scoped = all.filter(
         (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
