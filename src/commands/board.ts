@@ -13,6 +13,7 @@ import {
   validateSlug,
   type Board,
 } from "../record.ts";
+import { patchBoardListIndex } from "../card-list-index.ts";
 import {
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
@@ -55,9 +56,11 @@ export async function boardCreateCmd(opts: {
   const hash = schemaHashFor("board", opts.cfg);
   if (existing) {
     await opts.node.updateRecord({ schemaHash: hash, fields: boardToFields(board), keyHash: board.slug });
+  await patchBoardListIndex(opts.node, opts.cfg, board, "upsert");
     return { slug: board.slug, action: "updated" };
   }
   await opts.node.createRecord({ schemaHash: hash, fields: boardToFields(board), keyHash: board.slug });
+  await patchBoardListIndex(opts.node, opts.cfg, board, "upsert");
   return { slug: board.slug, action: "created" };
 }
 
