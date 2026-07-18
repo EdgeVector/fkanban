@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { ClaimConflictError, moveCmd } from "../src/commands/move.ts";
+import { listCmd } from "../src/commands/list.ts";
+import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import {
   boardToFields,
   cardToFields,
@@ -21,6 +23,10 @@ const cfg: Config = {
   userHash: "test-user",
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
+const cfgWithBoardCards: Config = {
+  ...cfg,
+  schemaHashes: { ...cfg.schemaHashes, board_cards: "boardcardshash" },
+};
 
 function casError(actual: unknown): FkanbanError {
   return new FkanbanError({
@@ -31,7 +37,9 @@ function casError(actual: unknown): FkanbanError {
 }
 
 function fakeNode(): NodeClient {
-  const store = new Map<string, Map<string, Record<string, unknown>>>();
+  type StoredRecord = { keyHash: string; rangeKey: string | null; fields: Record<string, unknown> };
+  const store = new Map<string, Map<string, StoredRecord>>();
+  const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
   const tableFor = (schemaHash: string) => {
     let t = store.get(schemaHash);
     if (!t) {
@@ -43,11 +51,11 @@ function fakeNode(): NodeClient {
   const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const t = tableFor(schemaHash);
     const entries = filter?.HashKey
-      ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : [])
-      : [...t.entries()].filter(([, fields]) =>
-          !filter || Object.entries(filter).every(([field, value]) => fields[field] === value)
+      ? [...t.values()].filter((rec) => rec.keyHash === filter.HashKey)
+      : [...t.values()].filter((rec) =>
+          !filter || Object.entries(filter).every(([field, value]) => rec.fields[field] === value)
         );
-    return entries.map(([hash, fields]) => ({ fields, key: { hash, range: null } }));
+    return entries.map(({ keyHash, rangeKey, fields }) => ({ fields, key: { hash: keyHash, range: rangeKey } }));
   };
   const checkExpected = (fields: Record<string, unknown>, expected?: CasExpectation) => {
     if (expected === undefined) return;
@@ -68,18 +76,20 @@ function fakeNode(): NodeClient {
     bootstrap: notImpl("bootstrap"),
     loadSchemas: notImpl("loadSchemas"),
     listSchemas: notImpl("listSchemas"),
-    async createRecord({ schemaHash, fields, keyHash, expected }) {
+    async createRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
       const table = tableFor(schemaHash);
-      checkExpected(table.get(keyHash) ?? {}, expected);
-      table.set(keyHash, fields);
+      const key = storeKey(keyHash, rangeKey);
+      checkExpected(table.get(key)?.fields ?? {}, expected);
+      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields });
     },
-    async updateRecord({ schemaHash, fields, keyHash, expected }) {
+    async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
       const table = tableFor(schemaHash);
-      checkExpected(table.get(keyHash) ?? {}, expected);
-      table.set(keyHash, fields);
+      const key = storeKey(keyHash, rangeKey);
+      checkExpected(table.get(key)?.fields ?? {}, expected);
+      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields });
     },
-    async deleteRecord({ schemaHash, keyHash }) {
-      tableFor(schemaHash).delete(keyHash);
+    async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
     },
     async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
       const results = rowsFor(schemaHash, filter);
@@ -135,6 +145,15 @@ async function seed(node: NodeClient) {
   });
 }
 
+async function seedBoardCard(node: NodeClient, c: Card) {
+  await node.createRecord({
+    schemaHash: cfgWithBoardCards.schemaHashes.board_cards!,
+    keyHash: c.board,
+    rangeKey: boardCardSk(c.column, c.position, c.slug),
+    fields: boardCardFieldsFromCard(c),
+  });
+}
+
 describe("move claim guard", () => {
   test("move --from is exactly-one-winner under a CAS-aware node", async () => {
     const node = fakeNode();
@@ -161,6 +180,28 @@ describe("move claim guard", () => {
     const second = await moveCmd({ cfg, node, slug: "claim-me", column: "doing" });
 
     expect(second).toMatchObject({ slug: "claim-me", from: "doing", to: "doing" });
+  });
+
+  test("move removes the old BoardCards row so column list previews follow show", async () => {
+    const node = fakeNode();
+    const initial = card({ column: "doing", position: "2" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: boardToFields(board()),
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card!,
+      keyHash: initial.slug,
+      fields: cardToFields(initial),
+    });
+    await seedBoardCard(node, initial);
+
+    await moveCmd({ cfg: cfgWithBoardCards, node, slug: initial.slug, column: "done" });
+
+    expect(await findCard(node, cfgWithBoardCards, initial.slug)).toMatchObject({ column: "done" });
+    const doing = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));
+    expect(doing.map((c: { slug: string }) => c.slug)).not.toContain(initial.slug);
   });
 
   test("move refuses an ambient DB that disagrees with the card home DB", async () => {

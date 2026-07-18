@@ -172,6 +172,7 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
       opts.expectColumn !== undefined
         ? { type: "value", field: "column", value: opts.expectColumn }
         : undefined,
+      card,
     );
   } catch (err) {
     if (err instanceof FkanbanError && err.code === "cas_conflict" && opts.expectColumn !== undefined) {
