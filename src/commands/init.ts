@@ -18,6 +18,7 @@ import { basename, dirname, join } from "node:path";
 import { fkanbanInvocation, mcpAddCommand } from "../mcp/register.ts";
 import {
   UNIQUE_SCHEMAS,
+  EXTRA_SCHEMAS,
   OWNER_APP_ID,
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
@@ -153,7 +154,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
   // Step 2: declare fkanban's app-private schemas locally. This is Mini's
   // private-schema bootstrap path; it must not call schema_service load.
-  print(`[2/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} private schemas locally`);
+  print(`[2/${STEPS}] declaring ${UNIQUE_SCHEMAS.length + EXTRA_SCHEMAS.length} private schemas locally`);
   let schemaHashes: Record<string, string>;
   try {
     schemaHashes = await declareOwnedSchemasLocally(node, print);
@@ -288,7 +289,7 @@ async function declareOwnedSchemasLocally(
     throw appSchemaDeclareUnsupported();
   }
   const schemaHashes: Record<string, string> = {};
-  for (const entry of UNIQUE_SCHEMAS) {
+  for (const entry of [...UNIQUE_SCHEMAS, ...EXTRA_SCHEMAS]) {
     const descriptive = entry.schema.schema.descriptive_name ?? entry.key;
     try {
       const declared = await node.declareAppSchema!(OWNER_APP_ID, entry.schema.schema as unknown as Record<string, unknown>);
