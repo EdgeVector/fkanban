@@ -28,6 +28,7 @@ import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
+import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
@@ -75,6 +76,7 @@ Commands:
   pickup claim         claim the next ready card into doing (lanes + priority + overlap + CAS)
   pickup lanes         show logical pickup lanes, starvation, and next claim order
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
+  groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
@@ -482,20 +484,27 @@ Example:
 
 Usage:
   fkanban groom stale-blockers [--apply] [--json]
+  fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
 
 Subcommands:
   stale-blockers       detect stale generated pickup/blocker metadata, malformed
                        Repo header lines, stale area-overlap holds, and
                        human/parking candidates.
+  board-cards-heal     repair BoardCards membership so list --column agrees with
+                       show <slug> (delete orphan column#pos rows, upsert truth).
 
 Flags:
   --apply              rewrite only generated boilerplate and structured fields
                        proven stale. Omitted by default: dry-run only.
-  --json               machine-readable { scanned, candidates, changed, cards }
+  --json               machine-readable report
+  --board SLUG         (board-cards-heal) limit to one board partition
+  --slug S             (board-cards-heal) limit to one or more card slugs
 
 Examples:
   fkanban groom stale-blockers
-  fkanban groom stale-blockers --apply`),
+  fkanban groom stale-blockers --apply
+  fkanban groom board-cards-heal
+  fkanban groom board-cards-heal --apply`),
 
   hygiene: withFooter(`fkanban hygiene — local machine-hygiene helpers
 
@@ -825,7 +834,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   board: new Set(["title", "columns", "body", "force"]),
   // migrate's one-time subcommands take --dry-run to preview without writing.
   migrate: new Set(["dry-run"]),
-  groom: new Set(["apply", "dry-run"]),
+  groom: new Set(["apply", "dry-run", "board", "slug"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
 };
@@ -926,6 +935,7 @@ async function main(argv: string[]): Promise<number> {
         db: { type: "string" },
         title: { type: "string" },
         board: { type: "string" },
+        slug: { type: "string", multiple: true },
         column: { type: "string" },
         tag: { type: "string" },
         assignee: { type: "string" },
@@ -1518,18 +1528,39 @@ async function dispatch(
 
     case "groom": {
       const sub = positionals[1];
-      if (sub !== "stale-blockers") {
-        console.error(`kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers`);
+      if (sub !== "stale-blockers" && sub !== "board-cards-heal") {
+        console.error(
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal`,
+        );
         return 2;
       }
-      const extra = rejectExtraPositionals(positionals, 2, "groom stale-blockers");
-      if (extra !== undefined) return extra;
       const ctx = loadCtx({ verbose });
-      console.log(await groomStaleBlockersCmd({
+      if (sub === "stale-blockers") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom stale-blockers");
+        if (extra !== undefined) return extra;
+        console.log(await groomStaleBlockersCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          apply: values.apply as boolean | undefined,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      // board-cards-heal: optional extra positionals are slugs; --slug also works.
+      const slugFlag = values.slug;
+      const fromFlag = Array.isArray(slugFlag)
+        ? slugFlag.filter((s): s is string => typeof s === "string" && s.length > 0)
+        : typeof slugFlag === "string" && slugFlag.length > 0
+          ? [slugFlag]
+          : [];
+      const slugs = [...fromFlag, ...positionals.slice(2).filter((s) => s.length > 0)];
+      console.log(await boardCardsHealCmd({
         cfg: ctx.cfg,
         node: ctx.node,
         apply: values.apply as boolean | undefined,
         json: values.json as boolean | undefined,
+        board: typeof values.board === "string" ? values.board : undefined,
+        slugs: slugs.length > 0 ? slugs : undefined,
       }));
       return 0;
     }
