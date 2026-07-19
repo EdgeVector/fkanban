@@ -1700,13 +1700,69 @@ export async function listPickupAreaPeers(node: NodeClient, cfg: Config, card: C
   return filterPickupAreaPeers(node, cfg, summaries, targetRepo, targetAreas);
 }
 
+/**
+ * Cards in one column. Prefer BoardCards HashRangePrefix on a single board
+ * (one keyed query). Without board, falls back to full thin list + client filter
+ * (legacy multi-board column scan — avoid on the hot list path).
+ */
 export async function listCardsByColumn(
   node: NodeClient,
   cfg: Config,
   column: string,
   fields: string[],
+  board?: string,
 ): Promise<Card[]> {
-  return listCardsClientFiltered(node, cfg, fields, { column });
+  if (board) {
+    try {
+      const part = await listBoardCardsPartition(node, cfg, board, { column });
+      if (part !== null) {
+        return part
+          .filter((c) => !isHiddenCard(c))
+          .map((c) => Object.assign(c, deriveStructuredFields(c)));
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return listCardsClientFiltered(node, cfg, fields, {
+    column,
+    ...(board ? { board } : {}),
+  });
+}
+
+/**
+ * Thin cards on one board only (one BoardCards partition — no empty-board fan-out).
+ * `fields` is used only on the legacy CardListIndex / Card fallback path.
+ */
+export async function listCardsOnBoard(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  fields: string[] = fieldsFor("card"),
+): Promise<Card[]> {
+  try {
+    const part = await listBoardCardsPartition(node, cfg, board);
+    if (part !== null && part.length > 0) {
+      return part
+        .filter((c) => !isHiddenCard(c))
+        .map((c) => Object.assign(c, deriveStructuredFields(c)));
+    }
+    if (part !== null && part.length === 0) {
+      // Empty board vs not dual-written: check index for this board only.
+      const indexed = await readCardListIndex(node, cfg);
+      if (indexed !== null) {
+        return (indexed.filter((c) => !isHiddenCard(c as Card) && c.board === board) as Card[]).map(
+          (c) => Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
+        );
+      }
+      return [];
+    }
+  } catch {
+    // fall through
+  }
+  // No BoardCards schema / query failed: field-projected multi-board list, filter client-side.
+  const all = await listCardsWithFields(node, cfg, fields);
+  return all.filter((c) => c.board === board);
 }
 
 export async function listCardsByFilter(

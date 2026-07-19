@@ -15,6 +15,7 @@ import {
   listCards,
   listCardsByColumn,
   listCardsForDisplay,
+  listCardsOnBoard,
   listDependencyStatusesForCards,
   requireBoard,
   sortCards,
@@ -151,19 +152,23 @@ export async function listResult(
   if (opts.column !== undefined) ensureColumn(opts.column, resolvedBoard.columns);
 
   // Body-free fetch on the text path (`displayOnly`): the render + filters need
-  // CARD_DISPLAY_FIELDS, never `body`. With --column, fetch the visible set via
-  // a server-side column filter, then point-read only its deps for blocked
-  // status. Without --column, keep the existing whole-board read so the normal
-  // full board render and multi-board footer retain their current behavior.
+  // CARD_DISPLAY_FIELDS, never `body`. Hot path is always board-scoped BoardCards
+  // (one HashKey / HashRangePrefix query) — never fan out empty stress boards.
+  // With --column: BoardCards prefix on this board, then point-read deps only.
+  // Without --column: this board's partition; multi-board footer uses a separate
+  // thin cross-board sample only when other boards exist.
   const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : fieldsFor("card");
   const columnCards = opts.column
-    ? await listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields)
+    ? await listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields, boardSlug)
     : null;
+  // Board-scoped BoardCards (one partition). Avoids querying empty stress boards.
+  // Pass visibleFields so legacy (no BoardCards hash) stubs still omit body on text path.
+  const boardCards = columnCards
+    ? null
+    : await listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);
   const allCards = columnCards
     ? await listDependencyStatusesForCards(opts.node, opts.cfg, columnCards)
-    : opts.displayOnly
-      ? await listCardsForDisplay(opts.node, opts.cfg)
-      : await listCards(opts.node, opts.cfg);
+    : boardCards!;
   // Terminal column per board (board slug → last column) so a dep counts as
   // done at its OWN board's final column, not only a literal `done`. Resolved
   // against ALL boards because blocked status spans cross-board deps below.
@@ -201,14 +206,15 @@ export async function listResult(
   });
   // `jsonLimit` only reflects an explicit `--limit`; the CLI broad-JSON default
   // cap is applied in listCmd so MCP structuredContent keeps its own contract.
-  // Multi-board discoverability footer: if any OTHER board holds live cards,
-  // append a one-line hint so a card created on a non-default board (and thus
-  // absent from this view) is still discoverable. Text surface ONLY — the
-  // `cards`/`structuredContent` array is untouched (machine consumers reach
-  // every board via separate calls), and `listCmd` returns `text` only when
-  // `!--json`, so the footer is naturally suppressed under `--json`. Derived
-  // from the already-fetched `allCards` — no extra node read.
-  const footer = columnCards ? "" : otherBoardsFooter(allCards, boardSlug, fkanbanInvocation());
+  // Multi-board discoverability footer (column-text path only). Board-scoped
+  // main read no longer includes other boards' cards, so one thin cross-board
+  // list when rendering the default text board. Skip for --json / --wide /
+  // --column (wide never shows the footer; column is the hot single-query path).
+  let footer = "";
+  if (!columnCards && !opts.json && !opts.wide) {
+    const cross = await listCardsForDisplay(opts.node, opts.cfg);
+    footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation());
+  }
   const text = footer
     ? `${renderBoard(resolvedBoard, cards, renderOpts)}\n${footer}\n`
     : renderBoard(resolvedBoard, cards, renderOpts);

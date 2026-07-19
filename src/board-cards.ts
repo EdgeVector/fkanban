@@ -221,24 +221,50 @@ export async function removeBoardCard(
   }
 }
 
-/** One partition query: all thin cards on a board (no body). */
+/**
+ * One keyed BoardCards query (no body).
+ * - board only → HashKey partition (all columns on that board)
+ * - board + column → HashRangePrefix column# (server-side column pushdown)
+ */
 export async function listBoardCardsPartition(
   node: NodeClient,
   cfg: Config,
   board: string,
+  opts?: { column?: string },
 ): Promise<Card[] | null> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return null;
+  const column = opts?.column?.trim();
   try {
+    const filter =
+      column && column.length > 0
+        ? { HashRangePrefix: { hash: board, prefix: `${column}#` } }
+        : { HashKey: board };
     const res = await node.queryAll({
       schemaHash,
       fields: [...BOARD_CARDS_FIELDS],
-      filter: { HashKey: board },
+      filter,
     });
     return res.results
       .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
-      .filter((c) => c.slug.length > 0);
+      .filter((c) => c.slug.length > 0)
+      .filter((c) => !column || c.column === column);
   } catch {
+    // Prefix filter may be rejected on older Mini — fall back to full partition.
+    if (column) {
+      try {
+        const res = await node.queryAll({
+          schemaHash,
+          fields: [...BOARD_CARDS_FIELDS],
+          filter: { HashKey: board },
+        });
+        return res.results
+          .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
+          .filter((c) => c.slug.length > 0 && c.column === column);
+      } catch {
+        return null;
+      }
+    }
     return null;
   }
 }
