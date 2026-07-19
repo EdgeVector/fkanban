@@ -115,6 +115,31 @@ describe("board policy invariants", () => {
     expect(derived?.body.startsWith("Repo: EdgeVector/fkanban\nBase: main\n\n")).toBe(true);
   });
 
+  test("a registry tag does not override body-declared Kind: pr for default todo", async () => {
+    const body = [
+      "Repo: EdgeVector/fkanban",
+      "Base: main",
+      "Kind: pr",
+      "",
+      "Implement the registry-backed app-platform slice.",
+    ].join("\n");
+    const tags = ["app-platform", "registry", "phase2"];
+
+    await addCmd({ cfg, node, slug: "registry-tag-add", column: "todo", tags, body });
+    const added = await findCard(node, cfg, "registry-tag-add");
+    expect(added?.column).toBe("todo");
+    expect(added?.kind).toBe("pr");
+    expect(added?.tags).toEqual(tags);
+    expect(added && isPickupEligible(added)).toBe(true);
+
+    await addCmd({ cfg, node, slug: "registry-tag-move", column: "backlog", tags, body });
+    await moveCmd({ cfg, node, slug: "registry-tag-move", column: "todo" });
+    const moved = await findCard(node, cfg, "registry-tag-move");
+    expect(moved?.column).toBe("todo");
+    expect(moved?.kind).toBe("pr");
+    expect(moved && isPickupEligible(moved)).toBe(true);
+  });
+
   test("add update repairs stale routing metadata from body headers before todo policy", async () => {
     const now = nowIso();
     await node.createRecord({
