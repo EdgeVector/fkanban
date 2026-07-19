@@ -94,7 +94,18 @@ if command -v jq >/dev/null 2>&1; then
       refreshed_at: $refreshed_at,
       notes: $notes
     }' >"$stamp"
-  cp "$stamp" "$stamp_dir/fkanban.json"
+  jq \
+    --arg app "fkanban" \
+    --arg command "fkanban" \
+    --arg exec_path "$bin_dir/fkanban" \
+    --arg stamp "$stamp_dir/fkanban.json" \
+    '. + {
+      app: $app,
+      command: $command,
+      exec_path: $exec_path,
+      stamp: $stamp,
+      notes: "fkanban alias for the registered kanban host-track app; PATH shims point into host track."
+    }' "$stamp" >"$stamp_dir/fkanban.json"
 fi
 
 echo "kanban host-track refreshed: $host_track"
