@@ -1271,11 +1271,11 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
     expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
   });
 
-  test("column-filtered JSON uses the default cap and body previews", async () => {
+  test("column-filtered JSON is uncapped by default and still body previews", async () => {
     const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, column: "todo" });
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed.map((c) => c.slug)).toEqual(
-      Array.from({ length: DEFAULT_COLUMN_LIMIT }, (_, i) => `t${i + 1}`),
+      Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
     );
     expect(parsed.find((c) => c.slug === "t1")!.body.length).toBeLessThanOrEqual(200);
     expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
