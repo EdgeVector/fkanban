@@ -104,10 +104,13 @@ pointing PATH at a workspace checkout:
 ```bash
 bin/host-track-refresh
 kanban which --json
+kanban which --check
 ```
 
 That maintains `~/.host-track/fkanban` from `lastdb:///fkanban` and repoints
-`~/.local/bin/{kanban,kanban-mcp,fkanban,fkanban-mcp}` at that durable checkout.
+`~/.local/bin/{kanban,kanban-mcp,fkanban,fkanban-mcp,kanban-host-track-refresh}`
+at that durable checkout. `which --check` exits nonzero when the running CLI
+does not resolve under `~/.host-track/fkanban`.
 
 ## Quick start
 

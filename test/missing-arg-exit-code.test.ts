@@ -10,16 +10,24 @@
 // in unit.test.ts against an ephemeral node and is not re-derived here.)
 
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pkg from "../package.json";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const REPO_ROOT = resolve(dirname(CLI), "..");
 
-async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runCli(
+  args: string[],
+  env: Record<string, string> = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(["bun", "run", CLI, ...args], {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
+    env: { ...process.env, ...env },
   });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -85,8 +93,45 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(report.version).toBe(pkg.version);
     expect(report.executable_path).toContain("src/cli.ts");
     expect(report.source_path).toContain("src/cli.ts");
+    expect(typeof (report as { in_host_track?: unknown }).in_host_track).toBe("boolean");
+    expect(typeof (report as { expected_host_track?: unknown }).expected_host_track).toBe("string");
     expect(report.bun_path.length).toBeGreaterThan(0);
     expect(report.bun_version.length).toBeGreaterThan(0);
+  });
+
+  test("which --check exits nonzero when the CLI is not host-track managed", async () => {
+    const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-not-host-track-"));
+    const { code, stdout, stderr } = await runCli(["which", "--check"], { HOME: home });
+    expect(code).toBe(1);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("in_host_track: false");
+  });
+
+  test("which --check exits zero when the source root resolves under host-track", async () => {
+    const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-host-track-"));
+    mkdirSync(resolve(home, ".host-track"), { recursive: true });
+    symlinkSync(REPO_ROOT, resolve(home, ".host-track/fkanban"));
+    const { code, stdout, stderr } = await runCli(["which", "--check"], { HOME: home });
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("in_host_track: true");
+  });
+
+  test("which accepts the host-track refresh alias advertised by the manifest", async () => {
+    const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-refresh-"));
+    mkdirSync(resolve(home, ".host-track"), { recursive: true });
+    symlinkSync(REPO_ROOT, resolve(home, ".host-track/fkanban"));
+    const env = {
+      HOME: home,
+      PATH: `${resolve(REPO_ROOT, "bin")}:${process.env.PATH ?? ""}`,
+    };
+    const { code, stdout, stderr } = await runCli(["which", "kanban-host-track-refresh", "--json", "--check"], env);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    const report = JSON.parse(stdout) as { command: string; under_host_track: boolean; issues: string[] };
+    expect(report.command).toBe("kanban-host-track-refresh");
+    expect(report.under_host_track).toBe(true);
+    expect(report.issues).toEqual([]);
   });
 
   test("bare invocation prints help and exits 0 (unchanged)", async () => {
