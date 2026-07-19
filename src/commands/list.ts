@@ -245,8 +245,9 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   }
   if (!opts.json) return text;
   const broadJson = opts.column === undefined;
+  const implicitJsonDefault = !opts.all && !opts.fullBody && opts.limit === undefined;
   const implicitJsonLimit =
-    broadJson && !opts.all && !opts.fullBody && opts.limit === undefined ? DEFAULT_COLUMN_LIMIT : 0;
+    implicitJsonDefault ? DEFAULT_COLUMN_LIMIT : 0;
   const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
   const capped = effectiveJsonLimit > 0 ? capPerColumn(board, cards, effectiveJsonLimit, opts.column) : cards;
   // Bodies are never loaded for board-wide list (BoardCards thin projection).
@@ -255,7 +256,9 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   const withBodies = opts.fullBody
     ? await hydrateCardBodies(opts.node, opts.cfg, capped)
     : capped;
-  const out = broadJson || opts.fullBody ? previewCardBodies(withBodies, opts.fullBody ?? false) : withBodies;
+  const out = broadJson || implicitJsonDefault || opts.fullBody
+    ? previewCardBodies(withBodies, opts.fullBody ?? false)
+    : withBodies;
   return JSON.stringify(out, null, 2);
 }
 
