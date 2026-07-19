@@ -6,7 +6,7 @@ import type { Config } from "../src/config.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
 import { rmCmd } from "../src/commands/rm.ts";
-import { boardToFields, findCard, nowIso } from "../src/record.ts";
+import { boardToFields, cardToFields, emptyStructuredFields, findCard, isPickupEligible, nowIso, priorityOf } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 
 const cfg: Config = {
@@ -113,6 +113,61 @@ describe("board policy invariants", () => {
     expect(derived?.repo).toBe("EdgeVector/fkanban");
     expect(derived?.base).toBe("main");
     expect(derived?.body.startsWith("Repo: EdgeVector/fkanban\nBase: main\n\n")).toBe(true);
+  });
+
+  test("add update repairs stale routing metadata from body headers before todo policy", async () => {
+    const now = nowIso();
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.card!,
+      keyHash: "stale-body-route",
+      fields: cardToFields({
+        slug: "stale-body-route",
+        title: "Stale body route",
+        body: "Old registry note.",
+        board: "default",
+        column: "backlog",
+        position: "10",
+        assignee: "",
+        tags: ["p3"],
+        deps: [],
+        created_at: now,
+        updated_at: now,
+        ...emptyStructuredFields(),
+        repo: "",
+        base: "",
+        kind: "registry",
+      }),
+    });
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "stale-body-route",
+      column: "todo",
+      body: [
+        "Repo: EdgeVector/fkanban",
+        "Base: main",
+        "Kind: pr",
+        "Priority: P1",
+        "Branch: kanban/stale-body-route",
+        "North Star: north-star-lastdb-no-scan-access",
+        "Surfaces: src/commands/add.ts, src/record.ts",
+        "",
+        "Ship the routing repair.",
+      ].join("\n"),
+    });
+
+    const repaired = await findCard(node, cfg, "stale-body-route");
+    expect(repaired?.repo).toBe("EdgeVector/fkanban");
+    expect(repaired?.base).toBe("main");
+    expect(repaired?.kind).toBe("pr");
+    expect(repaired?.branch).toBe("");
+    expect(repaired?.north_star).toBe("north-star-lastdb-no-scan-access");
+    expect(repaired?.surfaces).toEqual(["src/commands/add.ts", "src/record.ts"]);
+    expect(repaired?.tags).toContain("p1");
+    expect(repaired?.tags).not.toContain("p3");
+    expect(repaired && isPickupEligible(repaired)).toBe(true);
+    expect(repaired && priorityOf({ body: "", tags: repaired.tags })).toBe("P1");
   });
 
   test("default todo rejects malformed or missing routing unless forced", async () => {
