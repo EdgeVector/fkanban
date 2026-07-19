@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -48,7 +48,10 @@ describe("host-track refresh", () => {
     await run(["git", "config", "user.email", "test@example.invalid"], seed);
     await run(["git", "config", "user.name", "Host Track Test"], seed);
     mkdirSync(resolve(seed, "bin"), { recursive: true });
-    for (const name of ["kanban", "kanban-mcp", "fkanban", "fkanban-mcp", "host-track-refresh", "kanban-host-track-refresh"]) {
+    mkdirSync(resolve(seed, "src/mcp"), { recursive: true });
+    writeFileSync(resolve(seed, "src/cli.ts"), "console.log('cli')\n");
+    writeFileSync(resolve(seed, "src/mcp/main.ts"), "console.log('mcp')\n");
+    for (const name of ["host-track-refresh", "kanban-host-track-refresh"]) {
       writeFileSync(resolve(seed, "bin", name), `#!/usr/bin/env bash\necho ${name}\n`);
       chmodSync(resolve(seed, "bin", name), 0o755);
     }
@@ -67,8 +70,13 @@ describe("host-track refresh", () => {
     };
     const first = await run(["bash", "bin/host-track-refresh"], resolve(import.meta.dir, ".."), env);
     expect(first.code).toBe(0);
-    expect(readlinkSync(resolve(bin, "kanban"))).toBe(`${host}/bin/kanban`);
-    expect(readlinkSync(resolve(bin, "fkanban"))).toBe(`${host}/bin/fkanban`);
+    const kanbanShim = resolve(bin, "kanban");
+    const fkanbanShim = resolve(bin, "fkanban");
+    expect(statSync(kanbanShim).mode & 0o111).not.toBe(0);
+    expect(statSync(fkanbanShim).mode & 0o111).not.toBe(0);
+    expect(await Bun.file(kanbanShim).text()).toContain("host-track checkout is missing or incomplete");
+    expect(await Bun.file(fkanbanShim).text()).toContain("host-track refresh kanban");
+    expect(await run([kanbanShim], root)).toMatchObject({ code: 0, stdout: "cli\n", stderr: "" });
     expect(await Bun.file(resolve(stamps, "kanban.json")).json()).toMatchObject({
       app: "kanban",
       command: "kanban",
@@ -91,5 +99,13 @@ describe("host-track refresh", () => {
     const second = await run(["bash", "bin/host-track-refresh"], resolve(import.meta.dir, ".."), env);
     expect(second.code).toBe(0);
     expect(await Bun.file(resolve(host, "README.md")).text()).toBe("two\n");
-  }, 30_000);
+
+    rmSync(resolve(host, "src/cli.ts"), { force: true });
+    const broken = await run([kanbanShim], root);
+    expect(broken.code).toBe(127);
+    expect(broken.stdout).toBe("");
+    expect(broken.stderr).toContain("kanban: host-track checkout is missing or incomplete");
+    expect(broken.stderr).toContain("expected ");
+    expect(broken.stderr).toContain("host-track refresh kanban");
+  }, 60_000);
 });

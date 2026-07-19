@@ -55,10 +55,70 @@ if [ -f "$host_track/package.json" ] && [ "$skip_install" != "1" ]; then
   bun install --cwd "$host_track" --frozen-lockfile
 fi
 
-for name in kanban kanban-mcp fkanban fkanban-mcp host-track-refresh; do
-  ln -sfn "$host_track/bin/$name" "$bin_dir/$name"
-done
-ln -sfn "$host_track/bin/kanban-host-track-refresh" "$bin_dir/kanban-host-track-refresh"
+write_runtime_shim() {
+  name="$1"
+  entry="$2"
+  target="$bin_dir/$name"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+name="$name"
+host_track="$host_track"
+entry="$entry"
+expected="\$host_track/\$entry"
+
+if [ ! -f "\$expected" ]; then
+  echo "\$name: host-track checkout is missing or incomplete at \$host_track" >&2
+  echo "\$name: expected \$expected" >&2
+  echo "\$name: run host-track refresh kanban to repair the checkout" >&2
+  exit 127
+fi
+
+if bun_bin="\$(command -v bun 2>/dev/null)"; then
+  :
+elif [ -n "\${HOME:-}" ] && [ -x "\$HOME/.bun/bin/bun" ]; then
+  bun_bin="\$HOME/.bun/bin/bun"
+else
+  echo "\$name: bun not found on PATH and no executable found at \\\$HOME/.bun/bin/bun" >&2
+  echo "\$name: install Bun or add its bin directory to PATH before running \$name" >&2
+  exit 127
+fi
+
+exec "\$bun_bin" run "\$expected" "\$@"
+EOF
+  chmod 755 "$target"
+}
+
+write_refresh_shim() {
+  name="$1"
+  entry="$2"
+  target="$bin_dir/$name"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+name="$name"
+host_track="$host_track"
+entry="$entry"
+expected="\$host_track/\$entry"
+
+if [ ! -x "\$expected" ]; then
+  echo "\$name: host-track checkout is missing or incomplete at \$host_track" >&2
+  echo "\$name: expected executable \$expected" >&2
+  echo "\$name: run host-track refresh kanban to repair the checkout" >&2
+  exit 127
+fi
+
+exec "\$expected" "\$@"
+EOF
+  chmod 755 "$target"
+}
+
+write_runtime_shim kanban src/cli.ts
+write_runtime_shim fkanban src/cli.ts
+write_runtime_shim kanban-mcp src/mcp/main.ts
+write_runtime_shim fkanban-mcp src/mcp/main.ts
+write_refresh_shim host-track-refresh bin/host-track-refresh
+write_refresh_shim kanban-host-track-refresh bin/kanban-host-track-refresh
 
 host_head="$(git -C "$host_track" rev-parse HEAD)"
 gate_head="$(git -C "$host_track" ls-remote origin "$ref" 2>/dev/null | awk 'NR == 1 {print $1}')"
