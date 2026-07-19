@@ -21,6 +21,7 @@ import {
   parseBodyListHeader,
   parseBodyTagsHeader,
   PICKUP_AREA_BLOCK_PREFIX,
+  repairStructuredFieldsFromBody,
   resolvePickupRepo,
   rowToCard,
   type Card,
@@ -777,5 +778,52 @@ describe("deriveStructuredFields (backfill)", () => {
     expect(d.kind).toBeUndefined();
     expect(d.branch).toBeUndefined();
     expect(d.surfaces).toBeUndefined();
+  });
+
+  test("write-time repair lets body headers replace stale structured routing fields", () => {
+    const c = card({
+      repo: "",
+      base: "",
+      kind: "registry",
+      north_star: "old-ns",
+      branch: "old-branch",
+      surfaces: ["src/old.ts"],
+      tags: ["p3"],
+      body: [
+        "Repo: EdgeVector/fkanban",
+        "Base: main",
+        "Kind: pr",
+        "Priority: P1",
+        "North Star: north-star-lastdb-no-scan-access",
+        "Branch: kanban/body-route",
+        "Surfaces: src/commands/add.ts, src/record.ts",
+        "",
+        "Ship the repair.",
+      ].join("\n"),
+    });
+
+    repairStructuredFieldsFromBody(c);
+
+    expect(c.repo).toBe("EdgeVector/fkanban");
+    expect(c.base).toBe("main");
+    expect(c.kind).toBe("pr");
+    expect(c.north_star).toBe("north-star-lastdb-no-scan-access");
+    expect(c.branch).toBe("kanban/body-route");
+    expect(c.surfaces).toEqual(["src/commands/add.ts", "src/record.ts"]);
+  });
+
+  test("write-time repair keeps same-call explicit fields authoritative", () => {
+    const c = card({
+      repo: "EdgeVector/explicit",
+      base: "explicit-base",
+      kind: "tracker",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nKind: pr\n\nBody headers.",
+    });
+
+    repairStructuredFieldsFromBody(c, { repo: true, base: true, kind: true });
+
+    expect(c.repo).toBe("EdgeVector/explicit");
+    expect(c.base).toBe("explicit-base");
+    expect(c.kind).toBe("tracker");
   });
 });

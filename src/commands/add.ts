@@ -257,6 +257,16 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     await stampCardForWrite(opts.node, opts.cfg, updated, {
       forcedRepo: opts.repo,
       explicitBlockStatus: opts.blockStatus !== undefined,
+      explicitPriority: opts.priority !== undefined,
+      explicitStructuredFields: {
+        repo: opts.repo !== undefined,
+        base: opts.base !== undefined,
+        kind: opts.kind !== undefined,
+        northStar: opts.northStar !== undefined,
+        branch: opts.branch !== undefined,
+        surfaces: opts.surfaces !== undefined,
+        db: opts.dbLocator !== undefined,
+      },
       warn: suppressDefaultTodoWarning(updated, opts.force) ? () => {} : undefined,
     });
     sanitizeDefaultTodoLaneMetadata(updated);
@@ -295,6 +305,16 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   await stampCardForWrite(opts.node, opts.cfg, card, {
     forcedRepo: opts.repo,
     explicitBlockStatus: opts.blockStatus !== undefined,
+    explicitPriority: opts.priority !== undefined,
+    explicitStructuredFields: {
+      repo: opts.repo !== undefined,
+      base: opts.base !== undefined,
+      kind: opts.kind !== undefined,
+      northStar: opts.northStar !== undefined,
+      branch: opts.branch !== undefined,
+      surfaces: opts.surfaces !== undefined,
+      db: opts.dbLocator !== undefined,
+    },
     warn: suppressDefaultTodoWarning(card, opts.force) ? () => {} : undefined,
   });
   sanitizeDefaultTodoLaneMetadata(card);

@@ -768,7 +768,13 @@ export async function stampCardForWrite(
   node: NodeClient,
   cfg: Config,
   card: Card,
-  opts: { forcedRepo?: string; explicitBlockStatus?: boolean; warn?: (msg: string) => void } = {},
+  opts: {
+    forcedRepo?: string;
+    explicitBlockStatus?: boolean;
+    explicitPriority?: boolean;
+    explicitStructuredFields?: StructuredFieldRepairOptions;
+    warn?: (msg: string) => void;
+  } = {},
 ): Promise<Card> {
   applyDerivedHeader(
     card,
@@ -778,7 +784,8 @@ export async function stampCardForWrite(
       { forcedRepo: opts.forcedRepo },
     ),
   );
-  Object.assign(card, deriveStructuredFields(card));
+  repairStructuredFieldsFromBody(card, opts.explicitStructuredFields);
+  applyBodyPriorityTag(card, opts.explicitPriority === true);
   const explicitBlockStatus = opts.explicitBlockStatus === true;
   const areaPeers = card.column === "todo" && !explicitBlockStatus ? await listPickupAreaPeers(node, cfg, card) : [];
   return applyPickupAreaDerivation(card, areaPeers, explicitBlockStatus);
@@ -1166,6 +1173,58 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
     if (db) out.db = db;
   }
   return out;
+}
+
+export type StructuredFieldRepairOptions = {
+  repo?: boolean;
+  base?: boolean;
+  kind?: boolean;
+  northStar?: boolean;
+  branch?: boolean;
+  surfaces?: boolean;
+  db?: boolean;
+};
+
+// Write-time body→field repair. `deriveStructuredFields` is intentionally
+// conservative for read-time legacy backfill and never overwrites an existing
+// value; this mutating helper is used only on explicit card writes, where a
+// clear body header is the operator's current source of truth unless the same
+// write passed the matching structured CLI flag.
+export function repairStructuredFieldsFromBody(
+  card: Card,
+  explicit: StructuredFieldRepairOptions = {},
+): Card {
+  Object.assign(card, deriveStructuredFields(card));
+
+  if (!explicit.repo) {
+    const repo = parseBodyHeader(card.body, "Repo");
+    if (repo) card.repo = repo;
+  }
+  if (!explicit.base) {
+    const base = parseBodyHeader(card.body, "Base");
+    if (base) card.base = base;
+  }
+  if (!explicit.kind) {
+    const kind = parseBodyHeader(card.body, "Kind").toLowerCase();
+    if (isCardKind(kind)) card.kind = kind;
+  }
+  if (!explicit.northStar) {
+    const northStar = parseBodyHeader(card.body, "North Star");
+    if (northStar) card.north_star = northStar;
+  }
+  if (!explicit.branch) {
+    const branch = parseBodyHeader(card.body, "Branch");
+    if (branch) card.branch = branch;
+  }
+  if (!explicit.surfaces) {
+    const surfaces = parseBodyListHeader(card.body, "Surfaces");
+    if (surfaces.length > 0) card.surfaces = surfaces;
+  }
+  if (!explicit.db) {
+    const db = normalizeDbLocator(parseBodyHeader(card.body, "Db"));
+    if (db) card.db = db;
+  }
+  return card;
 }
 
 // Fields that default empty on fresh/test Card literals.
@@ -2317,6 +2376,13 @@ export function rankCards<T extends Card>(cards: T[]): T[] {
 // untouched). Used by `add --priority`.
 export function withPriorityTag(tags: string[], tier: PriorityTier): string[] {
   return [...tags.filter((t) => !isPriorityTag(t)), priorityTag(tier)];
+}
+
+export function applyBodyPriorityTag(card: Pick<Card, "body" | "tags">, explicitPriority = false): void {
+  if (explicitPriority) return;
+  const tier = normalizePriority(parseBodyHeader(card.body, "Priority"));
+  if (!tier) return;
+  card.tags = withPriorityTag(card.tags, tier);
 }
 
 // Type guard for record-type-keyed config lookups used by the CLI.
