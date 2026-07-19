@@ -68,9 +68,17 @@ describe("host-track refresh", () => {
     const first = await run(["bash", "bin/host-track-refresh"], resolve(import.meta.dir, ".."), env);
     expect(first.code).toBe(0);
     expect(readlinkSync(resolve(bin, "kanban"))).toBe(`${host}/bin/kanban`);
+    expect(readlinkSync(resolve(bin, "fkanban"))).toBe(`${host}/bin/fkanban`);
     expect(await Bun.file(resolve(stamps, "kanban.json")).json()).toMatchObject({
       app: "kanban",
       command: "kanban",
+      kind: "B checkout-shim",
+      stale: false,
+    });
+    expect(await Bun.file(resolve(stamps, "fkanban.json")).json()).toMatchObject({
+      app: "fkanban",
+      command: "fkanban",
+      exec_path: `${bin}/fkanban`,
       kind: "B checkout-shim",
       stale: false,
     });

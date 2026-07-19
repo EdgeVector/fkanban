@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,18 @@ describe("bin/kanban + bin/fkanban bun resolution", () => {
     }
     tempRoots = [];
   });
+
+  for (const [name, shimPath] of [["kanban", kanbanShimPath], ["fkanban", fkanbanShimPath]] as const) {
+    test(`${name} shim is a non-empty executable shell wrapper`, () => {
+      const stat = statSync(shimPath);
+      const body = readFileSync(shimPath, "utf8");
+
+      expect(stat.size).toBeGreaterThan(0);
+      expect(stat.mode & 0o111).not.toBe(0);
+      expect(body).toContain("#!/usr/bin/env bash");
+      expect(body).toContain("../src/cli.ts");
+    });
+  }
 
   for (const [name, shimPath] of [["kanban", kanbanShimPath], ["fkanban", fkanbanShimPath]] as const) {
     test(`${name} falls back to $HOME/.bun/bin/bun when GUI PATH omits bun`, async () => {

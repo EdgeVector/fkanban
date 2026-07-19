@@ -112,6 +112,12 @@ That maintains `~/.host-track/fkanban` from `lastdb:///fkanban` and repoints
 at that durable checkout. `which --check` exits nonzero when the running CLI
 does not resolve under `~/.host-track/fkanban`.
 
+Host-track registers this repo under the app id `kanban`; `fkanban` is a
+command alias for the same checkout and schema namespace. Use
+`host-track status kanban` for the registered app status, and `fkanban which
+--json` or the `~/.host-track/stamps/fkanban.json` alias stamp to inspect the
+alias path.
+
 ## Quick start
 
 With the prerequisites in place (Bun installed, repo cloned, `bun install` run,
