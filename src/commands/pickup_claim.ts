@@ -124,6 +124,13 @@ export type PickupClaimDiagnosticExemplar = {
   suggestion: string;
 };
 
+export function isTrueIdlePickupClaim(result: Pick<PickupClaimResult, "claimed" | "reason" | "scanned_ready" | "skipped">): boolean {
+  return !result.claimed &&
+    result.reason === "no-eligible" &&
+    result.scanned_ready === 0 &&
+    result.skipped.length === 0;
+}
+
 function normalizeRepoList(repos: string[] | undefined): string[] {
   if (!repos) return [];
   const out: string[] = [];
@@ -507,6 +514,11 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
     `  scanned_ready: ${result.scanned_ready}`,
     `  todo_count: ${result.todo_count}`,
   ];
+  if (result.reason === "no-eligible") {
+    lines.push(isTrueIdlePickupClaim(result)
+      ? "  idle: true empty pickup queue (no ready candidates were skipped)"
+      : "  idle: false (ready candidates were skipped or blocked; do not enter idle mode)");
+  }
   if (result.skipped.length > 0) {
     lines.push("  skipped:");
     for (const s of result.skipped.slice(0, 20)) {

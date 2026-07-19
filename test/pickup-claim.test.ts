@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { formatPickupClaim, pickupClaimResult } from "../src/commands/pickup_claim.ts";
+import { formatPickupClaim, isTrueIdlePickupClaim, pickupClaimResult } from "../src/commands/pickup_claim.ts";
 import { showResult } from "../src/commands/show.ts";
 import {
   boardToFields,
@@ -504,6 +504,7 @@ describe("pickup claim", () => {
     expect(result.claimed).toBe(false);
     expect(result.reason).toBe("no-eligible");
     expect(result.scanned_ready).toBe(0);
+    expect(result.skipped).toEqual([]);
     expect(result.todo_count).toBe(0);
     expect(result.todo_blockers).toBe(0);
     expect(result.todo_blocker_exemplars).toBeUndefined();
@@ -511,6 +512,10 @@ describe("pickup claim", () => {
     expect(result.diagnostics?.ready).toBe(0);
     expect(result.diagnostics?.inflight_without_artifact).toBe(0);
     expect(result.diagnostics?.inflight_without_artifact_exemplars).toBeUndefined();
+    expect(isTrueIdlePickupClaim(result)).toBe(true);
+    expect(formatPickupClaim(result)).toContain(
+      "idle: true empty pickup queue (no ready candidates were skipped)",
+    );
   });
 
   test("no-eligible reports zero todo count for backlog and doing only", async () => {
@@ -810,6 +815,10 @@ describe("pickup claim", () => {
       reason: "exclude-repo",
       detail: "EdgeVector/fold",
     });
+    expect(isTrueIdlePickupClaim(result)).toBe(false);
+    expect(formatPickupClaim(result)).toContain(
+      "idle: false (ready candidates were skipped or blocked; do not enter idle mode)",
+    );
   });
 
   test("claim_conflict on first candidate falls through to second", async () => {

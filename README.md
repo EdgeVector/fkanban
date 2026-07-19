@@ -289,6 +289,20 @@ and the command continues to the next candidate. Idle boards return
 include bounded `diagnostics.exemplars` for non-ready categories so automations
 can report concrete blockers without broad board scans.
 
+For automation idle decisions, treat the queue as truly empty only when the
+claim result is all of:
+
+- `claimed: false`
+- `reason: "no-eligible"`
+- `scanned_ready: 0`
+- `skipped: []`
+
+If `scanned_ready > 0`, or `skipped` contains `surface-overlap`,
+`exclude-repo`, `claim_conflict`, or another skip reason, ready work existed but
+could not be claimed by this worker. That is queue backpressure or routing
+selection, not idle capacity; a pickup routine should report the skip and exit
+instead of inventing idle work.
+
 It classifies each active card as `pickup-ready`,
 `blocked-on-dependency`, `human-gated`, `malformed-routing`,
 `parked/non-work`, `collision`, or `stale-metadata`. The JSON shape carries the
