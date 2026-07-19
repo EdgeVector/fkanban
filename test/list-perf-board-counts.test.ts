@@ -362,6 +362,29 @@ describe("search — default text path uses indexed/native candidates", () => {
     expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
   });
 
+  test("fallback search scan explicitly opts into the approved admin full-scan path", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({
+          slug: "feature-ready",
+          title: "Ready feature slice",
+          tags: ["feature-ship"],
+          body: "feature details should not be needed for tag search",
+        }),
+      ],
+      rejectUnallowedCardScan: true,
+    });
+
+    const { cards } = await searchResult({ cfg, node, query: "feature-ship" });
+
+    expect(cards.map((c) => c.slug)).toEqual(["feature-ready"]);
+    expect(node.cardQueries).toContainEqual(expect.objectContaining({
+      filter: undefined,
+      allowFullScan: true,
+    }));
+  });
+
   test("search --all removes the broad JSON row cap but keeps body previews", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
