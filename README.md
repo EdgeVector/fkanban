@@ -216,10 +216,11 @@ moving it.
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
 line (the `done`/terminal column keeps the most *recent* cards). `--all` shows
 everything and `--limit N` sets a custom per-column cap — both apply to text
-**and** `--json`. Broad `--json` reads use the same 12-card-per-column default
-cap and return single-line body previews with `bodyTruncated`; pass `--all` to
-return every row, or `--full-body` / `--full_body` for the historical complete
-card-body JSON surface. `--wide` prints one fixed-width row per card with
+**and** `--json`. Default `--json` reads, including `--column`, use the same
+12-card-per-column default cap and return single-line body previews with
+`bodyTruncated`; pass `--all` to return every row, or `--full-body` /
+`--full_body` for the historical complete card-body JSON surface. `--wide`
+prints one fixed-width row per card with
 `COLUMN SLUG REPO BASE PR UPDATED TITLE` for agent/reconcile scans.
 
 `--tag <tag>` and `--assignee <name>` apply **exact-match** filters to the

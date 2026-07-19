@@ -1271,10 +1271,14 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
     expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
   });
 
-  test("column-filtered JSON stays uncapped for pickup-style narrow reads", async () => {
-    expect(await jsonSlugs({ column: "todo" })).toEqual(
-      Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
+  test("column-filtered JSON uses the default cap and body previews", async () => {
+    const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, column: "todo" });
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    expect(parsed.map((c) => c.slug)).toEqual(
+      Array.from({ length: DEFAULT_COLUMN_LIMIT }, (_, i) => `t${i + 1}`),
     );
+    expect(parsed.find((c) => c.slug === "t1")!.body.length).toBeLessThanOrEqual(200);
+    expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
   });
 
   test("explicit --limit caps a single column to N (matches the text head slice)", async () => {
@@ -1296,6 +1300,12 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
       "d3",
       ...Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
     ].sort());
+  });
+
+  test("--all keeps a column-filtered JSON list uncapped", async () => {
+    expect(await jsonSlugs({ column: "todo", all: true })).toEqual(
+      Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
+    );
   });
 });
 
