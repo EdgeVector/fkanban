@@ -108,7 +108,8 @@ const QUERY_PAGE_LIMIT = 1000;
 
 // fold's /api/query `filter` — exact field filters. `HashKey` is the special
 // primary-key point read; schema fields such as `column` may be backed by node
-// secondary indexes on newer nodes.
+// secondary indexes on newer nodes. Callers that need HashRangePrefix /
+// HashRangeKey cast through `as QueryFilter` (fold accepts those objects).
 export type QueryFilter = Record<string, string>;
 
 // Every request gets a deadline so a contended node can never hang the CLI
