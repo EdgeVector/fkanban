@@ -165,6 +165,17 @@ describe("queryAll filter", () => {
     expect(token.app_id).toBe("fkanban");
     expect(token.scope).toEqual({ wildcard: "fkanban/*" });
   });
+
+  test("allowFullScan sends the node's explicit admin full-scan header", async () => {
+    const node = newNodeClient({ baseUrl, userHash: "test-user", appId: "fkanban" });
+    await node.queryAll({ schemaHash: "cardhash", fields: ["slug"], allowFullScan: true });
+    const last = seen.at(-1)!;
+    expect(last.path).toBe("/api/query");
+    expect(last.headers.get("x-lastdb-allow-full-scan")).toBe("1");
+    expect((last.body as Record<string, unknown>).schema_name).toBe("cardhash");
+    expect((last.body as Record<string, unknown>).limit).toBe(1000);
+    expect(last.headers.get("x-app-capability")).toBeTruthy();
+  });
 });
 
 describe("search data path", () => {
