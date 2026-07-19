@@ -35,6 +35,7 @@ import {
   TransportError,
   UnexpectedResponseError,
   capabilityStoreKey,
+  parseQueryResponse,
   type CapabilityStore,
   type JsonValue,
   type KeyValue,
@@ -622,6 +623,56 @@ export function newNodeClient(opts: {
     }
   };
 
+  const queryAllWithFullScanHeader = async (opts: {
+    schemaHash: string;
+    fields: string[];
+    filter?: QueryFilter;
+  }): Promise<QueryResponse> => {
+    const rows: SdkQueryResult["rows"] = [];
+    let schema = "";
+    let rowCount = 0;
+    let page: SdkQueryResult["page"] = null;
+    let offset = 0;
+    let cursor: KeyValue | null = null;
+
+    try {
+      for (;;) {
+        const body: Record<string, unknown> = {
+          schema_name: opts.schemaHash,
+          fields: opts.fields,
+          limit: QUERY_PAGE_SIZE,
+          ...(opts.filter !== undefined ? { filter: opts.filter as JsonValue } : {}),
+          ...(cursor === null ? { offset } : { cursor }),
+        };
+        const res = await sdkTransport.send("POST", "/api/query", {
+          headers: { "X-LastDB-Allow-Full-Scan": "1" },
+          body,
+        });
+        if (res.status !== 200) {
+          throw mapNodeError(res.status, res.body, "/api/query");
+        }
+        const parsed = parseQueryResponse(res.body);
+        schema = parsed.schema || schema;
+        rowCount = parsed.page?.totalCount ?? parsed.rowCount ?? rowCount;
+        page = parsed.page;
+        rows.push(...parsed.rows);
+
+        const hasMore = parsed.page !== null
+          ? parsed.page.hasMore
+          : parsed.rows.length >= QUERY_PAGE_SIZE;
+        if (!hasMore) break;
+        if (rows.length >= QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT) break;
+        cursor = parsed.page?.nextCursor ?? null;
+        if (cursor === null) offset += parsed.rows.length;
+        if (parsed.rows.length === 0) break;
+      }
+    } catch (err) {
+      throw mapSdkDataError(err, url, "POST", "/api/query", socketPath);
+    }
+
+    return queryResponseFromSdk({ schema, rowCount, rows, page });
+  };
+
   const callJson = async (
     path: string,
     method: "GET" | "POST",
@@ -792,6 +843,9 @@ export function newNodeClient(opts: {
       );
     },
     async queryAll({ schemaHash, fields, filter, allowFullScan }) {
+      if (allowFullScan === true) {
+        return queryAllWithFullScanHeader({ schemaHash, fields, filter });
+      }
       const result = await sdkDataPath("/api/query", (client) =>
         client.queryAll(
           schemaHash,
@@ -802,9 +856,7 @@ export function newNodeClient(opts: {
           {
             pageSize: QUERY_PAGE_SIZE,
             maxRows: QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT,
-            // Only explicit admin/offline callers may set allowFullScan.
-            ...(allowFullScan === true ? { allowFullScan: true } : {}),
-          } as { pageSize: number; maxRows: number; allowFullScan?: boolean },
+          },
         ),
       );
       return queryResponseFromSdk(result);
