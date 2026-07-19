@@ -236,10 +236,13 @@ export async function listBoardCardsPartition(
   if (!schemaHash) return null;
   const column = opts?.column?.trim();
   try {
-    const filter =
+    // HashRangePrefix is a fold HashRangeFilter object; QueryFilter's TS type
+    // is string-map only — cast at the edge (runtime accepts the object).
+    const filter = (
       column && column.length > 0
         ? { HashRangePrefix: { hash: board, prefix: `${column}#` } }
-        : { HashKey: board };
+        : { HashKey: board }
+    ) as import("./client.ts").QueryFilter;
     const res = await node.queryAll({
       schemaHash,
       fields: [...BOARD_CARDS_FIELDS],
