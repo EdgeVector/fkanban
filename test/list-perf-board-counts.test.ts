@@ -362,7 +362,7 @@ describe("search — default text path uses indexed/native candidates", () => {
     expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
   });
 
-  test("fallback search scan explicitly opts into the approved admin full-scan path", async () => {
+  test("complete search explicitly opts into the approved admin full-scan path", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -376,7 +376,7 @@ describe("search — default text path uses indexed/native candidates", () => {
       rejectUnallowedCardScan: true,
     });
 
-    const { cards } = await searchResult({ cfg, node, query: "feature-ship" });
+    const { cards } = await searchResult({ cfg, node, query: "feature-ship", complete: true });
 
     expect(cards.map((c) => c.slug)).toEqual(["feature-ready"]);
     expect(node.cardQueries).toContainEqual(expect.objectContaining({
