@@ -22,7 +22,7 @@ export type Config = {
   schemaHashes: Record<string, string>;
   // Optional override for the node's Unix-domain control socket, used for
   // owner-session attestation against an app-isolation node. When absent the
-  // path is derived from FOLDDB_HOME (see `resolveSocketPath`).
+  // path is derived from LASTDB_HOME / FOLDDB_HOME (see `resolveSocketPath`).
   nodeSocketPath?: string;
   // Card schema hash PROVEN (by a live write) to reject the optional card
   // fields (CARD_OPTIONAL_SCHEMA_FIELDS). While it matches schemaHashes.card,
@@ -59,16 +59,17 @@ function resolveDefaultNodeHome(base: string): string {
 // The node's app-isolation control socket lives under its data dir — for a
 // socket-only local node this IS the transport, not a fallback. The primary
 // local brain uses ~/.lastdb/data (a v0.15.1+ brew/CLI node) or ~/.folddb/data
-// (the legacy desktop app); an ephemeral dev node sets FOLDDB_HOME to a temp
-// dir. `FOLDDB_SOCKET_PATH` overrides everything; then the config field; then
-// the LASTDB_HOME/FOLDDB_HOME override; then a probe for the live default home.
+// (the legacy desktop app); an ephemeral dev node sets LASTDB_HOME or
+// FOLDDB_HOME to a temp dir. `FOLDDB_SOCKET_PATH` overrides everything; then the
+// LASTDB_HOME/FOLDDB_HOME override; then the config field; then a probe for the
+// live default home.
 export function resolveSocketPath(cfg?: { nodeSocketPath?: string }): string {
   const envOverride = process.env.FOLDDB_SOCKET_PATH;
   if (envOverride && envOverride.length > 0) return envOverride;
-  if (cfg?.nodeSocketPath && cfg.nodeSocketPath.length > 0) return cfg.nodeSocketPath;
   const homeOverride = process.env.LASTDB_HOME ?? process.env.FOLDDB_HOME;
-  const home =
-    homeOverride && homeOverride.length > 0 ? homeOverride : resolveDefaultNodeHome(homedir());
+  if (homeOverride && homeOverride.length > 0) return join(homeOverride, "data", SOCKET_FILE_NAME);
+  if (cfg?.nodeSocketPath && cfg.nodeSocketPath.length > 0) return cfg.nodeSocketPath;
+  const home = resolveDefaultNodeHome(homedir());
   return join(home, "data", SOCKET_FILE_NAME);
 }
 
