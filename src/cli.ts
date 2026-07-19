@@ -5,7 +5,7 @@
 
 import { parseArgs, format } from "node:util";
 import * as fs from "node:fs";
-import { basename } from "node:path";
+import { basename, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -542,7 +542,7 @@ Flags:
   which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
 Usage:
-  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp] [--json]
+  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp|host-track-refresh|kanban-host-track-refresh] [--json] [--check]
 
 Without a target, prints the running CLI entrypoint, package version, source
 root, Bun runtime, and current working directory. This never contacts the board
@@ -550,10 +550,13 @@ node, so it is safe for host-track and pickup preflight diagnostics.
 
 With a target, prints the resolved executable path. With --json, also reports
 the realpath and whether it lives under the expected host-track checkout.
+With --check, exits nonzero when the running CLI or resolved target is not
+host-track managed.
 
 Example:
   fkanban which
   fkanban which --json
+  fkanban which --check
   fkanban which fkanban-mcp --json`),
 
   mcp: withFooter(`fkanban mcp — start an MCP server over stdio
@@ -837,6 +840,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   groom: new Set(["apply", "dry-run", "board", "slug"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
+  which: new Set(["check"]),
 };
 
 type WhichReport = {
@@ -846,9 +850,12 @@ type WhichReport = {
   executable_path: string;
   source_path: string;
   source_root: string;
+  expected_host_track: string;
+  in_host_track: boolean;
   bun_path: string;
   bun_version: string;
   cwd: string;
+  issues: string[];
 };
 
 function realpathOrSelf(path: string): string {
@@ -859,19 +866,39 @@ function realpathOrSelf(path: string): string {
   }
 }
 
+function expectedHostTrackRoot(): string {
+  const home = process.env.HOME ?? "";
+  if (!home) return "";
+  const expected = `${home}/.host-track/fkanban`;
+  return fs.existsSync(expected) ? realpathOrSelf(expected) : expected;
+}
+
+function pathWithin(path: string, root: string): boolean {
+  if (!path || !root) return false;
+  const rel = relative(root, path);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+}
+
 function whichReport(): WhichReport {
   const sourcePath = fileURLToPath(import.meta.url);
   const argvPath = process.argv[1] ?? sourcePath;
+  const sourceRoot = realpathOrSelf(sourcePath.replace(/\/src\/cli\.ts$/, ""));
+  const expectedHostTrack = expectedHostTrackRoot();
+  const inHostTrack = pathWithin(sourceRoot, expectedHostTrack);
+  const issues = inHostTrack ? [] : [`fkanban is not running from ${expectedHostTrack}`];
   return {
     package: pkg.name,
     version: pkg.version,
     command: basename(argvPath),
     executable_path: realpathOrSelf(argvPath),
     source_path: sourcePath,
-    source_root: sourcePath.replace(/\/src\/cli\.ts$/, ""),
+    source_root: sourceRoot,
+    expected_host_track: expectedHostTrack,
+    in_host_track: inHostTrack,
     bun_path: realpathOrSelf(process.execPath),
     bun_version: Bun.version,
     cwd: process.cwd(),
+    issues,
   };
 }
 
@@ -882,9 +909,12 @@ function formatWhichReport(report: WhichReport): string {
     `executable_path: ${report.executable_path}`,
     `source_path: ${report.source_path}`,
     `source_root: ${report.source_root}`,
+    `expected_host_track: ${report.expected_host_track}`,
+    `in_host_track: ${report.in_host_track}`,
     `bun_path: ${report.bun_path}`,
     `bun_version: ${report.bun_version}`,
     `cwd: ${report.cwd}`,
+    `issues: ${report.issues.length > 0 ? report.issues.join("; ") : "(none)"}`,
   ].join("\n");
 }
 
@@ -977,6 +1007,7 @@ async function main(argv: string[]): Promise<number> {
         "prefer-repo": { type: "string" },
         "exclude-repo": { type: "string" },
         "max-doing": { type: "string" },
+        check: { type: "boolean" },
       },
     });
   } catch (err) {
@@ -1122,35 +1153,36 @@ async function dispatch(
       if (name === undefined) {
         const report = whichReport();
         console.log(values.json ? JSON.stringify(report) : formatWhichReport(report));
-        return 0;
+        return values.check && !report.in_host_track ? 1 : 0;
       }
-      const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp"]);
+      const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp", "host-track-refresh", "kanban-host-track-refresh"]);
       if (!allowed.has(name)) {
-        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp`);
+        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp | host-track-refresh | kanban-host-track-refresh`);
         return 2;
       }
-      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp]");
+      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp|host-track-refresh|kanban-host-track-refresh]");
       if (extra !== undefined) return extra;
       const execPath = resolveCommandPath(name);
       if (!execPath) {
         console.error(`kanban: ${name} not found on PATH`);
         return 1;
       }
+      const realPath = safeRealpath(execPath);
+      const hostTrack = expectedHostTrackRoot();
+      const underHostTrack = pathWithin(realPath, hostTrack);
       if (values.json) {
-        const realPath = safeRealpath(execPath);
-        const home = process.env.HOME ?? "";
-        const hostTrack = home.length > 0 ? `${home}/.host-track/fkanban` : "";
         console.log(JSON.stringify({
           command: name,
           exec_path: execPath,
           real_path: realPath,
           host_track: hostTrack,
-          under_host_track: hostTrack.length > 0 && (realPath === hostTrack || realPath.startsWith(`${hostTrack}/`)),
+          under_host_track: underHostTrack,
+          issues: underHostTrack ? [] : [`${name} does not resolve under ${hostTrack}`],
         }));
       } else {
         console.log(execPath);
       }
-      return 0;
+      return values.check && !underHostTrack ? 1 : 0;
     }
 
     case "add": {
