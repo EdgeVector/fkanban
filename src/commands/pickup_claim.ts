@@ -95,7 +95,11 @@ export type PickupClaimResult = {
   scanned_ready: number;
   /** Count of cards currently in the target board's todo column. */
   todo_count: number;
+  /** Count of non-ready cards still parked in the target board's todo column. */
+  todo_blockers: number;
   skipped: PickupClaimSkip[];
+  /** Sample of non-ready todo cards blocking pickup hygiene. */
+  todo_blocker_exemplars?: PickupClaimDiagnosticExemplar[];
   diagnostics?: PickupClaimDiagnostics;
 };
 
@@ -239,6 +243,15 @@ function claimDiagnostics(report: PickupStatusReport, cards: Card[], board: stri
   };
 }
 
+function todoBlockerFields(diagnostics: PickupClaimDiagnostics): Pick<PickupClaimResult, "todo_blockers" | "todo_blocker_exemplars"> {
+  return {
+    todo_blockers: diagnostics.todo_blockers,
+    ...(diagnostics.todo_blocker_exemplars?.length
+      ? { todo_blocker_exemplars: diagnostics.todo_blocker_exemplars }
+      : {}),
+  };
+}
+
 export async function pickupClaimResult(opts: PickupClaimOptions): Promise<PickupClaimResult> {
   const board = opts.board ?? "default";
   const preferRepo = normalizeRepoList(opts.preferRepo);
@@ -258,18 +271,20 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         cfg: opts.cfg,
         node: opts.node,
       });
+      const diagnostics = claimDiagnostics(report, cards, board);
       return {
         claimed: false,
         reason: "at-capacity",
         scanned_ready: 0,
         todo_count: todoCount,
+        ...todoBlockerFields(diagnostics),
         skipped: [{
           slug: "*",
           reason: "at-capacity",
           detail: `doing=${doingCount} max-doing=${opts.maxDoing}`,
         }],
         worker: opts.worker,
-        diagnostics: claimDiagnostics(report, cards, board),
+        diagnostics,
       };
     }
   }
@@ -335,6 +350,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         worker: opts.worker,
         scanned_ready: readyCards.length,
         todo_count: todoCount,
+        ...todoBlockerFields(diagnostics),
         skipped,
         ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
@@ -379,6 +395,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         worker: opts.worker,
         scanned_ready: readyCards.length,
         todo_count: todoCount,
+        ...todoBlockerFields(diagnostics),
         skipped,
         ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
@@ -419,6 +436,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     skipped,
     worker: opts.worker,
     diagnostics,
+    ...todoBlockerFields(diagnostics),
   };
 }
 

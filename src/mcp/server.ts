@@ -492,11 +492,18 @@ export function createFkanbanMcpServer(
         worker: z.string().optional(),
         scanned_ready: z.number().int(),
         todo_count: z.number().int(),
+        todo_blockers: z.number().int(),
         skipped: z.array(z.object({
           slug: z.string(),
           reason: z.string(),
           detail: z.string().optional(),
         })),
+        todo_blocker_exemplars: z.array(z.object({
+          slug: z.string(),
+          category: z.string(),
+          reason: z.string(),
+          suggestion: z.string(),
+        })).optional(),
         diagnostics: z.object({
           scanned_active: z.number().int(),
           ready: z.number().int(),

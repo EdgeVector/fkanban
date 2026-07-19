@@ -234,6 +234,13 @@ describe("pickup claim", () => {
 
     expect(result.claimed).toBe(true);
     expect(result.card?.slug).toBe("ready-work");
+    expect(result.todo_blockers).toBe(1);
+    expect(result.todo_blocker_exemplars).toEqual([{
+      slug: "human-hold",
+      category: "human-gated",
+      reason: "intentional hold: needs_human",
+      suggestion: "Move true human-gated work to `--board human`; clear the hold only when pickup-ready.",
+    }]);
     expect(result.diagnostics?.todo_blockers).toBe(1);
     expect(result.diagnostics?.todo_blocker_exemplars).toEqual([{
       slug: "human-hold",
@@ -498,6 +505,8 @@ describe("pickup claim", () => {
     expect(result.reason).toBe("no-eligible");
     expect(result.scanned_ready).toBe(0);
     expect(result.todo_count).toBe(0);
+    expect(result.todo_blockers).toBe(0);
+    expect(result.todo_blocker_exemplars).toBeUndefined();
     expect(result.diagnostics?.scanned_active).toBe(0);
     expect(result.diagnostics?.ready).toBe(0);
     expect(result.diagnostics?.inflight_without_artifact).toBe(0);
