@@ -103,8 +103,11 @@ export type PickupClaimDiagnostics = {
   scanned_active: number;
   ready: number;
   counts: Record<PickupCategory, number>;
+  /** Non-ready cards still parked in the target todo lane. */
+  todo_blockers: number;
   inflight_without_artifact: number;
   exemplars?: PickupClaimDiagnosticExemplar[];
+  todo_blocker_exemplars?: PickupClaimDiagnosticExemplar[];
   inflight_without_artifact_exemplars?: PickupClaimDiagnosticExemplar[];
 };
 
@@ -178,6 +181,7 @@ async function persistLaneClaimState(opts: {
 
 const DIAGNOSTIC_EXEMPLARS_PER_CATEGORY = 3;
 const INFLIGHT_WITHOUT_ARTIFACT_EXEMPLARS = 3;
+const TODO_BLOCKER_EXEMPLARS = 8;
 
 function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticExemplar {
   return {
@@ -188,7 +192,7 @@ function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticEx
   };
 }
 
-function claimDiagnostics(report: PickupStatusReport, cards: Card[]): PickupClaimDiagnostics {
+function claimDiagnostics(report: PickupStatusReport, cards: Card[], board: string): PickupClaimDiagnostics {
   const exemplars: PickupClaimDiagnosticExemplar[] = [];
   for (const category of PICKUP_CATEGORIES) {
     if (category === "pickup-ready") continue;
@@ -199,6 +203,12 @@ function claimDiagnostics(report: PickupStatusReport, cards: Card[]): PickupClai
         .map(diagnosticExemplar),
     );
   }
+  const todoBlockers = report.cards.filter(
+    (classification) =>
+      classification.board === board &&
+      classification.column === "todo" &&
+      !classification.ready,
+  );
   const bySlug = new Map(cards.map((card) => [card.slug, card]));
   const inflightWithoutArtifact = report.cards.filter((classification) => {
     if (classification.category !== "collision" || classification.column !== "doing") return false;
@@ -209,8 +219,16 @@ function claimDiagnostics(report: PickupStatusReport, cards: Card[]): PickupClai
     scanned_active: report.scanned,
     ready: report.ready,
     counts: report.counts,
+    todo_blockers: todoBlockers.length,
     inflight_without_artifact: inflightWithoutArtifact.length,
     ...(exemplars.length > 0 ? { exemplars } : {}),
+    ...(todoBlockers.length > 0
+      ? {
+          todo_blocker_exemplars: todoBlockers
+            .slice(0, TODO_BLOCKER_EXEMPLARS)
+            .map(diagnosticExemplar),
+        }
+      : {}),
     ...(inflightWithoutArtifact.length > 0
       ? {
           inflight_without_artifact_exemplars: inflightWithoutArtifact
@@ -251,7 +269,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
           detail: `doing=${doingCount} max-doing=${opts.maxDoing}`,
         }],
         worker: opts.worker,
-        diagnostics: claimDiagnostics(report, cards),
+        diagnostics: claimDiagnostics(report, cards, board),
       };
     }
   }
@@ -262,7 +280,8 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     opts.situationPreflight,
     { cfg: opts.cfg, node: opts.node },
   );
-  const diagnostics = claimDiagnostics(report, cards);
+  const diagnostics = claimDiagnostics(report, cards, board);
+  const claimDiagnosticsIfActionable = diagnostics.todo_blockers > 0 ? diagnostics : undefined;
 
   const readyClassifications = report.cards.filter(
     (c) => c.ready && c.board === board && c.column === "todo",
@@ -317,6 +336,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         scanned_ready: readyCards.length,
         todo_count: todoCount,
         skipped,
+        ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
     }
 
@@ -360,6 +380,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         scanned_ready: readyCards.length,
         todo_count: todoCount,
         skipped,
+        ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
     } catch (err) {
       if (err instanceof ClaimConflictError) {
@@ -401,6 +422,18 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   };
 }
 
+function formatDiagnosticExemplar(exemplar: PickupClaimDiagnosticExemplar): string {
+  return `${exemplar.slug}: ${exemplar.category} - ${exemplar.reason}; ${exemplar.suggestion}`;
+}
+
+function appendTodoBlockerDiagnostics(lines: string[], diagnostics: PickupClaimDiagnostics): void {
+  if (diagnostics.todo_blockers <= 0 || !diagnostics.todo_blocker_exemplars?.length) return;
+  lines.push(`  todo blockers: ${diagnostics.todo_blockers}`);
+  for (const exemplar of diagnostics.todo_blocker_exemplars.slice(0, TODO_BLOCKER_EXEMPLARS)) {
+    lines.push(`    - ${formatDiagnosticExemplar(exemplar)}`);
+  }
+}
+
 export function formatPickupClaim(result: PickupClaimResult, json?: boolean): string {
   if (json) return JSON.stringify(result, null, 2);
 
@@ -418,6 +451,7 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
         lines.push(`    - ${s.slug}: ${s.reason}${s.detail ? ` (${s.detail})` : ""}`);
       }
     }
+    if (result.diagnostics) appendTodoBlockerDiagnostics(lines, result.diagnostics);
     return lines.join("\n");
   }
 
@@ -432,6 +466,7 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
       lines.push(`    - ${s.slug}: ${s.reason}${s.detail ? ` (${s.detail})` : ""}`);
     }
   }
+  if (result.diagnostics) appendTodoBlockerDiagnostics(lines, result.diagnostics);
   return lines.join("\n");
 }
 

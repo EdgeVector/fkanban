@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { pickupClaimResult } from "../src/commands/pickup_claim.ts";
+import { formatPickupClaim, pickupClaimResult } from "../src/commands/pickup_claim.ts";
 import { showResult } from "../src/commands/show.ts";
 import {
   boardToFields,
@@ -216,6 +216,34 @@ describe("pickup claim", () => {
     const onBoard = await findCard(node, cfg, "host-track-agent-standing-and-pickup");
     expect(onBoard?.column).toBe("doing");
     expect(onBoard?.assignee).toBe("worker-a");
+  });
+
+  test("successful claim reports actionable todo blockers", async () => {
+    await seedCard(node, card({
+      slug: "human-hold",
+      block_status: "needs_human",
+      block_reason: "waiting on Tom",
+    }));
+    await seedCard(node, card({
+      slug: "ready-work",
+      tags: ["p1"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\nPriority: P1\n\nReady.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("ready-work");
+    expect(result.diagnostics?.todo_blockers).toBe(1);
+    expect(result.diagnostics?.todo_blocker_exemplars).toEqual([{
+      slug: "human-hold",
+      category: "human-gated",
+      reason: "intentional hold: needs_human",
+      suggestion: "Move true human-gated work to `--board human`; clear the hold only when pickup-ready.",
+    }]);
+    expect(formatPickupClaim(result)).toContain(
+      "human-hold: human-gated - intentional hold: needs_human",
+    );
   });
 
   test("claims a dependent when its done dependency is only available by point read", async () => {

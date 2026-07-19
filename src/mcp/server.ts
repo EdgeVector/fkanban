@@ -501,8 +501,15 @@ export function createFkanbanMcpServer(
           scanned_active: z.number().int(),
           ready: z.number().int(),
           counts: z.record(z.string(), z.number().int()),
+          todo_blockers: z.number().int(),
           inflight_without_artifact: z.number().int(),
           exemplars: z.array(z.object({
+            slug: z.string(),
+            category: z.string(),
+            reason: z.string(),
+            suggestion: z.string(),
+          })).optional(),
+          todo_blocker_exemplars: z.array(z.object({
             slug: z.string(),
             category: z.string(),
             reason: z.string(),
