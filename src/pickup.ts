@@ -317,6 +317,12 @@ export type GroomReport = {
   cards: GroomCardResult[];
 };
 
+export type PickupGeneratedBlockerSelfHeal = {
+  card: Card;
+  changed: boolean;
+  issues: GroomIssue[];
+};
+
 function rewriteRepoHeaders(body: string): { body: string; changed: boolean } {
   let changed = false;
   const next = body.replace(/^([ \t]*Repo:[ \t]*)(.*)$/gim, (line, prefix: string, raw: string) => {
@@ -479,6 +485,55 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
     next.block_reason !== card.block_reason ||
     next.branch !== card.branch ||
     next.pr_url !== card.pr_url;
+  return { card: next, issues, changed };
+}
+
+export function selfHealGeneratedPickupBlocker(card: Card, allCards: Card[]): PickupGeneratedBlockerSelfHeal {
+  const issues: GroomIssue[] = [];
+  const next: Card = { ...card, tags: [...card.tags], deps: [...card.deps] };
+
+  const blockStatus = normalizeBlockStatus(next.block_status);
+  if (blockStatus === "none" && generatedReason(next.block_reason)) {
+    issues.push({
+      kind: "stale-block-status",
+      message: "block_reason contains generated text while block_status is none",
+      applyable: true,
+      suggestion: "Clear block_reason.",
+    });
+    next.block_reason = "";
+  }
+  if (
+    blockStatus === "needs_human" &&
+    next.block_reason.startsWith(PICKUP_AREA_BLOCK_PREFIX) &&
+    !activePickupOverlapStillExists(next, allCards)
+  ) {
+    issues.push({
+      kind: "stale-pickup-area-overlap",
+      message: "pickup-area overlap hold no longer points at an active unblocked peer",
+      applyable: true,
+      suggestion: "Clear the generated overlap hold.",
+    });
+    next.block_status = "none";
+    next.block_reason = "";
+  }
+
+  const resolvedRepo = resolvePickupRepo(next).ok;
+  const resolvedBase = baseForPickup(next).length > 0;
+  const blockedLines = removeGeneratedBlockedLines(next.body);
+  if (blockedLines.changed && resolvedRepo && resolvedBase) {
+    issues.push({
+      kind: "stale-blocked-prose",
+      message: "generated fkanban-pickup BLOCKED prose remains after routing resolved",
+      applyable: true,
+      suggestion: "Remove only the generated BLOCKED line.",
+    });
+    next.body = blockedLines.body;
+  }
+
+  const changed =
+    next.body !== card.body ||
+    next.block_status !== card.block_status ||
+    next.block_reason !== card.block_reason;
   return { card: next, issues, changed };
 }
 

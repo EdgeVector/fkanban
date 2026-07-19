@@ -22,6 +22,8 @@ import {
 import {
   buildPickupStatusReportWithSituations,
   PICKUP_CATEGORIES,
+  selfHealGeneratedPickupBlocker,
+  writeGroomedCard,
   type PickupCategory,
   type PickupClassification,
   type PickupStatusReport,
@@ -252,6 +254,26 @@ function todoBlockerFields(diagnostics: PickupClaimDiagnostics): Pick<PickupClai
   };
 }
 
+async function selfHealTargetTodoGeneratedBlockers(opts: {
+  cfg: Config;
+  node: NodeClient;
+  cards: Card[];
+  board: string;
+  dryRun?: boolean;
+}): Promise<Card[]> {
+  let nextCards = opts.cards;
+  for (const card of opts.cards) {
+    if (card.board !== opts.board || card.column !== "todo") continue;
+    const healed = selfHealGeneratedPickupBlocker(card, nextCards);
+    if (!healed.changed || !healed.issues.some((issue) => issue.applyable)) continue;
+    nextCards = nextCards.map((c) => c.slug === card.slug ? healed.card : c);
+    if (!opts.dryRun) {
+      await writeGroomedCard({ cfg: opts.cfg, node: opts.node }, healed.card);
+    }
+  }
+  return nextCards;
+}
+
 export async function pickupClaimResult(opts: PickupClaimOptions): Promise<PickupClaimResult> {
   const board = opts.board ?? "default";
   const preferRepo = normalizeRepoList(opts.preferRepo);
@@ -262,16 +284,23 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     listCards(opts.node, opts.cfg),
     listBoards(opts.node, opts.cfg),
   ]);
-  const todoCount = cards.filter((c) => c.board === board && c.column === "todo").length;
+  const cardsForSelection = await selfHealTargetTodoGeneratedBlockers({
+    cfg: opts.cfg,
+    node: opts.node,
+    cards,
+    board,
+    dryRun: opts.dryRun,
+  });
+  const todoCount = cardsForSelection.filter((c) => c.board === board && c.column === "todo").length;
 
   if (opts.maxDoing !== undefined) {
-    const doingCount = cards.filter((c) => c.board === board && c.column === "doing").length;
+    const doingCount = cardsForSelection.filter((c) => c.board === board && c.column === "doing").length;
     if (doingCount >= opts.maxDoing) {
-      const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight, {
+      const report = await buildPickupStatusReportWithSituations(cardsForSelection, boards, opts.situationPreflight, {
         cfg: opts.cfg,
         node: opts.node,
       });
-      const diagnostics = claimDiagnostics(report, cards, board);
+      const diagnostics = claimDiagnostics(report, cardsForSelection, board);
       return {
         claimed: false,
         reason: "at-capacity",
@@ -290,18 +319,18 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   }
 
   const report = await buildPickupStatusReportWithSituations(
-    cards,
+    cardsForSelection,
     boards,
     opts.situationPreflight,
     { cfg: opts.cfg, node: opts.node },
   );
-  const diagnostics = claimDiagnostics(report, cards, board);
+  const diagnostics = claimDiagnostics(report, cardsForSelection, board);
   const claimDiagnosticsIfActionable = diagnostics.todo_blockers > 0 ? diagnostics : undefined;
 
   const readyClassifications = report.cards.filter(
     (c) => c.ready && c.board === board && c.column === "todo",
   );
-  const bySlug = new Map(cards.map((c) => [c.slug, c]));
+  const bySlug = new Map(cardsForSelection.map((c) => [c.slug, c]));
   const readyCards: Card[] = [];
   for (const c of readyClassifications) {
     const full = bySlug.get(c.slug);
@@ -312,7 +341,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   const laneState = parsePickupLaneState(boardRec?.body ?? "");
   const candidates = orderCandidatesByLanes(
     readyCards,
-    cards,
+    cardsForSelection,
     laneState,
     board,
     preferRepo,
@@ -320,7 +349,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
 
   // Working copy of board state so we can mark a CAS conflict as no longer todo
   // without re-listing (and so overlap sees concurrent skips consistently).
-  let liveCards = cards.slice();
+  let liveCards = cardsForSelection.slice();
 
   for (const candidate of candidates) {
     const repo = claimedRepo(candidate);
