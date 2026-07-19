@@ -18,6 +18,8 @@ import { listCmd } from "../src/commands/list.ts";
 import { searchCmd } from "../src/commands/search.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
+import { BOARD_LIST_INDEX_KEY, CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
+import { boardCardFieldsFromCard } from "../src/board-cards.ts";
 import type { Config } from "../src/config.ts";
 
 const cfg: Config = {
@@ -26,6 +28,11 @@ const cfg: Config = {
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
   schemaHashes: { card: "cardhash", board: "boardhash" },
+};
+
+const cfgWithIndexes: Config = {
+  ...cfg,
+  schemaHashes: { ...cfg.schemaHashes, card_list_index: "indexhash", board_cards: "boardcardshash" },
 };
 
 function board(partial: Partial<Board>): Board {
@@ -65,13 +72,18 @@ function fakeNode(opts: {
   boards: Board[];
   cards: Card[];
   cardScanError?: boolean;
+  rejectUnallowedCardScan?: boolean;
   rejectColumnFilter?: boolean;
   nativeSearchSlugs?: string[];
 }): NodeClient & { cardScanFields: string[][]; cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> } {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
   const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
+  const boardCardRows = opts.cards.map((c) => ({
+    fields: boardCardFieldsFromCard(c),
+    key: { hash: c.board, range: null },
+  }));
   const cardScanFields: string[][] = [];
-  const cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> = [];
+  const cardQueries: Array<{ fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }> = [];
   const stub = () => {
     throw new Error("not implemented in fake node");
   };
@@ -109,13 +121,51 @@ function fakeNode(opts: {
       return stub() as never;
     },
     nodeTransport: stub as never,
-    async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
+    async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse> {
+      if (q.schemaHash === "indexhash") {
+        const key = q.filter?.HashKey;
+        if (key === BOARD_LIST_INDEX_KEY) {
+          return {
+            ok: true,
+            results: [{
+              key: { hash: BOARD_LIST_INDEX_KEY, range: null },
+              fields: { key: BOARD_LIST_INDEX_KEY, payload_json: JSON.stringify(opts.boards), updated_at: "2026-01-01T00:00:00.000Z" },
+            }],
+          };
+        }
+        if (key === CARD_LIST_INDEX_KEY) {
+          return {
+            ok: true,
+            results: [{
+              key: { hash: CARD_LIST_INDEX_KEY, range: null },
+              fields: { key: CARD_LIST_INDEX_KEY, payload_json: JSON.stringify(opts.cards.map((c) => ({ ...c, body: "" }))), updated_at: "2026-01-01T00:00:00.000Z" },
+            }],
+          };
+        }
+        return { ok: true, results: [] };
+      }
+      if (q.schemaHash === "boardcardshash") {
+        let rows = boardCardRows;
+        const rangePrefix = (q.filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)?.HashRangePrefix;
+        if (rangePrefix?.hash && rangePrefix.prefix !== undefined) {
+          rows = rows.filter((r) => r.fields.board === rangePrefix.hash && typeof r.fields.sk === "string" && r.fields.sk.startsWith(rangePrefix.prefix!));
+        } else if (q.filter?.HashKey) {
+          rows = rows.filter((r) => r.fields.board === q.filter!.HashKey);
+        }
+        return { ok: true, results: rows };
+      }
       if (q.schemaHash === "cardhash") {
-        cardQueries.push({ fields: q.fields, filter: q.filter });
+        cardQueries.push({ fields: q.fields, filter: q.filter, allowFullScan: q.allowFullScan });
         // Only the unfiltered full-board scan is the list/count payload; the
         // point-read (HashKey) findCard is not relevant here.
         if (!q.filter) {
           cardScanFields.push(q.fields);
+          if (opts.rejectUnallowedCardScan && !q.allowFullScan) {
+            throw new FkanbanError({
+              code: "full_schema_scan_not_allowed",
+              message: "full_schema_scan_not_allowed: unfiltered query is deprecated for product apps",
+            });
+          }
           if (opts.cardScanError) throw new Error("node shed the full scan (load)");
         }
         if (opts.rejectColumnFilter && q.filter?.column) {
@@ -261,6 +311,33 @@ describe("search — default text path uses indexed/native candidates", () => {
     const fullScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
     expect(fullScans).toHaveLength(0);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit-0" && q.fields.includes("body"))).toBe(true);
+  });
+
+  test("--json stays on indexed card reads when the node rejects unallowed Card scans", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({
+          slug: "feature-ready",
+          title: "Ready feature slice",
+          tags: ["feature-ship"],
+          body: "feature details should not be needed for tag search",
+        }),
+        card({
+          slug: "ordinary-work",
+          title: "Ordinary work",
+          tags: ["cleanup"],
+          body: "unrelated",
+        }),
+      ],
+      rejectUnallowedCardScan: true,
+    });
+
+    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "feature-ship", json: true });
+    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+
+    expect(parsed.map((c) => c.slug)).toEqual(["feature-ready"]);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
   });
 
   test("search --all removes the broad JSON row cap but keeps body previews", async () => {
