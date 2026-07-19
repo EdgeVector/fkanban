@@ -199,7 +199,7 @@ export async function searchResult(
   if (opts.column !== undefined) {
     ensureColumn(opts.column, board?.columns ?? [...DEFAULT_COLUMNS]);
   }
-  const complete = opts.complete ?? true;
+  const complete = opts.complete ?? false;
   let allCards: Card[];
   let matches: Card[];
   if (complete) {

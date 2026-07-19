@@ -15,7 +15,7 @@ import { describe, expect, test } from "bun:test";
 
 import { boardListCmd, boardListResult } from "../src/commands/board.ts";
 import { listCmd } from "../src/commands/list.ts";
-import { searchCmd } from "../src/commands/search.ts";
+import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
 import { BOARD_LIST_INDEX_KEY, CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
@@ -264,6 +264,26 @@ describe("board list — per-board live-card counts", () => {
 });
 
 describe("search — default text path uses indexed/native candidates", () => {
+  test("searchResult defaults to indexed candidates, not the deprecated full Card scan", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({
+          slug: "feature-ready",
+          title: "Ready feature slice",
+          tags: ["feature-ship"],
+          body: "feature details should not be needed for tag search",
+        }),
+      ],
+      rejectUnallowedCardScan: true,
+    });
+
+    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "feature-ship" });
+
+    expect(cards.map((c) => c.slug)).toEqual(["feature-ready"]);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+  });
+
   test("does not fetch every full card body for a native-index body hit", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
