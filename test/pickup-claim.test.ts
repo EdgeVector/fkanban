@@ -609,6 +609,80 @@ describe("pickup claim", () => {
     }]);
   });
 
+  test("self-heals stale generated pickup overlap hold before claiming", async () => {
+    await seedCard(node, card({
+      slug: "stale-overlap",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      block_status: "needs_human",
+      block_reason: "Pickup area overlap: shares area:pickup with old-peer in doing; serialize or retag one card.",
+      tags: ["area:pickup", "p0"],
+      body:
+        "Repo: EdgeVector/fkanban\nBase: main\nPriority: P0\n\n" +
+        "BLOCKED: fkanban-pickup cannot pick up stale overlap metadata.\nImplement it.",
+    }));
+    await seedCard(node, card({
+      slug: "old-peer",
+      column: "done",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      tags: ["area:pickup"],
+    }));
+
+    const result = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("stale-overlap");
+    expect(result.diagnostics?.counts["stale-metadata"] ?? 0).toBe(0);
+
+    const onBoard = await findCard(node, cfg, "stale-overlap");
+    expect(onBoard?.column).toBe("doing");
+    expect(onBoard?.assignee).toBe("worker-a");
+    expect(onBoard?.block_status).toBe("none");
+    expect(onBoard?.block_reason).toBe("");
+    expect(onBoard?.body).not.toContain("BLOCKED: fkanban-pickup");
+  });
+
+  test("keeps active generated overlap and real human holds protected", async () => {
+    await seedCard(node, card({
+      slug: "active-peer",
+      column: "doing",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      tags: ["area:pickup"],
+    }));
+    await seedCard(node, card({
+      slug: "active-overlap",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      block_status: "needs_human",
+      block_reason: "Pickup area overlap: shares area:pickup with active-peer in doing; serialize or retag one card.",
+      tags: ["area:pickup", "p0"],
+    }));
+    await seedCard(node, card({
+      slug: "human-hold",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      block_status: "needs_human",
+      block_reason: "waiting on Tom",
+      tags: ["p1"],
+    }));
+
+    const result = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.diagnostics?.counts["human-gated"]).toBe(2);
+
+    const overlap = await findCard(node, cfg, "active-overlap");
+    expect(overlap?.block_status).toBe("needs_human");
+    expect(overlap?.block_reason).toContain("active-peer");
+
+    const human = await findCard(node, cfg, "human-hold");
+    expect(human?.block_status).toBe("needs_human");
+    expect(human?.block_reason).toBe("waiting on Tom");
+  });
+
   test("no-eligible diagnostics do not call legacy registry fallback non-pickup kind pr", async () => {
     await seedCard(node, card({
       slug: "legacy-registry",
