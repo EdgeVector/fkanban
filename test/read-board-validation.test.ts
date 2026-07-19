@@ -70,7 +70,41 @@ function fakeNode(): NodeClient {
       const results = rowsFor(schemaHash, filter);
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
-    rawCall: notImpl("rawCall") as NodeClient["rawCall"],
+    async rawCall(method, path) {
+      if (method !== "GET" || !path.startsWith("/api/native-index/search")) {
+        return notImpl("rawCall")() as never;
+      }
+      const url = new URL(path, "http://fake.invalid");
+      const terms = (url.searchParams.get("q") ?? "").toLowerCase().trim().split(/\s+/).filter(Boolean);
+      const results = rowsFor(cfg.schemaHashes.card!)
+        .filter((row) => {
+          const fields = row.fields;
+          const hay = [
+            row.key.hash,
+            fields.slug,
+            fields.title,
+            fields.body,
+            fields.assignee,
+            ...(Array.isArray(fields.tags) ? fields.tags : []),
+            ...(Array.isArray(fields.deps) ? fields.deps : []),
+          ].join("\n").toLowerCase();
+          return terms.every((term) => hay.includes(term));
+        })
+        .map((row) => ({
+          schema_name: cfg.schemaHashes.card!,
+          schema_display_name: "Card",
+          field: "body",
+          key_value: { hash: row.key.hash, range: null },
+          value: "native candidate",
+          metadata: { score: 0.9 },
+        }));
+      return {
+        status: 200,
+        headers: new Headers(),
+        body: "",
+        json: { ok: true, results },
+      };
+    },
     nodeTransport: () => ({ transport: "unavailable" as const }),
   };
 }
