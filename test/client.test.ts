@@ -206,7 +206,7 @@ describe("findCard", () => {
     expect(card).toBeNull();
   });
 
-  test("falls back to a scan when the keyed point read hits a transport error", async () => {
+  test("does not fall back to a scan when the keyed point read hits a transport error", async () => {
     const calls: unknown[] = [];
     const fakeNode: NodeClient = {
       baseUrl: "http://fake.invalid",
@@ -225,34 +225,13 @@ describe("findCard", () => {
         if (opts.filter !== undefined) {
           throw new FkanbanError({ code: "service_unreachable", message: "socket flaked" });
         }
-        return {
-          ok: true,
-          results: [
-            {
-              fields: {
-                slug: "my-card",
-                title: "My card",
-                body: "spec",
-                board: "default",
-                column: "todo",
-                position: "10",
-                assignee: "",
-                tags: [],
-                created_at: "2026-01-01T00:00:00.000Z",
-                updated_at: "2026-01-01T00:00:00.000Z",
-              },
-              key: { hash: "my-card", range: null },
-            },
-          ],
-        };
+        throw new Error("findCard must not scan after a point-read transport failure");
       },
     };
 
-    const card = await findCard(fakeNode, cfg, "my-card");
-    expect(card?.slug).toBe("my-card");
-    expect(calls).toHaveLength(2);
+    await expect(findCard(fakeNode, cfg, "my-card")).rejects.toMatchObject({ code: "service_unreachable" });
+    expect(calls).toHaveLength(1);
     expect((calls[0] as Record<string, unknown>).filter).toEqual({ HashKey: "my-card" });
-    expect("filter" in (calls[1] as Record<string, unknown>)).toBe(false);
   });
 });
 

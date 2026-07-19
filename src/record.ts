@@ -1523,6 +1523,7 @@ async function listCardsWithFields(
   cfg: Config,
   fields: string[],
   filter?: QueryFilter,
+  opts: { allowFullScanFallback?: boolean } = {},
 ): Promise<Card[]> {
   // Prefer BoardCards HashRange partitions (hash=board) — Dynamo-style list.
   // Never hydrate body for board-wide lists (that was the N+1 storm). Callers
@@ -1559,6 +1560,9 @@ async function listCardsWithFields(
       return (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
         Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
       );
+    }
+    if (opts.allowFullScanFallback === false) {
+      return [];
     }
     // Index missing: one admin full scan seeds indexes (keeps body for this
     // rare path only — still not N+1). Prefer BoardCards after dual-write.
@@ -1630,6 +1634,7 @@ async function listCardsClientFiltered(
   cfg: Config,
   fields: string[],
   predicate: Record<string, string>,
+  opts: { allowFullScanFallback?: boolean } = {},
 ): Promise<Card[]> {
   const required = Object.keys(predicate);
   const matches = (c: Card): boolean =>
@@ -1645,6 +1650,8 @@ async function listCardsClientFiltered(
       fields.includes("body") ? fields.filter((f) => f !== "body") : fields,
       required,
     ),
+    undefined,
+    opts,
   );
   return cards.filter(matches);
 }
@@ -1830,13 +1837,14 @@ export async function listCardsByFilter(
   cfg: Config,
   filter: QueryFilter,
   fields: string[],
+  opts: { allowFullScanFallback?: boolean } = {},
 ): Promise<{ cards: Card[]; indexed: boolean }> {
   const entries = Object.entries(filter).filter(([, value]) => value.length > 0);
   if (entries.length === 0) {
-    return { cards: await listCardsWithFields(node, cfg, fields), indexed: false };
+    return { cards: await listCardsWithFields(node, cfg, fields, undefined, opts), indexed: false };
   }
   return {
-    cards: await listCardsClientFiltered(node, cfg, fields, Object.fromEntries(entries)),
+    cards: await listCardsClientFiltered(node, cfg, fields, Object.fromEntries(entries), opts),
     indexed: false,
   };
 }
@@ -1945,14 +1953,7 @@ export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promis
 // Point read by slug — the node resolves a HashKey filter as an indexed key
 // lookup, so this never scans the board.
 export async function findCard(node: NodeClient, cfg: Config, slug: string): Promise<Card | null> {
-  try {
-    return await findCardWithFields(node, cfg, slug, fieldsFor("card"));
-  } catch (err) {
-    if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") throw err;
-    // Transport error on point-read: one admin scan with bodies (not thin list).
-    const cards = await listCardsWithBodiesForSearch(node, cfg);
-    return cards.find((c) => c.slug === slug) ?? null;
-  }
+  return findCardWithFields(node, cfg, slug, fieldsFor("card"));
 }
 
 /** Point-get bodies for a small capped set (MCP preview / list --full-body). */

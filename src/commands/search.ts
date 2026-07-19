@@ -13,7 +13,6 @@ import {
   listDependencyStatusesForCards,
   listBoards,
   listCardsByFilter,
-  listCardsForDisplay,
   listCardsWithBodiesForSearch,
   queryTerms,
   requireBoard,
@@ -108,9 +107,9 @@ async function indexedSearchCards(
   if (opts.board) filter.board = opts.board;
   if (opts.column) filter.column = opts.column;
 
-  const displayRead = Object.keys(filter).length > 0
-    ? await listCardsByFilter(opts.node, opts.cfg, filter, CARD_DISPLAY_FIELDS)
-    : { cards: await listCardsForDisplay(opts.node, opts.cfg), indexed: false };
+  const displayRead = await listCardsByFilter(opts.node, opts.cfg, filter, CARD_DISPLAY_FIELDS, {
+    allowFullScanFallback: false,
+  });
 
   let native: { slugs: string[]; saturated: boolean } | null = null;
   try {
