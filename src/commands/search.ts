@@ -119,10 +119,6 @@ async function indexedSearchCards(
     native = null;
   }
 
-  if (native?.saturated) {
-    return { cards: [], allCards: [], fallbackReason: "native-index returned its cap" };
-  }
-
   const scopedDisplay = displayRead.cards.filter(
     (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
   );
@@ -145,9 +141,14 @@ async function indexedSearchCards(
     displayIndexed: displayRead.indexed,
     nativeCandidates: native?.slugs.length ?? 0,
     hydratedCandidates: hydrated.filter(Boolean).length,
+    saturated: native?.saturated ?? false,
     fullBodyScan: false,
   });
-  return { cards: sortCards([...bySlug.values()]), allCards: statusCards };
+  return {
+    cards: sortCards([...bySlug.values()]),
+    allCards: statusCards,
+    fallbackReason: native?.saturated ? "native-index returned its cap" : undefined,
+  };
 }
 
 // Both the human text and the structured (`--json`) matches, from a single
@@ -159,7 +160,8 @@ async function indexedSearchCards(
 //     (`renderSearchResults` applies it and prints a "… N more" footer).
 //   - `searchCmd` (`--json`) applies an explicit `--limit`, and also applies a
 //     safe DEFAULT_SEARCH_LIMIT cap + body previews for broad all-column JSON
-//     reads unless the caller requests `--all` or `--full-body`.
+//     reads unless the caller requests `--all` or `--full-body`. JSON alone
+//     does not force a deprecated complete-body scan; routine dedupe uses JSON.
 //   - The `fkanban_search` MCP tool caps the structured array BY DEFAULT
 //     (DEFAULT_SEARCH_LIMIT, via `server.ts`'s `capCards`), because its consumer
 //     is a token-bounded LLM: every match carries its full `body`, so returning
@@ -216,13 +218,9 @@ export async function searchResult(
   } else {
     const indexed = await indexedSearchCards(opts);
     if (indexed.fallbackReason !== undefined) {
-      debugSearchPlan("complete-scan", { reason: indexed.fallbackReason });
-      const all = await listCardsWithBodiesForSearch(opts.node, opts.cfg);
-      allCards = all;
-      const scoped = all.filter(
-        (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
-      );
-      matches = sortCards(searchCards(scoped, opts.query));
+      debugSearchPlan("indexed-candidates", { reason: indexed.fallbackReason, fullBodyScan: false });
+      allCards = indexed.allCards;
+      matches = indexed.cards;
     } else {
       allCards = indexed.allCards;
       matches = indexed.cards;
@@ -246,7 +244,7 @@ export async function searchResult(
 
 export async function searchCmd(opts: SearchOptions): Promise<string> {
   const projectionFields = opts.fields ?? [];
-  const complete = Boolean(opts.json || opts.all || fieldProjectionNeedsFullCards(projectionFields));
+  const complete = Boolean(opts.all || opts.fullBody || fieldProjectionNeedsFullCards(projectionFields));
   const { text, cards, jsonLimit } = await searchResult({ ...opts, complete });
   const broadJson = opts.column === undefined;
   const implicitJsonLimit =

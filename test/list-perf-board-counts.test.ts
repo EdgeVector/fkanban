@@ -239,7 +239,7 @@ describe("search — default text path uses indexed/native candidates", () => {
     expect(fullScans).toHaveLength(0);
   });
 
-  test("--json keeps exhaustive search while returning capped body previews by default", async () => {
+  test("--json uses indexed/native candidates by default while returning capped body previews", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: Array.from({ length: 25 }, (_, i) =>
@@ -250,6 +250,7 @@ describe("search — default text path uses indexed/native candidates", () => {
           position: String(i + 1),
         }),
       ),
+      nativeSearchSlugs: Array.from({ length: 25 }, (_, i) => `body-hit-${i}`),
     });
 
     const out = await searchCmd({ cfg, node, query: "needle", json: true });
@@ -258,7 +259,8 @@ describe("search — default text path uses indexed/native candidates", () => {
     expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
     expect(parsed[0]!.bodyTruncated).toBe(true);
     const fullScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
-    expect(fullScans).toHaveLength(1);
+    expect(fullScans).toHaveLength(0);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit-0" && q.fields.includes("body"))).toBe(true);
   });
 
   test("search --all removes the broad JSON row cap but keeps body previews", async () => {

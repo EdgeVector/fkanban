@@ -411,6 +411,7 @@ export function createFkanbanMcpServer(
         const o: Parameters<typeof searchResult>[0] = { cfg, node, query };
         if (args.board) o.board = args.board;
         if (args.column) o.column = args.column;
+        o.complete = Boolean(args.all || args.limit === 0 || args.full_body);
         const { text, cards } = await searchResult(o);
         // Cap the agent-facing structured array (matches already sorted); the
         // human `text` is independently capped already.
