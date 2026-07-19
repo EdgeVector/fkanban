@@ -247,7 +247,7 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   const broadJson = opts.column === undefined;
   const implicitJsonDefault = !opts.all && !opts.fullBody && opts.limit === undefined;
   const implicitJsonLimit =
-    implicitJsonDefault ? DEFAULT_COLUMN_LIMIT : 0;
+    implicitJsonDefault && broadJson ? DEFAULT_COLUMN_LIMIT : 0;
   const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
   const capped = effectiveJsonLimit > 0 ? capPerColumn(board, cards, effectiveJsonLimit, opts.column) : cards;
   // Bodies are never loaded for board-wide list (BoardCards thin projection).
