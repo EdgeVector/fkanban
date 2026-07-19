@@ -68,6 +68,8 @@ function card(partial: Partial<Card>): Card {
 // Records the `fields` of every CARD (cardhash) queryAll so a test can assert
 // what the list path actually fetched. `cardScanError` makes the unfiltered
 // (full-scan) card query throw, to exercise graceful degradation.
+type CardQueryLog = { fields: string[]; filter?: QueryFilter; allowFullScan?: boolean };
+
 function fakeNode(opts: {
   boards: Board[];
   cards: Card[];
@@ -75,7 +77,7 @@ function fakeNode(opts: {
   rejectUnallowedCardScan?: boolean;
   rejectColumnFilter?: boolean;
   nativeSearchSlugs?: string[];
-}): NodeClient & { cardScanFields: string[][]; cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> } {
+}): NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[] } {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
   const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
   const boardCardRows = opts.cards.map((c) => ({
@@ -83,11 +85,11 @@ function fakeNode(opts: {
     key: { hash: c.board, range: null },
   }));
   const cardScanFields: string[][] = [];
-  const cardQueries: Array<{ fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }> = [];
+  const cardQueries: CardQueryLog[] = [];
   const stub = () => {
     throw new Error("not implemented in fake node");
   };
-  const node: NodeClient & { cardScanFields: string[][]; cardQueries: Array<{ fields: string[]; filter?: QueryFilter }> } = {
+  const node: NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[] } = {
     baseUrl: "http://fake",
     userHash: "test-user",
     cardScanFields,
@@ -371,12 +373,16 @@ describe("search — default text path uses indexed/native candidates", () => {
           position: String(i + 1),
         }),
       ),
+      nativeSearchSlugs: Array.from({ length: 25 }, (_, i) => `body-hit-${i}`),
+      rejectUnallowedCardScan: true,
     });
 
-    const out = await searchCmd({ cfg, node, query: "needle", json: true, all: true });
+    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle", json: true, all: true });
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(25);
     expect(parsed[0]!.bodyTruncated).toBe(true);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    expect(node.cardQueries.filter((q) => q.allowFullScan)).toHaveLength(0);
   });
 
   test("search --full-body restores the complete-body JSON surface", async () => {
