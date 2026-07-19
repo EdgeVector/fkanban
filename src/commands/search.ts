@@ -244,7 +244,7 @@ export async function searchResult(
 
 export async function searchCmd(opts: SearchOptions): Promise<string> {
   const projectionFields = opts.fields ?? [];
-  const complete = Boolean(opts.all || opts.fullBody || fieldProjectionNeedsFullCards(projectionFields));
+  const complete = Boolean(opts.fullBody || fieldProjectionNeedsFullCards(projectionFields));
   const { text, cards, jsonLimit } = await searchResult({ ...opts, complete });
   const broadJson = opts.column === undefined;
   const implicitJsonLimit =
