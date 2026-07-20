@@ -60,6 +60,7 @@ describe("host-track refresh", () => {
     await run(["git", "commit", "-q", "-m", "initial"], seed);
     await run(["git", "remote", "add", "origin", remote], seed);
     await run(["git", "push", "-q", "origin", "main"], seed);
+    const firstHead = (await run(["git", "rev-parse", "HEAD"], seed)).stdout.trim();
 
     const env = {
       FKANBAN_HOST_TRACK_REMOTE: remote,
@@ -77,10 +78,19 @@ describe("host-track refresh", () => {
     expect(await Bun.file(kanbanShim).text()).toContain("host-track checkout is missing or incomplete");
     expect(await Bun.file(fkanbanShim).text()).toContain("host-track refresh kanban");
     expect(await run([kanbanShim], root)).toMatchObject({ code: 0, stdout: "cli\n", stderr: "" });
+    expect(await run(["git", "-C", host, "remote", "get-url", "lastgit"], root)).toMatchObject({
+      code: 0,
+      stdout: `${remote}\n`,
+      stderr: "",
+    });
+    expect((await run(["git", "-C", host, "ls-remote", "lastgit", "refs/heads/main"], root)).stdout).toBe(`${firstHead}\trefs/heads/main\n`);
     expect(await Bun.file(resolve(stamps, "kanban.json")).json()).toMatchObject({
       app: "kanban",
       command: "kanban",
       kind: "B checkout-shim",
+      gate_remote: "lastgit",
+      gate_ref: "refs/heads/main",
+      gate_head: firstHead,
       stale: false,
     });
     expect(await Bun.file(resolve(stamps, "fkanban.json")).json()).toMatchObject({
@@ -95,10 +105,16 @@ describe("host-track refresh", () => {
     await run(["git", "add", "README.md"], seed);
     await run(["git", "commit", "-q", "-m", "update"], seed);
     await run(["git", "push", "-q", "origin", "main"], seed);
+    const secondHead = (await run(["git", "rev-parse", "HEAD"], seed)).stdout.trim();
 
     const second = await run(["bash", "bin/host-track-refresh"], resolve(import.meta.dir, ".."), env);
     expect(second.code).toBe(0);
     expect(await Bun.file(resolve(host, "README.md")).text()).toBe("two\n");
+    expect(await Bun.file(resolve(stamps, "kanban.json")).json()).toMatchObject({
+      host_head: secondHead,
+      gate_head: secondHead,
+      stale: false,
+    });
 
     rmSync(resolve(host, "src/cli.ts"), { force: true });
     const broken = await run([kanbanShim], root);
