@@ -1,6 +1,6 @@
 // Heal BoardCards membership drift: list/column previews must agree with
-// authoritative card column. Prefer CardListIndex (one read) as truth; fall
-// back to point-read only when a slug is missing from the index.
+// authoritative card column. Card point-reads are the source of truth;
+// CardListIndex only discovers slugs that have no BoardCards row yet.
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -95,11 +95,13 @@ export async function boardCardsHealResult(
 
   const slugFilter = opts.slugs?.length ? new Set(opts.slugs) : null;
 
-  // One bulk truth source — CardListIndex is slug-keyed and updated on write.
+  // One bulk discovery source — CardListIndex is slug-keyed and updated on
+  // write, but it can be stale. Use it to find missing BoardCards rows only;
+  // each candidate slug is verified by point-read Card truth below.
   const indexed = (await readCardListIndex(opts.node, opts.cfg)) ?? [];
-  const truthBySlug = new Map<string, CardSummary>();
+  const indexedBySlug = new Map<string, CardSummary>();
   for (const c of indexed) {
-    if (c.slug) truthBySlug.set(c.slug, c);
+    if (c.slug) indexedBySlug.set(c.slug, c);
   }
 
   // Raw BoardCards partitions (may include multi-row orphans per slug).
@@ -127,7 +129,7 @@ export async function boardCardsHealResult(
   }
 
   // Truth slugs with no BoardCards row yet (missing membership).
-  for (const [slug, t] of truthBySlug) {
+  for (const [slug, t] of indexedBySlug) {
     if (slugFilter && !slugFilter.has(slug)) continue;
     const board = t.board || "default";
     if (boardFilter && board !== boardFilter) continue;
@@ -146,61 +148,53 @@ export async function boardCardsHealResult(
     const [boardFromKey, slug] = key.split("\0") as [string, string];
     const board = boardFromKey || "default";
 
-    let truthSummary = truthBySlug.get(slug);
-    if (!truthSummary) {
-      // Index miss: one point-read. If still missing, BoardCards rows are orphans.
-      const point = await findCard(opts.node, opts.cfg, slug);
-      if (!point) {
-        missing_card += 1;
-        drifted += 1;
-        if (rows.length === 0) continue;
-        for (const row of rows) {
-          actions.push({
+    const point = await findCard(opts.node, opts.cfg, slug);
+    if (!point) {
+      if (rows.length === 0) continue;
+      missing_card += 1;
+      drifted += 1;
+      for (const row of rows) {
+        actions.push({
+          slug,
+          board,
+          list_column: row.column,
+          list_position: row.position,
+          truth_column: null,
+          truth_position: null,
+          action: "delete-orphan",
+          reason: "card point-read missing; BoardCards row is orphan",
+        });
+        if (opts.apply) {
+          await removeBoardCard(opts.node, opts.cfg, thinCard({
             slug,
+            title: "",
+            body: "",
             board,
-            list_column: row.column,
-            list_position: row.position,
-            truth_column: null,
-            truth_position: null,
-            action: "delete-orphan",
-            reason: "card point-read missing; BoardCards row is orphan",
-          });
-          if (opts.apply) {
-            await removeBoardCard(opts.node, opts.cfg, thinCard({
-              slug,
-              title: "",
-              body: "",
-              board,
-              column: row.column,
-              position: row.position,
-              assignee: "",
-              tags: [],
-              deps: [],
-              surfaces: [],
-              created_at: "",
-              updated_at: "",
-              db: "",
-              repo: "",
-              base: "",
-              kind: "",
-              block_status: "",
-              block_reason: "",
-              north_star: "",
-              pr_url: "",
-              branch: "",
-            }));
-            healed += 1;
-          }
+            column: row.column,
+            position: row.position,
+            assignee: "",
+            tags: [],
+            deps: [],
+            surfaces: [],
+            created_at: "",
+            updated_at: "",
+            db: "",
+            repo: "",
+            base: "",
+            kind: "",
+            block_status: "",
+            block_reason: "",
+            north_star: "",
+            pr_url: "",
+            branch: "",
+          }));
+          healed += 1;
         }
-        continue;
       }
-      truthSummary = {
-        ...point,
-        body: "",
-      };
+      continue;
     }
 
-    const truth = thinCard(truthSummary);
+    const truth = thinCard({ ...point, body: "" });
     const truthBoard = truth.board || "default";
     const truthSk = boardCardSk(truth.column, truth.position, truth.slug);
     const matching = rows.filter(
