@@ -33,6 +33,7 @@ function baseCard(over: Partial<Card> = {}): Card {
     pr_url: "",
     branch: "",
     ...over,
+    position: over.position ?? "1000",
   };
 }
 
