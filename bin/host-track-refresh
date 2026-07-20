@@ -79,7 +79,8 @@ write_runtime_shim() {
   name="$1"
   entry="$2"
   target="$bin_dir/$name"
-  cat >"$target" <<EOF
+  tmp="$target.tmp.$$"
+  cat >"$tmp" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 name="$name"
@@ -106,14 +107,16 @@ fi
 
 exec "\$bun_bin" run "\$expected" "\$@"
 EOF
-  chmod 755 "$target"
+  chmod 755 "$tmp"
+  mv -f "$tmp" "$target"
 }
 
 write_refresh_shim() {
   name="$1"
   entry="$2"
   target="$bin_dir/$name"
-  cat >"$target" <<EOF
+  tmp="$target.tmp.$$"
+  cat >"$tmp" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 name="$name"
@@ -130,7 +133,8 @@ fi
 
 exec "\$expected" "\$@"
 EOF
-  chmod 755 "$target"
+  chmod 755 "$tmp"
+  mv -f "$tmp" "$target"
 }
 
 write_runtime_shim kanban src/cli.ts
