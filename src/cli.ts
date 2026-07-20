@@ -489,7 +489,9 @@ Usage:
 Subcommands:
   stale-blockers       detect stale generated pickup/blocker metadata, malformed
                        Repo header lines, stale area-overlap holds, and
-                       human/parking candidates.
+                       human/parking candidates; --apply also parks unheld
+                       non-pr-kind cards (tracker/validation/capstone/meta)
+                       out of default/todo into backlog.
   board-cards-heal     repair BoardCards membership so list --column agrees with
                        show <slug> (delete orphan column#pos rows, upsert truth).
 

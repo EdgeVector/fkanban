@@ -53,7 +53,7 @@ export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions):
     if (groomed.issues.length === 0) continue;
     const applyableChange = groomed.changed && groomed.issues.some((issue) => issue.applyable);
     if (opts.apply && applyableChange) {
-      await writeGroomedCard(opts, groomed.card);
+      await writeGroomedCard(opts, groomed.card, card);
       changed += 1;
     } else if (!opts.apply && applyableChange) {
       changed += 1;

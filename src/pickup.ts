@@ -290,6 +290,7 @@ export type GroomIssueKind =
   | "human-parking-candidate"
   | "todo-lane-branch-metadata"
   | "todo-lane-pr-metadata"
+  | "non-pr-kind-in-todo"
   | "missing-done-when-predicate"
   | "malformed-done-when-predicate";
 
@@ -467,6 +468,20 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
     }
   }
 
+  // Park non-PR-kind cards that pickup already refuses out of default/todo
+  // (see classifyPickupCard's `non-pickup kind: ${kind}` branch) — an unheld
+  // tracker/validation/capstone/meta card can otherwise sit in the pickup
+  // lane forever since fkanban-agent will never claim it there.
+  if (next.board === "default" && next.column === "todo" && kind !== "pr" && finalBlockStatus === "none") {
+    issues.push({
+      kind: "non-pr-kind-in-todo",
+      message: `kind=${kind} card sits in default/todo, which fkanban-agent pickup always skips`,
+      applyable: true,
+      suggestion: "Move grouping/tracker/program/capstone/validation cards to backlog until their sequence opens.",
+    });
+    next.column = "backlog";
+  }
+
   // Heal the false-collision class: structured branch/pr_url on default/todo
   // stranded cards that looked "filed" but could never be picked up.
   if (next.board === "default" && next.column === "todo") {
@@ -568,6 +583,10 @@ export function selfHealPickupTodoBlocker(card: Card, allCards: Card[]): PickupG
   return { card: next, issues, changed };
 }
 
-export async function writeGroomedCard(opts: { cfg: Config; node: NodeClient }, card: Card): Promise<void> {
-  await updateCardRecord(opts, { ...card, updated_at: nowIso() });
+export async function writeGroomedCard(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+  previous?: Card,
+): Promise<void> {
+  await updateCardRecord(opts, { ...card, updated_at: nowIso() }, undefined, previous);
 }

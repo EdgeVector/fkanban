@@ -490,4 +490,37 @@ describe("groom stale-blockers", () => {
     expect(text).toContain("validation-malformed kind=validation column=doing");
     expect(text).toContain("DONE-WHEN: brain <slug> exists");
   });
+
+  test("apply parks an unheld non-pr-kind todo card into backlog", async () => {
+    await seedCard(node, card({
+      slug: "terminal-verification-stuck",
+      kind: "validation",
+      column: "todo",
+      body: "Kind: validation\nDONE-WHEN: brain some-proof-slug exists\n",
+    }));
+    await seedCard(node, card({
+      slug: "held-tracker-stays",
+      kind: "tracker",
+      column: "todo",
+      block_status: "design_first",
+      block_reason: "design still in flight",
+      body: "Kind: tracker\nDONE-WHEN: brain another-slug exists\n",
+    }));
+
+    const { report } = await groomStaleBlockersResult({ cfg, node, apply: true });
+
+    const stuckReport = report.cards.find((c) => c.slug === "terminal-verification-stuck");
+    expect(stuckReport?.issues.map((i) => i.kind)).toContain("non-pr-kind-in-todo");
+    expect(stuckReport?.changed).toBe(true);
+    const stuck = await findCard(node, cfg, "terminal-verification-stuck");
+    expect(stuck?.column).toBe("backlog");
+
+    // A card already parked by an intentional (non-needs_human) hold isn't
+    // double-classified by this rule — that's the design_first/deferred
+    // human-parking-candidate branch's job, and it's review-only there.
+    const heldReport = report.cards.find((c) => c.slug === "held-tracker-stays");
+    expect(heldReport?.issues.map((i) => i.kind)).not.toContain("non-pr-kind-in-todo");
+    const held = await findCard(node, cfg, "held-tracker-stays");
+    expect(held?.column).toBe("todo");
+  });
 });
