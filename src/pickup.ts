@@ -192,6 +192,13 @@ export function classifyPickupCard(
   if (!base) {
     return out("malformed-routing", "missing Base header/field", "Set `Base: main` or pass `--base main`.");
   }
+  if (dep.blocked) {
+    details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
+    return out("blocked-on-dependency", "unfinished dependency", "Finish or retarget the dependency before pickup.");
+  }
+  if (card.column === "doing") {
+    return out("collision", "card is already in doing", "Do not pick up again; reconcile the existing branch/PR or move it back to todo.");
+  }
   // Only an open PR URL means in-flight work. A pre-declared `branch` name alone
   // is optional metadata (agents often set Branch: kanban/<slug> at file time)
   // and must NOT block pickup — that false collision stranded ready cards.
@@ -201,13 +208,6 @@ export function classifyPickupCard(
       "todo card already has PR metadata",
       "Reconcile the existing PR (watch/merge or clear pr_url) before pickup.",
     );
-  }
-  if (dep.blocked) {
-    details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
-    return out("blocked-on-dependency", "unfinished dependency", "Finish or retarget the dependency before pickup.");
-  }
-  if (card.column === "doing") {
-    return out("collision", "card is already in doing", "Do not pick up again; reconcile the existing branch/PR or move it back to todo.");
   }
   if (card.column !== "todo") {
     return out("parked/non-work", `card is parked in ${card.column}`, "Move to default/todo only when an agent should pick it up.");
