@@ -661,6 +661,14 @@ describe("pickup claim", () => {
     expect(result.claimed).toBe(false);
     expect(result.reason).toBe("no-eligible");
     expect(result.diagnostics?.counts.collision).toBe(2);
+    expect(result.diagnostics?.exemplars).toEqual(expect.arrayContaining([
+      {
+        slug: "inflight-with-pr",
+        category: "collision",
+        reason: "card is already in doing",
+        suggestion: "Do not pick up again; reconcile the existing branch/PR or move it back to todo.",
+      },
+    ]));
     expect(result.diagnostics?.inflight_without_artifact).toBe(0);
     expect(result.diagnostics?.inflight_without_artifact_exemplars).toBeUndefined();
   });
