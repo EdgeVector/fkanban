@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -51,6 +51,8 @@ describe("host-track refresh", () => {
     mkdirSync(resolve(seed, "src/mcp"), { recursive: true });
     writeFileSync(resolve(seed, "src/cli.ts"), "console.log('cli')\n");
     writeFileSync(resolve(seed, "src/mcp/main.ts"), "console.log('mcp')\n");
+    writeFileSync(resolve(seed, "bin", "kanban"), "#!/usr/bin/env bash\necho tracked-kanban\n");
+    chmodSync(resolve(seed, "bin", "kanban"), 0o755);
     for (const name of ["host-track-refresh", "kanban-host-track-refresh"]) {
       writeFileSync(resolve(seed, "bin", name), `#!/usr/bin/env bash\necho ${name}\n`);
       chmodSync(resolve(seed, "bin", name), 0o755);
@@ -101,6 +103,13 @@ describe("host-track refresh", () => {
       stale: false,
     });
 
+    const hostKanbanScript = await Bun.file(resolve(host, "bin/kanban")).text();
+    const hostRefreshScript = await Bun.file(resolve(host, "bin/host-track-refresh")).text();
+    for (const name of ["kanban", "host-track-refresh"]) {
+      rmSync(resolve(bin, name));
+      symlinkSync(resolve(host, "bin", name), resolve(bin, name));
+    }
+
     writeFileSync(resolve(seed, "README.md"), "two\n");
     await run(["git", "add", "README.md"], seed);
     await run(["git", "commit", "-q", "-m", "update"], seed);
@@ -115,6 +124,10 @@ describe("host-track refresh", () => {
       gate_head: secondHead,
       stale: false,
     });
+    expect(lstatSync(resolve(bin, "kanban")).isSymbolicLink()).toBe(false);
+    expect(lstatSync(resolve(bin, "host-track-refresh")).isSymbolicLink()).toBe(false);
+    expect(await Bun.file(resolve(host, "bin/kanban")).text()).toBe(hostKanbanScript);
+    expect(await Bun.file(resolve(host, "bin/host-track-refresh")).text()).toBe(hostRefreshScript);
 
     rmSync(resolve(host, "src/cli.ts"), { force: true });
     const broken = await run([kanbanShim], root);
