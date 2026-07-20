@@ -406,12 +406,35 @@ describe("pickup area overlap", () => {
     expect(second.block_reason).toContain("fbrain-list-updated-since-offset-count");
   });
 
-  test("holds same-repo forge CI cards even without explicit area tags", () => {
-    const compileFix = card({
-      slug: "fold-cloud-proxy-subscription-status-test-compile-break",
-      title: "Fix subscription status compile break",
-      body:
-        "Repo: EdgeVector/fold\nBase: main\n\nFix `cargo test --workspace --all-targets` so the forge check can go green.",
+  test("forge-check prose and venue boilerplate do NOT mint area:forge-ci", () => {
+    // Regression (papercut-groomer-area-forge-ci-false-human-gates): every
+    // well-formed Forgejo-repo card carries "CI gate: `Forge CI / ci-required`"
+    // boilerplate; cards shipping THROUGH forge CI are not cards ABOUT it.
+    expect(
+      pickupAreaTagsForCard(
+        card({
+          title: "Fix subscription status compile break",
+          body:
+            "Repo: EdgeVector/fold\nBase: main\n\nFix `cargo test --workspace --all-targets` so the forge check can go green.",
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      pickupAreaTagsForCard(
+        card({
+          title: "Cloud: presign backup actions",
+          body:
+            "Repo: EdgeVector/fold\nBase: main\n\nShip via last-stack-forge-api. CI gate: `Forge CI / ci-required`.",
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  test("holds same-repo cards genuinely about forge CI (workflow paths)", () => {
+    const workflowEdit = card({
+      slug: "fold-ci-shard-rebalance",
+      title: "Rebalance CI shards",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nTune `.forgejo/workflows/ci.yml` shard split.",
       repo: "EdgeVector/fold",
       base: "main",
       kind: "pr",
@@ -427,11 +450,49 @@ describe("pickup area overlap", () => {
       column: "todo",
     });
 
-    applyPickupAreaDerivation(requiredCheck, [compileFix]);
+    applyPickupAreaDerivation(requiredCheck, [workflowEdit]);
 
     expect(requiredCheck.tags).toContain("area:forge-ci");
     expect(requiredCheck.block_status).toBe("needs_human");
-    expect(requiredCheck.block_reason).toContain("fold-cloud-proxy-subscription-status-test-compile-break");
+    expect(requiredCheck.block_reason).toContain("fold-ci-shard-rebalance");
+  });
+
+  test("same-north-star cards sharing an area are NOT held (program serializes itself)", () => {
+    const first = card({
+      slug: "prog-lane-a",
+      title: "Lane A",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nTouch `fbrain list` internals.",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "doing",
+      north_star: "north-star-shared-program",
+    });
+    const second = card({
+      slug: "prog-lane-b",
+      title: "Lane B",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nTouch `fbrain list` docs.",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      north_star: "north-star-shared-program",
+    });
+
+    expect(findPickupAreaOverlap(second, [first])).toBeNull();
+
+    const differentProgram = card({
+      slug: "prog-lane-c",
+      title: "Lane C",
+      body: "Repo: EdgeVector/fbrain\nBase: main\n\nTouch `fbrain list` output.",
+      repo: "EdgeVector/fbrain",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      north_star: "north-star-other-program",
+    });
+
+    expect(findPickupAreaOverlap(differentProgram, [first])).not.toBeNull();
   });
 
   test("does not treat the same area in a different repo as an overlap", () => {
@@ -575,7 +636,7 @@ describe("pickup area overlap", () => {
     const a = card({
       slug: "forge-ci-compile-fix",
       title: "Fix forge check compile break",
-      body: "Repo: EdgeVector/fold\nBase: main\n\nFix tests before the local forge CI gate is required.",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nFix tests in `.forgejo/workflows/ci.yml` before the gate is required.",
       repo: "EdgeVector/fold",
       base: "main",
       kind: "pr",

@@ -508,8 +508,13 @@ export const PICKUP_AREA_PEER_FIELDS = [
 ] as const;
 const PICKUP_AREA_PEER_BODY_FIELDS = [...PICKUP_AREA_PEER_FIELDS, "body"] as const;
 const FEATURE_AREA_PATTERNS: Array<{ area: string; pattern: RegExp }> = [
-  { area: "forge-ci", pattern: /\b(?:local[\s_-]+)?forge(?:jo)?[\s_-]+ci\b/gi },
-  { area: "forge-ci", pattern: /\bforge(?:jo)?[\s_-]+(?:required[\s_-]+)?checks?\b/gi },
+  // Path references only. The former prose patterns ("forge ci", "forge
+  // required checks") matched the standard venue boilerplate every well-formed
+  // Forgejo-repo card carries ("CI gate: `Forge CI / ci-required`"), minting
+  // area:forge-ci on cards that merely ship THROUGH forge CI rather than cards
+  // ABOUT it — the dominant source of false pickup-area needs_human holds.
+  // Cards genuinely about CI infrastructure reference .forgejo/workflows paths
+  // or declare an explicit `Area: forge-ci` line, both of which still match.
   { area: "forge-ci", pattern: /(?:^|[`"'([{\s])\.forgejo\/workflows(?:\/[A-Za-z0-9._/-]+)?/gim },
 ];
 
@@ -724,6 +729,12 @@ export function findPickupAreaOverlap(card: Card, allCards: Card[]): PickupAreaO
     // a graph that includes THIS card's own (possibly not-yet-persisted) deps:
     // on a create/update, `card` carries edges `allCards` doesn't have yet.
     if (depsPathConnects(cardsWithSelf, card.slug, other.slug)) continue;
+    // Two cards advancing the SAME North Star are one program's lanes: the
+    // program driver files them in dependency order on purpose, and file-level
+    // collisions are already caught by declared-surfaces overlap at claim
+    // time. An area hold here second-guesses the driver and has produced only
+    // false positives (see papercut-groomer-area-forge-ci-false-human-gates).
+    if (card.north_star && card.north_star === other.north_star) continue;
     const overlap = pickupAreaTagsForCard(other).filter((area) => areas.has(area));
     if (overlap.length > 0) return { other, areas: overlap };
   }

@@ -169,7 +169,7 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
       repo: "EdgeVector/fold",
       base: "main",
       body:
-        "Repo: EdgeVector/fold\nBase: main\n\nFix `cargo test --workspace --all-targets` so the forge check can go green.",
+        "Repo: EdgeVector/fold\nBase: main\n\nFix `cargo test` breakage surfaced by `.forgejo/workflows/ci.yml`.",
     });
     await addCmd({
       cfg,
