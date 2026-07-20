@@ -234,23 +234,16 @@ describe("pickup claim", () => {
 
     expect(result.claimed).toBe(true);
     expect(result.card?.slug).toBe("ready-work");
-    expect(result.todo_blockers).toBe(1);
-    expect(result.todo_blocker_exemplars).toEqual([{
-      slug: "human-hold",
-      category: "human-gated",
-      reason: "intentional hold: needs_human",
-      suggestion: "Move true human-gated work to `--board human`; clear the hold only when pickup-ready.",
-    }]);
-    expect(result.diagnostics?.todo_blockers).toBe(1);
-    expect(result.diagnostics?.todo_blocker_exemplars).toEqual([{
-      slug: "human-hold",
-      category: "human-gated",
-      reason: "intentional hold: needs_human",
-      suggestion: "Move true human-gated work to `--board human`; clear the hold only when pickup-ready.",
-    }]);
-    expect(formatPickupClaim(result)).toContain(
-      "human-hold: human-gated - intentional hold: needs_human",
-    );
+    expect(result.todo_count).toBe(1);
+    expect(result.todo_blockers).toBe(0);
+    expect(result.todo_blocker_exemplars).toBeUndefined();
+    expect(result.diagnostics).toBeUndefined();
+    expect(formatPickupClaim(result)).not.toContain("todo blockers");
+
+    const human = await findCard(node, cfg, "human-hold");
+    expect(human?.column).toBe("backlog");
+    expect(human?.block_status).toBe("needs_human");
+    expect(human?.block_reason).toBe("waiting on Tom");
   });
 
   test("claims a dependent when its done dependency is only available by point read", async () => {
@@ -493,9 +486,14 @@ describe("pickup claim", () => {
     expect(result.claimed).toBe(false);
     expect(result.reason).toBe("no-eligible");
     expect(result.scanned_ready).toBe(0);
+    expect(result.todo_count).toBe(0);
+    expect(result.todo_blockers).toBe(0);
     expect(result.diagnostics?.scanned_active).toBe(1);
     expect(result.diagnostics?.ready).toBe(0);
     expect(result.diagnostics?.counts["human-gated"]).toBe(1);
+
+    const human = await findCard(node, cfg, "human");
+    expect(human?.column).toBe("backlog");
   });
 
   test("no-eligible reports zero todo count when todo queue is empty", async () => {
@@ -695,7 +693,7 @@ describe("pickup claim", () => {
     expect(onBoard?.body).not.toContain("BLOCKED: fkanban-pickup");
   });
 
-  test("keeps active generated overlap and real human holds protected", async () => {
+  test("keeps active generated overlap protected and parks real human holds", async () => {
     await seedCard(node, card({
       slug: "active-peer",
       column: "doing",
@@ -731,6 +729,7 @@ describe("pickup claim", () => {
     expect(overlap?.block_reason).toContain("active-peer");
 
     const human = await findCard(node, cfg, "human-hold");
+    expect(human?.column).toBe("backlog");
     expect(human?.block_status).toBe("needs_human");
     expect(human?.block_reason).toBe("waiting on Tom");
   });
