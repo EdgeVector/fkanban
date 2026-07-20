@@ -13,6 +13,15 @@ host_track="${FKANBAN_HOST_TRACK_DIR:-$HOME/.host-track/fkanban}"
 bin_dir="${FKANBAN_HOST_TRACK_BIN_DIR:-$HOME/.local/bin}"
 stamp_dir="${FKANBAN_HOST_TRACK_STAMP_DIR:-$HOME/.host-track/stamps}"
 skip_install="${FKANBAN_HOST_TRACK_SKIP_INSTALL:-0}"
+# LastGit's git-smart-protocol layer ("other" verb) can run 8-30s per round
+# trip under node load (observed 2026-07-20: avg 8.5s, p95/max ~30s) — a full
+# fetch/checkout/merge can stack several of those. Bound each step so a slow
+# node produces a fast, attributed failure instead of an unbounded hang that
+# an outer caller silently kills with no diagnosis (papercut
+# papercut-fkanban-host-track-refresh-hangs-and-drifted).
+git_timeout="${FKANBAN_HOST_TRACK_GIT_TIMEOUT:-90}"
+install_timeout="${FKANBAN_HOST_TRACK_INSTALL_TIMEOUT:-90}"
+gate_probe_timeout="${FKANBAN_HOST_TRACK_GATE_PROBE_TIMEOUT:-20}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -28,7 +37,42 @@ Environment:
   FKANBAN_HOST_TRACK_DIR        checkout path, default ~/.host-track/fkanban
   FKANBAN_HOST_TRACK_BIN_DIR    shim directory, default ~/.local/bin
   FKANBAN_HOST_TRACK_STAMP_DIR  stamp directory, default ~/.host-track/stamps
+  FKANBAN_HOST_TRACK_GIT_TIMEOUT       seconds per git network step, default 90
+  FKANBAN_HOST_TRACK_INSTALL_TIMEOUT   seconds for bun install, default 90
+  FKANBAN_HOST_TRACK_GATE_PROBE_TIMEOUT
+                                        seconds for the post-refresh ls-remote
+                                        staleness probe, default 20 (best-effort;
+                                        a timeout here does not fail the refresh)
 EOF
+}
+
+timeout_bin=""
+if command -v timeout >/dev/null 2>&1; then
+  timeout_bin="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  timeout_bin="gtimeout"
+fi
+
+# Run a network/install step under a bound so a slow node produces a fast,
+# named failure instead of an unattributed hang. Fatal: exits the script.
+run_step() {
+  step_name="$1" step_timeout="$2"
+  shift 2
+  if [ -n "$timeout_bin" ] && [ "$step_timeout" -gt 0 ]; then
+    # NOT `if "$timeout_bin" ...; then return 0; fi; rc=$?` — with no `else`,
+    # bash resets `$?` to 0 when the condition is false instead of preserving
+    # the tested command's real exit code, which silently turned every
+    # timeout/failure here into a false "succeeded" (exit 0).
+    "$timeout_bin" "$step_timeout" "$@" && return 0
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      echo "kanban host-track-refresh: step '$step_name' timed out after ${step_timeout}s (node may be slow/loaded — see \`lastdb ops\`)" >&2
+    else
+      echo "kanban host-track-refresh: step '$step_name' failed (exit $rc)" >&2
+    fi
+    exit "$rc"
+  fi
+  "$@"
 }
 
 force=0
@@ -55,15 +99,15 @@ ensure_remote() {
 
 if [ ! -d "$host_track/.git" ]; then
   rm -rf "$host_track"
-  git clone --branch "$ref" "$remote" "$host_track"
+  run_step "git clone" "$git_timeout" git clone --branch "$ref" "$remote" "$host_track"
 else
   ensure_remote origin "$remote"
-  git -C "$host_track" fetch origin "$ref"
+  run_step "git fetch" "$git_timeout" git -C "$host_track" fetch origin "$ref"
   if [ "$force" -eq 1 ]; then
-    git -C "$host_track" checkout -B "$ref" "origin/$ref"
+    run_step "git checkout -B" "$git_timeout" git -C "$host_track" checkout -B "$ref" "origin/$ref"
   else
-    git -C "$host_track" checkout "$ref"
-    git -C "$host_track" merge --ff-only "origin/$ref"
+    run_step "git checkout" "$git_timeout" git -C "$host_track" checkout "$ref"
+    run_step "git merge --ff-only" "$git_timeout" git -C "$host_track" merge --ff-only "origin/$ref"
   fi
 fi
 
@@ -72,7 +116,7 @@ if [ -n "$gate_remote_name" ] && [ "$gate_remote_name" != "origin" ]; then
 fi
 
 if [ -f "$host_track/package.json" ] && [ "$skip_install" != "1" ]; then
-  bun install --cwd "$host_track" --frozen-lockfile
+  run_step "bun install" "$install_timeout" bun install --cwd "$host_track" --frozen-lockfile
 fi
 
 write_runtime_shim() {
@@ -145,7 +189,17 @@ write_refresh_shim host-track-refresh bin/host-track-refresh
 write_refresh_shim kanban-host-track-refresh bin/kanban-host-track-refresh
 
 host_head="$(git -C "$host_track" rev-parse HEAD)"
-gate_head="$(git -C "$host_track" ls-remote "${gate_remote_name:-origin}" "$gate_ref" 2>/dev/null | awk 'NR == 1 {print $1}')"
+# Best-effort staleness probe: never fail the whole refresh over this (the
+# fetch/checkout/merge above already succeeded), but never silently report
+# "not stale" just because the probe itself timed out or errored either —
+# that false-clean signal is how a real drift went undetected for hours
+# (papercut-fkanban-host-track-refresh-hangs-and-drifted). An empty gate_head
+# below means "unknown", not "current".
+if [ -n "$timeout_bin" ]; then
+  gate_head="$("$timeout_bin" "$gate_probe_timeout" git -C "$host_track" ls-remote "${gate_remote_name:-origin}" "$gate_ref" 2>/dev/null | awk 'NR == 1 {print $1}')" || gate_head=""
+else
+  gate_head="$(git -C "$host_track" ls-remote "${gate_remote_name:-origin}" "$gate_ref" 2>/dev/null | awk 'NR == 1 {print $1}')" || gate_head=""
+fi
 exec_path="$bin_dir/kanban"
 stamp="$stamp_dir/kanban.json"
 
@@ -177,7 +231,7 @@ if command -v jq >/dev/null 2>&1; then
       gate_head: ($gate_head | select(length > 0) // null),
       exec_path: $exec_path,
       kind: $kind,
-      stale: ($gate_head != "" and $host_head != $gate_head),
+      stale: (if $gate_head == "" then null else ($host_head != $gate_head) end),
       stamp: $stamp,
       refreshed_at: $refreshed_at,
       notes: $notes
@@ -194,6 +248,20 @@ if command -v jq >/dev/null 2>&1; then
       stamp: $stamp,
       notes: "fkanban alias for the registered kanban host-track app; PATH shims point into host track."
     }' "$stamp" >"$stamp_dir/fkanban.json"
+fi
+
+# A refresh that finishes without actually reaching the gate ref is not a
+# success — surface it loudly and non-zero instead of printing the same
+# "refreshed" text a real success would print. gate_head empty means the
+# probe itself failed/timed out; that is reported but does not fail the run
+# (fetch/checkout/merge already proved forward progress or a true no-op).
+if [ -n "$gate_head" ] && [ "$host_head" != "$gate_head" ]; then
+  echo "kanban host-track-refresh: WARNING checkout still behind gate after refresh (host_head=$host_head gate_head=$gate_head)" >&2
+  echo "kanban host-track-refresh: run again, or check \`lastdb ops\` for lastgit node load" >&2
+  exit 1
+fi
+if [ -z "$gate_head" ]; then
+  echo "kanban host-track-refresh: staleness probe against '$gate_ref' timed out or failed; checkout freshness unverified this run" >&2
 fi
 
 echo "kanban host-track refreshed: $host_track"
