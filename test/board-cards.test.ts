@@ -19,6 +19,7 @@ import {
   purgeOtherBoardCardRows,
   upsertBoardCard,
 } from "../src/board-cards.ts";
+import { CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
 import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
 import { BOARD_CARDS_LAYOUT, boardCardsSchema } from "../src/schemas.ts";
@@ -31,6 +32,7 @@ const cfgWithBoardCards: Config = {
   schemaHashes: {
     board: "board-hash",
     card: "card-hash",
+    card_list_index: "card-list-index-hash",
     board_cards: "board-cards-hash",
   },
 };
@@ -298,6 +300,65 @@ describe("board-cards membership integrity", () => {
 
     const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
     expect(applied.report.healed).toBeGreaterThanOrEqual(1);
+
+    const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
+    expect(listed).toHaveLength(1);
+    expect(listed![0]!.column).toBe("done");
+  });
+
+  test("board-cards-heal trusts point-read card over stale CardListIndex", async () => {
+    const node = fakeNode();
+    const doing = card({ column: "doing", position: "1", updated_at: "2026-01-01T00:00:00.000Z" });
+    const done = card({ column: "done", position: "2", updated_at: "2026-01-02T00:00:00.000Z" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: {
+        slug: "default",
+        title: "Default",
+        body: "",
+        columns: ["backlog", "todo", "doing", "done"],
+        created_at: done.created_at,
+        updated_at: done.updated_at,
+      },
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card!,
+      keyHash: done.slug,
+      fields: {
+        ...done,
+        body: done.body,
+      },
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card_list_index!,
+      keyHash: CARD_LIST_INDEX_KEY,
+      fields: {
+        key: CARD_LIST_INDEX_KEY,
+        payload_json: JSON.stringify([{ ...doing, body: "" }]),
+        updated_at: doing.updated_at,
+      },
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board_cards!,
+      keyHash: "default",
+      rangeKey: boardCardSk(doing.column, doing.position, doing.slug),
+      fields: boardCardFieldsFromCard(doing),
+    });
+
+    const dry = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    expect(dry.report.drifted).toBe(1);
+    expect(dry.report.actions[0]).toMatchObject({
+      slug: "my-card",
+      list_column: "doing",
+      truth_column: "done",
+      action: "delete-stale-and-upsert",
+    });
+
+    const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
+    expect(applied.report.healed).toBe(1);
+    const clean = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    expect(clean.report.drifted).toBe(0);
 
     const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
     expect(listed).toHaveLength(1);
