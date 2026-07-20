@@ -237,7 +237,7 @@ function claimDiagnostics(report: PickupStatusReport, cards: Card[], board: stri
   const inflightWithoutArtifact = report.cards.filter((classification) => {
     if (classification.category !== "collision" || classification.column !== "doing") return false;
     const card = bySlug.get(classification.slug);
-    return card !== undefined && !card.pr_url && !card.branch;
+    return card !== undefined && !card.pr_url;
   });
   return {
     scanned_active: report.scanned,
