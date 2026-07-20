@@ -641,7 +641,7 @@ describe("pickup claim", () => {
     }]);
   });
 
-  test("no-eligible diagnostics ignore doing cards that already have review artifacts", async () => {
+  test("no-eligible diagnostics count doing cards without review URLs", async () => {
     await seedCard(node, card({
       slug: "inflight-with-pr",
       column: "doing",
@@ -669,8 +669,13 @@ describe("pickup claim", () => {
         suggestion: "Do not pick up again; reconcile the existing branch/PR or move it back to todo.",
       },
     ]));
-    expect(result.diagnostics?.inflight_without_artifact).toBe(0);
-    expect(result.diagnostics?.inflight_without_artifact_exemplars).toBeUndefined();
+    expect(result.diagnostics?.inflight_without_artifact).toBe(1);
+    expect(result.diagnostics?.inflight_without_artifact_exemplars).toEqual([{
+      slug: "inflight-with-branch",
+      category: "collision",
+      reason: "card is already in doing",
+      suggestion: "Do not pick up again; reconcile the existing branch/PR or move it back to todo.",
+    }]);
   });
 
   test("no-eligible diagnostics include malformed routing exemplars", async () => {
