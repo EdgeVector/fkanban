@@ -4,6 +4,11 @@ set -euo pipefail
 
 remote="${FKANBAN_HOST_TRACK_REMOTE:-lastdb:///fkanban}"
 ref="${FKANBAN_HOST_TRACK_REF:-main}"
+gate_remote_name="${FKANBAN_HOST_TRACK_GATE_REMOTE_NAME:-lastgit}"
+case "$ref" in
+  refs/*) gate_ref="${FKANBAN_HOST_TRACK_GATE_REF:-$ref}" ;;
+  *) gate_ref="${FKANBAN_HOST_TRACK_GATE_REF:-refs/heads/$ref}" ;;
+esac
 host_track="${FKANBAN_HOST_TRACK_DIR:-$HOME/.host-track/fkanban}"
 bin_dir="${FKANBAN_HOST_TRACK_BIN_DIR:-$HOME/.local/bin}"
 stamp_dir="${FKANBAN_HOST_TRACK_STAMP_DIR:-$HOME/.host-track/stamps}"
@@ -17,6 +22,9 @@ Usage:
 Environment:
   FKANBAN_HOST_TRACK_REMOTE     git remote, default lastdb:///fkanban
   FKANBAN_HOST_TRACK_REF        branch/ref to track, default main
+  FKANBAN_HOST_TRACK_GATE_REMOTE_NAME
+                                  local git remote name host-track status probes, default lastgit
+  FKANBAN_HOST_TRACK_GATE_REF    exact gate ref for status, default refs/heads/<ref>
   FKANBAN_HOST_TRACK_DIR        checkout path, default ~/.host-track/fkanban
   FKANBAN_HOST_TRACK_BIN_DIR    shim directory, default ~/.local/bin
   FKANBAN_HOST_TRACK_STAMP_DIR  stamp directory, default ~/.host-track/stamps
@@ -34,14 +42,22 @@ done
 
 mkdir -p "$(dirname "$host_track")" "$bin_dir" "$stamp_dir"
 
+ensure_remote() {
+  name="$1"
+  url="$2"
+  current="$(git -C "$host_track" remote get-url "$name" 2>/dev/null || true)"
+  if [ -z "$current" ]; then
+    git -C "$host_track" remote add "$name" "$url"
+  elif [ "$current" != "$url" ]; then
+    git -C "$host_track" remote set-url "$name" "$url"
+  fi
+}
+
 if [ ! -d "$host_track/.git" ]; then
   rm -rf "$host_track"
   git clone --branch "$ref" "$remote" "$host_track"
 else
-  current_remote="$(git -C "$host_track" remote get-url origin 2>/dev/null || true)"
-  if [ "$current_remote" != "$remote" ]; then
-    git -C "$host_track" remote set-url origin "$remote"
-  fi
+  ensure_remote origin "$remote"
   git -C "$host_track" fetch origin "$ref"
   if [ "$force" -eq 1 ]; then
     git -C "$host_track" checkout -B "$ref" "origin/$ref"
@@ -49,6 +65,10 @@ else
     git -C "$host_track" checkout "$ref"
     git -C "$host_track" merge --ff-only "origin/$ref"
   fi
+fi
+
+if [ -n "$gate_remote_name" ] && [ "$gate_remote_name" != "origin" ]; then
+  ensure_remote "$gate_remote_name" "$remote"
 fi
 
 if [ -f "$host_track/package.json" ] && [ "$skip_install" != "1" ]; then
@@ -121,7 +141,7 @@ write_refresh_shim host-track-refresh bin/host-track-refresh
 write_refresh_shim kanban-host-track-refresh bin/kanban-host-track-refresh
 
 host_head="$(git -C "$host_track" rev-parse HEAD)"
-gate_head="$(git -C "$host_track" ls-remote origin "$ref" 2>/dev/null | awk 'NR == 1 {print $1}')"
+gate_head="$(git -C "$host_track" ls-remote "${gate_remote_name:-origin}" "$gate_ref" 2>/dev/null | awk 'NR == 1 {print $1}')"
 exec_path="$bin_dir/kanban"
 stamp="$stamp_dir/kanban.json"
 
@@ -131,6 +151,8 @@ if command -v jq >/dev/null 2>&1; then
     --arg command "kanban" \
     --arg gate "lastgit" \
     --arg gate_main "$remote#$ref" \
+    --arg gate_remote "$gate_remote_name" \
+    --arg gate_ref "$gate_ref" \
     --arg host_track "$host_track" \
     --arg host_head "$host_head" \
     --arg gate_head "$gate_head" \
@@ -144,6 +166,8 @@ if command -v jq >/dev/null 2>&1; then
       command: $command,
       gate: $gate,
       gate_main: $gate_main,
+      gate_remote: $gate_remote,
+      gate_ref: $gate_ref,
       host_track: $host_track,
       host_head: $host_head,
       gate_head: ($gate_head | select(length > 0) // null),
