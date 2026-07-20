@@ -26,6 +26,7 @@ import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
+import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
@@ -73,6 +74,7 @@ Commands:
   list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
   overlap <slug>       report declared surface conflicts with doing cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
+  pickup explain <slug> full readiness path for one card (write-guard+classify+lane+overlap)
   pickup claim         claim the next ready card into doing (lanes + priority + overlap + CAS)
   pickup lanes         show logical pickup lanes, starvation, and next claim order
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
@@ -306,12 +308,18 @@ Example:
 
 Usage:
   fkanban pickup status [--json]
+  fkanban pickup explain <slug> [--json]
   fkanban pickup lanes [--json] [--board <slug>]
   fkanban pickup claim [options]
 
 status — Classifies every active (non-terminal) card as pickup-ready,
 blocked-on-dependency, human-gated, malformed-routing, parked/non-work,
 collision, or stale-metadata. Read-only hygiene report.
+
+explain — Full readiness path for ONE card: write-guard
+(assertDefaultTodoPickupReady), classify category, lane, surface-overlap vs
+doing, situation fence, and eligible_for_claim. Prefer this over re-deriving
+policy from prompts.
 
 lanes — Logical lanes on the default board todo queue: p0-now, program:*,
 unlaned, papercut. Shows ready/doing pressure, starved lanes (ready>0 and
@@ -324,8 +332,8 @@ CAS-claim the first winner into doing (\`move --from todo\`). On
 claim_conflict (another worker won), try the next candidate. Prefer this
 over hand-rolling list + overlap + move in prompts.
 
-status options:
-  --json                machine-readable { scanned, ready, counts, cards }
+status / explain options:
+  --json                machine-readable report
 
 lanes options:
   --board <slug>        board (default: default)
@@ -342,6 +350,7 @@ claim options:
 
 Example:
   fkanban pickup status
+  fkanban pickup explain my-card-slug --json
   fkanban pickup lanes
   fkanban pickup claim --json --worker last-stack-fkanban-pickup
   fkanban pickup claim --dry-run --prefer-repo EdgeVector/fold`),
@@ -1498,22 +1507,26 @@ async function dispatch(
     case "pickup-status":
     case "pickup-claim": {
       // Subcommand resolution:
-      //   pickup status | pickup claim | bare `pickup` (= status, back-compat)
+      //   pickup status | pickup explain <slug> | pickup claim | pickup lanes
+      //   bare `pickup` (= status, back-compat)
       //   pickup-status / pickup-claim aliases (single positional)
-      let sub: "status" | "claim" | "lanes";
+      let sub: "status" | "claim" | "lanes" | "explain";
       if (cmd === "pickup-status") sub = "status";
       else if (cmd === "pickup-claim") sub = "claim";
       else if (positionals[1] === undefined || positionals[1] === "status") sub = "status";
       else if (positionals[1] === "claim") sub = "claim";
       else if (positionals[1] === "lanes") sub = "lanes";
+      else if (positionals[1] === "explain") sub = "explain";
       else {
         console.error(
-          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup lanes | pickup claim`,
+          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup explain <slug> | pickup lanes | pickup claim`,
         );
         return 2;
       }
 
-      const maxPos = cmd === "pickup" ? (positionals[1] === undefined ? 1 : 2) : 1;
+      const maxPos = cmd === "pickup"
+        ? (sub === "explain" ? 3 : (positionals[1] === undefined ? 1 : 2))
+        : 1;
       const usage = cmd === "pickup" ? `pickup ${sub}` : cmd;
       const extra = rejectExtraPositionals(positionals, maxPos, usage);
       if (extra !== undefined) return extra;
@@ -1523,6 +1536,20 @@ async function dispatch(
         console.log(await pickupStatusCmd({
           cfg: ctx.cfg,
           node: ctx.node,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      if (sub === "explain") {
+        const explainSlug = positionals[2];
+        if (!explainSlug) {
+          console.error("kanban: pickup explain requires a card slug. Usage: pickup explain <slug> [--json]");
+          return 2;
+        }
+        console.log(await pickupExplainCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug: explainSlug,
           json: values.json as boolean | undefined,
         }));
         return 0;
