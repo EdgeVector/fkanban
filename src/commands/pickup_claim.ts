@@ -14,6 +14,7 @@ import {
   listBoards,
   listCards,
   nowIso,
+  normalizeKind,
   priorityOf,
   requireCard,
   updateCardRecord,
@@ -21,6 +22,8 @@ import {
 } from "../record.ts";
 import {
   buildPickupStatusReportWithSituations,
+  doneWhenPredicate,
+  isSupportedDoneWhenPredicate,
   PICKUP_CATEGORIES,
   selfHealGeneratedPickupBlocker,
   writeGroomedCard,
@@ -205,6 +208,12 @@ function diagnosticExemplar(card: PickupClassification): PickupClaimDiagnosticEx
   };
 }
 
+function isSupportedValidationProofCard(card: Card | undefined): boolean {
+  if (!card || normalizeKind(card.kind) !== "validation") return false;
+  const predicate = doneWhenPredicate(card.body);
+  return predicate.length > 0 && isSupportedDoneWhenPredicate(predicate);
+}
+
 function claimDiagnostics(report: PickupStatusReport, cards: Card[], board: string): PickupClaimDiagnostics {
   const exemplars: PickupClaimDiagnosticExemplar[] = [];
   for (const category of PICKUP_CATEGORIES) {
@@ -216,13 +225,14 @@ function claimDiagnostics(report: PickupStatusReport, cards: Card[], board: stri
         .map(diagnosticExemplar),
     );
   }
+  const bySlug = new Map(cards.map((card) => [card.slug, card]));
   const todoBlockers = report.cards.filter(
     (classification) =>
       classification.board === board &&
       classification.column === "todo" &&
-      !classification.ready,
+      !classification.ready &&
+      !isSupportedValidationProofCard(bySlug.get(classification.slug)),
   );
-  const bySlug = new Map(cards.map((card) => [card.slug, card]));
   const inflightWithoutArtifact = report.cards.filter((classification) => {
     if (classification.category !== "collision" || classification.column !== "doing") return false;
     const card = bySlug.get(classification.slug);

@@ -518,6 +518,53 @@ describe("pickup claim", () => {
     );
   });
 
+  test("supported validation proof cards do not count as todo blockers", async () => {
+    await seedCard(node, card({
+      slug: "terminal-validation",
+      kind: "validation",
+      body: "Kind: validation\nDONE-WHEN: file src/pickup.ts matches /buildPickupStatusReport/\n",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.todo_count).toBe(1);
+    expect(result.todo_blockers).toBe(0);
+    expect(result.todo_blocker_exemplars).toBeUndefined();
+    expect(result.diagnostics?.counts["parked/non-work"]).toBe(1);
+    expect(result.diagnostics?.todo_blockers).toBe(0);
+    expect(isTrueIdlePickupClaim(result)).toBe(true);
+  });
+
+  test("malformed validation proof cards remain visible as todo blockers", async () => {
+    await seedCard(node, card({
+      slug: "valid-validation",
+      kind: "validation",
+      body: "Kind: validation\nDONE-WHEN: file src/pickup.ts matches /buildPickupStatusReport/\n",
+    }));
+    await seedCard(node, card({
+      slug: "malformed-validation",
+      kind: "validation",
+      body: "Kind: validation\nDONE-WHEN: production looks healthy\n",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.todo_count).toBe(2);
+    expect(result.todo_blockers).toBe(1);
+    expect(result.todo_blocker_exemplars).toEqual([{
+      slug: "malformed-validation",
+      category: "parked/non-work",
+      reason: "non-pickup kind: validation",
+      suggestion: "Leave grouping/tracker/program/capstone/validation cards out of default todo, or split a concrete PR card.",
+    }]);
+    expect(result.diagnostics?.counts["parked/non-work"]).toBe(2);
+  });
+
   test("no-eligible reports zero todo count for backlog and doing only", async () => {
     await seedCard(node, card({
       slug: "parked",
