@@ -361,6 +361,54 @@ describe("pickup claim", () => {
     expect(result.skipped.some((s) => s.slug === "overlap-todo" && s.reason === "surface-overlap")).toBe(true);
   });
 
+  test("ignores stale doing overlap rows when point-read truth is done", async () => {
+    await seedCard(node, card({
+      slug: "stale-peer",
+      column: "done",
+      repo: "EdgeVector/fkanban",
+      surfaces: ["src/pickup/**"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\nSurfaces: src/pickup/**\n\nMerged peer.",
+    }));
+    await seedCard(node, card({
+      slug: "overlap-todo",
+      repo: "EdgeVector/fkanban",
+      surfaces: ["src/pickup/claim.ts"],
+      tags: ["p0"],
+      body: "Repo: EdgeVector/fkanban\nBase: main\nPriority: P0\nSurfaces: src/pickup/claim.ts\n\nReady.",
+    }));
+
+    const stalePreview = card({
+      slug: "stale-peer",
+      column: "doing",
+      repo: "EdgeVector/fkanban",
+      surfaces: ["src/pickup/**"],
+      body: "",
+    });
+    const baseQueryAll = node.queryAll.bind(node);
+    node.queryAll = async (args: Parameters<NodeClient["queryAll"]>[0]) => {
+      const res = await baseQueryAll(args);
+      if (args.schemaHash === cfg.schemaHashes.card && !args.filter) {
+        const results = res.results.map((row) =>
+          row.key.hash === "stale-peer"
+            ? { ...row, fields: cardToFields(stalePreview) }
+            : row
+        );
+        return { ...res, results };
+      }
+      return res;
+    };
+
+    const result = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("overlap-todo");
+    expect(result.skipped.some((s) => s.slug === "overlap-todo" && s.reason === "surface-overlap")).toBe(false);
+
+    const onBoard = await findCard(node, cfg, "overlap-todo");
+    expect(onBoard?.column).toBe("doing");
+    expect(onBoard?.assignee).toBe("worker-a");
+  });
+
   test("dry-run selects without moving", async () => {
     await seedCard(node, card({ slug: "ready-one", tags: ["p1"] }));
 

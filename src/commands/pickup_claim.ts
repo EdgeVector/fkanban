@@ -10,6 +10,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config, schemaHashFor } from "../config.ts";
 import {
   boardToFields,
+  findCard,
   findBoard,
   listBoards,
   listCards,
@@ -271,6 +272,35 @@ function todoBlockerFields(diagnostics: PickupClaimDiagnostics): Pick<PickupClai
   };
 }
 
+async function refreshOverlapConflictCards(opts: {
+  cfg: Config;
+  node: NodeClient;
+  cards: Card[];
+  conflicts: Array<{ slug: string }>;
+}): Promise<Card[]> {
+  let nextCards = opts.cards.slice();
+  for (const conflict of opts.conflicts) {
+    let fresh: Card | null;
+    try {
+      fresh = await findCard(opts.node, opts.cfg, conflict.slug);
+    } catch {
+      // Keep the original preview on read errors so uncertain blockers stay protected.
+      continue;
+    }
+    const idx = nextCards.findIndex((card) => card.slug === conflict.slug);
+    if (!fresh) {
+      if (idx >= 0) nextCards.splice(idx, 1);
+      continue;
+    }
+    if (idx >= 0) {
+      nextCards[idx] = fresh;
+    } else {
+      nextCards.push(fresh);
+    }
+  }
+  return nextCards;
+}
+
 async function selfHealTargetTodoBlockers(opts: {
   cfg: Config;
   node: NodeClient;
@@ -375,7 +405,16 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
       continue;
     }
 
-    const overlap = overlapAgainstCards(candidate, liveCards);
+    let overlap = overlapAgainstCards(candidate, liveCards);
+    if (overlap.conflicts.length > 0) {
+      liveCards = await refreshOverlapConflictCards({
+        cfg: opts.cfg,
+        node: opts.node,
+        cards: liveCards,
+        conflicts: overlap.conflicts,
+      });
+      overlap = overlapAgainstCards(candidate, liveCards);
+    }
     if (overlap.conflicts.length > 0) {
       const peers = overlap.conflicts.map((c) => c.slug).join(",");
       skipped.push({
