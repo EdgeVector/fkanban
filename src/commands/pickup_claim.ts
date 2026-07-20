@@ -25,7 +25,7 @@ import {
   doneWhenPredicate,
   isSupportedDoneWhenPredicate,
   PICKUP_CATEGORIES,
-  selfHealGeneratedPickupBlocker,
+  selfHealPickupTodoBlocker,
   writeGroomedCard,
   type PickupCategory,
   type PickupClassification,
@@ -271,7 +271,7 @@ function todoBlockerFields(diagnostics: PickupClaimDiagnostics): Pick<PickupClai
   };
 }
 
-async function selfHealTargetTodoGeneratedBlockers(opts: {
+async function selfHealTargetTodoBlockers(opts: {
   cfg: Config;
   node: NodeClient;
   cards: Card[];
@@ -281,7 +281,7 @@ async function selfHealTargetTodoGeneratedBlockers(opts: {
   let nextCards = opts.cards;
   for (const card of opts.cards) {
     if (card.board !== opts.board || card.column !== "todo") continue;
-    const healed = selfHealGeneratedPickupBlocker(card, nextCards);
+    const healed = selfHealPickupTodoBlocker(card, nextCards);
     if (!healed.changed || !healed.issues.some((issue) => issue.applyable)) continue;
     nextCards = nextCards.map((c) => c.slug === card.slug ? healed.card : c);
     if (!opts.dryRun) {
@@ -301,7 +301,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     listCards(opts.node, opts.cfg),
     listBoards(opts.node, opts.cfg),
   ]);
-  const cardsForSelection = await selfHealTargetTodoGeneratedBlockers({
+  const cardsForSelection = await selfHealTargetTodoBlockers({
     cfg: opts.cfg,
     node: opts.node,
     cards,

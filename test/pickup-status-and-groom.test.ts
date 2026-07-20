@@ -434,7 +434,7 @@ describe("groom stale-blockers", () => {
 
     const { report } = await groomStaleBlockersResult({ cfg, node, apply: true });
     expect(report.dryRun).toBe(false);
-    expect(report.changed).toBe(2);
+    expect(report.changed).toBe(3);
 
     const routing = await findCard(node, cfg, "routing-fixed");
     expect(routing?.body).toContain("Repo: EdgeVector/fkanban\n");
@@ -448,10 +448,11 @@ describe("groom stale-blockers", () => {
     expect(overlapReport?.issues.map((i) => i.kind)).not.toContain("block-status-mismatch");
 
     const human = await findCard(node, cfg, "real-human");
+    expect(human?.column).toBe("backlog");
     expect(human?.block_status).toBe("needs_human");
     expect(human?.block_reason).toBe("waiting on Tom");
     const humanReport = report.cards.find((c) => c.slug === "real-human");
-    expect(humanReport?.changed).toBe(false);
+    expect(humanReport?.changed).toBe(true);
     expect(humanReport?.issues.map((i) => i.kind)).toContain("human-parking-candidate");
   });
 

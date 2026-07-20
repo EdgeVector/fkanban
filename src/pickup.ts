@@ -323,6 +323,9 @@ export type PickupGeneratedBlockerSelfHeal = {
   issues: GroomIssue[];
 };
 
+const HUMAN_GATED_TODO_PARKING_SUGGESTION =
+  "Move the held card to default/backlog; keep block_status=needs_human until the human gate clears.";
+
 function rewriteRepoHeaders(body: string): { body: string; changed: boolean } {
   let changed = false;
   const next = body.replace(/^([ \t]*Repo:[ \t]*)(.*)$/gim, (line, prefix: string, raw: string) => {
@@ -422,17 +425,25 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
       suggestion: "Add a human-readable reason or clear the hold explicitly.",
     });
   }
-  if (
+  if (next.board === "default" && next.column === "todo" && finalBlockStatus === "needs_human" && !generatedReason(card.block_reason)) {
+    issues.push({
+      kind: "human-parking-candidate",
+      message: `intentional ${finalBlockStatus} hold is still in default/todo`,
+      applyable: true,
+      suggestion: HUMAN_GATED_TODO_PARKING_SUGGESTION,
+    });
+    next.column = "backlog";
+  } else if (
     next.board === "default" &&
     next.column === "todo" &&
-    (finalBlockStatus === "needs_human" || finalBlockStatus === "design_first" || finalBlockStatus === "deferred") &&
+    (finalBlockStatus === "design_first" || finalBlockStatus === "deferred") &&
     !generatedReason(card.block_reason)
   ) {
     issues.push({
       kind: "human-parking-candidate",
       message: `intentional ${finalBlockStatus} hold is still in default/todo`,
       applyable: false,
-      suggestion: "Move true human-gated/deferred work to `--board human` or another parking board.",
+      suggestion: "Move held non-pickup work out of default/todo when its sequence is not ready.",
     });
   }
 
@@ -481,6 +492,8 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
 
   const changed =
     next.body !== card.body ||
+    next.board !== card.board ||
+    next.column !== card.column ||
     next.block_status !== card.block_status ||
     next.block_reason !== card.block_reason ||
     next.branch !== card.branch ||
@@ -488,11 +501,11 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
   return { card: next, issues, changed };
 }
 
-export function selfHealGeneratedPickupBlocker(card: Card, allCards: Card[]): PickupGeneratedBlockerSelfHeal {
+export function selfHealPickupTodoBlocker(card: Card, allCards: Card[]): PickupGeneratedBlockerSelfHeal {
   const issues: GroomIssue[] = [];
   const next: Card = { ...card, tags: [...card.tags], deps: [...card.deps] };
 
-  const blockStatus = normalizeBlockStatus(next.block_status);
+  let blockStatus = normalizeBlockStatus(next.block_status);
   if (blockStatus === "none" && generatedReason(next.block_reason)) {
     issues.push({
       kind: "stale-block-status",
@@ -515,6 +528,7 @@ export function selfHealGeneratedPickupBlocker(card: Card, allCards: Card[]): Pi
     });
     next.block_status = "none";
     next.block_reason = "";
+    blockStatus = "none";
   }
 
   const resolvedRepo = resolvePickupRepo(next).ok;
@@ -530,8 +544,25 @@ export function selfHealGeneratedPickupBlocker(card: Card, allCards: Card[]): Pi
     next.body = blockedLines.body;
   }
 
+  if (
+    next.board === "default" &&
+    next.column === "todo" &&
+    blockStatus === "needs_human" &&
+    !generatedReason(next.block_reason)
+  ) {
+    issues.push({
+      kind: "human-parking-candidate",
+      message: "intentional needs_human hold is still in default/todo",
+      applyable: true,
+      suggestion: HUMAN_GATED_TODO_PARKING_SUGGESTION,
+    });
+    next.column = "backlog";
+  }
+
   const changed =
     next.body !== card.body ||
+    next.board !== card.board ||
+    next.column !== card.column ||
     next.block_status !== card.block_status ||
     next.block_reason !== card.block_reason;
   return { card: next, issues, changed };
