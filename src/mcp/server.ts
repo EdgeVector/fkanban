@@ -20,10 +20,11 @@ import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
+import { milestoneAddCmd, milestoneListResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
-import { CARD_KINDS, PRIORITY_TIERS, hydrateCardBodies, type Card } from "../record.ts";
+import { CARD_KINDS, MILESTONE_PROOF_STATUSES, MILESTONE_STATES, PRIORITY_TIERS, hydrateCardBodies, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
 export const FKANBAN_MCP_NAME = "fkanban";
@@ -43,6 +44,8 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_overlap",
   "fkanban_pickup_status",
   "fkanban_board_list",
+  "fkanban_milestone_list",
+  "fkanban_milestone_show",
   "fkanban_doctor",
 ] as const;
 export const FKANBAN_WRITE_TOOLS = [
@@ -57,6 +60,8 @@ export const FKANBAN_WRITE_TOOLS = [
   "fkanban_tag_rm",
   "fkanban_board_create",
   "fkanban_board_rm",
+  "fkanban_milestone_add",
+  "fkanban_milestone_state",
 ] as const;
 export const FKANBAN_TOOL_COUNT =
   FKANBAN_READ_TOOLS.length + FKANBAN_WRITE_TOOLS.length;
@@ -233,6 +238,24 @@ const boardSchema = z.object({
   columns: z.array(z.string()),
   created_at: z.string(),
   updated_at: z.string(),
+});
+
+const milestoneSchema = z.object({
+  slug: z.string(),
+  title: z.string(),
+  body: z.string(),
+  board: z.string(),
+  state: z.string(),
+  position: z.string(),
+  north_star: z.string(),
+  driver: z.string(),
+  deps: z.array(z.string()),
+  proof_card: z.string(),
+  proof_status: z.string(),
+  block_reason: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  completed_at: z.string(),
 });
 
 // Required string args are declared `.optional()` (no Zod `.min(1)`) so an
@@ -553,6 +576,111 @@ export function createFkanbanMcpServer(
   );
 
   server.registerTool(
+    "fkanban_milestone_list",
+    {
+      title: "List milestones",
+      description: "List first-class outcome milestones. Milestones supervise card graphs and are never pickup work.",
+      annotations: { title: "List milestones", readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        board: z.string().optional(),
+        state: z.enum(MILESTONE_STATES).optional(),
+      },
+      outputSchema: { milestones: z.array(milestoneSchema) },
+    },
+    async (args) => {
+      try {
+        const { cfg, node } = requireConfig();
+        const result = await milestoneListResult({ cfg, node, board: args.board, state: args.state });
+        return toolResult(result.text, { milestones: result.milestones });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_milestone_show",
+    {
+      title: "Show milestone",
+      description: "Show one milestone's outcome, lifecycle, driver, dependencies, and proof linkage.",
+      annotations: { title: "Show milestone", readOnlyHint: true, openWorldHint: false },
+      inputSchema: { slug: z.string().optional() },
+      outputSchema: { milestone: milestoneSchema },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
+        const { cfg, node } = requireConfig();
+        const result = await milestoneShowResult({ cfg, node, slug });
+        return toolResult(result.text, { milestone: result.milestone });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_milestone_add",
+    {
+      title: "Add or update milestone",
+      description: "Create or update a first-class outcome milestone. This never creates an executable card.",
+      annotations: { title: "Add or update milestone", idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        slug: z.string().optional(),
+        title: z.string().optional(),
+        body: z.string().optional(),
+        board: z.string().optional(),
+        state: z.enum(MILESTONE_STATES).optional(),
+        position: z.string().optional(),
+        north_star: z.string().optional(),
+        driver: z.string().optional(),
+        deps: z.array(z.string()).optional(),
+        proof_card: z.string().optional(),
+        proof_status: z.enum(MILESTONE_PROOF_STATUSES).optional(),
+        block_reason: z.string().optional(),
+      },
+      outputSchema: { slug: z.string(), action: z.enum(["created", "updated"]), state: z.string() },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
+        const { cfg, node } = requireConfig();
+        const result = await milestoneAddCmd({
+          cfg, node, slug, title: args.title, body: args.body, board: args.board,
+          state: args.state, position: args.position, northStar: args.north_star,
+          driver: args.driver, deps: args.deps, proofCard: args.proof_card,
+          proofStatus: args.proof_status, blockReason: args.block_reason,
+        });
+        return toolResult(`${result.action} milestone ${result.slug} (${result.state})`, result);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_milestone_state",
+    {
+      title: "Transition milestone state",
+      description: "Move a milestone through its supervisory lifecycle. Proof gates are added by the lifecycle feature slice.",
+      annotations: { title: "Transition milestone state", idempotentHint: true, openWorldHint: false },
+      inputSchema: { slug: z.string().optional(), state: z.enum(MILESTONE_STATES).optional() },
+      outputSchema: { slug: z.string(), from: z.string(), to: z.string() },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
+        const state = requireArg(args.state, "milestone state", `Pass one of: ${MILESTONE_STATES.join(", ")}.`);
+        const { cfg, node } = requireConfig();
+        const result = await milestoneStateCmd({ cfg, node, slug, state });
+        return toolResult(`milestone ${slug}: ${result.from} → ${result.to}`, result);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "fkanban_add",
     {
       title: "Add or update a card",
@@ -597,6 +725,7 @@ export function createFkanbanMcpServer(
         block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional().describe("Intentional hold (NOT dependency-blocked, which is derived from deps)."),
         block_reason: z.string().optional().describe("Why, when block_status != none."),
         north_star: z.string().optional().describe("fbrain North Star slug this card advances."),
+        milestone: z.string().optional().describe("fkanban Milestone slug this card advances."),
         pr_url: z.string().optional().describe("PR driving this card, when in flight."),
         branch: z.string().optional().describe("Worktree/feature branch."),
       },
@@ -630,6 +759,7 @@ export function createFkanbanMcpServer(
         if (args.block_status !== undefined) o.blockStatus = args.block_status;
         if (args.block_reason !== undefined) o.blockReason = args.block_reason;
         if (args.north_star !== undefined) o.northStar = args.north_star;
+        if (args.milestone !== undefined) o.milestone = args.milestone;
         if (args.pr_url !== undefined) o.prUrl = args.pr_url;
         if (args.branch !== undefined) o.branch = args.branch;
         const res = await addCmd(o);

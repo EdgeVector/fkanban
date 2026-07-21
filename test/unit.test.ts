@@ -81,9 +81,10 @@ function card(partial: Partial<Card>): Card {
 }
 
 describe("schemas", () => {
-  test("two record types are recognised", () => {
+  test("three record types are recognised", () => {
     expect(isRecordType("card")).toBe(true);
     expect(isRecordType("board")).toBe(true);
+    expect(isRecordType("milestone")).toBe(true);
     expect(isRecordType("design")).toBe(false);
   });
 
@@ -122,6 +123,7 @@ describe("schemas", () => {
       block_status: "String",
       block_reason: "String",
       north_star: "String",
+      milestone: "String",
       pr_url: "String",
       branch: "String",
     });

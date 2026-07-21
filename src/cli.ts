@@ -23,6 +23,7 @@ import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
+import { milestoneAddCmd, milestoneListResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
@@ -90,6 +91,10 @@ Commands:
   board list           list boards (--json)
   board rm <slug>      soft-delete a board (always refuses default; refuses
                        live cards unless --force)
+  milestone add <slug> create/update a first-class outcome milestone
+  milestone list       list milestone portfolio (--board --state --json)
+  milestone show <slug> show one milestone (--json)
+  milestone state <slug> <state> transition milestone lifecycle state
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
   which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
@@ -183,6 +188,7 @@ Structured fields (auto-derived from the body/tags when omitted):
   --block-status <s>    none|needs_human|design_first|deferred (intentional holds)
   --block-reason <text> why, when --block-status is set
   --north-star <slug>   fbrain North Star this card advances
+  --milestone <slug>    fkanban Milestone this card advances
   --pr-url <url>        the PR driving this card (when in flight)
   --branch <name>       worktree/feature branch
 
@@ -197,6 +203,29 @@ Multi-line bodies — pipe via stdin, don't inline:
 
 Example:
   fkanban add ship-login --title "Ship login" --column todo --priority P1 --tags auth`),
+
+  milestone: withFooter(`fkanban milestone — manage bounded, provable outcomes
+
+Usage:
+  fkanban milestone add <slug> [options]
+  fkanban milestone list [--board <slug>] [--state <state>] [--json]
+  fkanban milestone show <slug> [--json]
+  fkanban milestone state <slug> <state> [--json]
+
+Add options:
+  --title <text>        outcome title
+  --body <markdown>     outcome, acceptance criteria, and rationale
+  --board <slug>        owning board (default: default)
+  --state <state>       planned|active|blocked|proving|complete|abandoned
+  --position <N>        portfolio ordering
+  --north-star <slug>   parent Brain North Star
+  --driver <name>       person, agent, or routine driving reconciliation
+  --deps a,b            milestone dependencies
+  --proof-card <slug>   terminal validation card
+  --proof-status <s>    pending|passing|failing|not_required
+  --block-reason <text> why the milestone is blocked
+
+Milestones are supervisory records, never pickup cards.`),
 
   mark: withFooter(`fkanban mark — append one marker line to an existing card body
 
@@ -835,8 +864,9 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
   add: new Set([
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
-    "repo", "base", "kind", "block-status", "block-reason", "north-star", "pr-url", "branch",
+    "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
   ]),
+  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["from", "expect", "position", "force"]),
@@ -995,6 +1025,11 @@ async function main(argv: string[]): Promise<number> {
         "block-status": { type: "string" },
         "block-reason": { type: "string" },
         "north-star": { type: "string" },
+        milestone: { type: "string" },
+        state: { type: "string" },
+        driver: { type: "string" },
+        "proof-card": { type: "string" },
+        "proof-status": { type: "string" },
         "pr-url": { type: "string" },
         branch: { type: "string" },
         force: { type: "boolean" },
@@ -1138,6 +1173,67 @@ async function dispatch(
       return 0;
     }
 
+    case "milestone": {
+      const action = positionals[1];
+      const ctx = loadCtx({ verbose });
+      if (action === "add") {
+        const slug = requirePositional(positionals[2], "milestone add <slug>");
+        const extra = rejectExtraPositionals(positionals, 3, "milestone add <slug>");
+        if (extra !== undefined) return extra;
+        let body = values.body as string | undefined;
+        if (body === undefined) body = await readStdinBodyForAdd();
+        const result = await milestoneAddCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug,
+          title: values.title as string | undefined,
+          body,
+          board: values.board as string | undefined,
+          state: values.state as string | undefined,
+          position: values.position as string | undefined,
+          northStar: values["north-star"] as string | undefined,
+          driver: values.driver as string | undefined,
+          deps: parseTags(values.deps as string | undefined),
+          proofCard: values["proof-card"] as string | undefined,
+          proofStatus: values["proof-status"] as string | undefined,
+          blockReason: values["block-reason"] as string | undefined,
+        });
+        console.log(values.json ? JSON.stringify(result) : `${result.action} milestone ${result.slug} (${result.state})`);
+        return 0;
+      }
+      if (action === "list") {
+        const extra = rejectExtraPositionals(positionals, 2, "milestone list");
+        if (extra !== undefined) return extra;
+        const result = await milestoneListResult({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          board: values.board as string | undefined,
+          state: values.state as string | undefined,
+        });
+        console.log(values.json ? JSON.stringify(result.milestones, null, 2) : result.text);
+        return 0;
+      }
+      if (action === "show") {
+        const slug = requirePositional(positionals[2], "milestone show <slug>");
+        const extra = rejectExtraPositionals(positionals, 3, "milestone show <slug>");
+        if (extra !== undefined) return extra;
+        const result = await milestoneShowResult({ cfg: ctx.cfg, node: ctx.node, slug });
+        console.log(values.json ? JSON.stringify(result.milestone, null, 2) : result.text);
+        return 0;
+      }
+      if (action === "state") {
+        const slug = requirePositional(positionals[2], "milestone state <slug> <state>");
+        const state = requirePositional(positionals[3], "milestone state <slug> <state>");
+        const extra = rejectExtraPositionals(positionals, 4, "milestone state <slug> <state>");
+        if (extra !== undefined) return extra;
+        const result = await milestoneStateCmd({ cfg: ctx.cfg, node: ctx.node, slug, state });
+        console.log(values.json ? JSON.stringify(result) : `milestone ${slug}: ${result.from} → ${result.to}`);
+        return 0;
+      }
+      console.error("kanban: Usage: fkanban milestone add|list|show|state");
+      return 2;
+    }
+
     case "version": {
       const extra = rejectExtraPositionals(positionals, 1, "version");
       if (extra !== undefined) return extra;
@@ -1245,6 +1341,7 @@ async function dispatch(
           blockStatus: values["block-status"] as string | undefined,
           blockReason: values["block-reason"] as string | undefined,
           northStar: values["north-star"] as string | undefined,
+          milestone: values.milestone as string | undefined,
           prUrl: values["pr-url"] as string | undefined,
           branch: values.branch as string | undefined,
           dbLocator,

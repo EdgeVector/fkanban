@@ -22,6 +22,7 @@ import { fieldsFor } from "../src/schemas.ts";
 const FULL_CARD_HASH = "doctorfullhash18";
 const STALE_CARD_HASH = "doctorstalehash10";
 const BOARD_HASH = "doctorboardhash";
+const MILESTONE_HASH = "doctormilestonehash";
 const OLD_CARD_FIELDS = [
   "slug",
   "title",
@@ -63,6 +64,7 @@ function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
               fields: c.fields,
             })),
             { name: BOARD_HASH, descriptive_name: "Board", owner_app_id: "fkanban", fields: fieldsFor("board") },
+            { name: MILESTONE_HASH, descriptive_name: "Milestone", owner_app_id: "fkanban", fields: fieldsFor("milestone") },
           ],
         });
       }
@@ -129,7 +131,7 @@ function writeCfgWithNode(name: string, cardHash: string, nodeUrl: string, nodeS
       nodeUrl,
       schemaServiceUrl: "http://unused.invalid",
       userHash: "u",
-      schemaHashes: { card: cardHash, board: BOARD_HASH },
+      schemaHashes: { card: cardHash, board: BOARD_HASH, milestone: MILESTONE_HASH },
       nodeSocketPath,
     }),
   );
@@ -226,6 +228,7 @@ describe("doctor write-probe", () => {
             schemas: [
               { name: FULL_CARD_HASH, descriptive_name: "Card", owner_app_id: "fkanban", fields: fieldsFor("card") },
               { name: BOARD_HASH, descriptive_name: "Board", owner_app_id: "fkanban", fields: fieldsFor("board") },
+              { name: MILESTONE_HASH, descriptive_name: "Milestone", owner_app_id: "fkanban", fields: fieldsFor("milestone") },
             ],
           });
         }
