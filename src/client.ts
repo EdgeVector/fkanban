@@ -1,4 +1,4 @@
-// Typed HTTP wrappers for fold_db_node + schema_service.
+// Typed HTTP wrappers for the LastDB node.
 //
 // Every node endpoint sends X-User-Hash (missing → 401 MISSING_USER_CONTEXT).
 // Writes go in as NodeOwner (no capability token) — fine for a local /
@@ -44,8 +44,6 @@ import {
   type SearchResult as SdkSearchResult,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
-
-import type { AddSchemaRequest } from "./schemas.ts";
 
 export type Verbose = (msg: string) => void;
 const noopVerbose: Verbose = () => {};
@@ -193,12 +191,6 @@ function busyBackoffMs(attempt: number, body: unknown): number {
   return base + Math.floor(Math.random() * 100);
 }
 
-export type RegisteredSchema = {
-  name: string;
-  descriptive_name: string;
-  fields: string[];
-};
-
 export type LoadedSchema = {
   // The canonical identity hash — what mutations/queries pin to.
   name: string;
@@ -215,12 +207,6 @@ export type LoadedSchema = {
   // Empty when the node omits `fields` (older nodes) — callers fall back to
   // descriptive_name matching + a write probe.
   fields: string[];
-};
-
-export type SchemaServiceClient = {
-  baseUrl: string;
-  registerSchema(req: AddSchemaRequest): Promise<{ canonicalHash: string; status: number }>;
-  getSchemaByHash(hash: string): Promise<RegisteredSchema | null>;
 };
 
 export type NodeClient = {
@@ -284,60 +270,6 @@ const noopCapabilityStore: CapabilityStore = {
   },
   async remove() {},
 };
-
-export function newSchemaServiceClient(
-  baseUrl: string,
-  verbose: Verbose = noopVerbose,
-): SchemaServiceClient {
-  const url = stripTrailingSlash(baseUrl);
-  return {
-    baseUrl: url,
-    async registerSchema(req) {
-      const path = "/v1/schemas";
-      const { res, readBody } = await verboseFetch({ baseUrl: url, path, method: "POST", body: req, verbose, service: "schema", headers: {} });
-      const body = await readBody();
-      if (res.status !== 200 && res.status !== 201) {
-        throw mapSchemaServiceError(res.status, body, path);
-      }
-      const schemaObj =
-        body && typeof body === "object"
-          ? ((body as Record<string, unknown>).schema as Record<string, unknown> | undefined)
-          : undefined;
-      const canonicalHash =
-        schemaObj && typeof schemaObj.name === "string" ? (schemaObj.name as string) : null;
-      if (!canonicalHash) {
-        throw new FkanbanError({
-          code: "schema_register_no_hash",
-          message: `Schema service did not return a canonical hash for ${req.schema.descriptive_name}.`,
-          hint: "fkanban expects `schema.name` to carry the identity hash in the response.",
-        });
-      }
-      return { canonicalHash, status: res.status };
-    },
-    async getSchemaByHash(hash) {
-      const path = `/v1/schema/${encodeURIComponent(hash)}`;
-      const { res, readBody } = await verboseFetch({ baseUrl: url, path, method: "GET", body: undefined, verbose, service: "schema", headers: {} });
-      if (res.status === 404) {
-        await readBody();
-        return null;
-      }
-      const body = await readBody();
-      if (res.status !== 200) throw mapSchemaServiceError(res.status, body, path);
-      const obj = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
-      if (!obj) return null;
-      const wrapped = obj.schema as Record<string, unknown> | undefined;
-      const schemaObj = wrapped && typeof wrapped === "object" ? wrapped : obj;
-      return {
-        name: typeof schemaObj.name === "string" ? schemaObj.name : "",
-        descriptive_name:
-          typeof schemaObj.descriptive_name === "string" ? schemaObj.descriptive_name : "",
-        fields: Array.isArray(schemaObj.fields)
-          ? (schemaObj.fields as unknown[]).filter((v): v is string => typeof v === "string")
-          : [],
-      };
-    },
-  };
-}
 
 // The outcome of one attestation attempt. On failure it carries enough context
 // (whether the socket file even existed, plus the human-readable reason) for the
@@ -1534,14 +1466,5 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
     // 400 with an unusual shape is never reduced to a bare status (fkanban #94).
     message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : errCode ? "" : rawBodySuffix(body)}${errCode ? ` [${errCode}]` : ""}.`,
     hint: status >= 500 ? "Check the node log; this looks like a node-side bug." : undefined,
-  });
-}
-
-function mapSchemaServiceError(status: number, body: unknown, path: string): FkanbanError {
-  const errCode = bodyError(body);
-  const msg = bodyMessage(body);
-  return new FkanbanError({
-    code: `schema_http_${status}`,
-    message: `Schema service ${path} returned HTTP ${status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""}.`,
   });
 }

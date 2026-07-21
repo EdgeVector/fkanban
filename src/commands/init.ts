@@ -154,10 +154,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
   // Step 2: ask Mini to resolve/register fkanban's schemas and return catalog
   // identities. The CLI does not bypass Mini to mint a local identity.
-  print(`[2/${STEPS}] registering ${UNIQUE_SCHEMAS.length + EXTRA_SCHEMAS.length} schemas through Mini`);
+  print(`[2/${STEPS}] syncing ${UNIQUE_SCHEMAS.length + EXTRA_SCHEMAS.length} catalog schemas through Mini`);
   let schemaHashes: Record<string, string>;
   try {
-    schemaHashes = await declareOwnedSchemasLocally(node, print);
+    schemaHashes = await syncOwnedSchemasThroughMini(node, print);
   } catch (err) {
     const degraded = await tryInitSocketOnly({
       err,
@@ -281,7 +281,7 @@ export function assertSafePrimaryConfigRepoint(args: {
  * Mini is responsible for reaching Schema Service when the verified catalog
  * cache cannot reuse an existing identity. No local-only fallback is valid.
  */
-async function declareOwnedSchemasLocally(
+async function syncOwnedSchemasThroughMini(
   node: NodeClient,
   print: (line: string) => void,
 ): Promise<Record<string, string>> {
@@ -308,7 +308,7 @@ async function declareOwnedSchemasLocally(
       throw err;
     }
   }
-  print(`        registered catalog identities persisted`);
+  print(`        catalog identities loaded; expansions reuse prior molecules`);
   return schemaHashes;
 }
 

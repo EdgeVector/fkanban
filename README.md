@@ -26,6 +26,14 @@ Default columns: `backlog → todo → doing → done`.
 > asks Mini to register/resolve the `fkanban/*` schemas and seeds the default
 > board.
 
+Schema setup has one supported path: `kanban init` calls Mini's
+`POST /api/apps/declare-schema`. Mini resolves an existing catalog identity or
+registers a novel shape with Schema Service, anchors added fields as an
+expansion of the prior identity, loads the exact catalog definition, and only
+then returns the hash that fkanban may persist. There is no fkanban-side Schema
+Service script and no Mini local-mint fallback. Existing rows remain visible
+through expansion field mappers; schema changes do not bulk-copy card data.
+
 ## Prerequisites
 
 You need three things before the Quick start, in this order:
