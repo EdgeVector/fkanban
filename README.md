@@ -200,7 +200,7 @@ DONE  (0)
 | `kanban dep rm <slug> <dep>` | remove a dependency edge |
 | `kanban tag add <slug> <tag…>` | add one or more tags to a card, incrementally (keeps the rest) |
 | `kanban tag rm <slug> <tag…>` | remove one or more tags from a card |
-| `kanban list` | render a board as columns or a wide table (`--board --column --tag --assignee --wide --json --full-body --limit N --all`); blocked cards show 🔒 |
+| `kanban list` | render a board as columns, a wide table, or grouped beneath milestone headings (`--group-by-milestone`); blocked cards show 🔒 |
 | `kanban overlap <slug>` | compare a candidate card's surfaces against doing cards in the same repo (exit 2 on declared conflict) |
 | `kanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
 | `kanban pickup claim` | atomic next-card claim: priority order + surface-overlap skip + CAS `todo→doing` (`--worker --prefer-repo --exclude-repo --max-doing --dry-run --json`) |
@@ -218,6 +218,9 @@ DONE  (0)
 | `kanban milestone show <slug>` | show one milestone's outcome, lifecycle, dependencies, driver, and proof linkage (`--json`) |
 | `kanban milestone state <slug> <state>` | transition `planned\|active\|blocked\|proving\|complete\|abandoned` (`--json`) |
 | `kanban milestone reconcile <slug>` | report ready child-card frontier, proof state, and actionable lifecycle warnings (`--json`) |
+| `kanban milestone portfolio` | show milestone North Star, lifecycle, proof, ready frontier, blocker, and warning count (`--board --json`) |
+| `kanban milestone detail <slug>` | show the outcome, proof, warnings, and child cards grouped by fixed columns (`--json`) |
+| `kanban milestone groom` | report actionable driver, proof, frontier, lifecycle, and relationship warnings (`--board --json`) |
 | `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
 | `kanban doctor` | health-check config + node + schemas + a query round-trip |
 | `kanban mcp` | start an MCP server over stdio |
@@ -249,6 +252,13 @@ never completes the milestone. A failed proof returns to `active` with
 `--proof-status failing` for fix-forward work. `milestone reconcile` exposes
 the next ready card frontier and warnings without making the milestone pickup
 work.
+
+Use `milestone portfolio` for the cross-outcome view, `milestone detail` to
+groom one outcome and its card frontier, and `milestone groom` for the health
+queue. The ordinary board remains card-native; `list --group-by-milestone`
+adds milestone headings while keeping cards in their fixed columns and puts
+unlinked work in a final `Unassigned / Operational` section. Milestone records
+themselves never appear as cards.
 
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
@@ -537,6 +547,8 @@ Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_milestone_add`, `fkanban_milestone_list`, `fkanban_milestone_show`,
 `fkanban_milestone_state`,
 `fkanban_milestone_reconcile`,
+`fkanban_milestone_portfolio`, `fkanban_milestone_detail`,
+`fkanban_milestone_groom`,
 `fkanban_doctor`)
 so agents can drive — and self-diagnose — the board.
 

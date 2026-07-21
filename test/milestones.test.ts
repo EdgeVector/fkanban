@@ -3,8 +3,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { milestoneAddCmd, milestoneListResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
+import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
+import { listCmd } from "../src/commands/list.ts";
 import { boardToFields, findCard, listCards, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { createFkanbanMcpServer } from "../src/mcp/server.ts";
@@ -125,6 +126,45 @@ describe("first-class milestones", () => {
     expect(result.warnings.map((warning) => warning.code)).toEqual(expect.arrayContaining(["no-driver", "no-proof-card"]));
   });
 
+  test("portfolio, detail, grooming, and grouped board expose the milestone operating view", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({ cfg, node, slug: "healthy-outcome", title: "Healthy outcome", state: "active", northStar: "north-a", driver: "driver-a" });
+    await addCmd({ cfg, node, slug: "healthy-slice", title: "Healthy slice", milestone: "healthy-outcome", northStar: "north-a", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo" });
+    await addCmd({ cfg, node, slug: "healthy-proof", title: "Healthy proof", milestone: "healthy-outcome", northStar: "north-a", kind: "validation", column: "backlog" });
+    await milestoneAddCmd({ cfg, node, slug: "healthy-outcome", proofCard: "healthy-proof" });
+    await addCmd({ cfg, node, slug: "operational-card", title: "Operational card", kind: "tracker", column: "backlog" });
+
+    const portfolio = await milestonePortfolioResult({ cfg, node });
+    expect(portfolio.entries[0]).toMatchObject({ slug: "healthy-outcome", north_star: "north-a", state: "active", ready: ["healthy-slice"], proof_status: "pending" });
+    const detail = await milestoneDetailResult({ cfg, node, slug: "healthy-outcome" });
+    expect(detail.detail.columns.todo?.map((card) => card.slug)).toEqual(["healthy-slice"]);
+    expect(detail.text).toContain("Healthy outcome");
+    expect((await milestoneGroomResult({ cfg, node })).issues).toEqual([]);
+
+    const grouped = await listCmd({ cfg, node, groupByMilestone: true });
+    expect(grouped).toContain("HEALTHY OUTCOME");
+    expect(grouped).toContain("UNASSIGNED / OPERATIONAL");
+    expect(grouped).toContain("healthy-slice");
+    const groupedJson = JSON.parse(await listCmd({ cfg, node, groupByMilestone: true, json: true }));
+    expect(groupedJson.groups.map((group: { slug: string }) => group.slug)).toEqual(["healthy-outcome", "unassigned-operational"]);
+  });
+
+  test("groom renders blocked, proving, and stale-complete warning fixtures", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({ cfg, node, slug: "blocked-outcome", title: "Blocked", state: "active" });
+    await milestoneAddCmd({ cfg, node, slug: "blocked-outcome", state: "blocked" });
+    await milestoneAddCmd({ cfg, node, slug: "proving-outcome", title: "Proving", state: "active", driver: "driver" });
+    await addCmd({ cfg, node, slug: "proving-proof", title: "Proof", milestone: "proving-outcome", kind: "validation", column: "backlog" });
+    await milestoneAddCmd({ cfg, node, slug: "proving-outcome", proofCard: "proving-proof" });
+    await milestoneStateCmd({ cfg, node, slug: "proving-outcome", state: "proving" });
+    const groom = await milestoneGroomResult({ cfg, node });
+    expect(groom.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(["blocked-no-reason", "no-driver", "implementation-done-proof-pending"]));
+    expect(groom.text).toContain("blocked-outcome");
+    expect(groom.text).toContain("proving-outcome");
+  });
+
   test("cards link to a live milestone and reject board/North-Star drift", async () => {
     const node = fakeNode();
     await seedBoard(node);
@@ -166,5 +206,13 @@ describe("first-class milestones", () => {
     const reconciled = await client.callTool({ name: "fkanban_milestone_reconcile", arguments: { slug: "mcp-outcome" } });
     expect(reconciled.isError).not.toBe(true);
     expect((reconciled.structuredContent as { proof: { slug: string } }).proof.slug).toBe("mcp-proof");
+    for (const [name, args] of [
+      ["fkanban_milestone_portfolio", {}],
+      ["fkanban_milestone_detail", { slug: "mcp-outcome" }],
+      ["fkanban_milestone_groom", {}],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError).not.toBe(true);
+    }
   });
 });

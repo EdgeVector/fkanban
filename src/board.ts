@@ -2,7 +2,7 @@
 // listed under their column in position order.
 
 import { DEFAULT_BOARD_SLUG, resolveColumns } from "./schemas.ts";
-import { normalizeKind, sortCards, type Board, type Card, type DepStatus } from "./record.ts";
+import { normalizeKind, sortCards, type Board, type Card, type DepStatus, type Milestone } from "./record.ts";
 import {
   formatPipelineStatusLines,
   type PipelineAttachResult,
@@ -31,6 +31,25 @@ export type RenderOptions = {
   // found: fkanban`.
   invocation?: string;
 };
+
+export type MilestoneCardGroup<T extends Card = Card> = {
+  slug: string;
+  title: string;
+  state: string;
+  cards: T[];
+  unassigned: boolean;
+};
+
+export function buildMilestoneCardGroups<T extends Card>(cards: T[], milestones: Milestone[]): MilestoneCardGroup<T>[] {
+  const bySlug = new Map(milestones.map((milestone) => [milestone.slug, milestone]));
+  const groups = milestones
+    .slice()
+    .sort((a, b) => Number(a.position) - Number(b.position) || a.slug.localeCompare(b.slug))
+    .map((milestone) => ({ slug: milestone.slug, title: milestone.title, state: milestone.state, cards: cards.filter((card) => card.milestone === milestone.slug), unassigned: false }));
+  const unassigned = cards.filter((card) => !card.milestone || !bySlug.has(card.milestone));
+  if (unassigned.length) groups.push({ slug: "unassigned-operational", title: "Unassigned / Operational", state: "", cards: unassigned, unassigned: true });
+  return groups;
+}
 
 const COLORS: Record<string, string> = {
   reset: "\x1b[0m",
@@ -137,6 +156,37 @@ export function renderBoard(
     }
     lines.push("");
   }
+  return lines.join("\n").replace(/\n+$/, "\n");
+}
+
+export function renderBoardGroupedByMilestone(
+  board: Board,
+  groups: MilestoneCardGroup[],
+  opts: RenderOptions = {},
+): string {
+  const color = opts.color ?? defaultColor();
+  const columns = resolveColumns(board.columns).filter((column) => !opts.column || column === opts.column);
+  const terminal = resolveColumns(board.columns).at(-1);
+  const cap = opts.limit && opts.limit > 0 ? opts.limit : 0;
+  const lines = [paint(color, "bold", `${board.title || board.slug}  ${paint(color, "dim", `(${board.slug}) · grouped by milestone`)}`), ""];
+  for (const group of groups) {
+    lines.push(paint(color, group.unassigned ? "magenta" : "bold", `${group.title.toUpperCase()}  ${paint(color, "dim", `(${group.slug}${group.state ? ` · ${group.state}` : ""})`)}`));
+    for (const column of columns) {
+      const inColumn = sortCards(group.cards.filter((card) => card.column === column));
+      lines.push(`  ${column.toUpperCase()} (${inColumn.length})`);
+      if (!inColumn.length) {
+        lines.push(paint(color, "dim", "    —"));
+        continue;
+      }
+      const visible = cap > 0 && inColumn.length > cap
+        ? column === terminal ? inColumn.slice(-cap) : inColumn.slice(0, cap)
+        : inColumn;
+      for (const card of visible) lines.push(`  ${renderCardLine(card, color, opts.blocked?.has(card.slug) ?? false)}`);
+      if (visible.length < inColumn.length) lines.push(paint(color, "dim", `    … ${inColumn.length - visible.length} more (--all)`));
+    }
+    lines.push("");
+  }
+  if (!groups.length) lines.push(paint(color, "dim", "No milestone-linked or operational cards."));
   return lines.join("\n").replace(/\n+$/, "\n");
 }
 

@@ -16,6 +16,7 @@ import {
   listCardsForDisplay,
   listCardsOnBoard,
   listDependencyStatusesForCards,
+  listMilestones,
   requireBoard,
   sortCards,
   type Card,
@@ -25,6 +26,8 @@ import {
   capPerColumn,
   previewCardBodies,
   renderBoard,
+  buildMilestoneCardGroups,
+  renderBoardGroupedByMilestone,
   renderWideTable,
   resolveLimits,
   type RenderOptions,
@@ -105,6 +108,7 @@ export type ListOptions = {
   // CLI compatibility escape hatch: `--full-body` asks for the historical
   // unpreviewed JSON surface. MCP has its own `full_body` option.
   fullBody?: boolean;
+  groupByMilestone?: boolean;
 };
 
 // Both the human text and the structured (`--json`) payload, built from a
@@ -124,7 +128,7 @@ export type ListOptions = {
 // unchanged (it consumes only the 🔒 marker via `blockedSlugSet`).
 export async function listResult(
   opts: ListOptions,
-): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number }> {
+): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
   const boardSlug = opts.board ?? "default";
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently render an empty default-column board. The
@@ -214,10 +218,12 @@ export async function listResult(
     const cross = await listCardsForDisplay(opts.node, opts.cfg);
     footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation());
   }
-  const text = footer
-    ? `${renderBoard(resolvedBoard, cards, renderOpts)}\n${footer}\n`
+  const milestones = opts.groupByMilestone ? (await listMilestones(opts.node, opts.cfg)).filter((milestone) => milestone.board === boardSlug) : undefined;
+  const rendered = milestones
+    ? renderBoardGroupedByMilestone(resolvedBoard, buildMilestoneCardGroups(cards, milestones), renderOpts)
     : renderBoard(resolvedBoard, cards, renderOpts);
-  return { text, cards: enriched, board: resolvedBoard, jsonLimit };
+  const text = footer ? `${rendered}\n${footer}\n` : rendered;
+  return { text, cards: enriched, board: resolvedBoard, jsonLimit, milestones };
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
@@ -229,7 +235,7 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     !opts.json &&
     !opts.wide &&
     (projectionFields.length === 0 || !fieldProjectionNeedsFullCards(projectionFields));
-  const { text, cards, board, jsonLimit } = await listResult({ ...opts, displayOnly });
+  const { text, cards, board, jsonLimit, milestones } = await listResult({ ...opts, displayOnly });
   if (projectionFields.length > 0) {
     const out = jsonLimit > 0 ? capPerColumn(board, cards, jsonLimit, opts.column) : cards;
     return renderFieldProjection(out, projectionFields);
@@ -259,6 +265,9 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   const out = broadJson || implicitJsonDefault || opts.fullBody
     ? previewCardBodies(withBodies, opts.fullBody ?? false)
     : withBodies;
+  if (opts.groupByMilestone && milestones) {
+    return JSON.stringify({ groups: buildMilestoneCardGroups(out, milestones) }, null, 2);
+  }
   return JSON.stringify(out, null, 2);
 }
 

@@ -20,7 +20,7 @@ import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
-import { milestoneAddCmd, milestoneListResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
+import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
@@ -47,6 +47,9 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_milestone_list",
   "fkanban_milestone_show",
   "fkanban_milestone_reconcile",
+  "fkanban_milestone_portfolio",
+  "fkanban_milestone_detail",
+  "fkanban_milestone_groom",
   "fkanban_doctor",
 ] as const;
 export const FKANBAN_WRITE_TOOLS = [
@@ -702,6 +705,70 @@ export function createFkanbanMcpServer(
         const { cfg, node } = requireConfig();
         const result = await milestoneReconcileResult({ cfg, node, slug });
         return toolResult(result.text, { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  const milestoneChildSchema = z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) });
+  const milestoneWarningSchema = z.object({ code: z.string(), message: z.string(), hint: z.string() });
+
+  server.registerTool(
+    "fkanban_milestone_portfolio",
+    {
+      title: "Milestone portfolio",
+      description: "List milestone health with North Star, lifecycle, proof, ready frontier, blocker, and warning count.",
+      annotations: { title: "Milestone portfolio", readOnlyHint: true, openWorldHint: false },
+      inputSchema: { board: z.string().optional() },
+      outputSchema: { entries: z.array(z.object({ slug: z.string(), title: z.string(), north_star: z.string(), state: z.string(), driver: z.string(), proof_card: z.string(), proof_status: z.string(), ready: z.array(z.string()), blocker: z.string(), warning_count: z.number() })) },
+    },
+    async (args) => {
+      try {
+        const { cfg, node } = requireConfig();
+        const result = await milestonePortfolioResult({ cfg, node, board: args.board });
+        return toolResult(result.text, { entries: result.entries });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_milestone_detail",
+    {
+      title: "Milestone detail",
+      description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns.",
+      annotations: { title: "Milestone detail", readOnlyHint: true, openWorldHint: false },
+      inputSchema: { slug: z.string().optional() },
+      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), columns: z.record(z.string(), z.array(milestoneChildSchema)) },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
+        const { cfg, node } = requireConfig();
+        const result = await milestoneDetailResult({ cfg, node, slug });
+        return toolResult(result.text, result.detail);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_milestone_groom",
+    {
+      title: "Groom milestones",
+      description: "Report actionable lifecycle, proof, driver, frontier, and relationship warnings across milestones.",
+      annotations: { title: "Groom milestones", readOnlyHint: true, openWorldHint: false },
+      inputSchema: { board: z.string().optional() },
+      outputSchema: { issues: z.array(z.object({ code: z.string(), message: z.string(), hint: z.string(), milestone: z.string().optional(), card: z.string().optional() })) },
+    },
+    async (args) => {
+      try {
+        const { cfg, node } = requireConfig();
+        const result = await milestoneGroomResult({ cfg, node, board: args.board });
+        return toolResult(result.text, { issues: result.issues });
       } catch (err) {
         return errorResult(err);
       }
