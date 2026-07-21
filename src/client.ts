@@ -89,6 +89,20 @@ export type RawResponse = {
   json: unknown;
 };
 
+export type AppSearchOptions = {
+  k?: number;
+};
+
+export type AppSearchHit = {
+  key_value: KeyValue;
+  fields: RowFields;
+  metadata?: unknown;
+  author_pub_key: string;
+  schema_name: string;
+  schema_display_name: string;
+  score: number;
+};
+
 export type CasExpectation =
   | { type: "absent"; field: string }
   | { type: "value"; field: string; value: JsonValue };
@@ -246,6 +260,7 @@ export type NodeClient = {
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string; rangeKey?: string | null }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse>;
+  search?(query: string, opts?: AppSearchOptions): Promise<AppSearchHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
   // Which transport local node requests take RIGHT NOW: `socket` when an owner
   // socket was threaded in and the file currently exists (the socket carries
@@ -673,6 +688,13 @@ export function newNodeClient(opts: {
     return queryResponseFromSdk({ schema, rowCount, rows, page });
   };
 
+  const appSearch = async (query: string, searchOpts?: AppSearchOptions): Promise<AppSearchHit[]> => {
+    const result = await sdkDataPath("/api/app/search", (client) =>
+      client.search(query, { k: searchOpts?.k ?? 50 }),
+    );
+    return appSearchHitsFromSdkSearch(result);
+  };
+
   const callJson = async (
     path: string,
     method: "GET" | "POST",
@@ -861,13 +883,12 @@ export function newNodeClient(opts: {
       );
       return queryResponseFromSdk(result);
     },
+    search: appSearch,
     async rawCall(method, path, body) {
       const sdkSearch = sdkSearchFromNativeIndexPath(method, path);
       if (sdkSearch !== null) {
-        const result = await sdkDataPath("/api/app/search", (client) =>
-          client.search(sdkSearch.query, { k: sdkSearch.k }),
-        );
-        const json = nativeIndexJsonFromSdkSearch(result);
+        const hits = await appSearch(sdkSearch.query, { k: sdkSearch.k });
+        const json = nativeIndexJsonFromAppSearchHits(hits);
         return { status: 200, headers: new Headers(), body: JSON.stringify(json), json };
       }
       await ensureAttested();
@@ -962,19 +983,23 @@ function sdkSearchFromNativeIndexPath(method: string, path: string): { query: st
   return { query, k: 50 };
 }
 
-function nativeIndexJsonFromSdkSearch(result: SdkSearchResult): unknown {
+function nativeIndexJsonFromAppSearchHits(hits: AppSearchHit[]): unknown {
   return {
     ok: true,
-    results: result.hits.map((hit) => ({
-      key_value: hit.keyValue ?? renderedKeyFallback(fieldString(hit.fields, "slug") ?? hit.key),
-      fields: hit.fields,
-      metadata: hit.metadata,
-      author_pub_key: hit.authorPubKey ?? "",
-      schema_name: hit.schemaName,
-      schema_display_name: hit.schemaDisplayName ?? "",
-      score: hit.score,
-    })),
+    results: hits,
   };
+}
+
+function appSearchHitsFromSdkSearch(result: SdkSearchResult): AppSearchHit[] {
+  return result.hits.map((hit) => ({
+    key_value: hit.keyValue ?? renderedKeyFallback(fieldString(hit.fields, "slug") ?? hit.key),
+    fields: hit.fields,
+    metadata: hit.metadata,
+    author_pub_key: hit.authorPubKey ?? "",
+    schema_name: hit.schemaName,
+    schema_display_name: hit.schemaDisplayName ?? "",
+    score: hit.score ?? 0,
+  }));
 }
 
 function fieldString(fields: RowFields, key: string): string | null {

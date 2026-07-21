@@ -2,7 +2,7 @@
 // across slug, title, body, assignee, and tags. Matches can span columns and
 // boards, so results render as a flat, location-annotated list (or `--json`).
 
-import { FkanbanError, type NodeClient } from "../client.ts";
+import { FkanbanError, type AppSearchHit, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   blockedSlugSet,
@@ -55,6 +55,26 @@ function debugSearchPlan(plan: SearchPlan, detail: Record<string, unknown>): voi
   console.error(`fkanban: query-plan search ${plan} ${JSON.stringify(detail)}`);
 }
 
+function appSearchCardSlugs(results: AppSearchHit[], cardSchemaHash: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const hit of results) {
+    const schemaName = hit.schema_name;
+    const schemaDisplayName = hit.schema_display_name;
+    const schemaMatches = cardSchemaHash.length > 0
+      ? schemaName === cardSchemaHash
+      : schemaDisplayName === "Card" || schemaDisplayName === "fkanban/Card";
+    if (!schemaMatches) {
+      continue;
+    }
+    const slug = hit.key_value.hash;
+    if (typeof slug !== "string" || slug.length === 0 || seen.has(slug)) continue;
+    seen.add(slug);
+    out.push(slug);
+  }
+  return out;
+}
+
 function nativeIndexPath(query: string): string {
   const params = new URLSearchParams({
     q: query,
@@ -63,37 +83,44 @@ function nativeIndexPath(query: string): string {
   return `/api/native-index/search?${params.toString()}`;
 }
 
-function nativeCardSlugs(json: unknown, cardSchemaHash: string): string[] {
+function legacyNativeCardSlugs(json: unknown, cardSchemaHash: string): string[] {
   if (typeof json !== "object" || json === null) return [];
   const results = (json as Record<string, unknown>).results;
   if (!Array.isArray(results)) return [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const hit of results) {
-    if (typeof hit !== "object" || hit === null) continue;
-    const h = hit as Record<string, unknown>;
-    const schemaName = typeof h.schema_name === "string" ? h.schema_name : "";
-    const schemaDisplayName = typeof h.schema_display_name === "string" ? h.schema_display_name : "";
-    const schemaMatches = cardSchemaHash.length > 0
-      ? schemaName === cardSchemaHash
-      : schemaDisplayName === "Card" || schemaDisplayName === "fkanban/Card";
-    if (!schemaMatches) {
-      continue;
-    }
-    const keyValue = h.key_value;
-    if (typeof keyValue !== "object" || keyValue === null) continue;
-    const slug = (keyValue as Record<string, unknown>).hash;
-    if (typeof slug !== "string" || slug.length === 0 || seen.has(slug)) continue;
-    seen.add(slug);
-    out.push(slug);
-  }
-  return out;
+  return appSearchCardSlugs(results.map(legacyNativeHitToAppSearchHit).filter((h): h is AppSearchHit => h !== null), cardSchemaHash);
+}
+
+function legacyNativeHitToAppSearchHit(hit: unknown): AppSearchHit | null {
+  if (typeof hit !== "object" || hit === null) return null;
+  const h = hit as Record<string, unknown>;
+  const keyValue = h.key_value;
+  if (typeof keyValue !== "object" || keyValue === null) return null;
+  const key = keyValue as Record<string, unknown>;
+  return {
+    key_value: {
+      hash: typeof key.hash === "string" ? key.hash : null,
+      range: typeof key.range === "string" ? key.range : null,
+    },
+    fields: typeof h.fields === "object" && h.fields !== null ? h.fields as AppSearchHit["fields"] : {},
+    metadata: h.metadata,
+    author_pub_key: typeof h.author_pub_key === "string" ? h.author_pub_key : "",
+    schema_name: typeof h.schema_name === "string" ? h.schema_name : "",
+    schema_display_name: typeof h.schema_display_name === "string" ? h.schema_display_name : "",
+    score: typeof h.score === "number" ? h.score : 0,
+  };
 }
 
 async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: string[]; saturated: boolean } | null> {
+  if (opts.node.search) {
+    const hits = await opts.node.search(opts.query, { k: NATIVE_INDEX_RESULT_CAP });
+    return {
+      slugs: appSearchCardSlugs(hits, opts.cfg.schemaHashes.card ?? ""),
+      saturated: hits.length >= NATIVE_INDEX_RESULT_CAP,
+    };
+  }
   const res = await opts.node.rawCall("GET", nativeIndexPath(opts.query));
   if (res.status !== 200) return null;
-  const slugs = nativeCardSlugs(res.json, opts.cfg.schemaHashes.card ?? "");
+  const slugs = legacyNativeCardSlugs(res.json, opts.cfg.schemaHashes.card ?? "");
   return {
     slugs,
     saturated: slugs.length >= NATIVE_INDEX_RESULT_CAP,
