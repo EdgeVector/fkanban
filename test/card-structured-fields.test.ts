@@ -22,6 +22,7 @@ import {
   parseBodyTagsHeader,
   PICKUP_AREA_BLOCK_PREFIX,
   repairStructuredFieldsFromBody,
+  resolveCreatedBy,
   resolvePickupRepo,
   rowToCard,
   type Card,
@@ -78,6 +79,7 @@ describe("normalizers", () => {
 describe("cardToFields ⇄ rowToCard round-trip", () => {
   test("structured fields survive a write/read cycle", () => {
     const c = card({
+      created_by: "routine:program-driver",
       repo: "EdgeVector/fold",
       db: "lastdb://org/edgevector/company",
       base: "main",
@@ -91,6 +93,7 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
     });
     const back = rowToCard({ fields: cardToFields(c), key: { hash: c.slug, range: null } });
     expect(back.repo).toBe("EdgeVector/fold");
+    expect(back.created_by).toBe("routine:program-driver");
     expect(back.db).toBe("lastdb://org/edgevector/company");
     expect(back.base).toBe("main");
     expect(back.block_status).toBe("needs_human");
@@ -111,9 +114,39 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
     expect(legacy.kind).toBe("");
     expect(legacy.block_status).toBe("");
     expect(legacy.surfaces).toEqual([]);
+    expect(legacy.created_by).toBe("unknown");
     // normalizers make the empties safe to act on
     expect(normalizeKind(legacy.kind)).toBe("pr");
     expect(normalizeBlockStatus(legacy.block_status)).toBe("none");
+  });
+});
+
+describe("creator provenance resolution", () => {
+  test("uses explicit, configured, routine, Codex, Claude, user, then unknown identity", () => {
+    expect(resolveCreatedBy("explicit:me", { LASTGIT_ACTOR: "routine:x" })).toBe("explicit:me");
+    expect(resolveCreatedBy(undefined, { FKANBAN_CREATED_BY: "wrapper:admin" })).toBe("wrapper:admin");
+    expect(resolveCreatedBy(undefined, { LASTGIT_ACTOR: "routine:program-driver" })).toBe("routine:program-driver");
+    expect(resolveCreatedBy(undefined, { DRIVEN_BY: "routine", AUTOMATION_ID: "dogfood-rotate" })).toBe("routine:dogfood-rotate");
+    expect(resolveCreatedBy(undefined, { CODEX_THREAD_ID: "thread-123" })).toBe("codex:thread-123");
+    expect(resolveCreatedBy(undefined, { CLAUDE_SESSION_ID: "session-456" })).toBe("claude:session-456");
+    expect(resolveCreatedBy(undefined, { USER: "tom" })).toBe("user:tom");
+    expect(resolveCreatedBy(undefined, {})).toBe("unknown");
+  });
+
+  test("legacy body header preserves creator when the schema lacks the field", () => {
+    const legacy = rowToCard({
+      fields: {
+        slug: "old-with-header",
+        title: "old",
+        body: "Created By: routine:legacy-driver\n\nbody",
+        board: "default",
+        column: "todo",
+        position: "1",
+        tags: [],
+      },
+      key: { hash: "old-with-header", range: null },
+    });
+    expect(legacy.created_by).toBe("routine:legacy-driver");
   });
 });
 

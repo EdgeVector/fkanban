@@ -113,6 +113,7 @@ describe("schemas", () => {
       deps: { Array: "String" },
       surfaces: { Array: "String" },
       created_at: "String",
+      created_by: "String",
       updated_at: "String",
       db: "String",
       repo: "String",

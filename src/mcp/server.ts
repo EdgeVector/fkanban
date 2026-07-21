@@ -185,6 +185,7 @@ const cardShape = {
   deps: z.array(z.string()),
   surfaces: z.array(z.string()),
   created_at: z.string(),
+  created_by: z.string(),
   updated_at: z.string(),
   done_at: z.string(),
 } as const;
@@ -565,6 +566,7 @@ export function createFkanbanMcpServer(
         board: z.string().optional().describe("Board slug (default: `default`)."),
         column: z.string().optional().describe("Column to place the card in."),
         assignee: z.string().optional().describe("Who owns the card."),
+        created_by: z.string().optional().describe("Creator identity override for a new card. Immutable after creation; normally inferred from routine/Codex environment."),
         tags: z
           .array(z.string())
           .optional()
@@ -615,6 +617,7 @@ export function createFkanbanMcpServer(
         if (args.board !== undefined) o.board = args.board;
         if (args.column !== undefined) o.column = args.column;
         if (args.assignee !== undefined) o.assignee = args.assignee;
+        if (args.created_by !== undefined) o.createdBy = args.created_by;
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
         if (args.replace_deps !== undefined) o.replaceDeps = args.replace_deps;

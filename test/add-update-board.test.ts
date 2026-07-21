@@ -148,6 +148,29 @@ describe("add update preserves the card's board", () => {
     expect(after?.tags).toContain("p2");
   });
 
+  test("creator provenance is captured once and preserved by ordinary upserts", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "creator-card",
+      title: "Creator card",
+      createdBy: "routine:dogfood-rotate",
+    });
+    expect((await findCard(node, cfg, "creator-card"))?.created_by).toBe("routine:dogfood-rotate");
+
+    await addCmd({ cfg, node, slug: "creator-card", title: "Renamed" });
+    expect((await findCard(node, cfg, "creator-card"))?.created_by).toBe("routine:dogfood-rotate");
+  });
+
+  test("a conflicting explicit creator cannot rewrite card history", async () => {
+    await addCmd({ cfg, node, slug: "immutable-creator", createdBy: "codex:original" });
+
+    await expect(
+      addCmd({ cfg, node, slug: "immutable-creator", createdBy: "codex:different" }),
+    ).rejects.toMatchObject({ code: "created_by_immutable" });
+    expect((await findCard(node, cfg, "immutable-creator"))?.created_by).toBe("codex:original");
+  });
+
   test("dep add on a todo card demotes it to backlog (pickup lane stays clean)", async () => {
     await addCmd({
       cfg,

@@ -312,6 +312,7 @@ export function renderCardDetail(
   lines.push(paint(color, "bold", c.title || c.slug) + blocked);
   lines.push(paint(color, "dim", `${c.slug} · ${c.board}/${c.column}`));
   if (c.assignee) lines.push(`assignee: @${c.assignee}`);
+  lines.push(`created by: ${c.created_by || "unknown"}`);
   if (c.tags.length > 0) lines.push(`tags: ${c.tags.map((t) => `#${t}`).join(" ")}`);
   // Structured pickup fields — only shown when set, so plain cards stay terse.
   if (c.repo) lines.push(`repo: ${c.repo}${c.base ? ` (base ${c.base})` : ""}`);
