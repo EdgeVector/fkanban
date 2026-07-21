@@ -21,6 +21,8 @@ import {
   upsertMilestoneRecord,
   validateSlug,
   type Milestone,
+  type Card,
+  type Board,
 } from "../record.ts";
 
 export type MilestoneWarning = {
@@ -43,6 +45,24 @@ export type MilestoneReconcileResult = {
   ready: MilestoneChildStatus[];
   proof: { slug: string; terminal: boolean; passingEvidence: boolean } | null;
   warnings: MilestoneWarning[];
+};
+
+export type MilestonePortfolioEntry = {
+  slug: string;
+  title: string;
+  north_star: string;
+  state: string;
+  driver: string;
+  proof_card: string;
+  proof_status: string;
+  ready: string[];
+  blocker: string;
+  warning_count: number;
+};
+
+export type MilestoneGroomIssue = MilestoneWarning & {
+  milestone?: string;
+  card?: string;
 };
 
 const ALLOWED_TRANSITIONS: Record<string, readonly string[]> = {
@@ -267,7 +287,21 @@ export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeCl
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
   const children = (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
-  const terminals = boardTerminalMap(await listBoards(opts.node, opts.cfg));
+  const boards = await listBoards(opts.node, opts.cfg);
+  const proofCard = milestone.proof_card ? await findCard(opts.node, opts.cfg, milestone.proof_card) : null;
+  const result = milestoneReconcileFromSnapshot(milestone, children, statuses, boards, proofCard);
+  return { ...result, text: renderMilestoneReconcile(result) };
+}
+
+export function milestoneReconcileFromSnapshot(
+  milestone: Milestone,
+  boardCards: Card[],
+  statuses: Card[],
+  boards: Board[],
+  proofCard: Card | null,
+): MilestoneReconcileResult {
+  const children = boardCards.filter((card) => card.milestone === milestone.slug);
+  const terminals = boardTerminalMap(boards);
   const childStatuses = children.map((card): MilestoneChildStatus => {
     const dep = depStatus(card, statuses, terminals);
     return { slug: card.slug, title: card.title, column: card.column, blocked: dep.blocked, blockedBy: dep.blockedBy };
@@ -277,7 +311,6 @@ export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeCl
     const card = bySlug.get(status.slug)!;
     return status.column === "todo" && !status.blocked && normalizeKind(card.kind) === "pr" && normalizeBlockStatus(card.block_status) === "none";
   });
-  const proofCard = milestone.proof_card ? await findCard(opts.node, opts.cfg, milestone.proof_card) : null;
   const proof = proofCard ? {
     slug: proofCard.slug,
     terminal: proofCard.column === (terminals.get(proofCard.board) ?? "done"),
@@ -290,14 +323,78 @@ export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeCl
   else if (proofCard.board !== milestone.board || proofCard.milestone !== milestone.slug) warnings.push({ code: "proof-card-mismatch", message: "Proof card board or milestone link does not match.", hint: "Align the proof card's --board and --milestone fields." });
   if (milestone.state === "blocked" && !milestone.block_reason) warnings.push({ code: "blocked-no-reason", message: "Blocked milestone has no reason.", hint: "Add --block-reason or return it to active." });
   const incomplete = childStatuses.filter((child) => child.column !== (terminals.get(milestone.board) ?? "done") && child.slug !== milestone.proof_card);
-  if (milestone.state === "active" && incomplete.length > 0 && ready.length === 0) warnings.push({ code: "active-no-ready-card", message: "Active milestone has implementation work but no ready card frontier.", hint: "Resolve dependencies/holds or promote the next implementation card to todo." });
+  const inFlight = incomplete.some((child) => child.column === "doing");
+  if (milestone.state === "active" && incomplete.length > 0 && ready.length === 0 && !inFlight) warnings.push({ code: "active-no-ready-card", message: "Active milestone has implementation work but no ready or in-flight card frontier.", hint: "Resolve dependencies/holds or promote the next implementation card to todo." });
   if (incomplete.length === 0 && milestone.state !== "complete" && (!proof?.terminal || !proof.passingEvidence || milestone.proof_status !== "passing")) warnings.push({ code: "implementation-done-proof-pending", message: "Implementation is done but terminal passing proof is still pending.", hint: "Run the proof, record `PROOF: PASS`, mark its status passing, then complete the milestone." });
-  const result = { milestone, children: childStatuses, ready, proof, warnings };
-  const text = [
-    `${milestone.title} (${milestone.slug}) — ${milestone.state}`,
-    `ready frontier: ${ready.length ? ready.map((card) => card.slug).join(", ") : "—"}`,
-    `proof: ${proof ? `${proof.slug} · ${proof.terminal ? "terminal" : "not terminal"} · ${proof.passingEvidence ? "PASS" : "no PASS"}` : "—"}`,
-    ...(warnings.length ? ["warnings:", ...warnings.map((warning) => `- ${warning.code}: ${warning.message} ${warning.hint}`)] : ["warnings: none"]),
+  if (milestone.state === "complete" && childStatuses.some((child) => child.column !== (terminals.get(milestone.board) ?? "done"))) warnings.push({ code: "complete-has-active-cards", message: "Complete milestone still has non-terminal child cards.", hint: "Reopen the milestone or finish/abandon the remaining cards." });
+  return { milestone, children: childStatuses, ready, proof, warnings };
+}
+
+function renderMilestoneReconcile(result: MilestoneReconcileResult): string {
+  return [
+    `${result.milestone.title} (${result.milestone.slug}) — ${result.milestone.state}`,
+    `ready frontier: ${result.ready.length ? result.ready.map((card) => card.slug).join(", ") : "—"}`,
+    `proof: ${result.proof ? `${result.proof.slug} · ${result.proof.terminal ? "terminal" : "not terminal"} · ${result.proof.passingEvidence ? "PASS" : "no PASS"}` : "—"}`,
+    ...(result.warnings.length ? ["warnings:", ...result.warnings.map((warning) => `- ${warning.code}: ${warning.message} ${warning.hint}`)] : ["warnings: none"]),
   ].join("\n");
-  return { ...result, text };
+}
+
+async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ milestones: Milestone[]; cards: Card[]; reconciled: MilestoneReconcileResult[] }> {
+  const milestones = (await listMilestones(opts.node, opts.cfg)).filter((milestone) => !opts.board || milestone.board === opts.board);
+  const boards = await listBoards(opts.node, opts.cfg);
+  const boardSlugs = [...new Set(milestones.map((milestone) => milestone.board))];
+  const cards = (await Promise.all(boardSlugs.map((board) => listCardsOnBoard(opts.node, opts.cfg, board)))).flat();
+  const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, cards);
+  const proofs = new Map<string, Card | null>();
+  await Promise.all(milestones.map(async (milestone) => {
+    if (milestone.proof_card && !proofs.has(milestone.proof_card)) proofs.set(milestone.proof_card, await findCard(opts.node, opts.cfg, milestone.proof_card));
+  }));
+  return {
+    milestones,
+    cards,
+    reconciled: milestones.map((milestone) => milestoneReconcileFromSnapshot(milestone, cards.filter((card) => card.board === milestone.board), statuses, boards, proofs.get(milestone.proof_card) ?? null)),
+  };
+}
+
+export async function milestonePortfolioResult(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ entries: MilestonePortfolioEntry[]; text: string }> {
+  const snapshot = await milestonePortfolioSnapshot(opts);
+  const entries = snapshot.reconciled.map((result): MilestonePortfolioEntry => ({
+    slug: result.milestone.slug,
+    title: result.milestone.title,
+    north_star: result.milestone.north_star,
+    state: result.milestone.state,
+    driver: result.milestone.driver,
+    proof_card: result.milestone.proof_card,
+    proof_status: result.milestone.proof_status,
+    ready: result.ready.map((card) => card.slug),
+    blocker: result.milestone.state === "blocked" ? (result.milestone.block_reason || "blocked with no reason") : (result.warnings[0]?.message ?? ""),
+    warning_count: result.warnings.length,
+  }));
+  const text = entries.length ? [
+    "STATE      MILESTONE                         NORTH STAR              READY  PROOF       WARN  BLOCKER",
+    ...entries.map((entry) => `${entry.state.padEnd(10)} ${entry.slug.slice(0, 32).padEnd(33)} ${(entry.north_star || "—").slice(0, 23).padEnd(24)} ${String(entry.ready.length).padEnd(6)} ${entry.proof_status.padEnd(11)} ${String(entry.warning_count).padEnd(5)} ${entry.blocker || "—"}`),
+  ].join("\n") : "No milestones.";
+  return { entries, text };
+}
+
+export async function milestoneDetailResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{ detail: MilestoneReconcileResult & { columns: Record<string, MilestoneChildStatus[]> }; text: string }> {
+  const result = await milestoneReconcileResult(opts);
+  const columns: Record<string, MilestoneChildStatus[]> = Object.fromEntries((await listBoards(opts.node, opts.cfg)).find((board) => board.slug === result.milestone.board)?.columns.map((column) => [column, result.children.filter((card) => card.column === column)]) ?? []);
+  const detail = { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, columns };
+  const columnText = Object.entries(columns).map(([column, cards]) => `${column.toUpperCase()} (${cards.length})\n${cards.length ? cards.map((card) => `  • ${card.blocked ? "🔒 " : ""}${card.title}  ${card.slug}`).join("\n") : "  —"}`).join("\n\n");
+  return { detail, text: `${renderMilestone(result.milestone)}\n\n${columnText}\n\n${renderMilestoneReconcile(result)}` };
+}
+
+export async function milestoneGroomResult(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ issues: MilestoneGroomIssue[]; text: string }> {
+  const snapshot = await milestonePortfolioSnapshot(opts);
+  const issues: MilestoneGroomIssue[] = snapshot.reconciled.flatMap((result) => result.warnings.map((warning) => ({ ...warning, milestone: result.milestone.slug })));
+  const bySlug = new Map(snapshot.milestones.map((milestone) => [milestone.slug, milestone]));
+  for (const card of snapshot.cards) {
+    if (!card.milestone) continue;
+    const milestone = bySlug.get(card.milestone);
+    if (!milestone) issues.push({ code: "missing-milestone", message: `Card links to missing milestone "${card.milestone}".`, hint: "Repair or clear the card milestone link.", card: card.slug });
+    else if (card.board !== milestone.board || (card.north_star && milestone.north_star && card.north_star !== milestone.north_star)) issues.push({ code: "milestone-link-mismatch", message: "Card board or North Star does not match its milestone.", hint: "Align the card and milestone relationship.", milestone: milestone.slug, card: card.slug });
+  }
+  const text = issues.length ? ["Milestone grooming warnings:", ...issues.map((issue) => `- ${issue.code} ${issue.milestone ? `[${issue.milestone}] ` : ""}${issue.card ? `[card:${issue.card}] ` : ""}${issue.message} ${issue.hint}`)].join("\n") : "Milestone grooming: healthy — no warnings.";
+  return { issues, text };
 }

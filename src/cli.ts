@@ -23,7 +23,7 @@ import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
-import { milestoneAddCmd, milestoneListResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
+import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
@@ -72,7 +72,7 @@ Commands:
   dep rm <slug> <dep>  remove a dependency edge
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
   tag rm <slug> <tag>  remove one or more tags from a card
-  list                 render cards as columns or --wide table (--board --column --tag --assignee --wide --field --json --full-body --limit N --all)
+  list                 render columns, --wide table, or --group-by-milestone
   overlap <slug>       report declared surface conflicts with doing cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
   pickup explain <slug> full readiness path for one card (write-guard+classify+lane+overlap)
@@ -96,6 +96,9 @@ Commands:
   milestone show <slug> show one milestone (--json)
   milestone state <slug> <state> transition milestone lifecycle state (--proof-status)
   milestone reconcile <slug> report ready frontier, proof, and lifecycle warnings
+  milestone portfolio  show milestone health and ready frontiers
+  milestone detail <slug> show outcome, cards by column, proof, and warnings
+  milestone groom      report actionable milestone health warnings
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
   which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
@@ -213,6 +216,9 @@ Usage:
   fkanban milestone show <slug> [--json]
   fkanban milestone state <slug> <state> [--proof-status <status>] [--json]
   fkanban milestone reconcile <slug> [--json]
+  fkanban milestone portfolio [--board <slug>] [--json]
+  fkanban milestone detail <slug> [--json]
+  fkanban milestone groom [--board <slug>] [--json]
 
 Add options:
   --title <text>        outcome title
@@ -330,6 +336,8 @@ Options:
   --json                machine-readable output (broad reads are capped previews)
   --full-body, --full_body
                         compatibility alias for --json with complete bodies
+  --group-by-milestone group cards beneath milestone headings, with an
+                        Unassigned / Operational section
 
 Example:
   fkanban list --board default --limit 10
@@ -872,7 +880,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["from", "expect", "position", "force"]),
-  list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body"]),
+  list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone"]),
   rank: new Set(["board", "column"]),
   search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body"]),
   gates: new Set(["declare-link"]),
@@ -1060,6 +1068,7 @@ async function main(argv: string[]): Promise<number> {
         "exclude-repo": { type: "string" },
         "max-doing": { type: "string" },
         check: { type: "boolean" },
+        "group-by-milestone": { type: "boolean" },
       },
     });
   } catch (err) {
@@ -1240,7 +1249,29 @@ async function dispatch(
         console.log(values.json ? JSON.stringify({ milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings }, null, 2) : result.text);
         return 0;
       }
-      console.error("kanban: Usage: fkanban milestone add|list|show|state|reconcile");
+      if (action === "portfolio") {
+        const extra = rejectExtraPositionals(positionals, 2, "milestone portfolio");
+        if (extra !== undefined) return extra;
+        const result = await milestonePortfolioResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
+        console.log(values.json ? JSON.stringify(result.entries, null, 2) : result.text);
+        return 0;
+      }
+      if (action === "detail") {
+        const slug = requirePositional(positionals[2], "milestone detail <slug>");
+        const extra = rejectExtraPositionals(positionals, 3, "milestone detail <slug>");
+        if (extra !== undefined) return extra;
+        const result = await milestoneDetailResult({ cfg: ctx.cfg, node: ctx.node, slug });
+        console.log(values.json ? JSON.stringify(result.detail, null, 2) : result.text);
+        return 0;
+      }
+      if (action === "groom") {
+        const extra = rejectExtraPositionals(positionals, 2, "milestone groom");
+        if (extra !== undefined) return extra;
+        const result = await milestoneGroomResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
+        console.log(values.json ? JSON.stringify(result.issues, null, 2) : result.text);
+        return 0;
+      }
+      console.error("kanban: Usage: fkanban milestone add|list|show|state|reconcile|portfolio|detail|groom");
       return 2;
     }
 
@@ -1596,6 +1627,7 @@ async function dispatch(
         limit,
         all: values.all as boolean | undefined,
         fullBody: fullBodyList,
+        groupByMilestone: values["group-by-milestone"] as boolean | undefined,
       });
       console.log(out);
       return 0;
