@@ -18,6 +18,9 @@ done
 echo "== dependencies =="
 bun install --frozen-lockfile
 
+echo "== schema-sync architecture boundary =="
+bun run check:schema-sync-boundary
+
 echo "== typecheck =="
 bun run typecheck
 
