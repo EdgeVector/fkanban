@@ -1007,6 +1007,8 @@ describe("gates command", () => {
         canonical: "fbrain-reference-hash",
         resolution: opts.declareResolution ?? "link",
         decision: opts.declareResolution ?? "link",
+        auditEventId: "audit-gates-link",
+        bindEligible: true,
       }),
       createRecord: async () => {},
       updateRecord: async () => {},

@@ -163,6 +163,14 @@ build whose `/api/apps/declare-schema` resolves or registers every proposal
 with Schema Service; `--schema-service-url` is diagnostic because Mini owns the
 service call.
 
+Schema synchronization has one executable transport: F-Kanban's node client
+calls Mini's `POST /api/apps/declare-schema` (normally through `kanban init`).
+F-Kanban must not call Schema Service, use the legacy owner-declare route,
+accept `local_mint`, or copy rows as part of a field expansion. The LastGit CI gate runs
+`bun run check:schema-sync-boundary` and rejects those bypasses. An incompatible
+key-layout migration is a separately designed and reviewed operation; it is
+never inferred from schema synchronization.
+
 If `init` reports `schema_not_writable`, the node has a `fkanban/*` schema that
 **resolves but isn't writable for all fields** — usually an older, narrower
 version of the schema (fewer fields than this kanban build expects), sometimes

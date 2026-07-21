@@ -77,6 +77,24 @@ const server = Bun.serve({
       busyHits.notProvisioned += 1;
       return Response.json({ error: "node_not_provisioned" }, { status: 503 });
     }
+    if (url.pathname === "/good-audit/api/apps/declare-schema") {
+      return Response.json({
+        app_id: "fkanban",
+        schema: "fkanban/Card",
+        canonical: "catalog-card-hash",
+        resolution: "reuse",
+        audit_event_id: "schema-sync-123",
+        bind_eligible: true,
+      });
+    }
+    if (url.pathname === "/bad-audit/api/apps/declare-schema") {
+      return Response.json({
+        app_id: "fkanban",
+        schema: "fkanban/Card",
+        canonical: "catalog-card-hash",
+        resolution: "reuse",
+      });
+    }
     if (url.pathname === "/api/query") {
       const filter = (body as Record<string, unknown>).filter as { HashKey?: string } | undefined;
       const results =
@@ -175,6 +193,25 @@ describe("queryAll filter", () => {
     expect((last.body as Record<string, unknown>).schema_name).toBe("cardhash");
     expect((last.body as Record<string, unknown>).limit).toBe(1000);
     expect(last.headers.get("x-app-capability")).toBeTruthy();
+  });
+});
+
+describe("audited schema sync bind", () => {
+  test("accepts only a catalog sync carrying durable audit evidence", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/good-audit`, userHash: "test-user" });
+    const result = await node.declareAppSchema!("fkanban", { name: "Card" });
+    expect(result).toMatchObject({
+      canonical: "catalog-card-hash",
+      auditEventId: "schema-sync-123",
+      bindEligible: true,
+    });
+  });
+
+  test("refuses an otherwise valid identity when Mini omits audit evidence", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/bad-audit`, userHash: "test-user" });
+    await expect(node.declareAppSchema!("fkanban", { name: "Card" })).rejects.toMatchObject({
+      code: "app_schema_declare_bad_response",
+    });
   });
 });
 

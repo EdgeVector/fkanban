@@ -83,6 +83,8 @@ function makeSocketNode(
           canonical,
           resolution: "mint",
           decision: "mint",
+          audit_event_id: `audit-${schema.descriptive_name}`,
+          bind_eligible: true,
         });
       }
       if (opts.fullSurface && url.pathname === "/api/schemas/load") {
