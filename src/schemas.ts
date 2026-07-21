@@ -126,6 +126,7 @@ export const CARD_FIELDS = [
   "block_status",
   "block_reason",
   "north_star",
+  "milestone",
   "pr_url",
   "branch",
 ] as const;
@@ -133,7 +134,7 @@ export const CARD_FIELDS = [
 // New fields that can be losslessly mirrored through legacy body headers while
 // the published schema catches up. The resolver/doctor can treat a schema
 // missing only these fields as operationally writable.
-export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces", "db", "created_by"] as const;
+export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces", "db", "created_by", "milestone"] as const;
 
 export const BOARD_FIELDS = [
   "slug",
@@ -142,6 +143,12 @@ export const BOARD_FIELDS = [
   "columns",
   "created_at",
   "updated_at",
+] as const;
+
+export const MILESTONE_FIELDS = [
+  "slug", "title", "body", "board", "state", "position", "north_star",
+  "driver", "deps", "proof_card", "proof_status", "block_reason",
+  "created_at", "updated_at", "completed_at",
 ] as const;
 
 function defaultStringFieldTypes(
@@ -195,6 +202,7 @@ export const cardSchema: AddSchemaRequest = {
       block_status: "none|needs_human|design_first|deferred — INTENTIONAL holds only (dependency-blocked stays derived from deps)",
       block_reason: "free-text why, when block_status != none",
       north_star: "fbrain North Star slug this card advances",
+      milestone: "fkanban Milestone slug this card advances",
       pr_url: "URL/number of the PR driving this card, when in flight",
       branch: "worktree/feature branch a build agent works on",
     },
@@ -230,7 +238,40 @@ export const boardSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
-export const RECORD_TYPES = ["card", "board"] as const;
+export const milestoneSchema: AddSchemaRequest = {
+  schema: {
+    name: "Milestone",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Milestone",
+    purpose_statement: "A bounded, multi-card outcome managed and completed through terminal proof",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [...MILESTONE_FIELDS],
+    field_types: defaultStringFieldTypes(MILESTONE_FIELDS, ["deps"]),
+    field_descriptions: {
+      slug: "stable milestone id",
+      title: "one-line outcome name",
+      body: "markdown outcome, acceptance criteria, and rationale",
+      board: "board whose cards this milestone groups",
+      state: "planned|active|blocked|proving|complete|abandoned",
+      position: "integer-as-string portfolio ordering",
+      north_star: "fbrain North Star slug this outcome advances",
+      driver: "person, agent, or routine responsible for reconciliation",
+      deps: "array of milestone slugs that must complete first",
+      proof_card: "terminal validation card slug",
+      proof_status: "pending|passing|failing|not_required",
+      block_reason: "why the milestone is blocked",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+      completed_at: "RFC 3339 completion timestamp, empty until complete",
+    },
+    field_classifications: { title: ["word"], body: ["word"] },
+    field_data_classifications: generalDataClassifications(MILESTONE_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
+export const RECORD_TYPES = ["card", "board", "milestone"] as const;
 export type RecordType = (typeof RECORD_TYPES)[number];
 
 export type RecordTypeDef = {
@@ -241,6 +282,7 @@ export type RecordTypeDef = {
 export const RECORDS: Record<RecordType, RecordTypeDef> = {
   card: { type: "card", schema: cardSchema },
   board: { type: "board", schema: boardSchema },
+  milestone: { type: "milestone", schema: milestoneSchema },
 };
 
 
@@ -300,6 +342,7 @@ export const BOARD_CARDS_FIELDS = [
   "block_status",
   "block_reason",
   "north_star",
+  "milestone",
   "pr_url",
   "branch",
   "layout",
@@ -337,6 +380,7 @@ export const boardCardsSchema: AddSchemaRequest = {
       block_status: "none|needs_human|design_first|deferred",
       block_reason: "free-text when blocked",
       north_star: "North Star slug",
+      milestone: "Milestone slug",
       pr_url: "PR URL when in flight",
       branch: "feature branch",
       layout: "identity marker for HashRange layout (do not change without new schema)",
@@ -352,6 +396,7 @@ export const boardCardsSchema: AddSchemaRequest = {
 export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }> = [
   { key: "card", schema: cardSchema },
   { key: "board", schema: boardSchema },
+  { key: "milestone", schema: milestoneSchema },
 ];
 
 /** Extra schemas declared at init (not RECORD_TYPES). */

@@ -193,7 +193,7 @@ DONE  (0)
 | Command | What it does |
 |---|---|
 | `kanban init` | bootstrap node + register/resolve schemas + seed default board (idempotent) |
-| `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
+| `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --milestone <slug> --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
 | `kanban mark <slug> <line>` | append one marker line to an existing card body, idempotently (`--json`) |
 | `kanban move <slug> <column>` | move a card to a column (`--from/--expect COL` as a compare-and-swap claim guard, `--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
 | `kanban dep add <slug> <dep>` | add a dependency edge (card `<slug>` depends on existing live card `<dep>`) |
@@ -213,6 +213,10 @@ DONE  (0)
 | `kanban board create <slug>` | create/update a board (`--title`; `--columns` may be omitted or set to `backlog,todo,doing,done`) |
 | `kanban board list` | list boards (`--json`) |
 | `kanban board rm <slug>` | delete a board with native tombstones; always refuses `default`, and refuses non-default boards with live cards unless `--force` |
+| `kanban milestone add <slug>` | create/update a first-class outcome milestone (`--state --north-star --driver --deps --proof-card --proof-status`) |
+| `kanban milestone list` | list the milestone portfolio (`--board --state --json`) |
+| `kanban milestone show <slug>` | show one milestone's outcome, lifecycle, dependencies, driver, and proof linkage (`--json`) |
+| `kanban milestone state <slug> <state>` | transition `planned\|active\|blocked\|proving\|complete\|abandoned` (`--json`) |
 | `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
 | `kanban doctor` | health-check config + node + schemas + a query round-trip |
 | `kanban mcp` | start an MCP server over stdio |
@@ -227,6 +231,14 @@ Use `kanban move ship-login doing --from todo` when claiming work: if another
 writer moved the card first, the command exits non-zero and `--json` prints
 `{"error":"claim_conflict","current":"<col>","expected":"todo"}` without
 moving it.
+
+### Milestones
+
+Milestones are first-class supervisory records between Brain North Stars and
+executable cards. They are not tagged cards, never occupy card columns, and can
+never be selected by `pickup`. Cards link to them with `--milestone <slug>`;
+F-Kanban refuses missing milestone references and board/North-Star mismatches.
+Milestones are driven and proven while cards remain the atomic pickup work.
 
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
@@ -512,6 +524,8 @@ Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_tag_rm`, `fkanban_show`,
 `fkanban_pickup_status`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
+`fkanban_milestone_add`, `fkanban_milestone_list`, `fkanban_milestone_show`,
+`fkanban_milestone_state`,
 `fkanban_doctor`)
 so agents can drive — and self-diagnose — the board.
 

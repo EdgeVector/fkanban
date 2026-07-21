@@ -33,6 +33,7 @@ export type CardSummary = {
   block_status: string;
   block_reason: string;
   north_star: string;
+  milestone?: string;
   pr_url: string;
   branch: string;
   [key: string]: unknown;

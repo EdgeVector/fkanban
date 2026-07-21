@@ -68,6 +68,7 @@ export type Card = {
   block_status: string; // BlockStatus: none|needs_human|design_first|deferred
   block_reason: string; // free-text why, when block_status != none
   north_star: string; // fbrain North Star slug this advances
+  milestone?: string; // fkanban Milestone slug this card advances
   pr_url: string; // PR driving this card, when in flight
   branch: string; // worktree/feature branch
 };
@@ -80,6 +81,32 @@ export type Board = {
   created_at: string;
   updated_at: string;
 };
+
+export const MILESTONE_STATES = ["planned", "active", "blocked", "proving", "complete", "abandoned"] as const;
+export type MilestoneState = (typeof MILESTONE_STATES)[number];
+export const MILESTONE_PROOF_STATUSES = ["pending", "passing", "failing", "not_required"] as const;
+
+export type Milestone = {
+  slug: string;
+  title: string;
+  body: string;
+  board: string;
+  state: string;
+  position: string;
+  north_star: string;
+  driver: string;
+  deps: string[];
+  proof_card: string;
+  proof_status: string;
+  block_reason: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string;
+};
+
+export function isMilestoneState(value: string): value is MilestoneState {
+  return (MILESTONE_STATES as readonly string[]).includes(value);
+}
 
 // Legacy soft-delete sentinel. Current `rm` uses the node's native delete
 // mutation, so new tombstoned records are filtered before fkanban sees them.
@@ -1275,7 +1302,7 @@ export function repairStructuredFieldsFromBody(
 // Fields that default empty on fresh/test Card literals.
 export function emptyStructuredFields(): Pick<
   Card,
-  "done_at" | "db" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "pr_url" | "branch" | "surfaces"
+  "done_at" | "db" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "milestone" | "pr_url" | "branch" | "surfaces"
 > {
   return {
     done_at: "",
@@ -1286,6 +1313,7 @@ export function emptyStructuredFields(): Pick<
     block_status: "",
     block_reason: "",
     north_star: "",
+    milestone: "",
     pr_url: "",
     branch: "",
     surfaces: [],
@@ -1547,6 +1575,7 @@ export function rowToCard(row: QueryRow): Card {
     block_status: stringField(f, "block_status"),
     block_reason: stringField(f, "block_reason"),
     north_star: stringField(f, "north_star"),
+    milestone: stringField(f, "milestone"),
     pr_url: stringField(f, "pr_url"),
     branch: stringField(f, "branch"),
   };
@@ -1561,6 +1590,27 @@ export function rowToBoard(row: QueryRow): Board {
     columns: arrayStringField(f, "columns"),
     created_at: stringField(f, "created_at"),
     updated_at: stringField(f, "updated_at"),
+  };
+}
+
+export function rowToMilestone(row: QueryRow): Milestone {
+  const f = (row.fields ?? {}) as Record<string, unknown>;
+  return {
+    slug: stringField(f, "slug"),
+    title: stringField(f, "title"),
+    body: stringField(f, "body"),
+    board: stringField(f, "board") || DEFAULT_BOARD_SLUG,
+    state: stringField(f, "state") || "planned",
+    position: stringField(f, "position"),
+    north_star: stringField(f, "north_star"),
+    driver: stringField(f, "driver"),
+    deps: arrayStringField(f, "deps"),
+    proof_card: stringField(f, "proof_card"),
+    proof_status: stringField(f, "proof_status") || "pending",
+    block_reason: stringField(f, "block_reason"),
+    created_at: stringField(f, "created_at"),
+    updated_at: stringField(f, "updated_at"),
+    completed_at: stringField(f, "completed_at"),
   };
 }
 
@@ -2126,9 +2176,75 @@ export function cardToFields(c: Card): Record<string, unknown> {
     block_status: c.block_status ?? "",
     block_reason: c.block_reason ?? "",
     north_star: c.north_star ?? "",
+    milestone: c.milestone ?? "",
     pr_url: c.pr_url ?? "",
     branch: c.branch ?? "",
   };
+}
+
+export function milestoneToFields(m: Milestone): Record<string, unknown> {
+  return {
+    slug: m.slug,
+    title: m.title,
+    body: m.body,
+    board: m.board,
+    state: m.state,
+    position: m.position,
+    north_star: m.north_star,
+    driver: m.driver,
+    deps: normalizeDeps(m.deps, m.slug),
+    proof_card: m.proof_card,
+    proof_status: m.proof_status,
+    block_reason: m.block_reason,
+    created_at: m.created_at,
+    updated_at: m.updated_at,
+    completed_at: m.completed_at,
+  };
+}
+
+export async function listMilestones(node: NodeClient, cfg: Config): Promise<Milestone[]> {
+  const res = await node.queryAll({
+    schemaHash: schemaHashFor("milestone", cfg),
+    fields: fieldsFor("milestone"),
+    allowFullScan: true,
+  });
+  return res.results
+    .map(rowToMilestone)
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug));
+}
+
+export async function findMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone | null> {
+  const res = await node.queryAll({
+    schemaHash: schemaHashFor("milestone", cfg),
+    fields: fieldsFor("milestone"),
+    filter: { HashKey: slug },
+  });
+  return res.results[0] ? rowToMilestone(res.results[0]) : null;
+}
+
+export async function requireMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone> {
+  const milestone = await findMilestone(node, cfg, slug);
+  if (!milestone) {
+    throw new FkanbanError({
+      code: "milestone_not_found",
+      message: `Milestone "${slug}" not found.`,
+      hint: "Run `fkanban milestone list` to see milestones.",
+    });
+  }
+  return milestone;
+}
+
+export async function upsertMilestoneRecord(
+  node: NodeClient,
+  cfg: Config,
+  milestone: Milestone,
+  exists: boolean,
+): Promise<void> {
+  await node[exists ? "updateRecord" : "createRecord"]({
+    schemaHash: schemaHashFor("milestone", cfg),
+    keyHash: milestone.slug,
+    fields: milestoneToFields(milestone),
+  });
 }
 
 function cardToLegacyOptionalFields(c: Card): Record<string, unknown> {

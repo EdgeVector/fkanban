@@ -73,6 +73,7 @@ export function boardCardFieldsFromCard(card: Card | CardSummary): Record<string
     block_status: summary.block_status,
     block_reason: summary.block_reason,
     north_star: summary.north_star,
+    milestone: summary.milestone ?? "",
     pr_url: summary.pr_url,
     branch: summary.branch,
     layout: BOARD_CARDS_LAYOUT,
@@ -108,6 +109,7 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
     block_status: str("block_status"),
     block_reason: str("block_reason"),
     north_star: str("north_star"),
+    milestone: str("milestone"),
     pr_url: str("pr_url"),
     branch: str("branch"),
   };

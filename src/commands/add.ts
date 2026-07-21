@@ -22,6 +22,7 @@ import {
   ensureBoardRecord,
   ensureColumn,
   findCard,
+  findMilestone,
   isBlockStatus,
   isCardKind,
   listCardStatuses,
@@ -78,6 +79,7 @@ export type AddOptions = {
   blockStatus?: string; // none|needs_human|design_first|deferred
   blockReason?: string;
   northStar?: string;
+  milestone?: string;
   prUrl?: string;
   branch?: string;
   dbLocator?: string;
@@ -113,6 +115,7 @@ function applyExplicitStructuredFields(card: Card, opts: AddOptions): Card {
   if (opts.blockStatus !== undefined) card.block_status = opts.blockStatus;
   if (opts.blockReason !== undefined) card.block_reason = opts.blockReason;
   if (opts.northStar !== undefined) card.north_star = opts.northStar;
+  if (opts.milestone !== undefined) card.milestone = opts.milestone;
   if (opts.prUrl !== undefined) card.pr_url = opts.prUrl;
   if (opts.branch !== undefined) card.branch = opts.branch;
   if (opts.surfaces !== undefined) card.surfaces = opts.surfaces;
@@ -225,6 +228,32 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   // `--board` still moves the card; only the implicit default would be wrong.
   const existing = await findCard(opts.node, opts.cfg, opts.slug);
   const boardSlug = opts.board ?? existing?.board ?? "default";
+  const milestoneSlug = opts.milestone ?? existing?.milestone ?? "";
+  if (milestoneSlug) {
+    const milestone = await findMilestone(opts.node, opts.cfg, milestoneSlug);
+    if (!milestone) {
+      throw new FkanbanError({
+        code: "milestone_not_found",
+        message: `Milestone "${milestoneSlug}" not found.`,
+        hint: "Create it first with `fkanban milestone add`, or omit --milestone.",
+      });
+    }
+    const requestedNorthStar = opts.northStar ?? existing?.north_star ?? "";
+    if (requestedNorthStar && milestone.north_star && requestedNorthStar !== milestone.north_star) {
+      throw new FkanbanError({
+        code: "milestone_north_star_mismatch",
+        message: `Card North Star "${requestedNorthStar}" does not match milestone "${milestoneSlug}" (${milestone.north_star}).`,
+        hint: "Use the milestone's North Star or choose a different milestone.",
+      });
+    }
+    if (milestone.board !== boardSlug) {
+      throw new FkanbanError({
+        code: "milestone_board_mismatch",
+        message: `Card board "${boardSlug}" does not match milestone "${milestoneSlug}" (${milestone.board}).`,
+        hint: "Place the card on the milestone's board or choose a milestone on this board.",
+      });
+    }
+  }
   const board = await ensureBoardRecord(opts.node, opts.cfg, boardSlug);
   const columns = board.columns;
   const targetColumn = existing ? (opts.column ?? existing.column) : (opts.column ?? columns[0] ?? "backlog");
