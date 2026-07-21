@@ -48,6 +48,10 @@ export type Card = {
   // touch. Used by `overlap` as an advisory file-surface claim.
   surfaces: string[];
   created_at: string;
+  // Immutable self-reported provenance captured when the card is first
+  // created. Legacy cards read as "unknown"; updates must never infer or
+  // replace it from the current process identity.
+  created_by?: string;
   updated_at: string;
   // First time the card entered its board's terminal column. Empty for legacy
   // or not-yet-complete cards; immutable once set.
@@ -86,6 +90,36 @@ export const TOMBSTONE_TAG = "__fkanban_deleted__";
 // never collides with a real card, and hidden from reads even if best-effort
 // cleanup is shed by a busy node.
 export const WRITE_PROBE_SLUG = "__fkanban_write_probe__";
+
+export const UNKNOWN_CREATED_BY = "unknown";
+
+/** Collapse a creator label to one safe, single-line operational identifier. */
+export function normalizeCreatedBy(value: string | undefined | null): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, 256);
+}
+
+/** Resolve creator provenance at CREATE time only. */
+export function resolveCreatedBy(
+  explicit?: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const direct = [explicit, env.FKANBAN_CREATED_BY, env.LASTGIT_ACTOR]
+    .map(normalizeCreatedBy)
+    .find(Boolean);
+  if (direct) return direct;
+
+  const automationId = normalizeCreatedBy(env.AUTOMATION_ID);
+  if (env.DRIVEN_BY === "routine" && automationId) return `routine:${automationId}`;
+
+  const codexThread = normalizeCreatedBy(env.CODEX_THREAD_ID);
+  if (codexThread) return `codex:${codexThread}`;
+
+  const claudeSession = normalizeCreatedBy(env.CLAUDE_SESSION_ID ?? env.CLAUDE_CODE_SESSION_ID);
+  if (claudeSession) return `claude:${claudeSession}`;
+
+  const user = normalizeCreatedBy(env.USER);
+  return user ? `user:${user}` : UNKNOWN_CREATED_BY;
+}
 
 export function isTombstoned(tags: string[]): boolean {
   return tags.includes(TOMBSTONE_TAG);
@@ -1499,6 +1533,10 @@ export function rowToCard(row: QueryRow): Card {
     deps: normalizeDeps([...deps, ...legacyTagDeps], slug),
     surfaces: structuredSurfaces.length > 0 ? structuredSurfaces : parseBodyListHeader(body, "Surfaces"),
     created_at: stringField(f, "created_at"),
+    created_by:
+      stringField(f, "created_by") ||
+      parseBodyHeader(body, "Created By") ||
+      UNKNOWN_CREATED_BY,
     updated_at: stringField(f, "updated_at"),
     done_at: doneAt,
     // New fields default to "" for cards written before the schema gained them.
@@ -1951,7 +1989,7 @@ export async function listDependencyStatusesForCards(
 // no longer drags every card's full spec over the wire (the first thing to time
 // out when the node is busy). `--json`/`--wide`/`search`/MCP still use the
 // full-body `listCards` because they genuinely surface structured/body fields.
-export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "deps", "surfaces", "assignee", "kind", "created_at"];
+export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "deps", "surfaces", "assignee", "kind", "created_at", "created_by"];
 
 // Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields
 // (notably `body`) come back as "" on the Card. Enough for the text board render,
@@ -2079,6 +2117,7 @@ export function cardToFields(c: Card): Record<string, unknown> {
     deps: normalizeDeps(c.deps, c.slug),
     surfaces: normalizeSurfaces(c.surfaces ?? []),
     created_at: c.created_at,
+    created_by: c.created_by ?? UNKNOWN_CREATED_BY,
     updated_at: c.updated_at,
     db: c.db ?? "",
     repo: c.repo ?? "",
@@ -2095,7 +2134,11 @@ export function cardToFields(c: Card): Record<string, unknown> {
 function cardToLegacyOptionalFields(c: Card): Record<string, unknown> {
   const fields = cardToFields({
     ...c,
-    body: writeBodyHeader(writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []), "Db", c.db ?? ""),
+    body: writeBodyHeader(
+      writeBodyHeader(writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []), "Db", c.db ?? ""),
+      "Created By",
+      c.created_by ?? UNKNOWN_CREATED_BY,
+    ),
   });
   for (const field of CARD_OPTIONAL_SCHEMA_FIELDS) delete fields[field];
   return fields;

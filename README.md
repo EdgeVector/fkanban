@@ -12,7 +12,7 @@ Development source of truth is LastGit `lastdb:///fkanban`; GitHub
 Two schemas, registered under the `fkanban/*` app namespace (so they never
 collide with `fbrain/*` or any other app on a shared daemon):
 
-- **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, deps, surfaces, created_at, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
+- **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, deps, surfaces, created_at, created_by, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
 - **`fkanban/Board`** — `slug, title, body, columns, created_at, updated_at`
 
 Default columns: `backlog → todo → doing → done`.

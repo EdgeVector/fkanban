@@ -9,12 +9,20 @@
 // sks for the same slug so column list previews cannot diverge from show.
 
 import type { Config } from "./config.ts";
-import type { NodeClient } from "./client.ts";
+import { FkanbanError, type NodeClient } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 
 export { BOARD_CARDS_LAYOUT };
+
+const LEGACY_BOARD_CARDS_FIELDS = BOARD_CARDS_FIELDS.filter((field) => field !== "created_by");
+
+function isCreatedByFieldMiss(err: unknown): boolean {
+  return err instanceof FkanbanError &&
+    err.code === "unknown_fields" &&
+    err.message.includes("created_by");
+}
 
 /** Sort key: column#pos(8)#slug — ordered, column-prefix filterable. */
 export function boardCardSk(column: string, position: string | number, slug: string): string {
@@ -56,6 +64,7 @@ export function boardCardFieldsFromCard(card: Card | CardSummary): Record<string
     deps: summary.deps,
     surfaces: summary.surfaces,
     created_at: summary.created_at,
+    created_by: summary.created_by ?? "unknown",
     updated_at: summary.updated_at,
     db: summary.db,
     repo: summary.repo,
@@ -89,6 +98,7 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
     deps: arr("deps"),
     surfaces: arr("surfaces"),
     created_at: str("created_at"),
+    created_by: str("created_by") || "unknown",
     updated_at: str("updated_at"),
     done_at: "",
     db: str("db"),
@@ -188,20 +198,22 @@ export async function upsertBoardCard(
     await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
   }
 
+  const write = async (fields: Record<string, unknown>) => {
+    try {
+      await node.updateRecord({ schemaHash, fields, keyHash: nextBoard, rangeKey: nextSk });
+    } catch (updateErr) {
+      if (isCreatedByFieldMiss(updateErr)) throw updateErr;
+      await node.createRecord({ schemaHash, fields, keyHash: nextBoard, rangeKey: nextSk });
+    }
+  };
+
   try {
-    await node.updateRecord({
-      schemaHash,
-      fields: nextFields,
-      keyHash: nextBoard,
-      rangeKey: nextSk,
-    });
-  } catch {
-    await node.createRecord({
-      schemaHash,
-      fields: nextFields,
-      keyHash: nextBoard,
-      rangeKey: nextSk,
-    });
+    await write(nextFields);
+  } catch (err) {
+    if (!isCreatedByFieldMiss(err)) throw err;
+    const legacyFields = { ...nextFields };
+    delete legacyFields.created_by;
+    await write(legacyFields);
   }
 }
 
@@ -243,11 +255,13 @@ export async function listBoardCardsPartition(
         ? { HashRangePrefix: { hash: board, prefix: `${column}#` } }
         : { HashKey: board }
     ) as import("./client.ts").QueryFilter;
-    const res = await node.queryAll({
-      schemaHash,
-      fields: [...BOARD_CARDS_FIELDS],
-      filter,
-    });
+    let res;
+    try {
+      res = await node.queryAll({ schemaHash, fields: [...BOARD_CARDS_FIELDS], filter });
+    } catch (err) {
+      if (!isCreatedByFieldMiss(err)) throw err;
+      res = await node.queryAll({ schemaHash, fields: [...LEGACY_BOARD_CARDS_FIELDS], filter });
+    }
     return res.results
       .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
       .filter((c) => c.slug.length > 0)

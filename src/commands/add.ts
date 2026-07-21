@@ -26,11 +26,14 @@ import {
   isCardKind,
   listCardStatuses,
   missingDepError,
+  normalizeCreatedBy,
   normalizeDeps,
   parseBodyTagsHeader,
   nowIso,
+  resolveCreatedBy,
   stampCardForWrite,
   updateCardRecord,
+  UNKNOWN_CREATED_BY,
   validateSlug,
   withPriorityTag,
   wouldCreateCycle,
@@ -47,6 +50,9 @@ export type AddOptions = {
   board?: string;
   column?: string;
   assignee?: string;
+  // Immutable creator provenance. Honored on create; a conflicting explicit
+  // value on update is rejected so an upsert cannot rewrite history.
+  createdBy?: string;
   tags?: string[];
   // Replace the card's dependency list with these slugs (validated, deduped,
   // self-references dropped). On update this is refused unless replaceDeps is
@@ -227,6 +233,17 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   const now = nowIso();
 
   if (existing) {
+    if (opts.createdBy !== undefined) {
+      const requested = normalizeCreatedBy(opts.createdBy) || UNKNOWN_CREATED_BY;
+      const original = existing.created_by || UNKNOWN_CREATED_BY;
+      if (requested !== original) {
+        throw new FkanbanError({
+          code: "created_by_immutable",
+          message: `Card "${opts.slug}" was created by "${original}"; created_by is immutable.`,
+          hint: "Omit --created-by on updates. Creator provenance records creation, not the latest editor.",
+        });
+      }
+    }
     const nextDeps = opts.deps !== undefined
       ? await prepareDeps(opts, opts.deps, opts.slug, existing.deps)
       : existing.deps;
@@ -295,6 +312,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     tags: applyPriority(opts.tags ?? parseBodyTagsHeader(opts.body ?? ""), opts.priority),
     deps: opts.deps !== undefined ? await prepareDeps(opts, opts.deps, opts.slug, []) : [],
     created_at: now,
+    created_by: resolveCreatedBy(opts.createdBy),
     updated_at: now,
     ...emptyStructuredFields(),
   };

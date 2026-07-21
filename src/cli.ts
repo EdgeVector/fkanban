@@ -64,7 +64,7 @@ Global:
 Commands:
   init                 bootstrap a node + declare private schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
-  add <slug>           create/update a card (--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
+  add <slug>           create/update a card (--title --board --column --assignee --created-by --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
   mark <slug> <line>   append one marker line to a card body, idempotently
   move <slug> <col>    move a card to a column (--from/--expect COL claim guard, --position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
@@ -153,6 +153,8 @@ Options:
   --board <slug>        board to place the card on (default: default)
   --column <col>        column to place the card in (default: first column)
   --assignee <name>     who owns the card
+  --created-by <id>     creator override for a NEW card (normally inferred from
+                        routine/Codex environment; immutable after creation)
   --tags a,b,c          comma-separated tags
   --deps a,b            comma-separated slugs this card depends on
                         On update, this requires --replace-deps when it changes
@@ -831,7 +833,7 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "db"]);
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
   add: new Set([
-    "title", "board", "column", "assignee", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
+    "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "pr-url", "branch",
   ]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
@@ -980,6 +982,7 @@ async function main(argv: string[]): Promise<number> {
         column: { type: "string" },
         tag: { type: "string" },
         assignee: { type: "string" },
+        "created-by": { type: "string" },
         tags: { type: "string" },
         deps: { type: "string" },
         "replace-deps": { type: "boolean" },
@@ -1227,6 +1230,7 @@ async function dispatch(
           board: values.board as string | undefined,
           column: values.column as string | undefined,
           assignee: values.assignee as string | undefined,
+          createdBy: values["created-by"] as string | undefined,
           tags: parseTags(values.tags as string | undefined),
           deps: parseTags(values.deps as string | undefined),
           replaceDeps: values["replace-deps"] as boolean | undefined,
@@ -1261,7 +1265,8 @@ async function dispatch(
             err.code === "invalid_db_locator" ||
             err.code === "db_locator_mismatch" ||
             err.code === "body_slug_list_tripwire" ||
-            err.code === "stdin_body_unavailable"
+            err.code === "stdin_body_unavailable" ||
+            err.code === "created_by_immutable"
           )
         ) {
           if (values.json) {

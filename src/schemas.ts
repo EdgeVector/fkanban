@@ -110,6 +110,7 @@ export const CARD_FIELDS = [
   "deps",
   "surfaces",
   "created_at",
+  "created_by",
   "updated_at",
   "db",
   // Structured pickup-decision + reconcile fields (see fbrain design
@@ -131,7 +132,7 @@ export const CARD_FIELDS = [
 // New fields that can be losslessly mirrored through legacy body headers while
 // the published schema catches up. The resolver/doctor can treat a schema
 // missing only these fields as operationally writable.
-export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces", "db"] as const;
+export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces", "db", "created_by"] as const;
 
 export const BOARD_FIELDS = [
   "slug",
@@ -184,6 +185,7 @@ export const cardSchema: AddSchemaRequest = {
       deps: "array of card slugs this card depends on; dependencies are satisfied when each referenced card reaches its board's terminal column",
       surfaces: "array of repo-relative path globs or subsystem names this card expects to touch",
       created_at: "RFC 3339 timestamp",
+      created_by: "immutable self-reported creator identity captured when the card is first created",
       updated_at: "RFC 3339 timestamp",
       db: "home LastDB locator for this card, e.g. lastdb://personal or lastdb://org/<slug>/<db>",
       repo: "owner/name of the repo a build agent clones (empty = not a code card)",
@@ -288,6 +290,7 @@ export const BOARD_CARDS_FIELDS = [
   "deps",
   "surfaces",
   "created_at",
+  "created_by",
   "updated_at",
   "db",
   "repo",
@@ -324,6 +327,7 @@ export const boardCardsSchema: AddSchemaRequest = {
       deps: "array of dependency card slugs",
       surfaces: "array of path globs / subsystem names",
       created_at: "RFC 3339 timestamp",
+      created_by: "immutable creator identity copied from the Card record",
       updated_at: "RFC 3339 timestamp",
       db: "home LastDB locator",
       repo: "owner/name of the code repo",
