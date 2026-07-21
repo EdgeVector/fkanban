@@ -7,19 +7,20 @@
 //   - **Board** — a named board with an ordered list of `columns`.
 //
 // How the CLI gets the canonical hashes (the values every mutation/query MUST
-// pin to): the `fkanban/*` schemas are app-private implementation schemas. At
-// `init` time the Mini node declares them locally through
-// `/api/apps/declare-schema` and returns deterministic app-namespaced canonical
-// hashes. fkanban then write-probes those hashes before persisting them in
-// config. The shared schema service is reserved for explicit publish/attach
-// workflows, not ordinary private board storage. The `descriptive_name` /
+// pin to): the `fkanban/*` schemas are private in visibility, but their
+// identities must still be registered with Schema Service. At `init` time the
+// CLI submits them through Mini's `/api/apps/declare-schema` orchestration
+// route; Mini must resolve/register the proposal and return the catalog hash.
+// fkanban then write-probes those hashes before persisting them in config.
+// Shared-surface publication is optional governance; catalog registration is
+// not. The `descriptive_name` /
 // `purpose_statement` are for human display + the dual-signal canonicalization
 // gate (so Card and Board never collapse onto one canonical hash, and
 // `fkanban/*` never collides with another app).
 
 // The app id that owns every fkanban schema. Under app_identity v3.1,
 // `owner_app_id` folds into the schema's identity hash, so the
-// local declaration stores these under canonical identities equivalent to
+// registered declaration stores these under canonical identities equivalent to
 // `fkanban/Card` and `fkanban/Board` — distinct from `fbrain/*` or any other
 // app's schemas even when the field shape matches.
 export const OWNER_APP_ID = "fkanban";

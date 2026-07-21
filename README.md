@@ -2,8 +2,9 @@
 
 A kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db). Cards move through columns; every
 change persists in folddb. Modeled on `fbrain` — a thin Bun/TypeScript client
-of the LastDB/FoldDB node (`/api/mutation` + `/api/query`) using Mini local
-app-schema declaration for its private record shapes.
+of the LastDB/FoldDB node (`/api/mutation` + `/api/query`) using Mini's
+Schema Service-backed app-schema declaration for its private-visibility record
+shapes.
 
 Development source of truth is LastGit `lastdb:///fkanban`; GitHub
 `EdgeVector/fkanban` is a public read-only mirror for clone/browse. See
@@ -22,8 +23,8 @@ Default columns: `backlog → todo → doing → done`.
 
 > **Just want to use kanban?** Skip straight to
 > [Prerequisites](#prerequisites) + [Quick start](#quick-start). `kanban init`
-> declares the private `fkanban/*` schemas locally on the Mini node and seeds
-> the default board.
+> asks Mini to register/resolve the `fkanban/*` schemas and seeds the default
+> board.
 
 ## Prerequisites
 
@@ -126,15 +127,15 @@ a folddb node up), from inside the `kanban` repo:
 ```bash
 bun run install-cli   # one-time: put kanban on PATH (see "Install the global shim")
 
-# Bootstrap the node, declare the private fkanban schemas locally, and seed the
+# Bootstrap the node, register/resolve the fkanban schemas, and seed the
 # default board. On a fresh bootstrap, `init` ends by printing a "Next steps" block —
 # including the `claude mcp add fkanban …` command to register the MCP server
 # (the form is picked for you based on whether the `kanban` shim is on PATH).
 kanban init
 
 # …or point at an ephemeral dev node. The CLI's --schema-service-url is recorded
-# in config for diagnostics only (it shows in `kanban doctor`) and is not used
-# for private fkanban schema init.
+# in config for diagnostics only (it shows in `kanban doctor`); Mini owns the
+# required Schema Service registration call.
 kanban init \
   --node-url http://127.0.0.1:9105 \
   --schema-service-url https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com
@@ -149,9 +150,10 @@ kanban list
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
 If `init` reports `app_schema_declare_unsupported`, the node does not expose
-Mini's local private schema declaration route. Upgrade LastDB/FoldDB to a Mini
-build with `/api/apps/declare-schema`; `--schema-service-url` is diagnostic-only
-and will not fix private fkanban schema setup.
+Mini's registered app-schema declaration route. Upgrade LastDB/FoldDB to a Mini
+build whose `/api/apps/declare-schema` resolves or registers every proposal
+with Schema Service; `--schema-service-url` is diagnostic because Mini owns the
+service call.
 
 If `init` reports `schema_not_writable`, the node has a `fkanban/*` schema that
 **resolves but isn't writable for all fields** — usually an older, narrower
@@ -159,7 +161,7 @@ version of the schema (fewer fields than this kanban build expects), sometimes
 loaded *alongside* the current one. `init` now refuses to adopt such a hash
 (it would 400 every subsequent write) and **leaves your existing config
 untouched**, so the board keeps working. The fix is node-side: repair or
-upgrade Mini's local schema declaration path, then re-run `kanban init`. `init`
+upgrade Mini's registered schema declaration path, then re-run `kanban init`. `init`
 and `kanban doctor` write-probe the schema hashes before trusting them, so a
 stale duplicate can't silently break writes.
 
@@ -182,7 +184,7 @@ DONE  (0)
 
 | Command | What it does |
 |---|---|
-| `kanban init` | bootstrap node + declare private schemas + seed default board (idempotent) |
+| `kanban init` | bootstrap node + register/resolve schemas + seed default board (idempotent) |
 | `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
 | `kanban mark <slug> <line>` | append one marker line to an existing card body, idempotently (`--json`) |
 | `kanban move <slug> <column>` | move a card to a column (`--from/--expect COL` as a compare-and-swap claim guard, `--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
@@ -550,15 +552,16 @@ and each body are capped unless you opt out.
 (usually `done`) and is preserved across later tag/body grooming updates. Legacy
 or not-yet-complete cards expose it as an empty string.
 
-## Private vs Shared Schemas
+## Registered vs Shared Schemas
 
-The `fkanban/Card` and `fkanban/Board` schemas are private implementation
-schemas. `kanban init` declares them locally through Mini and persists the
-returned deterministic hashes in config after write-probing them.
+The `fkanban/Card` and `fkanban/Board` schemas are private in visibility, but
+every identity is registered with Schema Service. `kanban init` asks Mini to
+resolve/register them and persists the returned catalog hashes in config after
+write-probing them.
 
-The shared schema service is only for contracts fkanban deliberately exposes to
-another app or an external surface. Ordinary board storage does not register,
-publish, or load private schemas through schema_service.
+Shared-surface publication is only for contracts fkanban deliberately exposes
+to another app or an external surface. Ordinary board storage does not publish
+its schemas, but registration with Schema Service is still mandatory.
 
 ## Design notes
 

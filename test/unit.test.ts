@@ -788,12 +788,13 @@ describe("per-command help", () => {
     }
   });
 
-  test("init help tells the truth: the node declares private schemas, --schema-service-url is diagnostic-only", () => {
+  test("init help tells the truth: Mini owns mandatory schema registration, --schema-service-url is diagnostic-only", () => {
     const init = COMMAND_HELP.init!;
-    // The flag must NOT be described as the thing that resolves/loads schemas.
+    // The CLI does not call the service directly; Mini owns the required
+    // resolve/register operation and returns a catalog identity.
     expect(init).not.toContain("schema service to resolve fkanban schemas from");
-    // It must name Mini local declaration and the flag as informational/diagnostic.
-    expect(init).toContain("local");
+    expect(init).toMatch(/must resolve or register every schema/i);
+    expect(init).toMatch(/catalog identity/i);
     expect(init).toContain("declare-schema");
     expect(init).toMatch(/recorded in config|diagnostic/i);
   });
