@@ -62,7 +62,7 @@ Global:
                        also read from env LASTDB_DB (set by org/fkanban wrappers ...)
 
 Commands:
-  init                 bootstrap a node + declare private schemas + seed default board
+  init                 bootstrap a node + register schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --created-by --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
   mark <slug> <line>   append one marker line to a card body, idempotently
@@ -122,7 +122,7 @@ function withFooter(body: string): string {
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
-  init: withFooter(`fkanban init — bootstrap a node + declare private schemas + seed the default board
+  init: withFooter(`fkanban init — bootstrap a node + register schemas + seed the default board
 
 Usage:
   fkanban init [options]
@@ -130,15 +130,16 @@ Usage:
 Options:
   --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1)
   --schema-service-url <url>  schema_service URL recorded in config for diagnostics
-                              (not used for private fkanban schema init)
   --node-socket-path <path>   unix socket of the node, instead of --node-url
   --name <name>               display name to seed the default board with
 
-Private schema setup is performed by the NODE through Mini's local
-/api/apps/declare-schema route. The CLI never contacts --schema-service-url;
-that URL is only recorded in ~/.fkanban/config.json for diagnostics (it shows
-up in \`fkanban doctor\`). If init fails with app_schema_declare_unsupported,
-upgrade the node to a Mini build with local app-schema declaration.
+Schema setup is orchestrated by the NODE through Mini's
+/api/apps/declare-schema route. The CLI does not contact --schema-service-url
+directly, but Mini must resolve or register every schema with Schema Service
+before returning its catalog identity. That URL is also recorded in
+~/.fkanban/config.json for diagnostics (it shows up in \`fkanban doctor\`). If
+init fails with app_schema_declare_unsupported, upgrade the node to a Mini
+build with registered app-schema declaration.
 
 Example:
   fkanban init --node-url http://127.0.0.1 --name "Tom's board"`),

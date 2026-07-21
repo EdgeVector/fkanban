@@ -2,15 +2,15 @@
 // write the board:
 //
 //   1. probe identity, bootstrap the node if needed
-//   2. declare fkanban's private schemas locally on the Mini node
-//   3. capture each schema's canonical hash from the local declaration result
+//   2. ask Mini to resolve/register fkanban's schemas with Schema Service
+//   3. capture each registered catalog hash from the declaration result
 //   4. persist ~/.kanban/config.json
 //   5. seed the default board (idempotent)
 //
-// fkanban's Card/Board schemas are app-private implementation details. Mini
-// declares them through its local `/api/apps/declare-schema` route and returns
-// deterministic app-namespaced canonical hashes. The schema service is reserved
-// for explicit shared-surface publish/attach flows, not ordinary private init.
+// fkanban's Card/Board schemas are private in visibility, but not local-only.
+// Mini orchestrates `/api/apps/declare-schema` and must return Schema
+// Service-registered catalog hashes. Shared-surface publish/attach is separate
+// governance and is not a prerequisite for registration.
 
 import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
 import { existsSync } from "node:fs";
@@ -98,7 +98,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const nodeSocketPath = opts.nodeSocketPath ?? existing?.nodeSocketPath;
   const socketPath = resolveSocketPath({ nodeSocketPath });
 
-  // Step 1: probe identity, bootstrap if needed. The private-schema declaration
+  // Step 1: probe identity, bootstrap if needed. The schema declaration
   // path below is an owner verb that 403s `transport_not_attested` on an app-isolation node,
   // so every node client here attests an owner session over the control socket
   // (no-op fallback when the node serves no socket).
@@ -152,9 +152,9 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // error if the owner verb 403s.
   const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath });
 
-  // Step 2: declare fkanban's app-private schemas locally. This is Mini's
-  // private-schema bootstrap path; it must not call schema_service load.
-  print(`[2/${STEPS}] declaring ${UNIQUE_SCHEMAS.length + EXTRA_SCHEMAS.length} private schemas locally`);
+  // Step 2: ask Mini to resolve/register fkanban's schemas and return catalog
+  // identities. The CLI does not bypass Mini to mint a local identity.
+  print(`[2/${STEPS}] registering ${UNIQUE_SCHEMAS.length + EXTRA_SCHEMAS.length} schemas through Mini`);
   let schemaHashes: Record<string, string>;
   try {
     schemaHashes = await declareOwnedSchemasLocally(node, print);
@@ -200,7 +200,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
         `subsequent write):\n  ${notWritable.join("\n  ")}`,
       hint:
         "The node returned a declared fkanban/* schema hash that is not writable for all " +
-        "fields. Upgrade or repair the Mini local schema declaration path, then re-run `kanban init`. " +
+        "fields. Upgrade or repair Mini's registered schema declaration path, then re-run `kanban init`. " +
         "Your existing config was left untouched — current writes keep working.",
     });
   }
@@ -277,9 +277,9 @@ export function assertSafePrimaryConfigRepoint(args: {
 }
 
 /**
- * Declare fkanban's private schemas through Mini's local declaration API.
- * Private init has no schema_service fallback; older nodes must be upgraded
- * rather than loading app-private schemas from the shared service registry.
+ * Resolve/register fkanban's schemas through Mini's declaration API.
+ * Mini is responsible for reaching Schema Service when the verified catalog
+ * cache cannot reuse an existing identity. No local-only fallback is valid.
  */
 async function declareOwnedSchemasLocally(
   node: NodeClient,
@@ -308,17 +308,17 @@ async function declareOwnedSchemasLocally(
       throw err;
     }
   }
-  print(`        local app-schema declarations persisted; schema_service load skipped`);
+  print(`        registered catalog identities persisted`);
   return schemaHashes;
 }
 
 function appSchemaDeclareUnsupported(cause?: unknown): FkanbanError {
   return new FkanbanError({
     code: "app_schema_declare_unsupported",
-    message: "This node does not support Mini local private schema declaration at /api/apps/declare-schema.",
+    message: "This node does not support registered app-schema declaration at /api/apps/declare-schema.",
     hint:
-      "Upgrade LastDB/fold to a Mini node with local app-schema declaration. " +
-      "fkanban's Card/Board schemas are private implementation schemas and `kanban init` no longer loads them from schema_service.",
+      "Upgrade LastDB/fold to a Mini node that resolves/registers app schemas with Schema Service. " +
+      "Private visibility does not permit local-only schema identities.",
     cause,
   });
 }
@@ -339,7 +339,7 @@ function freshSetupSocketError(err: unknown, socketPath: string, route: string):
       "This node appears to expose only the narrow data/attestation socket. Use a node build " +
       "or startup mode that creates <data>/folddb-full.sock for setup writes, then re-run " +
       "`kanban init --node-socket-path <data>/folddb.sock`. Existing provisioned nodes can " +
-      "still be used over the narrow socket; fresh bootstrap/private schema declaration needs the full surface.",
+      "still be used over the narrow socket; fresh bootstrap/schema registration needs the full surface.",
     cause: err,
   });
 }
@@ -403,7 +403,7 @@ async function tryInitSocketOnly(args: {
     `        node setup route unavailable, but the data-plane socket ` +
       `${transport.socketPath} is live — degrading to a socket-only re-init`,
   );
-  print(`        (bootstrap + private schema declaration are setup routes; ` + `skipping — the node is already provisioned with fkanban schema hashes in config)`);
+  print(`        (bootstrap + schema registration are setup routes; ` + `skipping — the node is already provisioned with fkanban schema hashes in config)`);
 
   // Persist config unchanged (re-affirm the existing pins). Carry the socket
   // path through if it was explicitly given, mirroring the TCP path.

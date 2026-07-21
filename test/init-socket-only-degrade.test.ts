@@ -339,7 +339,7 @@ describe("runInit socket-only graceful degrade", () => {
       expect(fe.code).toBe("full_surface_socket_unavailable");
       expect(fe.message).toContain("/api/setup/bootstrap");
       expect(fe.message).toContain("folddb-full.sock");
-      expect(fe.hint).toContain("fresh bootstrap/private schema declaration needs the full surface");
+      expect(fe.hint).toContain("fresh bootstrap/schema registration needs the full surface");
     } finally {
       server.stop(true);
     }
