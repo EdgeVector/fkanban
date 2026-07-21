@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { milestoneAddCmd, milestoneListResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
+import { milestoneAddCmd, milestoneListResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { boardToFields, findCard, listCards, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
@@ -82,11 +82,47 @@ describe("first-class milestones", () => {
     expect(created).toEqual({ slug: "ship-self-hosting", action: "created", state: "active" });
     expect((await milestoneListResult({ cfg, node })).milestones.map((m) => m.slug)).toEqual(["ship-self-hosting"]);
     expect((await milestoneShowResult({ cfg, node, slug: "ship-self-hosting" })).milestone.driver).toBe("program-driver");
+    await expect(milestoneStateCmd({ cfg, node, slug: "ship-self-hosting", state: "proving" }))
+      .rejects.toMatchObject({ code: "milestone_proof_card_required" });
+    await addCmd({ cfg, node, slug: "ship-proof", title: "Ship proof", milestone: "ship-self-hosting", kind: "validation", column: "backlog" });
+    await milestoneAddCmd({ cfg, node, slug: "ship-self-hosting", proofCard: "ship-proof" });
     expect(await milestoneStateCmd({ cfg, node, slug: "ship-self-hosting", state: "proving" })).toEqual({
-      slug: "ship-self-hosting", from: "active", to: "proving",
+      slug: "ship-self-hosting", from: "active", to: "proving", proof_status: "pending",
     });
     // Milestones do not share the Card schema and therefore cannot enter pickup.
-    expect(await listCards(node, cfg)).toEqual([]);
+    expect((await listCards(node, cfg)).map((card) => card.slug)).toEqual(["ship-proof"]);
+  });
+
+  test("completion requires terminal machine-readable passing proof and failed proof fixes forward", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({ cfg, node, slug: "outcome-proof", title: "Proven outcome", state: "active", driver: "driver" });
+    await addCmd({ cfg, node, slug: "outcome-proof-card", title: "Terminal proof", body: "DONE-WHEN: file /tmp/proof matches /^PASS/", milestone: "outcome-proof", kind: "validation", column: "done" });
+    await milestoneAddCmd({ cfg, node, slug: "outcome-proof", proofCard: "outcome-proof-card" });
+    await milestoneStateCmd({ cfg, node, slug: "outcome-proof", state: "proving" });
+    await expect(milestoneStateCmd({ cfg, node, slug: "outcome-proof", state: "complete" }))
+      .rejects.toMatchObject({ code: "milestone_proof_not_passing" });
+    await milestoneAddCmd({ cfg, node, slug: "outcome-proof", proofStatus: "passing" });
+    await expect(milestoneStateCmd({ cfg, node, slug: "outcome-proof", state: "complete" }))
+      .rejects.toMatchObject({ code: "milestone_proof_not_passing" });
+    await addCmd({ cfg, node, slug: "outcome-proof-card", body: "DONE-WHEN: file /tmp/proof matches /^PASS/\nPROOF: PASS", milestone: "outcome-proof", kind: "validation", column: "done" });
+    expect(await milestoneStateCmd({ cfg, node, slug: "outcome-proof", state: "complete" })).toMatchObject({ to: "complete", proof_status: "passing" });
+    expect((await milestoneShowResult({ cfg, node, slug: "outcome-proof" })).milestone.completed_at).not.toBe("");
+
+    expect(await milestoneStateCmd({ cfg, node, slug: "outcome-proof", state: "active", proofStatus: "failing" })).toMatchObject({
+      from: "complete", to: "active", proof_status: "failing",
+    });
+  });
+
+  test("reconcile exposes the ready child frontier and proof warnings", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({ cfg, node, slug: "outcome-reconcile", title: "Reconcile me", state: "active" });
+    await addCmd({ cfg, node, slug: "ready-slice", title: "Ready slice", milestone: "outcome-reconcile", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo" });
+    await addCmd({ cfg, node, slug: "parked-slice", title: "Parked slice", milestone: "outcome-reconcile", kind: "pr", column: "backlog" });
+    const result = await milestoneReconcileResult({ cfg, node, slug: "outcome-reconcile" });
+    expect(result.ready.map((card) => card.slug)).toEqual(["ready-slice"]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual(expect.arrayContaining(["no-driver", "no-proof-card"]));
   });
 
   test("cards link to a live milestone and reject board/North-Star drift", async () => {
@@ -123,7 +159,12 @@ describe("first-class milestones", () => {
     expect((listed.structuredContent as { milestones: Array<{ slug: string }> }).milestones[0]?.slug).toBe("mcp-outcome");
     const shown = await client.callTool({ name: "fkanban_milestone_show", arguments: { slug: "mcp-outcome" } });
     expect((shown.structuredContent as { milestone: { driver: string } }).milestone.driver).toBe("program-driver");
+    await addCmd({ cfg, node, slug: "mcp-proof", title: "MCP proof", milestone: "mcp-outcome", kind: "validation", column: "backlog" });
+    await milestoneAddCmd({ cfg, node, slug: "mcp-outcome", proofCard: "mcp-proof" });
     const moved = await client.callTool({ name: "fkanban_milestone_state", arguments: { slug: "mcp-outcome", state: "proving" } });
-    expect(moved.structuredContent).toEqual({ slug: "mcp-outcome", from: "active", to: "proving" });
+    expect(moved.structuredContent).toEqual({ slug: "mcp-outcome", from: "active", to: "proving", proof_status: "pending" });
+    const reconciled = await client.callTool({ name: "fkanban_milestone_reconcile", arguments: { slug: "mcp-outcome" } });
+    expect(reconciled.isError).not.toBe(true);
+    expect((reconciled.structuredContent as { proof: { slug: string } }).proof.slug).toBe("mcp-proof");
   });
 });

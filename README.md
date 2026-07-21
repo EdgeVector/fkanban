@@ -217,6 +217,7 @@ DONE  (0)
 | `kanban milestone list` | list the milestone portfolio (`--board --state --json`) |
 | `kanban milestone show <slug>` | show one milestone's outcome, lifecycle, dependencies, driver, and proof linkage (`--json`) |
 | `kanban milestone state <slug> <state>` | transition `planned\|active\|blocked\|proving\|complete\|abandoned` (`--json`) |
+| `kanban milestone reconcile <slug>` | report ready child-card frontier, proof state, and actionable lifecycle warnings (`--json`) |
 | `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
 | `kanban doctor` | health-check config + node + schemas + a query round-trip |
 | `kanban mcp` | start an MCP server over stdio |
@@ -239,6 +240,15 @@ executable cards. They are not tagged cards, never occupy card columns, and can
 never be selected by `pickup`. Cards link to them with `--milestone <slug>`;
 F-Kanban refuses missing milestone references and board/North-Star mismatches.
 Milestones are driven and proven while cards remain the atomic pickup work.
+Transitions are explicit and proof-gated. Entering `proving` requires a live
+proof card linked back to the same milestone and board. Entering `complete`
+also requires that card to be in the board's terminal column, milestone
+`proof_status` to be `passing`, and the card body to contain an exact
+`PROOF: PASS` or `RESULT: PASS` line. Finishing implementation cards alone
+never completes the milestone. A failed proof returns to `active` with
+`--proof-status failing` for fix-forward work. `milestone reconcile` exposes
+the next ready card frontier and warnings without making the milestone pickup
+work.
 
 `list` caps each column at **12** cards by default so a long `done` column
 can't flood the terminal; the overflow collapses to a dim `… N more (--all)`
@@ -526,6 +536,7 @@ Exposes the board as tools (`fkanban_list`, `fkanban_search`, `fkanban_add`,
 `fkanban_rm`, `fkanban_board_create`, `fkanban_board_list`, `fkanban_board_rm`,
 `fkanban_milestone_add`, `fkanban_milestone_list`, `fkanban_milestone_show`,
 `fkanban_milestone_state`,
+`fkanban_milestone_reconcile`,
 `fkanban_doctor`)
 so agents can drive — and self-diagnose — the board.
 

@@ -23,7 +23,7 @@ import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
-import { milestoneAddCmd, milestoneListResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
+import { milestoneAddCmd, milestoneListResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
@@ -94,7 +94,8 @@ Commands:
   milestone add <slug> create/update a first-class outcome milestone
   milestone list       list milestone portfolio (--board --state --json)
   milestone show <slug> show one milestone (--json)
-  milestone state <slug> <state> transition milestone lifecycle state
+  milestone state <slug> <state> transition milestone lifecycle state (--proof-status)
+  milestone reconcile <slug> report ready frontier, proof, and lifecycle warnings
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
   which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
@@ -210,7 +211,8 @@ Usage:
   fkanban milestone add <slug> [options]
   fkanban milestone list [--board <slug>] [--state <state>] [--json]
   fkanban milestone show <slug> [--json]
-  fkanban milestone state <slug> <state> [--json]
+  fkanban milestone state <slug> <state> [--proof-status <status>] [--json]
+  fkanban milestone reconcile <slug> [--json]
 
 Add options:
   --title <text>        outcome title
@@ -1226,11 +1228,19 @@ async function dispatch(
         const state = requirePositional(positionals[3], "milestone state <slug> <state>");
         const extra = rejectExtraPositionals(positionals, 4, "milestone state <slug> <state>");
         if (extra !== undefined) return extra;
-        const result = await milestoneStateCmd({ cfg: ctx.cfg, node: ctx.node, slug, state });
+        const result = await milestoneStateCmd({ cfg: ctx.cfg, node: ctx.node, slug, state, proofStatus: values["proof-status"] as string | undefined });
         console.log(values.json ? JSON.stringify(result) : `milestone ${slug}: ${result.from} → ${result.to}`);
         return 0;
       }
-      console.error("kanban: Usage: fkanban milestone add|list|show|state");
+      if (action === "reconcile") {
+        const slug = requirePositional(positionals[2], "milestone reconcile <slug>");
+        const extra = rejectExtraPositionals(positionals, 3, "milestone reconcile <slug>");
+        if (extra !== undefined) return extra;
+        const result = await milestoneReconcileResult({ cfg: ctx.cfg, node: ctx.node, slug });
+        console.log(values.json ? JSON.stringify({ milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings }, null, 2) : result.text);
+        return 0;
+      }
+      console.error("kanban: Usage: fkanban milestone add|list|show|state|reconcile");
       return 2;
     }
 

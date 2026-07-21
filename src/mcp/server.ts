@@ -20,7 +20,7 @@ import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
-import { milestoneAddCmd, milestoneListResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
+import { milestoneAddCmd, milestoneListResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
@@ -46,6 +46,7 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_board_list",
   "fkanban_milestone_list",
   "fkanban_milestone_show",
+  "fkanban_milestone_reconcile",
   "fkanban_doctor",
 ] as const;
 export const FKANBAN_WRITE_TOOLS = [
@@ -662,18 +663,45 @@ export function createFkanbanMcpServer(
     "fkanban_milestone_state",
     {
       title: "Transition milestone state",
-      description: "Move a milestone through its supervisory lifecycle. Proof gates are added by the lifecycle feature slice.",
+      description: "Move a milestone through its proof-gated supervisory lifecycle.",
       annotations: { title: "Transition milestone state", idempotentHint: true, openWorldHint: false },
-      inputSchema: { slug: z.string().optional(), state: z.enum(MILESTONE_STATES).optional() },
-      outputSchema: { slug: z.string(), from: z.string(), to: z.string() },
+      inputSchema: { slug: z.string().optional(), state: z.enum(MILESTONE_STATES).optional(), proof_status: z.enum(MILESTONE_PROOF_STATUSES).optional() },
+      outputSchema: { slug: z.string(), from: z.string(), to: z.string(), proof_status: z.string() },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const state = requireArg(args.state, "milestone state", `Pass one of: ${MILESTONE_STATES.join(", ")}.`);
         const { cfg, node } = requireConfig();
-        const result = await milestoneStateCmd({ cfg, node, slug, state });
+        const result = await milestoneStateCmd({ cfg, node, slug, state, proofStatus: args.proof_status });
         return toolResult(`milestone ${slug}: ${result.from} → ${result.to}`, result);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_milestone_reconcile",
+    {
+      title: "Reconcile milestone",
+      description: "Report a milestone's ready child-card frontier, proof state, and actionable lifecycle warnings.",
+      annotations: { title: "Reconcile milestone", readOnlyHint: true, openWorldHint: false },
+      inputSchema: { slug: z.string().optional() },
+      outputSchema: {
+        milestone: milestoneSchema,
+        children: z.array(z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) })),
+        ready: z.array(z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) })),
+        proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(),
+        warnings: z.array(z.object({ code: z.string(), message: z.string(), hint: z.string() })),
+      },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
+        const { cfg, node } = requireConfig();
+        const result = await milestoneReconcileResult({ cfg, node, slug });
+        return toolResult(result.text, { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings });
       } catch (err) {
         return errorResult(err);
       }
