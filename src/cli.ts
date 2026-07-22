@@ -926,11 +926,55 @@ function realpathOrSelf(path: string): string {
   }
 }
 
+/**
+ * Host-track install roots for fkanban/kanban.
+ *
+ * Prefer the Kind B local-safe layout used by host-track apps.json after the
+ * 2026-07 portal cutover:
+ *   ~/.host-track/apps/fkanban/{current,versions/<oid>}
+ * Keep accepting the legacy checkout path for older machines:
+ *   ~/.host-track/fkanban
+ *
+ * Override: FKANBAN_HOST_TRACK_DIR (or HOST_TRACK_ROOT for the whole tree root).
+ */
+function hostTrackInstallRoots(): string[] {
+  const home = process.env.HOME ?? "";
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  const push = (p: string) => {
+    if (!p) return;
+    const real = fs.existsSync(p) ? realpathOrSelf(p) : p;
+    if (seen.has(real)) return;
+    seen.add(real);
+    roots.push(real);
+  };
+
+  const override = process.env.FKANBAN_HOST_TRACK_DIR?.trim();
+  if (override) {
+    push(override);
+    return roots;
+  }
+
+  // Broad HOST_TRACK_ROOT (e.g. ~/.host-track) still counts as managed.
+  const hostTrackRoot = process.env.HOST_TRACK_ROOT?.trim();
+  if (hostTrackRoot) push(hostTrackRoot);
+
+  if (home) {
+    // Preferred: local-safe install root (contains current + versions/*)
+    push(`${home}/.host-track/apps/fkanban`);
+    // Legacy durable checkout (pre apps/ layout)
+    push(`${home}/.host-track/fkanban`);
+  }
+  return roots;
+}
+
+/** Preferred/advertised host-track root for which output. */
 function expectedHostTrackRoot(): string {
   const home = process.env.HOME ?? "";
-  if (!home) return "";
-  const expected = `${home}/.host-track/fkanban`;
-  return fs.existsSync(expected) ? realpathOrSelf(expected) : expected;
+  const roots = hostTrackInstallRoots().filter((r) => fs.existsSync(r));
+  if (roots.length > 0) return roots[0]!;
+  if (home) return `${home}/.host-track/apps/fkanban`;
+  return "";
 }
 
 function pathWithin(path: string, root: string): boolean {
@@ -939,12 +983,21 @@ function pathWithin(path: string, root: string): boolean {
   return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
 }
 
+function pathWithinAnyHostTrack(path: string): { ok: boolean; root: string } {
+  const roots = hostTrackInstallRoots();
+  for (const root of roots) {
+    if (pathWithin(path, root)) return { ok: true, root };
+  }
+  return { ok: false, root: expectedHostTrackRoot() };
+}
+
 function whichReport(): WhichReport {
   const sourcePath = fileURLToPath(import.meta.url);
   const argvPath = process.argv[1] ?? sourcePath;
   const sourceRoot = realpathOrSelf(sourcePath.replace(/\/src\/cli\.ts$/, ""));
-  const expectedHostTrack = expectedHostTrackRoot();
-  const inHostTrack = pathWithin(sourceRoot, expectedHostTrack);
+  const match = pathWithinAnyHostTrack(sourceRoot);
+  const expectedHostTrack = match.ok ? match.root : expectedHostTrackRoot();
+  const inHostTrack = match.ok;
   const issues = inHostTrack ? [] : [`fkanban is not running from ${expectedHostTrack}`];
   return {
     package: pkg.name,
@@ -1333,8 +1386,9 @@ async function dispatch(
         return 1;
       }
       const realPath = safeRealpath(execPath);
-      const hostTrack = expectedHostTrackRoot();
-      const underHostTrack = pathWithin(realPath, hostTrack);
+      const match = pathWithinAnyHostTrack(realPath);
+      const hostTrack = match.ok ? match.root : expectedHostTrackRoot();
+      const underHostTrack = match.ok;
       if (values.json) {
         console.log(JSON.stringify({
           command: name,

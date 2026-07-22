@@ -107,11 +107,35 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(stdout).toContain("in_host_track: false");
   });
 
-  test("which --check exits zero when the source root resolves under host-track", async () => {
+  test("which --check exits zero when the source root resolves under legacy host-track", async () => {
     const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-host-track-"));
     mkdirSync(resolve(home, ".host-track"), { recursive: true });
     symlinkSync(REPO_ROOT, resolve(home, ".host-track/fkanban"));
     const { code, stdout, stderr } = await runCli(["which", "--check"], { HOME: home });
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("in_host_track: true");
+  });
+
+  test("which --check exits zero under local-safe apps/fkanban layout", async () => {
+    // Kind B install root: ~/.host-track/apps/fkanban (versions/current underneath).
+    // Symlink the install root at REPO_ROOT so source_root is pathWithin it.
+    const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-apps-host-track-"));
+    mkdirSync(resolve(home, ".host-track/apps"), { recursive: true });
+    symlinkSync(REPO_ROOT, resolve(home, ".host-track/apps/fkanban"));
+    const { code, stdout, stderr } = await runCli(["which", "--check"], { HOME: home });
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("in_host_track: true");
+    // expected_host_track may be the realpath of the apps/fkanban symlink
+  });
+
+  test("which --check honors FKANBAN_HOST_TRACK_DIR override", async () => {
+    const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-override-"));
+    const { code, stdout, stderr } = await runCli(["which", "--check"], {
+      HOME: home,
+      FKANBAN_HOST_TRACK_DIR: REPO_ROOT,
+    });
     expect(code).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain("in_host_track: true");
