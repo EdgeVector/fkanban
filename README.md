@@ -116,16 +116,22 @@ kanban which --json
 kanban which --check
 ```
 
-That maintains `~/.host-track/fkanban` from `lastdb:///fkanban` and repoints
-`~/.local/bin/{kanban,kanban-mcp,fkanban,fkanban-mcp,kanban-host-track-refresh}`
-at that durable checkout. `which --check` exits nonzero when the running CLI
-does not resolve under `~/.host-track/fkanban`.
+**Preferred install (Kind B local-safe, host-track apps.json):**
 
-Host-track registers this repo under the app id `kanban`; `fkanban` is a
-command alias for the same checkout and schema namespace. Use
-`host-track status kanban` for the registered app status, and `fkanban which
---json` or the `~/.host-track/stamps/fkanban.json` alias stamp to inspect the
-alias path.
+```text
+~/.host-track/apps/fkanban/current → versions/<oid>
+~/.local/bin/{kanban,fkanban,…}    → …/current/bin/…
+```
+
+Upgrade with `last-stack-safe-upgrade-cli fkanban` (or `host-track refresh
+fkanban` when wired). `which --check` accepts both that layout and the legacy
+checkout `~/.host-track/fkanban` (still used by `bin/host-track-refresh` on
+older machines). Override with `FKANBAN_HOST_TRACK_DIR`.
+
+Host-track registers this repo under the app ids `kanban` and `fkanban`
+(same install root). Use `host-track status kanban` for the registered app
+status, and `fkanban which --json` or `~/.host-track/stamps/fkanban.json` to
+inspect the live install.
 
 ## Quick start
 
