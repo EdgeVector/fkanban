@@ -167,7 +167,7 @@ describe("F-Brain completion checkpoints", () => {
       slug: "ship-x",
       title: "Ship X",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\nNorth Star: north-star-x\nPR: https://example.invalid/pr/1\n",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nNorth Star: north-star-x\nPR: https://example.invalid/pr/1\n\nShip X completion checkpoint fixture.\n",
     });
 
     await moveCmd({ cfg, node, slug: "ship-x", column: "done" });
@@ -196,7 +196,7 @@ describe("F-Brain completion checkpoints", () => {
       slug: "active-owned-card",
       title: "Active owned",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nActive owned program checkpoint fixture.\n",
     });
 
     await moveCmd({ cfg, node, slug: "active-owned-card", column: "done" });

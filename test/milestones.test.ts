@@ -119,7 +119,18 @@ describe("first-class milestones", () => {
     const node = fakeNode();
     await seedBoard(node);
     await milestoneAddCmd({ cfg, node, slug: "outcome-reconcile", title: "Reconcile me", state: "active" });
-    await addCmd({ cfg, node, slug: "ready-slice", title: "Ready slice", milestone: "outcome-reconcile", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo" });
+    await addCmd({
+      cfg,
+      node,
+      slug: "ready-slice",
+      title: "Ready slice",
+      milestone: "outcome-reconcile",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nReady milestone slice fixture work.",
+    });
     await addCmd({ cfg, node, slug: "parked-slice", title: "Parked slice", milestone: "outcome-reconcile", kind: "pr", column: "backlog" });
     const result = await milestoneReconcileResult({ cfg, node, slug: "outcome-reconcile" });
     expect(result.ready.map((card) => card.slug)).toEqual(["ready-slice"]);
@@ -130,7 +141,19 @@ describe("first-class milestones", () => {
     const node = fakeNode();
     await seedBoard(node);
     await milestoneAddCmd({ cfg, node, slug: "healthy-outcome", title: "Healthy outcome", state: "active", northStar: "north-a", driver: "driver-a" });
-    await addCmd({ cfg, node, slug: "healthy-slice", title: "Healthy slice", milestone: "healthy-outcome", northStar: "north-a", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo" });
+    await addCmd({
+      cfg,
+      node,
+      slug: "healthy-slice",
+      title: "Healthy slice",
+      milestone: "healthy-outcome",
+      northStar: "north-a",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nHealthy milestone slice fixture work.",
+    });
     await addCmd({ cfg, node, slug: "healthy-proof", title: "Healthy proof", milestone: "healthy-outcome", northStar: "north-a", kind: "validation", column: "backlog" });
     await milestoneAddCmd({ cfg, node, slug: "healthy-outcome", proofCard: "healthy-proof" });
     await addCmd({ cfg, node, slug: "operational-card", title: "Operational card", kind: "tracker", column: "backlog" });
