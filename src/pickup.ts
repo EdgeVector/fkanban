@@ -293,6 +293,9 @@ export type GroomIssueKind =
   | "todo-lane-branch-metadata"
   | "todo-lane-pr-metadata"
   | "non-pr-kind-in-todo"
+  | "hollow-pr-false-human-gate"
+  | "hollow-pr-in-todo"
+  | "hollow-pr-brief"
   | "missing-done-when-predicate"
   | "malformed-done-when-predicate";
 
