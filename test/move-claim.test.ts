@@ -204,6 +204,29 @@ describe("move claim guard", () => {
     expect(doing.map((c: { slug: string }) => c.slug)).not.toContain(initial.slug);
   });
 
+  test("list repairs a stale BoardCards row from point-read card truth", async () => {
+    const node = fakeNode();
+    const stale = card({ column: "doing", position: "2", updated_at: "2026-01-01T00:00:00.000Z" });
+    const truth = card({ column: "done", position: "9", updated_at: "2026-01-02T00:00:00.000Z" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: boardToFields(board()),
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card!,
+      keyHash: truth.slug,
+      fields: cardToFields(truth),
+    });
+    await seedBoardCard(node, stale);
+
+    const doing = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));
+    expect(doing.map((c: { slug: string }) => c.slug)).not.toContain(truth.slug);
+
+    const all = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, json: true }));
+    expect(all).toMatchObject([{ slug: truth.slug, column: "done", position: "9" }]);
+  });
+
   test("move refuses an ambient DB that disagrees with the card home DB", async () => {
     const node = fakeNode();
     await seed(node);
