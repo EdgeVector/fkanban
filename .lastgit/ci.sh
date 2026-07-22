@@ -24,6 +24,9 @@ bun run check:schema-sync-boundary
 echo "== typecheck =="
 bun run typecheck
 
+echo "== artifact build =="
+bun run build
+
 echo "== tests =="
 bun test
 

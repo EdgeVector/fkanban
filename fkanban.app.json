@@ -4,7 +4,8 @@
   "homepage_url": "https://github.com/EdgeVector/fkanban",
   "host_track": {
     "app": "kanban",
-    "kind": "B checkout-shim",
+    "install_mode": "artifact",
+    "kind": "artifact-bundle",
     "command": "kanban",
     "aliases": [
       "fkanban",
@@ -14,10 +15,28 @@
     ],
     "gate": "lastgit",
     "gate_main": "lastdb:///fkanban#main",
-    "gate_remote": "lastgit",
-    "gate_ref": "refs/heads/main",
-    "host_track": "$HOME/.host-track/fkanban",
-    "refresh": "$HOME/.local/bin/kanban-host-track-refresh",
-    "notes": "Kind B host-track checkout; PATH shims point into ~/.host-track/fkanban/bin."
+    "artifact_app": "fkanban",
+    "artifact_channel": "stable",
+    "artifact_root": "$HOME/.lastgit/artifacts",
+    "install_root": "$HOME/.host-track/apps/fkanban",
+    "links": [
+      {
+        "source": "dist/kanban",
+        "target": "$HOME/.local/bin/kanban"
+      },
+      {
+        "source": "dist/fkanban",
+        "target": "$HOME/.local/bin/fkanban"
+      },
+      {
+        "source": "dist/kanban-mcp",
+        "target": "$HOME/.local/bin/kanban-mcp"
+      },
+      {
+        "source": "dist/fkanban-mcp",
+        "target": "$HOME/.local/bin/fkanban-mcp"
+      }
+    ],
+    "notes": "Verified LastGit artifact install; PATH links point into the immutable Host Track artifact bundle."
   }
 }

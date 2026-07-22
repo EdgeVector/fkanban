@@ -1,0 +1,10 @@
+{
+  "artifacts": [
+    {
+      "app": "fkanban",
+      "paths": [
+        "dist"
+      ]
+    }
+  ]
+}
