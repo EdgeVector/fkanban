@@ -13,6 +13,8 @@ import {
   listCardsOnBoard,
   listDependencyStatusesForCards,
   listMilestones,
+  hasPrWorkBrief,
+  isSubstantiveCardBody,
   normalizeBlockStatus,
   normalizeDeps,
   normalizeKind,
@@ -417,4 +419,264 @@ export async function milestoneGroomResult(opts: { cfg: Config; node: NodeClient
   }
   const text = issues.length ? ["Milestone grooming warnings:", ...issues.map((issue) => `- ${issue.code} ${issue.milestone ? `[${issue.milestone}] ` : ""}${issue.card ? `[card:${issue.card}] ` : ""}${issue.message} ${issue.hint}`)].join("\n") : "Milestone grooming: healthy — no warnings.";
   return { issues, text };
+}
+
+/** Deterministic portfolio gap status for factory-fill / milestone-driver. */
+export type MilestoneGapStatus =
+  | "complete"
+  | "abandoned"
+  | "no_north_star"
+  | "blocked"
+  | "in_flight"
+  | "idle_promoteable"
+  | "idle_empty"
+  | "idle_blocked"
+  | "proof_pending"
+  | "proof_ready";
+
+export type MilestoneGapAction =
+  | "skip"
+  | "promote"
+  | "decompose"
+  | "await_proof"
+  | "complete_proof";
+
+export type MilestoneGapEntry = {
+  slug: string;
+  title: string;
+  north_star: string;
+  state: string;
+  status: MilestoneGapStatus;
+  action: MilestoneGapAction;
+  pr_todo: number;
+  pr_doing: number;
+  pr_backlog: number;
+  pr_done: number;
+  pr_live: number;
+  /** Unblocked Kind:pr in backlog with substantive brief + Repo — safe to move to todo. */
+  promoteable: string[];
+  /** Kind:pr in backlog that are dep-blocked, held, hollow, or body-stopped. */
+  blocked_backlog: string[];
+  has_proof_card: boolean;
+  proof_passing: boolean;
+  reason: string;
+};
+
+export type MilestoneGapReport = {
+  generated_at: string;
+  board?: string;
+  counts: Record<MilestoneGapStatus, number>;
+  action_counts: Record<MilestoneGapAction, number>;
+  milestones: MilestoneGapEntry[];
+  /** Ordered work queue for the driver: promote first, then decompose. */
+  work_queue: Array<{ slug: string; action: "promote" | "decompose"; promoteable: string[] }>;
+};
+
+const BODY_STOP_RE = /STOPPED by Tom|resume only by explicit direction|resume only after explicit/i;
+
+/**
+ * Pure classifier: given one milestone + its board cards + dep-resolved child
+ * statuses, decide gap status. Exported for unit tests.
+ */
+export function classifyMilestoneGap(
+  milestone: Milestone,
+  boardCards: Card[],
+  childStatuses: MilestoneChildStatus[],
+  proof: { slug: string; terminal: boolean; passingEvidence: boolean } | null,
+): MilestoneGapEntry {
+  const bySlug = new Map(boardCards.map((card) => [card.slug, card]));
+  const prChildren = childStatuses.filter((child) => {
+    if (child.slug === milestone.proof_card) return false;
+    const card = bySlug.get(child.slug);
+    return card ? normalizeKind(card.kind) === "pr" : false;
+  });
+
+  let pr_todo = 0;
+  let pr_doing = 0;
+  let pr_backlog = 0;
+  const promoteable: string[] = [];
+  const blocked_backlog: string[] = [];
+
+  for (const child of prChildren) {
+    const card = bySlug.get(child.slug)!;
+    const col = child.column;
+    if (col === "todo") pr_todo += 1;
+    else if (col === "doing") pr_doing += 1;
+    else if (col === "backlog") {
+      pr_backlog += 1;
+      const hold = normalizeBlockStatus(card.block_status) !== "none";
+      const hollow = !isSubstantiveCardBody(card.body) || !hasPrWorkBrief(card.body);
+      const stopped = BODY_STOP_RE.test(card.body ?? "");
+      const noRepo = !(card.repo && String(card.repo).trim());
+      if (!child.blocked && !hold && !hollow && !stopped && !noRepo) promoteable.push(child.slug);
+      else blocked_backlog.push(child.slug);
+    }
+  }
+  const pr_done = prChildren.filter((c) => c.column !== "todo" && c.column !== "doing" && c.column !== "backlog").length;
+  const pr_live = pr_todo + pr_doing + pr_backlog;
+  const has_proof_card = Boolean(milestone.proof_card);
+  const proof_passing = Boolean(proof?.passingEvidence && (proof.terminal || milestone.proof_status === "passing"));
+
+  const base = {
+    slug: milestone.slug,
+    title: milestone.title,
+    north_star: milestone.north_star || "",
+    state: milestone.state,
+    pr_todo,
+    pr_doing,
+    pr_backlog,
+    pr_done,
+    pr_live,
+    promoteable,
+    blocked_backlog,
+    has_proof_card,
+    proof_passing,
+  };
+
+  if (milestone.state === "complete") {
+    return { ...base, status: "complete", action: "skip", reason: "milestone is complete" };
+  }
+  if (milestone.state === "abandoned") {
+    return { ...base, status: "abandoned", action: "skip", reason: "milestone is abandoned" };
+  }
+  if (!milestone.north_star?.trim()) {
+    return { ...base, status: "no_north_star", action: "skip", reason: "no north_star set — out of gap-fill scope" };
+  }
+  if (milestone.state === "blocked") {
+    return { ...base, status: "blocked", action: "skip", reason: milestone.block_reason || "milestone state is blocked" };
+  }
+  if (pr_todo > 0 || pr_doing > 0) {
+    return {
+      ...base,
+      status: "in_flight",
+      action: "skip",
+      reason: `live Kind:pr in todo=${pr_todo} doing=${pr_doing}`,
+    };
+  }
+
+  // No live todo/doing PRs.
+  if (pr_live === 0 && pr_done > 0 && !proof_passing) {
+    if (proof?.passingEvidence) {
+      return { ...base, status: "proof_ready", action: "complete_proof", reason: "implementation done; proof body has PASS evidence" };
+    }
+    return { ...base, status: "proof_pending", action: "await_proof", reason: "implementation Kind:pr done; terminal proof still pending" };
+  }
+  if (pr_live === 0 && pr_done === 0) {
+    return {
+      ...base,
+      status: "idle_empty",
+      action: "decompose",
+      reason: has_proof_card
+        ? "no Kind:pr children — needs next-gate decomposition into PR cards"
+        : "no Kind:pr children and no proof card — needs proof link + next-gate PRs",
+    };
+  }
+  if (pr_backlog > 0 && promoteable.length > 0) {
+    return {
+      ...base,
+      status: "idle_promoteable",
+      action: "promote",
+      reason: `${promoteable.length} promoteable Kind:pr in backlog (no todo/doing)`,
+    };
+  }
+  if (pr_backlog > 0 && promoteable.length === 0) {
+    return {
+      ...base,
+      status: "idle_blocked",
+      action: "skip",
+      reason: "backlog Kind:pr exist but all are held, hollow, missing Repo, or dep-blocked",
+    };
+  }
+
+  return {
+    ...base,
+    status: "idle_empty",
+    action: "decompose",
+    reason: "no feedable live Kind:pr frontier",
+  };
+}
+
+export function buildMilestoneGapReport(
+  reconciled: MilestoneReconcileResult[],
+  boardCards: Card[],
+  opts?: { board?: string },
+): MilestoneGapReport {
+  const emptyCounts = (): Record<MilestoneGapStatus, number> => ({
+    complete: 0,
+    abandoned: 0,
+    no_north_star: 0,
+    blocked: 0,
+    in_flight: 0,
+    idle_promoteable: 0,
+    idle_empty: 0,
+    idle_blocked: 0,
+    proof_pending: 0,
+    proof_ready: 0,
+  });
+  const emptyActions = (): Record<MilestoneGapAction, number> => ({
+    skip: 0,
+    promote: 0,
+    decompose: 0,
+    await_proof: 0,
+    complete_proof: 0,
+  });
+  const counts = emptyCounts();
+  const action_counts = emptyActions();
+  const milestones: MilestoneGapEntry[] = [];
+
+  for (const result of reconciled) {
+    const entry = classifyMilestoneGap(
+      result.milestone,
+      boardCards.filter((c) => c.board === result.milestone.board),
+      result.children,
+      result.proof,
+    );
+    counts[entry.status] += 1;
+    action_counts[entry.action] += 1;
+    milestones.push(entry);
+  }
+
+  // Work queue: promote before decompose; stable order = portfolio order already in reconciled
+  const work_queue: MilestoneGapReport["work_queue"] = [];
+  for (const entry of milestones) {
+    if (entry.action === "promote") work_queue.push({ slug: entry.slug, action: "promote", promoteable: entry.promoteable });
+  }
+  for (const entry of milestones) {
+    if (entry.action === "decompose") work_queue.push({ slug: entry.slug, action: "decompose", promoteable: [] });
+  }
+
+  return {
+    generated_at: nowIso(),
+    board: opts?.board,
+    counts,
+    action_counts,
+    milestones,
+    work_queue,
+  };
+}
+
+export async function milestoneGapReportResult(opts: {
+  cfg: Config;
+  node: NodeClient;
+  board?: string;
+}): Promise<{ report: MilestoneGapReport; text: string }> {
+  const snapshot = await milestonePortfolioSnapshot(opts);
+  const report = buildMilestoneGapReport(snapshot.reconciled, snapshot.cards, { board: opts.board });
+  const lines = [
+    `Milestone gap-report  (generated ${report.generated_at})`,
+    `counts: in_flight=${report.counts.in_flight} idle_promoteable=${report.counts.idle_promoteable} idle_empty=${report.counts.idle_empty} idle_blocked=${report.counts.idle_blocked} proof_pending=${report.counts.proof_pending} proof_ready=${report.counts.proof_ready} complete=${report.counts.complete} no_north_star=${report.counts.no_north_star} blocked=${report.counts.blocked}`,
+    `actions: promote=${report.action_counts.promote} decompose=${report.action_counts.decompose} await_proof=${report.action_counts.await_proof} complete_proof=${report.action_counts.complete_proof} skip=${report.action_counts.skip}`,
+    `work_queue (${report.work_queue.length}):`,
+    ...(report.work_queue.length
+      ? report.work_queue.map((w) => `  • ${w.action.padEnd(10)} ${w.slug}${w.promoteable.length ? `  [${w.promoteable.join(", ")}]` : ""}`)
+      : ["  —"]),
+    "",
+    "STATUS            MILESTONE                         NSTAR                    TODO DOING BLOG DONE ACTION",
+    ...report.milestones
+      .filter((m) => m.state !== "complete" && m.state !== "abandoned")
+      .map((m) =>
+        `${m.status.padEnd(17)} ${m.slug.slice(0, 32).padEnd(33)} ${(m.north_star || "—").slice(0, 24).padEnd(25)} ${String(m.pr_todo).padEnd(4)} ${String(m.pr_doing).padEnd(5)} ${String(m.pr_backlog).padEnd(4)} ${String(m.pr_done).padEnd(4)} ${m.action}`,
+      ),
+  ];
+  return { report, text: lines.join("\n") };
 }
