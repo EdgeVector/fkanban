@@ -509,10 +509,13 @@ describe("add stdin body replacement", () => {
       node,
       slug: "stdin-update",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\nOld body.\n",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nOld body with enough prose.\n",
     });
 
-    const body = await readPipe("Repo: EdgeVector/fkanban\nBase: main\n\nUpdated from stdin.\n\n", 350);
+    const body = await readPipe(
+      "Repo: EdgeVector/fkanban\nBase: main\n\nUpdated from stdin with enough prose.\n\n",
+      350,
+    );
     const updated = await addCmd({ cfg, node, slug: "stdin-update", body });
     expect(updated).toMatchObject({ action: "updated" });
     expect((await findCard(node, cfg, "stdin-update"))?.body).toBe(body);
@@ -585,6 +588,71 @@ describe("mark command and add --body slug-list tripwire", () => {
     const after = await findCard(node, cfg, "truncated-body");
     expect(after?.body).toBe("Created By: unknown\n");
     expect(after?.body).not.toContain("NEEDS-HUMAN: x");
+  });
+
+  test("mark refuses empty and HANDOFF-only bodies", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "empty-mark",
+      title: "Empty mark",
+      column: "backlog",
+      body: "",
+    });
+    await expect(
+      markCmd({ cfg, node, slug: "empty-mark", line: "HANDOFF: worktree=/tmp/x" }),
+    ).rejects.toMatchObject({ code: "truncated_card_body" });
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "handoff-only-mark",
+      title: "Handoff only",
+      column: "doing",
+      body: "HANDOFF: worktree=/tmp/x branch=kanban/handoff-only-mark",
+      force: true,
+    });
+    await expect(
+      markCmd({ cfg, node, slug: "handoff-only-mark", line: "WATCH RECHECK: still pending" }),
+    ).rejects.toMatchObject({ code: "truncated_card_body" });
+  });
+
+  test("add --body refuses HANDOFF-only replace of a full brief", async () => {
+    const full =
+      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this brief.\n\n## STEPS\n1. Do the work.";
+    await addCmd({
+      cfg,
+      node,
+      slug: "handoff-wipe",
+      title: "Handoff wipe",
+      column: "todo",
+      body: full,
+    });
+    await expect(
+      addCmd({
+        cfg,
+        node,
+        slug: "handoff-wipe",
+        body: "HANDOFF: worktree=/tmp/x branch=kanban/handoff-wipe",
+      }),
+    ).rejects.toMatchObject({ code: "destructive_body_replace" });
+    expect((await findCard(node, cfg, "handoff-wipe"))?.body).toBe(full);
+  });
+
+  test("add refuses empty-body create into default/todo", async () => {
+    await expect(
+      addCmd({
+        cfg,
+        node,
+        slug: "empty-todo",
+        title: "Empty todo",
+        column: "todo",
+        repo: "EdgeVector/fkanban",
+        base: "main",
+        kind: "pr",
+      }),
+    ).rejects.toMatchObject({ code: "default_todo_not_pickup_ready" });
+    expect(await findCard(node, cfg, "empty-todo")).toBeNull();
   });
 
   test("mark allows a legacy Created By header when the rest of the body is present", async () => {

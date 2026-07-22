@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertBodyReplaceSafe,
   assertDefaultTodoPickupReady,
   emptyStructuredFields,
   isDepEnforcedColumn,
+  isSubstantiveCardBody,
   sanitizeDefaultTodoLaneMetadata,
   type Card,
 } from "../src/record.ts";
@@ -59,6 +61,65 @@ describe("sanitizeDefaultTodoLaneMetadata", () => {
     const c = card({ slug: "ready-card", branch: "kanban/ready-card" });
     expect(() => assertDefaultTodoPickupReady(c)).not.toThrow();
     expect(c.branch).toBe("");
+  });
+
+  test("assertDefaultTodoPickupReady rejects empty and HANDOFF-only bodies", () => {
+    expect(() =>
+      assertDefaultTodoPickupReady(card({ slug: "empty-body", body: "" })),
+    ).toThrow(/empty or annotation-only body/);
+    expect(() =>
+      assertDefaultTodoPickupReady(
+        card({
+          slug: "handoff-only",
+          body: "HANDOFF: worktree=/tmp/x branch=kanban/handoff-only",
+        }),
+      ),
+    ).toThrow(/empty or annotation-only body/);
+    expect(() =>
+      assertDefaultTodoPickupReady(
+        card({
+          slug: "headers-only",
+          body: "Repo: EdgeVector/fold\nBase: main\nKind: pr\n",
+        }),
+      ),
+    ).toThrow(/empty or annotation-only body/);
+  });
+});
+
+describe("card body substance + destructive replace", () => {
+  test("isSubstantiveCardBody accepts fixtures and GOAL sections", () => {
+    expect(isSubstantiveCardBody("Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.")).toBe(true);
+    expect(isSubstantiveCardBody("Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nShip it.")).toBe(true);
+    expect(isSubstantiveCardBody("")).toBe(false);
+    expect(isSubstantiveCardBody("Created By: unknown\n")).toBe(false);
+    expect(
+      isSubstantiveCardBody(
+        "HANDOFF: worktree=/Users/tom/.fkanban/worktrees/x branch=kanban/x",
+      ),
+    ).toBe(false);
+  });
+
+  test("assertBodyReplaceSafe blocks HANDOFF wipe of a real brief", () => {
+    const full =
+      "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nMake declare identities queryable.\n\n## STEPS\n1. Fix mint key.";
+    expect(() =>
+      assertBodyReplaceSafe(
+        "wipe-me",
+        full,
+        "HANDOFF: worktree=/tmp/x branch=kanban/wipe-me",
+      ),
+    ).toThrow(/destructive_body_replace|annotation-only/);
+    expect(() => assertBodyReplaceSafe("wipe-me", full, full + "\nHANDOFF: ok")).not.toThrow();
+    expect(() =>
+      assertBodyReplaceSafe(
+        "wipe-me",
+        full,
+        "HANDOFF: only",
+        true,
+      ),
+    ).not.toThrow();
+    // Recovering an empty body is allowed.
+    expect(() => assertBodyReplaceSafe("recover", "", full)).not.toThrow();
   });
 });
 

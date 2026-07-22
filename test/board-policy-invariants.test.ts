@@ -196,7 +196,15 @@ describe("board policy invariants", () => {
   });
 
   test("default todo rejects malformed or missing routing unless forced", async () => {
-    const missing = await expectPolicyReject(addCmd({ cfg, node, slug: "missing-repo", column: "todo", body: "No route." }));
+    const missing = await expectPolicyReject(
+      addCmd({
+        cfg,
+        node,
+        slug: "missing-repo",
+        column: "todo",
+        body: "No route and enough prose for the body gate.",
+      }),
+    );
     expect(missing.message).toContain("Missing Repo");
     expect(await findCard(node, cfg, "missing-repo")).toBeNull();
 
@@ -206,7 +214,7 @@ describe("board policy invariants", () => {
         node,
         slug: "dirty-repo",
         column: "todo",
-        body: "Repo: EdgeVector/fkanban  # stale note\nBase: main\n\nx",
+        body: "Repo: EdgeVector/fkanban  # stale note\nBase: main\n\nEnough prose for the body gate.",
       }),
     );
     expect(dirty.message).toContain("bare owner/name");
