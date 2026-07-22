@@ -175,19 +175,59 @@ describe("first-class milestones", () => {
     expect(groupedJson.groups.map((group: { slug: string }) => group.slug)).toEqual(["healthy-outcome", "unassigned-operational"]);
   });
 
-  test("groom renders blocked, proving, and stale-complete warning fixtures", async () => {
+  test("groom renders blocked and proving fixtures without false implementation-done", async () => {
     const node = fakeNode();
     await seedBoard(node);
     await milestoneAddCmd({ cfg, node, slug: "blocked-outcome", title: "Blocked", state: "active" });
     await milestoneAddCmd({ cfg, node, slug: "blocked-outcome", state: "blocked" });
+    // Proof-only milestone (no implementation children) must NOT claim "implementation done".
     await milestoneAddCmd({ cfg, node, slug: "proving-outcome", title: "Proving", state: "active", driver: "driver" });
     await addCmd({ cfg, node, slug: "proving-proof", title: "Proof", milestone: "proving-outcome", kind: "validation", column: "backlog" });
     await milestoneAddCmd({ cfg, node, slug: "proving-outcome", proofCard: "proving-proof" });
     await milestoneStateCmd({ cfg, node, slug: "proving-outcome", state: "proving" });
     const groom = await milestoneGroomResult({ cfg, node });
-    expect(groom.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(["blocked-no-reason", "implementation-done-proof-pending"]));
+    const codes = groom.issues.map((issue) => issue.code);
+    // New milestones default driver=last-stack-milestone-driver (no no-driver warning).
+    expect(codes).toEqual(expect.arrayContaining(["blocked-no-reason"]));
+    expect(codes).not.toContain("implementation-done-proof-pending");
     expect(groom.text).toContain("blocked-outcome");
-    expect(groom.text).toContain("proving-outcome");
+    // Proof-only proving milestone is healthy (no false "implementation done"), so
+    // it correctly does not appear in the warnings list.
+    expect(groom.issues.some((issue) => issue.milestone === "proving-outcome")).toBe(false);
+  });
+
+  test("implementation-done-proof-pending only when real implementation children are terminal", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg, node, slug: "done-impl-outcome", title: "Done impl", state: "active", driver: "driver",
+    });
+    await addCmd({
+      cfg, node, slug: "done-impl-slice", title: "Done slice", milestone: "done-impl-outcome",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nShip slice.\n\n## END STATE\nMerged.\n",
+    });
+    await addCmd({
+      cfg, node, slug: "done-impl-proof", title: "Proof", milestone: "done-impl-outcome",
+      kind: "validation", column: "backlog",
+    });
+    await milestoneAddCmd({ cfg, node, slug: "done-impl-outcome", proofCard: "done-impl-proof" });
+
+    // Empty / never-started milestone: no false positive.
+    await milestoneAddCmd({
+      cfg, node, slug: "empty-outcome", title: "Empty", state: "planned", driver: "driver",
+    });
+
+    const groom = await milestoneGroomResult({ cfg, node });
+    const codesByMs = new Map<string, string[]>();
+    for (const issue of groom.issues) {
+      const ms = issue.milestone ?? "";
+      const list = codesByMs.get(ms) ?? [];
+      list.push(issue.code);
+      codesByMs.set(ms, list);
+    }
+    expect(codesByMs.get("done-impl-outcome") ?? []).toContain("implementation-done-proof-pending");
+    expect(codesByMs.get("empty-outcome") ?? []).not.toContain("implementation-done-proof-pending");
   });
 
   test("cards link to a live milestone and reject board/North-Star drift", async () => {

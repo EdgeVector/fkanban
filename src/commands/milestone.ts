@@ -324,11 +324,29 @@ export function milestoneReconcileFromSnapshot(
   else if (!proofCard) warnings.push({ code: "missing-proof-card", message: `Linked proof card "${milestone.proof_card}" is missing.`, hint: "Repair the proof link before proving." });
   else if (proofCard.board !== milestone.board || proofCard.milestone !== milestone.slug) warnings.push({ code: "proof-card-mismatch", message: "Proof card board or milestone link does not match.", hint: "Align the proof card's --board and --milestone fields." });
   if (milestone.state === "blocked" && !milestone.block_reason) warnings.push({ code: "blocked-no-reason", message: "Blocked milestone has no reason.", hint: "Add --block-reason or return it to active." });
-  const incomplete = childStatuses.filter((child) => child.column !== (terminals.get(milestone.board) ?? "done") && child.slug !== milestone.proof_card);
+  const terminalCol = terminals.get(milestone.board) ?? "done";
+  // Non-proof children still open (not in the board terminal column).
+  const incomplete = childStatuses.filter((child) => child.column !== terminalCol && child.slug !== milestone.proof_card);
+  // Implementation children = any non-proof child. Empty milestone ≠ "implementation done".
+  const implementationChildren = childStatuses.filter((child) => child.slug !== milestone.proof_card);
+  const hasImplementationWork = implementationChildren.length > 0;
+  const allImplementationDone = hasImplementationWork && incomplete.length === 0;
   const inFlight = incomplete.some((child) => child.column === "doing");
   if (milestone.state === "active" && incomplete.length > 0 && ready.length === 0 && !inFlight) warnings.push({ code: "active-no-ready-card", message: "Active milestone has implementation work but no ready or in-flight card frontier.", hint: "Resolve dependencies/holds or promote the next implementation card to todo." });
-  if (incomplete.length === 0 && milestone.state !== "complete" && (!proof?.terminal || !proof.passingEvidence || milestone.proof_status !== "passing")) warnings.push({ code: "implementation-done-proof-pending", message: "Implementation is done but terminal passing proof is still pending.", hint: "Run the proof, record `PROOF: PASS`, mark its status passing, then complete the milestone." });
-  if (milestone.state === "complete" && childStatuses.some((child) => child.column !== (terminals.get(milestone.board) ?? "done"))) warnings.push({ code: "complete-has-active-cards", message: "Complete milestone still has non-terminal child cards.", hint: "Reopen the milestone or finish/abandon the remaining cards." });
+  // Only when real implementation work exists and is fully terminal, with proof still not PASS.
+  // Zero children / proof-only milestones must NOT get this warning (false factory-fill poison).
+  if (
+    allImplementationDone
+    && milestone.state !== "complete"
+    && (!proof?.terminal || !proof.passingEvidence || milestone.proof_status !== "passing")
+  ) {
+    warnings.push({
+      code: "implementation-done-proof-pending",
+      message: "Implementation is done but terminal passing proof is still pending.",
+      hint: "Run the proof, record `PROOF: PASS`, mark its status passing, then complete the milestone.",
+    });
+  }
+  if (milestone.state === "complete" && childStatuses.some((child) => child.column !== terminalCol)) warnings.push({ code: "complete-has-active-cards", message: "Complete milestone still has non-terminal child cards.", hint: "Reopen the milestone or finish/abandon the remaining cards." });
   return { milestone, children: childStatuses, ready, proof, warnings };
 }
 
