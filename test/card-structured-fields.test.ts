@@ -21,6 +21,7 @@ import {
   parseBodyListHeader,
   parseBodyTagsHeader,
   PICKUP_AREA_BLOCK_PREFIX,
+  extractPrUrlFromBody,
   repairStructuredFieldsFromBody,
   resolveCreatedBy,
   resolvePickupRepo,
@@ -919,5 +920,46 @@ describe("deriveStructuredFields (backfill)", () => {
     expect(c.repo).toBe("EdgeVector/explicit");
     expect(c.base).toBe("explicit-base");
     expect(c.kind).toBe("tracker");
+  });
+
+  test("derive + repair stamp pr_url from body PR/CR headers", () => {
+    const lastgitBody = [
+      "Repo: EdgeVector/schema-infra",
+      "Branch: kanban/deploy-pipeline-red",
+      "PR: lastgit://schema-infra/cr/cr-mrw0frwz-ea84",
+      "",
+      "Waiting on deploy-pipeline.",
+    ].join("\n");
+    const derived = deriveStructuredFields(
+      card({ repo: "EdgeVector/schema-infra", body: lastgitBody }),
+    );
+    expect(derived.pr_url).toBe("lastgit://schema-infra/cr/cr-mrw0frwz-ea84");
+    expect(derived.branch).toBe("kanban/deploy-pipeline-red");
+
+    const c = card({
+      repo: "EdgeVector/fold",
+      body: "PR: https://github.com/EdgeVector/fold/pull/42\nBranch: kanban/x\n\nship it",
+    });
+    repairStructuredFieldsFromBody(c);
+    expect(c.pr_url).toBe("https://github.com/EdgeVector/fold/pull/42");
+    expect(c.branch).toBe("kanban/x");
+  });
+
+  test("extractPrUrlFromBody synthesizes lastgit locator from bare cr- id", () => {
+    expect(
+      extractPrUrlFromBody("CR: cr-abc123\n", "EdgeVector/schema-infra"),
+    ).toBe("lastgit://schema-infra/cr/cr-abc123");
+    expect(
+      extractPrUrlFromBody("see lastgit://last-stack/cr/cr-xyz99 in notes\n", ""),
+    ).toBe("lastgit://last-stack/cr/cr-xyz99");
+  });
+
+  test("write-time repair keeps explicit --pr-url authoritative", () => {
+    const c = card({
+      pr_url: "https://example.invalid/already-set",
+      body: "PR: lastgit://schema-infra/cr/cr-other\n",
+    });
+    repairStructuredFieldsFromBody(c, { prUrl: true });
+    expect(c.pr_url).toBe("https://example.invalid/already-set");
   });
 });

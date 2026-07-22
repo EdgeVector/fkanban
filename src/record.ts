@@ -1240,11 +1240,52 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
     const branch = parseBodyHeader(card.body, "Branch");
     if (branch) out.branch = branch;
   }
+  // pr_url: body `PR:` / `CR:` (and lastgit://… fallback). Agents often write
+  // only the body header on handoff; without this backfill, board-closeout
+  // treats the card as no-PR and rolls WIP back to todo.
+  if (!card.pr_url) {
+    const pr = extractPrUrlFromBody(card.body, card.repo);
+    if (pr) out.pr_url = pr;
+  }
   if (!card.db) {
     const db = normalizeDbLocator(parseBodyHeader(card.body, "Db"));
     if (db) out.db = db;
   }
   return out;
+}
+
+/**
+ * Resolve a PR/CR locator from card body prose for structured-field backfill.
+ * Prefers line headers `PR:` / `CR:`, then a bare `lastgit://…/cr/…` URL, then
+ * a bare `cr-…` id combined with the card's repo slug.
+ */
+export function extractPrUrlFromBody(body: string, repo = ""): string {
+  for (const name of ["PR", "CR"] as const) {
+    const raw = parseBodyHeader(body, name).trim();
+    if (!raw) continue;
+    if (/^(https?:\/\/|lastgit:\/\/)/i.test(raw)) return raw;
+    // Bare lastgit CR id — synthesize locator when repo is known.
+    const cr = raw.match(/\b(cr-[A-Za-z0-9_-]+)\b/)?.[1];
+    if (cr) {
+      const slug = repo.includes("/") ? repo.split("/").pop()! : repo.trim();
+      if (slug) return `lastgit://${slug}/cr/${cr}`;
+      return cr;
+    }
+    // Forge/GitHub path fragments already look like URLs after first-token parse.
+    if (/pulls?\/\d+/i.test(raw) || /\/pull\/\d+/i.test(raw)) return raw;
+  }
+  // Unfenced lastgit CR URL anywhere in the body (handoff notes).
+  let inFence = false;
+  for (const line of body.split("\n")) {
+    if (/^[ \t]*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = line.match(/\blastgit:\/\/[^\s)>\]]+/i);
+    if (m?.[0]) return m[0].replace(/[.,;]+$/, "");
+  }
+  return "";
 }
 
 export type StructuredFieldRepairOptions = {
@@ -1255,6 +1296,7 @@ export type StructuredFieldRepairOptions = {
   branch?: boolean;
   surfaces?: boolean;
   db?: boolean;
+  prUrl?: boolean;
 };
 
 // Write-time body→field repair. `deriveStructuredFields` is intentionally
@@ -1287,6 +1329,10 @@ export function repairStructuredFieldsFromBody(
   if (!explicit.branch) {
     const branch = parseBodyHeader(card.body, "Branch");
     if (branch) card.branch = branch;
+  }
+  if (!explicit.prUrl) {
+    const pr = extractPrUrlFromBody(card.body, card.repo);
+    if (pr) card.pr_url = pr;
   }
   if (!explicit.surfaces) {
     const surfaces = parseBodyListHeader(card.body, "Surfaces");
