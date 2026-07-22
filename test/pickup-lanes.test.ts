@@ -20,7 +20,7 @@ function card(partial: Partial<Card> & { slug: string; title?: string }): Card {
     ...emptyStructuredFields(),
     slug: partial.slug,
     title: partial.title ?? partial.slug,
-    body: partial.body ?? "",
+    body: partial.body ?? "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nfixture\n\n## END STATE\ndone\n",
     board: partial.board ?? "default",
     column: partial.column ?? "todo",
     assignee: partial.assignee ?? "",

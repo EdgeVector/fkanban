@@ -105,7 +105,7 @@ function card(partial: Partial<Card>): Card {
   return {
     slug: "claim-me",
     title: "Claim me",
-    body: "Repo: EdgeVector/fkanban\nBase: main\n\nClaim fixture.",
+    body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nfixture\n\n## END STATE\ndone\n",
     board: "default",
     column: "todo",
     position: "1",

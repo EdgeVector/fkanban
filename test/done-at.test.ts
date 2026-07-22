@@ -17,7 +17,8 @@ import {
 } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 
-const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\nDone-at fixture.";
+const validPickupBody =
+  "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nDone-at fixture.\n\n## END STATE\nFixture complete.";
 
 const cfg: Config = {
   configVersion: 1,
@@ -127,18 +128,18 @@ describe("done_at stamping", () => {
     await addCmd({ cfg, node, slug: "reopen-add", title: "Reopen add", column: "done", body: validPickupBody });
     expect((await findCard(node, cfg, "reopen-add"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
-    await addCmd({ cfg, node, slug: "reopen-add", column: "todo" });
+    await addCmd({ cfg, node, slug: "reopen-add", column: "todo", body: validPickupBody });
     expect((await findCard(node, cfg, "reopen-add"))?.done_at).toBe("");
   });
 
   test("create directly in the terminal column stamps done_at", async () => {
-    await addCmd({ cfg, node, slug: "already-done", column: "done" });
+    await addCmd({ cfg, node, slug: "already-done", column: "done", body: validPickupBody });
     expect((await findCard(node, cfg, "already-done"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   test("custom-board terminal column is used", async () => {
     await seedBoard(node, "custom", [...DEFAULT_COLUMNS]);
-    await addCmd({ cfg, node, slug: "custom-card", board: "custom", column: "todo" });
+    await addCmd({ cfg, node, slug: "custom-card", board: "custom", column: "todo", body: validPickupBody });
     await moveCmd({ cfg, node, slug: "custom-card", column: "done" });
     expect((await findCard(node, cfg, "custom-card"))?.done_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });

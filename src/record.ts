@@ -1154,6 +1154,89 @@ export function isSubstantiveCardBody(body: string): boolean {
 }
 
 /**
+ * Kind:pr work briefs need both a goal and a terminal acceptance section so
+ * bulk "scaffold a North Star" sessions cannot park header-only shells that
+ * later get false needs_human holds. Accepts markdown headings or plain
+ * `GOAL:` / `END STATE:` / `DONE-WHEN:` lines used by older agents.
+ */
+export function hasPrWorkBrief(body: string): boolean {
+  const hasGoal =
+    /^#{1,6}[ \t]*GOAL\b/im.test(body) ||
+    /^GOAL[ \t]*:/im.test(body);
+  const hasEnd =
+    /^#{1,6}[ \t]*END[ \t]+STATE\b/im.test(body) ||
+    /^#{1,6}[ \t]*DONE[ \t]+WHEN\b/im.test(body) ||
+    /^END[ \t]+STATE[ \t]*:/im.test(body) ||
+    /^DONE-WHEN[ \t]*:/im.test(body);
+  return hasGoal && hasEnd;
+}
+
+/**
+ * Refuse Kind:pr creates/updates into the pickup/work lanes without a real brief.
+ *
+ * - default/todo and default/doing: require a substantive body (not empty /
+ *   HANDOFF/reap-only). This is the bulk North Star scaffold failure mode.
+ * - GOAL + END STATE is the standing agent contract; `groomCard` flags missing
+ *   sections without inventing a needs_human Tom gate. Write-path hard-reject
+ *   of missing headings is limited to empty shells so routine fixtures and
+ *   mid-flight metadata updates keep working.
+ * - backlog: write allowed; groom flags hollow PR briefs.
+ *
+ * Non-pr kinds and --force are exempt.
+ */
+export function assertPrWorkBrief(
+  slug: string,
+  kind: string,
+  body: string,
+  force?: boolean,
+  opts?: { board?: string; column?: string },
+): void {
+  if (force) return;
+  if (normalizeKind(kind) !== "pr") return;
+  const board = opts?.board ?? "default";
+  const column = opts?.column ?? "";
+  const workLane = board === "default" && (column === "todo" || column === "doing");
+  if (!workLane) return;
+  if (!isSubstantiveCardBody(body)) {
+    throw new FkanbanError({
+      code: "pr_body_missing_work_brief",
+      message: `Card "${slug}" cannot enter default/${column} with an empty or annotation-only Kind: pr body.`,
+      hint: "Pipe a real work brief with `## GOAL` and `## END STATE`. Do not bulk-scaffold empty PR shells into the pickup lane — use north-star-driver + milestone-driver. Pass --force only for an intentional exception.",
+    });
+  }
+}
+
+/** Default reconciliation driver for new milestones (hierarchical pipeline). */
+export const DEFAULT_MILESTONE_DRIVER = "last-stack-milestone-driver";
+
+/** Superseded drivers that must not be written on new/updated milestones. */
+export const SUPERSEDED_MILESTONE_DRIVERS = new Set(["program-driver"]);
+
+/**
+ * Resolve the milestone driver field: default on create, auto-heal superseded
+ * values on update, refuse explicit superseded names.
+ */
+export function resolveMilestoneDriver(
+  requested: string | undefined,
+  existing: string | undefined,
+  isCreate: boolean,
+): string {
+  const raw = (requested ?? existing ?? "").trim();
+  if (requested !== undefined && SUPERSEDED_MILESTONE_DRIVERS.has(requested.trim())) {
+    throw new FkanbanError({
+      code: "superseded_milestone_driver",
+      message: `Milestone driver "${requested.trim()}" is superseded.`,
+      hint: `Use --driver ${DEFAULT_MILESTONE_DRIVER} (north-star-driver creates milestones; milestone-driver creates cards). program-driver is paused compatibility-only.`,
+    });
+  }
+  if (!raw || SUPERSEDED_MILESTONE_DRIVERS.has(raw)) {
+    return DEFAULT_MILESTONE_DRIVER;
+  }
+  if (isCreate && requested === undefined) return DEFAULT_MILESTONE_DRIVER;
+  return raw;
+}
+
+/**
  * Refuse full-body replaces that would destroy a real brief with only a
  * HANDOFF/reap/provenance stub. Recovery of an empty body is allowed; intentional
  * shrinks require `--force`.

@@ -18,6 +18,7 @@ import {
   normalizeKind,
   nowIso,
   requireMilestone,
+  resolveMilestoneDriver,
   upsertMilestoneRecord,
   validateSlug,
   type Milestone,
@@ -229,7 +230,8 @@ export async function milestoneAddCmd(opts: MilestoneAddOptions): Promise<{ slug
     state,
     position: opts.position ?? existing?.position ?? String(Date.now()),
     north_star: opts.northStar ?? existing?.north_star ?? "",
-    driver: opts.driver ?? existing?.driver ?? "",
+    // Default last-stack-milestone-driver; refuse/heal superseded program-driver.
+    driver: resolveMilestoneDriver(opts.driver, existing?.driver, existing === null),
     deps,
     proof_card: opts.proofCard ?? existing?.proof_card ?? "",
     proof_status: proofStatus,

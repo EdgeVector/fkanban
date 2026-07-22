@@ -110,7 +110,7 @@ function board(partial: Partial<Board>): Board {
   return {
     slug: "default",
     title: "Default",
-    body: "",
+    body: "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nfixture\n\n## END STATE\ndone\n",
     columns: [...DEFAULT_COLUMNS],
     created_at: now,
     updated_at: now,
@@ -123,7 +123,7 @@ function card(partial: Partial<Card>): Card {
   return {
     slug: "card",
     title: "Card",
-    body: "",
+    body: "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nfixture\n\n## END STATE\ndone\n",
     board: "default",
     column: "todo",
     position: String(Date.now()),

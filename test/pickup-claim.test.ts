@@ -109,7 +109,7 @@ function card(partial: Partial<Card>): Card {
   return {
     slug: "card",
     title: "Card",
-    body: "Repo: EdgeVector/fkanban\nBase: main\n\nWork unit.",
+    body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nfixture\n\n## END STATE\ndone\n",
     board: "default",
     column: "todo",
     position: "10",
