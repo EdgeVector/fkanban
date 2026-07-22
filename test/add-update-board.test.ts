@@ -567,6 +567,43 @@ describe("mark command and add --body slug-list tripwire", () => {
     expect(after?.kind).toBe("pr");
   });
 
+  test("mark refuses a provenance-only legacy body instead of making truncation harder to repair", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "truncated-body",
+      title: "Truncated body",
+      column: "todo",
+      body: "Created By: unknown\n",
+      force: true,
+    });
+
+    await expect(
+      markCmd({ cfg, node, slug: "truncated-body", line: "NEEDS-HUMAN: x" }),
+    ).rejects.toMatchObject({ code: "truncated_card_body" });
+
+    const after = await findCard(node, cfg, "truncated-body");
+    expect(after?.body).toBe("Created By: unknown\n");
+    expect(after?.body).not.toContain("NEEDS-HUMAN: x");
+  });
+
+  test("mark allows a legacy Created By header when the rest of the body is present", async () => {
+    const originalBody = "Created By: unknown\nRepo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this.";
+    await addCmd({
+      cfg,
+      node,
+      slug: "legacy-full-body",
+      title: "Legacy full body",
+      column: "todo",
+      body: originalBody,
+    });
+
+    await markCmd({ cfg, node, slug: "legacy-full-body", line: "NEEDS-HUMAN: x" });
+
+    const after = await findCard(node, cfg, "legacy-full-body");
+    expect(after?.body).toBe(`${originalBody}\nNEEDS-HUMAN: x`);
+  });
+
   test("add --body rejects a body made only of existing card slugs", async () => {
     await addCmd({ cfg, node, slug: "slug-one", column: "todo", body: validPickupBody });
     await addCmd({ cfg, node, slug: "slug-two", column: "todo", body: validPickupBody });

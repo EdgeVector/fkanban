@@ -21,6 +21,16 @@ function appendLineOnce(body: string, line: string): string {
   return body.endsWith("\n") ? `${body}${line}` : `${body}\n${line}`;
 }
 
+function hasTruncatedBodyMarker(card: { body: string; bodyTruncated?: unknown }): boolean {
+  if (card.bodyTruncated === true) return true;
+
+  const meaningfulLines = card.body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return meaningfulLines.length === 1 && /^Created By:\s*.+$/i.test(meaningfulLines[0]!);
+}
+
 export async function markCmd(opts: MarkOptions): Promise<AddResult> {
   if (opts.line.length === 0) {
     throw new FkanbanError({
@@ -31,6 +41,13 @@ export async function markCmd(opts: MarkOptions): Promise<AddResult> {
   }
 
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
+  if (hasTruncatedBodyMarker(card)) {
+    throw new FkanbanError({
+      code: "truncated_card_body",
+      message: `Refusing to mark "${opts.slug}" because its body appears to be truncated.`,
+      hint: "Recover the full card body first, then retry `fkanban mark`.",
+    });
+  }
   const body = appendLineOnce(card.body, opts.line);
   if (body === card.body) {
     return { slug: card.slug, action: "updated", board: card.board, column: card.column };
