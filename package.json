@@ -12,6 +12,7 @@
     "fkanban-mcp": "src/mcp/main.ts"
   },
   "scripts": {
+    "build": "bash scripts/build-artifact.sh",
     "kanban": "bun src/cli.ts",
     "fkanban": "bun src/cli.ts",
     "install-cli": "bash bin/install.sh",
