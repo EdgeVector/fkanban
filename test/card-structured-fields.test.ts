@@ -35,7 +35,9 @@ function card(partial: Partial<Card>): Card {
   return {
     slug: "c",
     title: "C",
-    body: "",
+    // Default brief is substantive so isPickupEligible fixtures are not
+    // accidentally empty-body rejects under the default/todo body gate.
+    body: "Repo: EdgeVector/fold\nBase: main\n\nPickup eligibility fixture work.",
     board: "default",
     column: "todo",
     position: "1",
@@ -191,8 +193,16 @@ describe("isPickupEligible", () => {
     ).toBe(true);
   });
   test("missing repo or base → not eligible", () => {
-    expect(isPickupEligible(card({ kind: "pr", repo: "", base: "main" }))).toBe(false);
-    expect(isPickupEligible(card({ kind: "pr", repo: "EdgeVector/fold", base: "" }))).toBe(false);
+    expect(
+      isPickupEligible(
+        card({ kind: "pr", repo: "", base: "main", body: "No repo header and enough fixture prose." }),
+      ),
+    ).toBe(false);
+    expect(
+      isPickupEligible(
+        card({ kind: "pr", repo: "EdgeVector/fold", base: "", body: "No base header and enough fixture prose." }),
+      ),
+    ).toBe(false);
   });
   test("an intentional block → not eligible", () => {
     expect(

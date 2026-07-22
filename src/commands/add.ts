@@ -10,6 +10,7 @@ import { type Config } from "../config.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import {
   appendPosition,
+  assertBodyReplaceSafe,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
   sanitizeDefaultTodoLaneMetadata,
@@ -282,6 +283,11 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
         message: `Updating "${opts.slug}" would replace its dependency list.`,
         hint: "Use `fkanban dep add`/`dep rm` for incremental edits, or pass --replace-deps with --deps for an intentional replacement/clear.",
       });
+    }
+    if (opts.body !== undefined) {
+      // `add --body` replaces the whole body. Refuse HANDOFF/reap/empty stubs
+      // that would destroy a real brief (the #1 cause of empty todo cards).
+      assertBodyReplaceSafe(opts.slug, existing.body, opts.body, opts.force);
     }
     const updated: Card = {
       ...existing,

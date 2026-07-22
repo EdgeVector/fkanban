@@ -5,7 +5,7 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { addCmd, type AddResult } from "./add.ts";
-import { requireCard } from "../record.ts";
+import { isSubstantiveCardBody, requireCard } from "../record.ts";
 
 export type MarkOptions = {
   cfg: Config;
@@ -23,6 +23,10 @@ function appendLineOnce(body: string, line: string): string {
 
 function hasTruncatedBodyMarker(card: { body: string; bodyTruncated?: unknown }): boolean {
   if (card.bodyTruncated === true) return true;
+  // Empty or annotation-only bodies (HANDOFF / Created By / CARD REAP only) are
+  // already damaged — appending another marker freezes the loss into a new
+  // full-body write via `add --body`.
+  if (!isSubstantiveCardBody(card.body)) return true;
 
   const meaningfulLines = card.body
     .split(/\r?\n/)
@@ -44,8 +48,8 @@ export async function markCmd(opts: MarkOptions): Promise<AddResult> {
   if (hasTruncatedBodyMarker(card)) {
     throw new FkanbanError({
       code: "truncated_card_body",
-      message: `Refusing to mark "${opts.slug}" because its body appears to be truncated.`,
-      hint: "Recover the full card body first, then retry `fkanban mark`.",
+      message: `Refusing to mark "${opts.slug}" because its body appears to be truncated or empty.`,
+      hint: "Recover the full card body first (pipe the complete brief into `fkanban add`), then retry `fkanban mark`.",
     });
   }
   const body = appendLineOnce(card.body, opts.line);

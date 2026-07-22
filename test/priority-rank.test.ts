@@ -209,13 +209,15 @@ describe("rank command", () => {
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
   });
 
+  const pickupBody = "Repo: EdgeVector/fold\nBase: main\n\nPriority-rank fixture work unit.";
+
   // Add cards with explicit created_at ordering so the tiebreak is deterministic.
   async function seedTodo(): Promise<void> {
     // Created oldest→newest: c1, c2, c3, c4. Priorities scrambled vs age.
-    await addCmd({ cfg, node, slug: "c1", column: "todo", priority: "P2", tags: ["fold"] });
-    await addCmd({ cfg, node, slug: "c2", column: "todo", priority: "P0", tags: ["fold"] });
-    await addCmd({ cfg, node, slug: "c3", column: "todo", tags: ["fold"] }); // no priority → P2
-    await addCmd({ cfg, node, slug: "c4", column: "todo", priority: "P0", tags: ["fold"] });
+    await addCmd({ cfg, node, slug: "c1", column: "todo", priority: "P2", tags: ["fold"], body: pickupBody });
+    await addCmd({ cfg, node, slug: "c2", column: "todo", priority: "P0", tags: ["fold"], body: pickupBody });
+    await addCmd({ cfg, node, slug: "c3", column: "todo", tags: ["fold"], body: pickupBody }); // no priority → P2
+    await addCmd({ cfg, node, slug: "c4", column: "todo", priority: "P0", tags: ["fold"], body: pickupBody });
   }
 
   test("assigns gap-spaced positions in priority order (default todo)", async () => {
@@ -255,8 +257,18 @@ describe("rank command", () => {
   });
 
   test("skips meta/grouping cards in the ranked column", async () => {
-    await addCmd({ cfg, node, slug: "work", column: "todo", priority: "P1", tags: ["fold"] });
-    await addCmd({ cfg, node, slug: "umbrella", column: "todo", priority: "P0", tags: ["fold"], kind: "umbrella", force: true });
+    await addCmd({ cfg, node, slug: "work", column: "todo", priority: "P1", tags: ["fold"], body: pickupBody });
+    await addCmd({
+      cfg,
+      node,
+      slug: "umbrella",
+      column: "todo",
+      priority: "P0",
+      tags: ["fold"],
+      kind: "umbrella",
+      force: true,
+      body: pickupBody,
+    });
     const before = (await findCard(node, cfg, "umbrella"))?.position;
     const res = await rankCmd({ cfg, node });
 
@@ -292,8 +304,10 @@ describe("add --priority", () => {
     await seedBoard(node, "default", [...DEFAULT_COLUMNS]);
   });
 
+  const pickupBody = "Repo: EdgeVector/fold\nBase: main\n\nPriority-rank fixture work unit.";
+
   test("create stamps the priority tag alongside other tags", async () => {
-    await addCmd({ cfg, node, slug: "x", column: "todo", priority: "P1", tags: ["auth", "fold"] });
+    await addCmd({ cfg, node, slug: "x", column: "todo", priority: "P1", tags: ["auth", "fold"], body: pickupBody });
     const card = await findCard(node, cfg, "x");
     expect(card?.tags).toContain("p1");
     expect(card?.tags).toEqual(expect.arrayContaining(["auth", "fold"]));
@@ -301,7 +315,7 @@ describe("add --priority", () => {
   });
 
   test("update --priority replaces the old tier, keeps the rest", async () => {
-    await addCmd({ cfg, node, slug: "y", column: "todo", priority: "P3", tags: ["fold"] });
+    await addCmd({ cfg, node, slug: "y", column: "todo", priority: "P3", tags: ["fold"], body: pickupBody });
     await addCmd({ cfg, node, slug: "y", priority: "P0" });
     const card = await findCard(node, cfg, "y");
     expect(card?.tags).toContain("p0");
@@ -310,7 +324,7 @@ describe("add --priority", () => {
   });
 
   test("omitting --priority on update leaves the existing priority tag intact", async () => {
-    await addCmd({ cfg, node, slug: "z", column: "todo", priority: "P1", tags: ["fold"] });
+    await addCmd({ cfg, node, slug: "z", column: "todo", priority: "P1", tags: ["fold"], body: pickupBody });
     await addCmd({ cfg, node, slug: "z", title: "renamed" }); // no priority
     const card = await findCard(node, cfg, "z");
     expect(card?.tags).toContain("p1");

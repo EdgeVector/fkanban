@@ -1117,6 +1117,64 @@ export function sanitizeDefaultTodoLaneMetadata(card: Card): boolean {
   return changed;
 }
 
+// Lines that are ownership headers, provenance, or routine annotations — not
+// a work brief. Agents keep wiping specs by `add --body` with only HANDOFF /
+// CARD REAP / Created By; treat those as non-substance.
+const NON_SPEC_BODY_LINE =
+  /^(?:repo|base|kind|branch|pr|priority|tags|surfaces|north\s*star|milestone|db|created\s*by)\s*:/i;
+const ANNOTATION_BODY_LINE =
+  /^(?:handoff|watch-handoff|watch\s+recheck|needs-human|parked-work\s+salvage)\s*:/i;
+const ANNOTATION_SECTION_HEADING =
+  /^#{1,6}\s*(?:card\s+reap|handoff|result|proof|live\s+proof\s+gap|parked-work\s+salvage)\b/i;
+
+/**
+ * True when the body still has agent-usable work prose (GOAL/STEPS/… or plain
+ * text beyond headers/annotations). Empty bodies and annotation-only bodies
+ * (e.g. sole `HANDOFF: worktree=…`) fail.
+ */
+export function isSubstantiveCardBody(body: string): boolean {
+  if (!body.trim()) return false;
+  if (/^##\s+(GOAL|CONTEXT|STEPS|VERIFY|DONE\s+WHEN|END\s+STATE)\b/im.test(body)) return true;
+  if (/^DONE-WHEN:\s+\S+/im.test(body)) return true;
+
+  const prose: string[] = [];
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (NON_SPEC_BODY_LINE.test(line)) continue;
+    if (ANNOTATION_BODY_LINE.test(line)) continue;
+    if (ANNOTATION_SECTION_HEADING.test(line)) continue;
+    // Skip pure markdown rules / list bullets that only restate annotations.
+    if (/^[-*_]{3,}$/.test(line)) continue;
+    prose.push(line);
+  }
+  // Match existing test fixtures ("Test fixture work.") while rejecting
+  // header-only / HANDOFF-only stubs.
+  return prose.join(" ").replace(/\s+/g, " ").trim().length >= 12;
+}
+
+/**
+ * Refuse full-body replaces that would destroy a real brief with only a
+ * HANDOFF/reap/provenance stub. Recovery of an empty body is allowed; intentional
+ * shrinks require `--force`.
+ */
+export function assertBodyReplaceSafe(
+  slug: string,
+  existingBody: string,
+  nextBody: string,
+  force?: boolean,
+): void {
+  if (force) return;
+  if (existingBody === nextBody) return;
+  if (!isSubstantiveCardBody(existingBody)) return;
+  if (isSubstantiveCardBody(nextBody)) return;
+  throw new FkanbanError({
+    code: "destructive_body_replace",
+    message: `Refusing to replace the body of "${slug}" with an empty or annotation-only stub.`,
+    hint: "Use `fkanban mark <slug> \"…\"` to append a HANDOFF/reap line, pipe the full recovered body via stdin, or pass --force for an intentional wipe.",
+  });
+}
+
 export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBody?: string): void {
   if (force) return;
   if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return;
@@ -1162,6 +1220,14 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
   }
 
   const bodyForHeaderCheck = rawBody ?? card.body;
+  if (!isSubstantiveCardBody(bodyForHeaderCheck)) {
+    throw new FkanbanError({
+      code: "default_todo_not_pickup_ready",
+      message: `Card "${card.slug}" cannot be placed in default/todo with an empty or annotation-only body.`,
+      hint: "Pipe a real work brief (GOAL/CONTEXT/STEPS/VERIFY/DONE WHEN, or ≥12 chars of prose beyond Repo/Base headers). Use `fkanban mark` for HANDOFF lines; pass --force only for an intentional exception.",
+    });
+  }
+
   const repoProblem = strictRepoProblem({ repo: card.repo, body: bodyForHeaderCheck });
   if (repoProblem) {
     throw new FkanbanError({
@@ -1191,6 +1257,7 @@ export function isPickupEligible(card: Card): boolean {
     (isCardKind(card.kind) || !isRegistryCard(card.body, card.title)) && // fallback for un-backfilled cards
     resolvePickupRepo(card).ok &&
     card.base.trim().length > 0 &&
+    isSubstantiveCardBody(card.body) &&
     normalizeBlockStatus(card.block_status) === "none"
   );
 }
