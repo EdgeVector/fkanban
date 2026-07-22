@@ -1882,7 +1882,8 @@ export async function listCardsByColumn(
     try {
       const part = await listBoardCardsPartition(node, cfg, board, { column });
       if (part !== null) {
-        return part
+        const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+        return reconciled
           .filter((c) => !isHiddenCard(c))
           .map((c) => Object.assign(c, deriveStructuredFields(c)));
       }
@@ -1909,7 +1910,8 @@ export async function listCardsOnBoard(
   try {
     const part = await listBoardCardsPartition(node, cfg, board);
     if (part !== null && part.length > 0) {
-      return part
+      const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+      return reconciled
         .filter((c) => !isHiddenCard(c))
         .map((c) => Object.assign(c, deriveStructuredFields(c)));
     }
@@ -2053,6 +2055,100 @@ export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promis
 // lookup, so this never scans the board.
 export async function findCard(node: NodeClient, cfg: Config, slug: string): Promise<Card | null> {
   return findCardWithFields(node, cfg, slug, fieldsFor("card"));
+}
+
+function cardListProjectionFields(fields: string[]): string[] {
+  const bodyFree = fields.filter((field) => field !== "body");
+  return withRequiredFields(bodyFree, [
+    "slug",
+    "title",
+    "board",
+    "column",
+    "position",
+    "assignee",
+    "tags",
+    "deps",
+    "surfaces",
+    "created_at",
+    "created_by",
+    "updated_at",
+    "repo",
+    "base",
+    "kind",
+    "block_status",
+    "block_reason",
+    "north_star",
+    "milestone",
+    "pr_url",
+    "branch",
+  ]);
+}
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+function boardCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
+  return (
+    summary.slug === truth.slug &&
+    summary.title === truth.title &&
+    (summary.board || DEFAULT_BOARD_SLUG) === (truth.board || DEFAULT_BOARD_SLUG) &&
+    summary.column === truth.column &&
+    String(summary.position) === String(truth.position) &&
+    summary.assignee === truth.assignee &&
+    arraysEqual(summary.tags, truth.tags) &&
+    arraysEqual(summary.deps, truth.deps) &&
+    arraysEqual(summary.surfaces, truth.surfaces) &&
+    summary.created_at === truth.created_at &&
+    (summary.created_by || UNKNOWN_CREATED_BY) === (truth.created_by || UNKNOWN_CREATED_BY) &&
+    summary.updated_at === truth.updated_at &&
+    summary.repo === truth.repo &&
+    summary.base === truth.base &&
+    summary.kind === truth.kind &&
+    summary.block_status === truth.block_status &&
+    summary.block_reason === truth.block_reason &&
+    summary.north_star === truth.north_star &&
+    (summary.milestone ?? "") === (truth.milestone ?? "") &&
+    summary.pr_url === truth.pr_url &&
+    summary.branch === truth.branch
+  );
+}
+
+async function reconcileBoardCardSummaries(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+  fields: string[],
+): Promise<Card[]> {
+  const projection = cardListProjectionFields(fields);
+  const out: Card[] = [];
+  const seen = new Set<string>();
+
+  for (const card of cards) {
+    if (seen.has(card.slug)) continue;
+    seen.add(card.slug);
+    const truth = await findCardWithFields(node, cfg, card.slug, projection);
+    if (!truth) {
+      try {
+        await removeBoardCard(node, cfg, card);
+      } catch {
+        // best-effort read repair; omit the stale row either way
+      }
+      continue;
+    }
+
+    Object.assign(truth, deriveStructuredFields(truth));
+    if (!boardCardSummaryMatchesTruth(card, truth)) {
+      try {
+        await upsertBoardCard(node, cfg, truth, card);
+      } catch {
+        // best-effort read repair; still return point-read truth
+      }
+    }
+    out.push(truth);
+  }
+
+  return out;
 }
 
 /** Point-get bodies for a small capped set (MCP preview / list --full-body). */
