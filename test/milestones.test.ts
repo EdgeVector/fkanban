@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
+import { classifyMilestoneGap, milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { listCmd } from "../src/commands/list.ts";
 import { boardToFields, findCard, listCards, nowIso } from "../src/record.ts";
@@ -228,6 +228,70 @@ describe("first-class milestones", () => {
     }
     expect(codesByMs.get("done-impl-outcome") ?? []).toContain("implementation-done-proof-pending");
     expect(codesByMs.get("empty-outcome") ?? []).not.toContain("implementation-done-proof-pending");
+  });
+
+  test("gap-report classifies in_flight, idle_promoteable, and idle_empty deterministically", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-flight", title: "In flight", state: "active", northStar: "ns-a", driver: "driver",
+    });
+    await addCmd({
+      cfg, node, slug: "flight-pr", title: "Flight PR", milestone: "ms-flight", northStar: "ns-a",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "doing",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-promote", title: "Promote me", state: "active", northStar: "ns-b", driver: "driver",
+    });
+    await addCmd({
+      cfg, node, slug: "promote-pr", title: "Promote PR", milestone: "ms-promote", northStar: "ns-b",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "backlog",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-empty", title: "Empty", state: "planned", northStar: "ns-c", driver: "driver",
+    });
+
+    const { report } = await milestoneGapReportResult({ cfg, node });
+    const bySlug = Object.fromEntries(report.milestones.map((m) => [m.slug, m]));
+
+    expect(bySlug["ms-flight"]?.status).toBe("in_flight");
+    expect(bySlug["ms-flight"]?.action).toBe("skip");
+
+    expect(bySlug["ms-promote"]?.status).toBe("idle_promoteable");
+    expect(bySlug["ms-promote"]?.action).toBe("promote");
+    expect(bySlug["ms-promote"]?.promoteable).toEqual(["promote-pr"]);
+
+    expect(bySlug["ms-empty"]?.status).toBe("idle_empty");
+    expect(bySlug["ms-empty"]?.action).toBe("decompose");
+
+    expect(report.work_queue.map((w) => w.slug)).toEqual(["ms-promote", "ms-empty"]);
+    expect(report.action_counts.promote).toBeGreaterThanOrEqual(1);
+    expect(report.action_counts.decompose).toBeGreaterThanOrEqual(1);
+
+    // Pure classifier: hollow backlog PR is not promoteable
+    const hollow = classifyMilestoneGap(
+      {
+        slug: "ms-hollow", title: "H", body: "", board: "default", state: "active", position: "1",
+        north_star: "ns-x", driver: "d", deps: [], proof_card: "", proof_status: "pending", block_reason: "",
+        created_at: nowIso(), updated_at: nowIso(), completed_at: "",
+      },
+      [{
+        slug: "hollow-pr", title: "Hollow", body: "Repo: EdgeVector/fkanban\nBase: main\n", board: "default",
+        column: "backlog", position: "1", assignee: "", tags: [], deps: [], surfaces: [],
+        created_at: nowIso(), created_by: "", updated_at: nowIso(), done_at: "",
+        db: "", repo: "EdgeVector/fkanban", base: "main", kind: "pr", block_status: "none", block_reason: "",
+        north_star: "ns-x", milestone: "ms-hollow", pr_url: "", branch: "",
+      } as never],
+      [{ slug: "hollow-pr", title: "Hollow", column: "backlog", blocked: false, blockedBy: [] }],
+      null,
+    );
+    expect(hollow.status).toBe("idle_blocked");
+    expect(hollow.promoteable).toEqual([]);
   });
 
   test("cards link to a live milestone and reject board/North-Star drift", async () => {

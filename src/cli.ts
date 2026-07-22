@@ -23,7 +23,7 @@ import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
-import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
+import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
@@ -99,6 +99,7 @@ Commands:
   milestone portfolio  show milestone health and ready frontiers
   milestone detail <slug> show outcome, cards by column, proof, and warnings
   milestone groom      report actionable milestone health warnings
+  milestone gap-report deterministic gap map (in-flight / promote / empty)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   doctor               health-check the local setup (--json)
   which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
@@ -219,6 +220,7 @@ Usage:
   fkanban milestone portfolio [--board <slug>] [--json]
   fkanban milestone detail <slug> [--json]
   fkanban milestone groom [--board <slug>] [--json]
+  fkanban milestone gap-report [--board <slug>] [--json]
 
 Add options:
   --title <text>        outcome title
@@ -1275,7 +1277,14 @@ async function dispatch(
         console.log(values.json ? JSON.stringify(result.issues, null, 2) : result.text);
         return 0;
       }
-      console.error("kanban: Usage: fkanban milestone add|list|show|state|reconcile|portfolio|detail|groom");
+      if (action === "gap-report" || action === "gap") {
+        const extra = rejectExtraPositionals(positionals, 2, "milestone gap-report");
+        if (extra !== undefined) return extra;
+        const result = await milestoneGapReportResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
+        console.log(values.json ? JSON.stringify(result.report, null, 2) : result.text);
+        return 0;
+      }
+      console.error("kanban: Usage: fkanban milestone add|list|show|state|reconcile|portfolio|detail|groom|gap-report");
       return 2;
     }
 
