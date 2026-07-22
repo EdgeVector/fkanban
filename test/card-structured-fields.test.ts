@@ -37,7 +37,7 @@ function card(partial: Partial<Card>): Card {
     title: "C",
     // Default brief is substantive so isPickupEligible fixtures are not
     // accidentally empty-body rejects under the default/todo body gate.
-    body: "Repo: EdgeVector/fold\nBase: main\n\nPickup eligibility fixture work.",
+    body: "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nfixture\n\n## END STATE\ndone\n",
     board: "default",
     column: "todo",
     position: "1",
@@ -188,7 +188,7 @@ describe("isPickupEligible", () => {
         kind: "pr",
         repo: "EdgeVector/fold",
         base: "main",
-        body: "Repo: EdgeVector/fold\nBase: main\n\nUpdate dogfood-registry via code.",
+        body: "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nUpdate dogfood-registry via code.\n\n## END STATE\ndone.",
       })),
     ).toBe(true);
   });

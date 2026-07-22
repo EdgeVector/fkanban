@@ -14,7 +14,7 @@ function card(partial: Partial<Card> & { slug: string }): Card {
   const now = new Date().toISOString();
   return {
     title: partial.slug,
-    body: "Repo: EdgeVector/fold\nBase: main\nKind: pr\n\n## GOAL\nx",
+    body: "Repo: EdgeVector/fold\nBase: main\nKind: pr\n\n## GOAL\nx\n\n## END STATE\ny",
     board: "default",
     column: "todo",
     position: "1",
@@ -88,7 +88,7 @@ describe("sanitizeDefaultTodoLaneMetadata", () => {
 
 describe("card body substance + destructive replace", () => {
   test("isSubstantiveCardBody accepts fixtures and GOAL sections", () => {
-    expect(isSubstantiveCardBody("Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.")).toBe(true);
+    expect(isSubstantiveCardBody("Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.")).toBe(true);
     expect(isSubstantiveCardBody("Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nShip it.")).toBe(true);
     expect(isSubstantiveCardBody("")).toBe(false);
     expect(isSubstantiveCardBody("Created By: unknown\n")).toBe(false);

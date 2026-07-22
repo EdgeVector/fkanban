@@ -78,11 +78,11 @@ describe("first-class milestones", () => {
     await seedBoard(node);
     const created = await milestoneAddCmd({
       cfg, node, slug: "ship-self-hosting", title: "Ship self-hosting", state: "active",
-      northStar: "north-star-lastgit", driver: "program-driver",
+      northStar: "north-star-lastgit", driver: "last-stack-milestone-driver",
     });
     expect(created).toEqual({ slug: "ship-self-hosting", action: "created", state: "active" });
     expect((await milestoneListResult({ cfg, node })).milestones.map((m) => m.slug)).toEqual(["ship-self-hosting"]);
-    expect((await milestoneShowResult({ cfg, node, slug: "ship-self-hosting" })).milestone.driver).toBe("program-driver");
+    expect((await milestoneShowResult({ cfg, node, slug: "ship-self-hosting" })).milestone.driver).toBe("last-stack-milestone-driver");
     await expect(milestoneStateCmd({ cfg, node, slug: "ship-self-hosting", state: "proving" }))
       .rejects.toMatchObject({ code: "milestone_proof_card_required" });
     await addCmd({ cfg, node, slug: "ship-proof", title: "Ship proof", milestone: "ship-self-hosting", kind: "validation", column: "backlog" });
@@ -129,12 +129,14 @@ describe("first-class milestones", () => {
       base: "main",
       kind: "pr",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\nReady milestone slice fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nReady milestone slice.\n\n## END STATE\nDone.\n",
     });
     await addCmd({ cfg, node, slug: "parked-slice", title: "Parked slice", milestone: "outcome-reconcile", kind: "pr", column: "backlog" });
     const result = await milestoneReconcileResult({ cfg, node, slug: "outcome-reconcile" });
     expect(result.ready.map((card) => card.slug)).toEqual(["ready-slice"]);
-    expect(result.warnings.map((warning) => warning.code)).toEqual(expect.arrayContaining(["no-driver", "no-proof-card"]));
+    // Driver defaults to last-stack-milestone-driver; only proof-card warning remains.
+    expect(result.warnings.map((warning) => warning.code)).toEqual(expect.arrayContaining(["no-proof-card"]));
+    expect(result.milestone.driver).toBe("last-stack-milestone-driver");
   });
 
   test("portfolio, detail, grooming, and grouped board expose the milestone operating view", async () => {
@@ -152,7 +154,7 @@ describe("first-class milestones", () => {
       base: "main",
       kind: "pr",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\nHealthy milestone slice fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nHealthy milestone slice.\n\n## END STATE\nDone.\n",
     });
     await addCmd({ cfg, node, slug: "healthy-proof", title: "Healthy proof", milestone: "healthy-outcome", northStar: "north-a", kind: "validation", column: "backlog" });
     await milestoneAddCmd({ cfg, node, slug: "healthy-outcome", proofCard: "healthy-proof" });
@@ -183,7 +185,7 @@ describe("first-class milestones", () => {
     await milestoneAddCmd({ cfg, node, slug: "proving-outcome", proofCard: "proving-proof" });
     await milestoneStateCmd({ cfg, node, slug: "proving-outcome", state: "proving" });
     const groom = await milestoneGroomResult({ cfg, node });
-    expect(groom.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(["blocked-no-reason", "no-driver", "implementation-done-proof-pending"]));
+    expect(groom.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(["blocked-no-reason", "implementation-done-proof-pending"]));
     expect(groom.text).toContain("blocked-outcome");
     expect(groom.text).toContain("proving-outcome");
   });
@@ -214,14 +216,14 @@ describe("first-class milestones", () => {
     await seedBoard(node);
     const client = await milestoneMcpClient(node);
     const created = await client.callTool({ name: "fkanban_milestone_add", arguments: {
-      slug: "mcp-outcome", title: "MCP outcome", state: "active", driver: "program-driver",
+      slug: "mcp-outcome", title: "MCP outcome", state: "active", driver: "last-stack-milestone-driver",
     } });
     expect(created.isError).not.toBe(true);
     expect(created.structuredContent).toEqual({ slug: "mcp-outcome", action: "created", state: "active" });
     const listed = await client.callTool({ name: "fkanban_milestone_list", arguments: {} });
     expect((listed.structuredContent as { milestones: Array<{ slug: string }> }).milestones[0]?.slug).toBe("mcp-outcome");
     const shown = await client.callTool({ name: "fkanban_milestone_show", arguments: { slug: "mcp-outcome" } });
-    expect((shown.structuredContent as { milestone: { driver: string } }).milestone.driver).toBe("program-driver");
+    expect((shown.structuredContent as { milestone: { driver: string } }).milestone.driver).toBe("last-stack-milestone-driver");
     await addCmd({ cfg, node, slug: "mcp-proof", title: "MCP proof", milestone: "mcp-outcome", kind: "validation", column: "backlog" });
     await milestoneAddCmd({ cfg, node, slug: "mcp-outcome", proofCard: "mcp-proof" });
     const moved = await client.callTool({ name: "fkanban_milestone_state", arguments: { slug: "mcp-outcome", state: "proving" } });

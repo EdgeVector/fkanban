@@ -13,6 +13,7 @@ import {
   assertBodyReplaceSafe,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
+  assertPrWorkBrief,
   sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
   BLOCK_STATUSES,
@@ -322,6 +323,11 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       },
       warn: suppressDefaultTodoWarning(updated, opts.force) ? () => {} : undefined,
     });
+    // Kind:pr: reject empty shells everywhere; require GOAL+END STATE in default/todo.
+    assertPrWorkBrief(updated.slug, updated.kind, rawBody, opts.force, {
+      board: updated.board,
+      column: updated.column,
+    });
     sanitizeDefaultTodoLaneMetadata(updated);
     assertDefaultTodoPickupReady(updated, opts.force, rawBody);
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
@@ -371,6 +377,10 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       db: opts.dbLocator !== undefined,
     },
     warn: suppressDefaultTodoWarning(card, opts.force) ? () => {} : undefined,
+  });
+  assertPrWorkBrief(card.slug, card.kind, rawBody, opts.force, {
+    board: card.board,
+    column: card.column,
   });
   sanitizeDefaultTodoLaneMetadata(card);
   assertDefaultTodoPickupReady(card, opts.force, rawBody);

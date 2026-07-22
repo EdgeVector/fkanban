@@ -34,7 +34,7 @@ const cfg: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
 
-const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.";
+const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.";
 
 function fakeNode(): NodeClient {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
@@ -117,6 +117,7 @@ describe("add update preserves the card's board", () => {
       title: "probe v1",
       board: "other",
       column: "todo",
+      body: validPickupBody,
     });
     expect(created).toMatchObject({ action: "created", board: "other", column: "todo" });
 
@@ -234,7 +235,7 @@ describe("add update preserves the card's board", () => {
       slug: "body-tags",
       title: "Body tags",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: cli, metadata pickup cli\n\nTest fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: cli, metadata pickup cli\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
     });
 
     const created = await findCard(node, cfg, "body-tags");
@@ -250,7 +251,7 @@ describe("add update preserves the card's board", () => {
       title: "Explicit tags",
       column: "todo",
       tags: ["explicit"],
-      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: body-only\n\nTest fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: body-only\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
     });
 
     const created = await findCard(node, cfg, "explicit-tags");
@@ -265,7 +266,7 @@ describe("add update preserves the card's board", () => {
       slug: "fenced-tags",
       title: "Fenced tags",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\n```\nTags: example-only\n```\n\nTest fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n```\nTags: example-only\n```\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
     });
 
     const created = await findCard(node, cfg, "fenced-tags");
@@ -287,7 +288,7 @@ describe("add update preserves the card's board", () => {
       cfg,
       node,
       slug: "preserve-tags",
-      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: replacement\n\nUpdated body.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nTags: replacement\n\n## GOAL\nUpdated body.\n\n## END STATE\nFixture complete.",
     });
 
     const updated = await findCard(node, cfg, "preserve-tags");
@@ -302,7 +303,7 @@ describe("add update preserves the card's board", () => {
       slug: "branch-card",
       title: "Branch card",
       column: "doing",
-      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\nTest fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
     });
 
     const created = await findCard(node, cfg, "branch-card");
@@ -316,7 +317,7 @@ describe("add update preserves the card's board", () => {
       slug: "explicit-branch-card",
       title: "Explicit branch card",
       column: "doing",
-      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\nTest fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nBranch: kanban/body-branch\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
       branch: "kanban/explicit-branch",
     });
 
@@ -332,7 +333,7 @@ describe("add update preserves the card's board", () => {
       title: "Fenced branch card",
       column: "doing",
       body:
-        "Repo: EdgeVector/fkanban\nBase: main\n```text\nBranch: kanban/example-only\n```\n\nTest fixture work.",
+        "Repo: EdgeVector/fkanban\nBase: main\n```text\nBranch: kanban/example-only\n```\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
     });
 
     const created = await findCard(node, cfg, "fenced-branch-card");
@@ -346,7 +347,7 @@ describe("add update preserves the card's board", () => {
       slug: "preserve-branch-card",
       title: "Preserve branch card",
       column: "doing",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
       branch: "kanban/existing-branch",
     });
 
@@ -354,7 +355,7 @@ describe("add update preserves the card's board", () => {
       cfg,
       node,
       slug: "preserve-branch-card",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\nUpdated fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nUpdated fixture work.\n\n## END STATE\nFixture complete.",
     });
 
     const updatedBranch = await findCard(node, cfg, "preserve-branch-card");
@@ -368,7 +369,7 @@ describe("add update preserves the card's board", () => {
       slug: "db-card",
       title: "DB card",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\nTest fixture work.",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nTest fixture work.\n\n## END STATE\nFixture complete.",
       dbLocator: "lastdb://org/edgevector/company",
     });
 
@@ -418,7 +419,7 @@ describe("add update preserves the card's board", () => {
   });
 
   test("(b') update --column inventing a name is rejected", async () => {
-    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo" });
+    await addCmd({ cfg, node, slug: "probe", board: "other", column: "todo", body: validPickupBody });
     await expect(addCmd({ cfg, node, slug: "probe", column: "shipped" })).rejects.toBeInstanceOf(
       FkanbanError,
     );
@@ -449,7 +450,7 @@ describe("add update preserves the card's board", () => {
   });
 
   test("(d') create with explicit --board honors it (fixed columns)", async () => {
-    const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "todo" });
+    const created = await addCmd({ cfg, node, slug: "fresh2", board: "other", column: "todo", body: validPickupBody });
     expect(created).toMatchObject({ action: "created", board: "other", column: "todo" });
   });
 
@@ -497,7 +498,10 @@ describe("add stdin body replacement", () => {
   }
 
   test("create-via-stdin persists the piped body exactly", async () => {
-    const body = await readPipe("Repo: EdgeVector/fkanban\nBase: main\n\nCreated from stdin.\n", 25);
+    const body = await readPipe(
+      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nCreated from stdin.\n\n## END STATE\nok\n",
+      25,
+    );
     const created = await addCmd({ cfg, node, slug: "stdin-create", column: "todo", body });
     expect(created).toMatchObject({ action: "created" });
     expect((await findCard(node, cfg, "stdin-create"))?.body).toBe(body);
@@ -509,11 +513,11 @@ describe("add stdin body replacement", () => {
       node,
       slug: "stdin-update",
       column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\nOld body with enough prose.\n",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nOld body with enough prose.\n\n## END STATE\nok\n",
     });
 
     const body = await readPipe(
-      "Repo: EdgeVector/fkanban\nBase: main\n\nUpdated from stdin with enough prose.\n\n",
+      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nUpdated from stdin with enough prose.\n\n## END STATE\nok\n",
       350,
     );
     const updated = await addCmd({ cfg, node, slug: "stdin-update", body });
@@ -545,7 +549,8 @@ describe("mark command and add --body slug-list tripwire", () => {
   });
 
   test("mark appends once and preserves card metadata", async () => {
-    const originalBody = "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this intact.\n\n## STEPS\nAlso intact.";
+    const originalBody =
+      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this intact.\n\n## STEPS\nAlso intact.\n\n## END STATE\nDone.";
     await addCmd({
       cfg,
       node,
@@ -619,7 +624,7 @@ describe("mark command and add --body slug-list tripwire", () => {
 
   test("add --body refuses HANDOFF-only replace of a full brief", async () => {
     const full =
-      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this brief.\n\n## STEPS\n1. Do the work.";
+      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this brief.\n\n## STEPS\n1. Do the work.\n\n## END STATE\nDone.";
     await addCmd({
       cfg,
       node,
@@ -651,12 +656,13 @@ describe("mark command and add --body slug-list tripwire", () => {
         base: "main",
         kind: "pr",
       }),
-    ).rejects.toMatchObject({ code: "default_todo_not_pickup_ready" });
+    ).rejects.toMatchObject({ code: "pr_body_missing_work_brief" });
     expect(await findCard(node, cfg, "empty-todo")).toBeNull();
   });
 
   test("mark allows a legacy Created By header when the rest of the body is present", async () => {
-    const originalBody = "Created By: unknown\nRepo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this.";
+    const originalBody =
+      "Created By: unknown\nRepo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep this.\n\n## END STATE\nDone.";
     await addCmd({
       cfg,
       node,
@@ -935,7 +941,15 @@ describe("add enforces the dependency soft-block into working columns", () => {
   test("creating a blocked card directly INTO a working column is refused", async () => {
     await addCmd({ cfg, node, slug: "dep", title: "Dep", column: "todo", body: validPickupBody });
     await expect(
-      addCmd({ cfg, node, slug: "born-doing", title: "Born", column: "doing", deps: ["dep"] }),
+      addCmd({
+        cfg,
+        node,
+        slug: "born-doing",
+        title: "Born",
+        column: "doing",
+        deps: ["dep"],
+        body: validPickupBody,
+      }),
     ).rejects.toMatchObject({ code: "card_blocked" });
     // Nothing written.
     expect(await findCard(node, cfg, "born-doing")).toBeNull();
@@ -971,7 +985,7 @@ describe("add enforces the dependency soft-block into working columns", () => {
     const res = await addCmd({ cfg, node, slug: "blk", column: "backlog" });
     expect(res).toMatchObject({ action: "updated", column: "backlog" });
     // Todo remains a queue lane; the hard dependency block starts at doing/done.
-    await expect(addCmd({ cfg, node, slug: "blk", column: "todo" })).resolves.toMatchObject({
+    await expect(addCmd({ cfg, node, slug: "blk", column: "todo", body: validPickupBody })).resolves.toMatchObject({
       action: "updated",
       column: "todo",
     });

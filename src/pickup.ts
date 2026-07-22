@@ -2,8 +2,10 @@ import { type NodeClient } from "./client.ts";
 import { type Config } from "./config.ts";
 import {
   depStatus,
+  hasPrWorkBrief,
   isCardKind,
   isRegistryCard,
+  isSubstantiveCardBody,
   normalizeBlockStatus,
   normalizeKind,
   nowIso,
@@ -480,6 +482,52 @@ export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: G
       suggestion: "Move grouping/tracker/program/capstone/validation cards to backlog until their sequence opens.",
     });
     next.column = "backlog";
+  }
+
+  // Hollow Kind:pr shells (missing GOAL + END STATE / empty brief) are a
+  // generator/repair problem — never a Tom human gate. Clear false
+  // needs_human holds and demote out of the pickup lane so milestone-driver
+  // or a human can rewrite a real brief.
+  if (kind === "pr" && next.column !== "done") {
+    const hollow = !isSubstantiveCardBody(next.body) || !hasPrWorkBrief(next.body);
+    if (hollow) {
+      const falseHumanHold =
+        finalBlockStatus === "needs_human" &&
+        /empty card body|END STATE|GOAL\/STEPS|work brief|annotation-only/i.test(next.block_reason);
+      if (falseHumanHold) {
+        issues.push({
+          kind: "hollow-pr-false-human-gate",
+          message: "hollow Kind:pr card held needs_human for missing work brief (not a Tom gate)",
+          applyable: true,
+          suggestion: "Clear the false human gate; leave the card in backlog until a real GOAL/END STATE brief is written.",
+        });
+        next.block_status = "none";
+        next.block_reason = "";
+      }
+      if (next.board === "default" && next.column === "todo") {
+        issues.push({
+          kind: "hollow-pr-in-todo",
+          message: "Kind:pr card in default/todo is missing GOAL + END STATE (or DONE WHEN) work brief",
+          applyable: true,
+          suggestion: "Demote to backlog and rewrite a full PR brief (or re-file via milestone-driver). Do not set needs_human.",
+        });
+        next.column = "backlog";
+      } else if (!falseHumanHold && !isSubstantiveCardBody(next.body)) {
+        issues.push({
+          kind: "hollow-pr-brief",
+          message: "Kind:pr card has an empty or annotation-only body",
+          applyable: false,
+          suggestion: "Rewrite a full GOAL/STEPS/VERIFY/END STATE brief (via milestone-driver or fkanban add with a real body). Do not park as needs_human.",
+        });
+      } else if (!falseHumanHold && !hasPrWorkBrief(next.body)) {
+        issues.push({
+          kind: "hollow-pr-brief",
+          message: "Kind:pr card is missing GOAL and/or END STATE (or DONE WHEN) sections",
+          applyable: false,
+          suggestion: "Add ## GOAL and ## END STATE sections before promoting to todo.",
+        });
+      }
+    }
   }
 
   // Heal the false-collision class: structured branch/pr_url on default/todo

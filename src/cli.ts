@@ -228,12 +228,16 @@ Add options:
   --position <N>        portfolio ordering
   --north-star <slug>   parent Brain North Star
   --driver <name>       person, agent, or routine driving reconciliation
+                        (default: last-stack-milestone-driver; program-driver is refused)
   --deps a,b            milestone dependencies
   --proof-card <slug>   terminal validation card
   --proof-status <s>    pending|passing|failing|not_required
   --block-reason <text> why the milestone is blocked
 
-Milestones are supervisory records, never pickup cards.`),
+Milestones are supervisory records, never pickup cards.
+New milestones default to driver last-stack-milestone-driver. Superseded
+program-driver is rejected — use the hierarchical north-star-driver →
+milestone-driver pipeline instead of bulk card scaffolding.`),
 
   mark: withFooter(`fkanban mark — append one marker line to an existing card body
 
