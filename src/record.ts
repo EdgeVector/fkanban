@@ -1853,6 +1853,31 @@ export function rowToMilestone(row: QueryRow): Milestone {
   };
 }
 
+/**
+ * True when a milestone query row is field-sparse (e.g. full-scan returned only
+ * `slug`). Point-read by HashKey still returns the full field set on Mini after
+ * 0.22.10-class cutovers; list/gap-report must hydrate those rows or every
+ * milestone classifies as `no_north_star`.
+ *
+ * A real write always persists more than slug (board/state/proof_status/timestamps
+ * at minimum). Only-slug (or empty) rows are therefore a projection miss, not a
+ * legitimate hollow milestone.
+ */
+export function milestoneQueryFieldsLookSparse(fields: Record<string, unknown> | null | undefined): boolean {
+  if (!fields) return true;
+  let nonEmptyNonSlug = 0;
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === "slug") continue;
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) {
+      if (value.length > 0) nonEmptyNonSlug += 1;
+      continue;
+    }
+    if (String(value).length > 0) nonEmptyNonSlug += 1;
+  }
+  return nonEmptyNonSlug === 0;
+}
+
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
 // Native deletes are hidden by the node before this point.
@@ -2543,9 +2568,31 @@ export async function listMilestones(node: NodeClient, cfg: Config): Promise<Mil
     fields: fieldsFor("milestone"),
     allowFullScan: true,
   });
-  return res.results
-    .map(rowToMilestone)
-    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug));
+  const sparse = res.results.some((row) =>
+    milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>),
+  );
+  let milestones: Milestone[];
+  if (!sparse) {
+    milestones = res.results.map(rowToMilestone);
+  } else {
+    // Hydrate each sparse slug via HashKey point-read (full fields). Parallel;
+    // portfolio sizes are small (tens of milestones).
+    milestones = await Promise.all(
+      res.results.map(async (row) => {
+        const mapped = rowToMilestone(row);
+        if (!milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>)) {
+          return mapped;
+        }
+        const slug = mapped.slug || stringField((row.fields ?? {}) as Record<string, unknown>, "slug");
+        if (!slug) return mapped;
+        const full = await findMilestone(node, cfg, slug);
+        return full ?? mapped;
+      }),
+    );
+  }
+  return milestones.sort(
+    (a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug),
+  );
 }
 
 export async function findMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone | null> {

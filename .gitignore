@@ -14,3 +14,4 @@ dist/
 /data/
 .portal-worktree
 .portal-worktree
+node_modules

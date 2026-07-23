@@ -6,7 +6,14 @@ import type { Config } from "../src/config.ts";
 import { classifyMilestoneGap, milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { listCmd } from "../src/commands/list.ts";
-import { boardToFields, findCard, listCards, nowIso } from "../src/record.ts";
+import {
+  boardToFields,
+  findCard,
+  listCards,
+  listMilestones,
+  milestoneQueryFieldsLookSparse,
+  nowIso,
+} from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { createFkanbanMcpServer } from "../src/mcp/server.ts";
 
@@ -325,6 +332,61 @@ describe("first-class milestones", () => {
     );
     expect(hollow.status).toBe("idle_blocked");
     expect(hollow.promoteable).toEqual([]);
+  });
+
+  test("milestoneQueryFieldsLookSparse detects slug-only full-scan rows", () => {
+    expect(milestoneQueryFieldsLookSparse({ slug: "ms-a" })).toBe(true);
+    expect(milestoneQueryFieldsLookSparse({ slug: "ms-a", title: "", north_star: "" })).toBe(true);
+    expect(milestoneQueryFieldsLookSparse({
+      slug: "ms-a",
+      title: "T",
+      north_star: "ns-x",
+      state: "active",
+    })).toBe(false);
+    expect(milestoneQueryFieldsLookSparse(null)).toBe(true);
+  });
+
+  test("listMilestones hydrates sparse full-scan rows via HashKey so gap-report sees north_star", async () => {
+    const base = fakeNode();
+    await seedBoard(base);
+    await milestoneAddCmd({
+      cfg,
+      node: base,
+      slug: "sparse-ms",
+      title: "Needs hydrate",
+      state: "active",
+      northStar: "north-star-cloud-sync-snapshot-log",
+      driver: "last-stack-milestone-driver",
+    });
+
+    // Wrap queryAll: unfiltered (list) returns slug only; HashKey returns full row.
+    const node: NodeClient = {
+      ...base,
+      async queryAll(opts) {
+        const res = await base.queryAll(opts);
+        if (opts.filter?.HashKey) return res;
+        return {
+          ...res,
+          results: res.results.map((row) => ({
+            ...row,
+            fields: { slug: String((row.fields as { slug?: string })?.slug ?? "") },
+          })),
+        };
+      },
+    };
+
+    const listed = await listMilestones(node, cfg);
+    const hit = listed.find((m) => m.slug === "sparse-ms");
+    expect(hit?.north_star).toBe("north-star-cloud-sync-snapshot-log");
+    expect(hit?.title).toBe("Needs hydrate");
+    expect(hit?.state).toBe("active");
+
+    const { report } = await milestoneGapReportResult({ cfg, node });
+    const entry = report.milestones.find((m) => m.slug === "sparse-ms");
+    expect(entry?.north_star).toBe("north-star-cloud-sync-snapshot-log");
+    expect(entry?.status).toBe("idle_empty");
+    expect(entry?.action).toBe("decompose");
+    expect(entry?.status).not.toBe("no_north_star");
   });
 
   test("cards link to a live milestone and reject board/North-Star drift", async () => {
