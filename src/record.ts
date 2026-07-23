@@ -22,7 +22,6 @@ import {
   upsertBoardMilestone,
 } from "./board-milestones.ts";
 import {
-  listMilestoneCardsPartition,
   removeMilestoneCard,
   upsertMilestoneCard,
 } from "./milestone-cards.ts";
