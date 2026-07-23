@@ -30,6 +30,7 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
+import { listMilestoneCardsPartition } from "../milestone-cards.ts";
 
 export type MilestoneWarning = {
   code: string;
@@ -282,7 +283,7 @@ export async function milestoneAddCmd(opts: MilestoneAddOptions): Promise<{ slug
   };
   await validateLinks(opts, milestone);
   await validateTransition(opts, existing, milestone);
-  await upsertMilestoneRecord(opts.node, opts.cfg, milestone, existing !== null);
+  await upsertMilestoneRecord(opts.node, opts.cfg, milestone, existing !== null, existing);
   return { slug: milestone.slug, action: existing ? "updated" : "created", state: milestone.state };
 }
 
@@ -327,7 +328,11 @@ export async function milestoneStateCmd(opts: { cfg: Config; node: NodeClient; s
 
 export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<MilestoneReconcileResult & { text: string }> {
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
-  const children = (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
+  // Prefer MilestoneCards partition (exact membership); fall back to board filter.
+  const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
+  const children = fromIndex !== null
+    ? fromIndex
+    : (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
   const boards = await listBoards(opts.node, opts.cfg);
   const proofCard = milestone.proof_card ? await findCard(opts.node, opts.cfg, milestone.proof_card) : null;
@@ -402,8 +407,13 @@ function renderMilestoneReconcile(result: MilestoneReconcileResult): string {
 async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ milestones: Milestone[]; cards: Card[]; reconciled: MilestoneReconcileResult[] }> {
   const milestones = (await listMilestones(opts.node, opts.cfg)).filter((milestone) => !opts.board || milestone.board === opts.board);
   const boards = await listBoards(opts.node, opts.cfg);
-  const boardSlugs = [...new Set(milestones.map((milestone) => milestone.board))];
-  const cards = (await Promise.all(boardSlugs.map((board) => listCardsOnBoard(opts.node, opts.cfg, board)))).flat();
+  // Prefer per-milestone partitions when bound; else one board-wide card list.
+  const childLists = await Promise.all(milestones.map(async (milestone) => {
+    const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
+    if (fromIndex !== null) return fromIndex;
+    return (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
+  }));
+  const cards = childLists.flat();
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, cards);
   const proofs = new Map<string, Card | null>();
   await Promise.all(milestones.map(async (milestone) => {
@@ -412,7 +422,14 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   return {
     milestones,
     cards,
-    reconciled: milestones.map((milestone) => milestoneReconcileFromSnapshot(milestone, cards.filter((card) => card.board === milestone.board), statuses, boards, proofs.get(milestone.proof_card) ?? null)),
+    reconciled: milestones.map((milestone, i) =>
+      milestoneReconcileFromSnapshot(
+        milestone,
+        childLists[i] ?? [],
+        statuses,
+        boards,
+        proofs.get(milestone.proof_card) ?? null,
+      )),
   };
 }
 

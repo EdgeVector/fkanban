@@ -16,6 +16,16 @@ import {
   removeBoardCard,
   upsertBoardCard,
 } from "./board-cards.ts";
+import {
+  listAllBoardMilestones,
+  removeBoardMilestone,
+  upsertBoardMilestone,
+} from "./board-milestones.ts";
+import {
+  listMilestoneCardsPartition,
+  removeMilestoneCard,
+  upsertMilestoneCard,
+} from "./milestone-cards.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
@@ -2562,7 +2572,21 @@ export function milestoneToFields(m: Milestone): Record<string, unknown> {
   };
 }
 
+/**
+ * List milestones without product full-scan when BoardMilestones is bound:
+ * one HashRange partition per board. Falls back to Milestone full-scan (+ sparse
+ * HashKey hydrate) only when the index is unbound or empty after never dual-written.
+ */
 export async function listMilestones(node: NodeClient, cfg: Config): Promise<Milestone[]> {
+  const boards = await listBoards(node, cfg);
+  const fromIndex = await listAllBoardMilestones(node, cfg, boards);
+  if (fromIndex !== null && fromIndex.length > 0) {
+    return fromIndex.sort(
+      (a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug),
+    );
+  }
+
+  // Fallback: full-scan + sparse hydrate (pre-index / empty backfill).
   const res = await node.queryAll({
     schemaHash: schemaHashFor("milestone", cfg),
     fields: fieldsFor("milestone"),
@@ -2575,8 +2599,6 @@ export async function listMilestones(node: NodeClient, cfg: Config): Promise<Mil
   if (!sparse) {
     milestones = res.results.map(rowToMilestone);
   } else {
-    // Hydrate each sparse slug via HashKey point-read (full fields). Parallel;
-    // portfolio sizes are small (tens of milestones).
     milestones = await Promise.all(
       res.results.map(async (row) => {
         const mapped = rowToMilestone(row);
@@ -2621,12 +2643,27 @@ export async function upsertMilestoneRecord(
   cfg: Config,
   milestone: Milestone,
   exists: boolean,
+  previous?: Milestone | null,
 ): Promise<void> {
   await node[exists ? "updateRecord" : "createRecord"]({
     schemaHash: schemaHashFor("milestone", cfg),
     keyHash: milestone.slug,
     fields: milestoneToFields(milestone),
   });
+  await upsertBoardMilestone(node, cfg, milestone, previous ?? null);
+}
+
+/** Remove fat Milestone + BoardMilestones dual index. */
+export async function deleteMilestoneRecord(
+  node: NodeClient,
+  cfg: Config,
+  milestone: Milestone,
+): Promise<void> {
+  await node.deleteRecord({
+    schemaHash: schemaHashFor("milestone", cfg),
+    keyHash: milestone.slug,
+  });
+  await removeBoardMilestone(node, cfg, milestone);
 }
 
 function cardToLegacyOptionalFields(c: Card): Record<string, unknown> {
@@ -2689,6 +2726,7 @@ export async function createCardRecord(
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
   await upsertBoardCard(opts.node, opts.cfg, card);
+  await upsertMilestoneCard(opts.node, opts.cfg, card);
 }
 
 export async function updateCardRecord(
@@ -2701,9 +2739,10 @@ export async function updateCardRecord(
   await writeCardRecordWithOptionalFieldFallback(opts, card, "updateRecord", expected);
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
   await upsertBoardCard(opts.node, opts.cfg, card, previous ?? null);
+  await upsertMilestoneCard(opts.node, opts.cfg, card, previous ?? null);
 }
 
-/** Remove Card + dual indexes (BoardCards + CardListIndex). */
+/** Remove Card + dual indexes (BoardCards + CardListIndex + MilestoneCards). */
 export async function deleteCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
@@ -2712,6 +2751,7 @@ export async function deleteCardRecord(
   await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
   await patchCardListIndex(opts.node, opts.cfg, card, "remove");
   await removeBoardCard(opts.node, opts.cfg, card);
+  await removeMilestoneCard(opts.node, opts.cfg, card);
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of
