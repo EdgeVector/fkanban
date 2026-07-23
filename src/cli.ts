@@ -31,6 +31,7 @@ import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
+import { milestoneIndexesHealResult } from "./commands/milestone_indexes_heal.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
@@ -1801,9 +1802,9 @@ async function dispatch(
 
     case "groom": {
       const sub = positionals[1];
-      if (sub !== "stale-blockers" && sub !== "board-cards-heal") {
+      if (sub !== "stale-blockers" && sub !== "board-cards-heal" && sub !== "milestone-indexes-heal") {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom milestone-indexes-heal`,
         );
         return 2;
       }
@@ -1817,6 +1818,17 @@ async function dispatch(
           apply: values.apply as boolean | undefined,
           json: values.json as boolean | undefined,
         }));
+        return 0;
+      }
+      if (sub === "milestone-indexes-heal") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom milestone-indexes-heal");
+        if (extra !== undefined) return extra;
+        const healed = await milestoneIndexesHealResult({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          board: typeof values.board === "string" ? values.board : undefined,
+        });
+        console.log(values.json ? JSON.stringify(healed, null, 2) : healed.text);
         return 0;
       }
       // board-cards-heal: optional extra positionals are slugs; --slug also works.

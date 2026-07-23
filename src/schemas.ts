@@ -391,6 +391,140 @@ export const boardCardsSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// Dynamo-style board → milestones: partition = board, sort key = state#pos#slug.
+// Thin enough for portfolio/gap-report without scanning the Milestone schema.
+export const BOARD_MILESTONES_LAYOUT = "hashrange_v1_board_milestones";
+export const BOARD_MILESTONES_FIELDS = [
+  "board",
+  "sk",
+  "slug",
+  "title",
+  "body",
+  "state",
+  "position",
+  "north_star",
+  "driver",
+  "deps",
+  "proof_card",
+  "proof_status",
+  "block_reason",
+  "created_at",
+  "updated_at",
+  "completed_at",
+  "layout",
+] as const;
+
+export const boardMilestonesSchema: AddSchemaRequest = {
+  schema: {
+    name: "BoardMilestones",
+    owner_app_id: OWNER_APP_ID,
+    // Unique descriptive_name so Mini does not expand/reuse a BoardCards-like
+    // composite missing completed_at (expand bug class 2026-07-23).
+    descriptive_name: "BoardMilestones_hashrange_v1_portfolio_20260723",
+    purpose_statement:
+      "Thin per-board milestone membership (HashRange) so portfolio/list never full-scan Milestone",
+    schema_type: "HashRange",
+    key: { hash_field: "board", range_field: "sk" },
+    fields: [...BOARD_MILESTONES_FIELDS],
+    field_types: defaultStringFieldTypes(BOARD_MILESTONES_FIELDS, ["deps"]),
+    field_descriptions: {
+      board: "board slug (HashRange partition key)",
+      sk: "sort key state#position(8)#slug for ordered portfolio lists",
+      slug: "milestone slug (matches Milestone hash key)",
+      title: "one-line outcome name",
+      body: "markdown outcome / acceptance (mirrored for list parity)",
+      state: "planned|active|blocked|proving|complete|abandoned",
+      position: "integer-as-string portfolio ordering",
+      north_star: "North Star slug",
+      driver: "reconciliation driver",
+      deps: "array of dependency milestone slugs",
+      proof_card: "terminal validation card slug",
+      proof_status: "pending|passing|failing|not_required",
+      block_reason: "why blocked",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+      completed_at: "RFC 3339 completion timestamp",
+      layout: "identity marker for HashRange layout",
+    },
+    field_classifications: { title: ["word"], body: ["word"] },
+    field_data_classifications: generalDataClassifications(BOARD_MILESTONES_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
+// Dynamo-style milestone → cards: partition = milestone, sort key = column#pos#slug.
+// Reverse membership so detail/reconcile never filter the whole board.
+export const MILESTONE_CARDS_LAYOUT = "hashrange_v1_milestone_cards";
+export const MILESTONE_CARDS_FIELDS = [
+  "milestone",
+  "sk",
+  "slug",
+  "title",
+  "board",
+  "column",
+  "position",
+  "assignee",
+  "tags",
+  "deps",
+  "surfaces",
+  "created_at",
+  "created_by",
+  "updated_at",
+  "db",
+  "repo",
+  "base",
+  "kind",
+  "block_status",
+  "block_reason",
+  "north_star",
+  "pr_url",
+  "branch",
+  "layout",
+] as const;
+
+export const milestoneCardsSchema: AddSchemaRequest = {
+  schema: {
+    name: "MilestoneCards",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "MilestoneCards_hashrange_v1_children_20260723",
+    purpose_statement:
+      "Thin per-milestone card membership (HashRange) so detail/reconcile never filter all board cards",
+    schema_type: "HashRange",
+    key: { hash_field: "milestone", range_field: "sk" },
+    fields: [...MILESTONE_CARDS_FIELDS],
+    field_types: defaultStringFieldTypes(MILESTONE_CARDS_FIELDS, ["tags", "deps", "surfaces"]),
+    field_descriptions: {
+      milestone: "milestone slug (HashRange partition key)",
+      sk: "sort key column#position(8)#slug",
+      slug: "card slug (matches Card hash key)",
+      title: "one-line card name",
+      board: "board slug",
+      column: DEFAULT_COLUMNS.join("|"),
+      position: "integer-as-string ordering within the column",
+      assignee: "who owns the card",
+      tags: "array of freeform labels",
+      deps: "array of dependency card slugs",
+      surfaces: "array of path globs / subsystem names",
+      created_at: "RFC 3339 timestamp",
+      created_by: "creator identity",
+      updated_at: "RFC 3339 timestamp",
+      db: "home LastDB locator",
+      repo: "owner/name of the code repo",
+      base: "PR base branch",
+      kind: "pr|registry|tracker|…",
+      block_status: "none|needs_human|design_first|deferred",
+      block_reason: "free-text when blocked",
+      north_star: "North Star slug",
+      pr_url: "PR URL when in flight",
+      branch: "feature branch",
+      layout: "identity marker for HashRange layout",
+    },
+    field_classifications: { title: ["word"] },
+    field_data_classifications: generalDataClassifications(MILESTONE_CARDS_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
 // One entry per schema `kanban init` must register. Binds a config-key
 // (where init writes the canonical hash) to the AddSchemaRequest.
 export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }> = [
@@ -403,6 +537,8 @@ export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }
 export const EXTRA_SCHEMAS: Array<{ key: string; schema: AddSchemaRequest }> = [
   { key: "card_list_index", schema: cardListIndexSchema },
   { key: "board_cards", schema: boardCardsSchema },
+  { key: "board_milestones", schema: boardMilestonesSchema },
+  { key: "milestone_cards", schema: milestoneCardsSchema },
 ];
 
 
