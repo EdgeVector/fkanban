@@ -115,6 +115,39 @@ describe("first-class milestones", () => {
     });
   });
 
+  test("DONE-WHEN file PASS/PASS-OFFLINE counts as terminal proof evidence", async () => {
+    const { hasPassingProofEvidence } = await import("../src/commands/milestone.ts");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fkanban-proof-"));
+    const passFile = path.join(dir, "ns.md");
+    const failFile = path.join(dir, "fail.md");
+    fs.writeFileSync(passFile, "PASS-OFFLINE\n\n# North Star proof\n");
+    fs.writeFileSync(failFile, "FAIL\nnot good\n");
+    const bodyPass = `DONE-WHEN: file ${passFile} matches /^PASS/`;
+    const bodyFail = `DONE-WHEN: file ${failFile} matches /^PASS/`;
+    const bodyMissing = "DONE-WHEN: file /tmp/does-not-exist-fkanban-proof.md matches /^PASS/";
+    expect(hasPassingProofEvidence(bodyPass)).toBe(true);
+    expect(hasPassingProofEvidence(bodyFail)).toBe(false);
+    expect(hasPassingProofEvidence(bodyMissing)).toBe(false);
+    expect(hasPassingProofEvidence("PROOF: PASS")).toBe(true);
+    // Integration: complete via file evidence without PROOF: line
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({ cfg, node, slug: "file-proof-ms", title: "File proof", state: "active", driver: "driver" });
+    await addCmd({
+      cfg, node, slug: "file-proof-card", title: "NS proof",
+      body: bodyPass, milestone: "file-proof-ms", kind: "validation", column: "done",
+    });
+    await milestoneAddCmd({ cfg, node, slug: "file-proof-ms", proofCard: "file-proof-card" });
+    await milestoneStateCmd({ cfg, node, slug: "file-proof-ms", state: "proving" });
+    await milestoneAddCmd({ cfg, node, slug: "file-proof-ms", proofStatus: "passing" });
+    expect(await milestoneStateCmd({ cfg, node, slug: "file-proof-ms", state: "complete" }))
+      .toMatchObject({ to: "complete", proof_status: "passing" });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   test("reconcile exposes the ready child frontier and proof warnings", async () => {
     const node = fakeNode();
     await seedBoard(node);

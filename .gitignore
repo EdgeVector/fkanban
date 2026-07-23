@@ -13,3 +13,4 @@ dist/
 # node rooted in the checkout (sled db + blobs + snapshots). Never committed.
 /data/
 .portal-worktree
+.portal-worktree
