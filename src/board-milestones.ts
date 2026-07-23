@@ -40,6 +40,8 @@ export function boardMilestonesHash(cfg: Config): string | null {
 export function boardMilestoneFieldsFromMilestone(m: Milestone): Record<string, unknown> {
   const board = m.board || "default";
   const sk = boardMilestoneSk(m.state, m.position, m.slug);
+  // Note: omit completed_at when writing — Mini expand may bind a composite
+  // schema that lacks it; completion is still on fat Milestone HashKey.
   return {
     board,
     sk,
@@ -56,7 +58,6 @@ export function boardMilestoneFieldsFromMilestone(m: Milestone): Record<string, 
     block_reason: m.block_reason,
     created_at: m.created_at,
     updated_at: m.updated_at,
-    completed_at: m.completed_at,
     layout: BOARD_MILESTONES_LAYOUT,
   };
 }
@@ -155,10 +156,24 @@ export async function upsertBoardMilestone(
     await purgeOtherBoardMilestoneRows(node, cfg, nextBoard, slug, nextSk);
   }
 
+  const write = async (fields: Record<string, unknown>) => {
+    try {
+      await node.updateRecord({ schemaHash, fields, keyHash: nextBoard, rangeKey: nextSk });
+    } catch (updateErr) {
+      await node.createRecord({ schemaHash, fields, keyHash: nextBoard, rangeKey: nextSk });
+    }
+  };
   try {
-    await node.updateRecord({ schemaHash, fields: nextFields, keyHash: nextBoard, rangeKey: nextSk });
-  } catch {
-    await node.createRecord({ schemaHash, fields: nextFields, keyHash: nextBoard, rangeKey: nextSk });
+    await write(nextFields);
+  } catch (err) {
+    // Drop completed_at if a composite expand schema rejects it (or other optional).
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("completed_at") && "completed_at" in nextFields) {
+      const { completed_at: _drop, ...rest } = nextFields as Record<string, unknown> & { completed_at?: unknown };
+      await write(rest);
+      return;
+    }
+    throw err;
   }
 }
 
@@ -192,8 +207,15 @@ export async function listBoardMilestonesPartition(
       filter: { HashKey: board },
     });
     return res.results
-      .map((r) => milestoneFromBoardMilestoneFields(r.fields as Record<string, unknown>))
-      .filter((m) => m.slug.length > 0);
+      .map((r) => {
+        const f = (r.fields ?? {}) as Record<string, unknown>;
+        // Only rows dual-written by this client (layout marker).
+        if (String(f.layout ?? "") !== BOARD_MILESTONES_LAYOUT) {
+          return null;
+        }
+        return milestoneFromBoardMilestoneFields(f);
+      })
+      .filter((m): m is Milestone => m !== null && m.slug.length > 0);
   } catch {
     return null;
   }

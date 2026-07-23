@@ -2580,7 +2580,10 @@ export function milestoneToFields(m: Milestone): Record<string, unknown> {
 export async function listMilestones(node: NodeClient, cfg: Config): Promise<Milestone[]> {
   const boards = await listBoards(node, cfg);
   const fromIndex = await listAllBoardMilestones(node, cfg, boards);
-  if (fromIndex !== null && fromIndex.length > 0) {
+  // Use index only when it has at least one row that looks like a real milestone
+  // (state set). Junk/composite expand rows without dual-write layout are filtered
+  // in listBoardMilestonesPartition; empty after filter → fall through to fat path.
+  if (fromIndex !== null && fromIndex.some((m) => (m.state || "").length > 0 && (m.slug || "").length > 0)) {
     return fromIndex.sort(
       (a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug),
     );

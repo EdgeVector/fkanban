@@ -418,7 +418,9 @@ export const boardMilestonesSchema: AddSchemaRequest = {
   schema: {
     name: "BoardMilestones",
     owner_app_id: OWNER_APP_ID,
-    descriptive_name: "BoardMilestones_hashrange_v1",
+    // Unique descriptive_name so Mini does not expand/reuse a BoardCards-like
+    // composite missing completed_at (expand bug class 2026-07-23).
+    descriptive_name: "BoardMilestones_hashrange_v1_portfolio_20260723",
     purpose_statement:
       "Thin per-board milestone membership (HashRange) so portfolio/list never full-scan Milestone",
     schema_type: "HashRange",
@@ -484,7 +486,7 @@ export const milestoneCardsSchema: AddSchemaRequest = {
   schema: {
     name: "MilestoneCards",
     owner_app_id: OWNER_APP_ID,
-    descriptive_name: "MilestoneCards_hashrange_v1",
+    descriptive_name: "MilestoneCards_hashrange_v1_children_20260723",
     purpose_statement:
       "Thin per-milestone card membership (HashRange) so detail/reconcile never filter all board cards",
     schema_type: "HashRange",

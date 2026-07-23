@@ -44,12 +44,30 @@ export async function milestoneIndexesHealResult(opts: {
     };
   }
 
-  const listed = await listMilestones(opts.node, opts.cfg);
+  // Always rebuild from fat Milestone rows (full-scan + HashKey hydrate), never
+  // from BoardMilestones (may be empty or polluted during first heal).
+  const { schemaHashFor } = await import("../config.ts");
+  const { fieldsFor } = await import("../schemas.ts");
+  const { rowToMilestone, milestoneQueryFieldsLookSparse } = await import("../record.ts");
+  const res = await opts.node.queryAll({
+    schemaHash: schemaHashFor("milestone", opts.cfg),
+    fields: fieldsFor("milestone"),
+    allowFullScan: true,
+  });
+  const slugs = res.results.map((row) => {
+    const mapped = rowToMilestone(row);
+    if (!milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>)) {
+      return mapped.slug;
+    }
+    return mapped.slug || String((row.fields as { slug?: string } | undefined)?.slug ?? "");
+  }).filter(Boolean);
+
   const milestones: Milestone[] = [];
-  for (const m of listed) {
-    if (opts.board && m.board !== opts.board) continue;
-    const full = await findMilestone(opts.node, opts.cfg, m.slug);
-    if (full) milestones.push(full);
+  for (const slug of slugs) {
+    const full = await findMilestone(opts.node, opts.cfg, slug);
+    if (!full) continue;
+    if (opts.board && full.board !== opts.board) continue;
+    milestones.push(full);
   }
 
   let milestonesWritten = 0;
