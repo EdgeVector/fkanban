@@ -1206,6 +1206,41 @@ export function assertPrWorkBrief(
   }
 }
 
+/** Columns where Kind:pr work is "live" factory fuel (not historical done). */
+export const LIVE_PR_COLUMNS = new Set(["backlog", "todo", "doing"]);
+
+/**
+ * Refuse Kind:pr cards in live columns without a milestone link.
+ * Escape with --force for intentional Unassigned/Operational exceptions.
+ * Callers that already resolved a milestone should also pass its state so
+ * abandoned milestones cannot anchor live PR work.
+ */
+export function assertLivePrMilestone(
+  card: Pick<Card, "slug" | "kind" | "column" | "milestone">,
+  force?: boolean,
+  opts?: { milestoneState?: string },
+): void {
+  if (force) return;
+  if (normalizeKind(card.kind) !== "pr") return;
+  if (!LIVE_PR_COLUMNS.has(card.column)) return;
+  const milestone = (card.milestone ?? "").trim();
+  if (!milestone) {
+    throw new FkanbanError({
+      code: "live_pr_milestone_required",
+      message: `Kind:pr card "${card.slug}" cannot enter ${card.column} without a milestone.`,
+      hint: "Pass --milestone <slug> to attach a real outcome, or --force for an intentional Unassigned/Operational exception.",
+    });
+  }
+  const state = (opts?.milestoneState ?? "").trim();
+  if (state === "abandoned") {
+    throw new FkanbanError({
+      code: "live_pr_milestone_abandoned",
+      message: `Kind:pr card "${card.slug}" cannot use abandoned milestone "${milestone}".`,
+      hint: "Pick an active/planned milestone, reopen the outcome, or pass --force for an intentional exception.",
+    });
+  }
+}
+
 /** Default reconciliation driver for new milestones (hierarchical pipeline). */
 export const DEFAULT_MILESTONE_DRIVER = "last-stack-milestone-driver";
 

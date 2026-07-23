@@ -13,6 +13,7 @@ import {
   assertBodyReplaceSafe,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
+  assertLivePrMilestone,
   assertPrWorkBrief,
   sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
@@ -231,6 +232,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   const existing = await findCard(opts.node, opts.cfg, opts.slug);
   const boardSlug = opts.board ?? existing?.board ?? "default";
   const milestoneSlug = opts.milestone ?? existing?.milestone ?? "";
+  let resolvedMilestoneState = "";
   if (milestoneSlug) {
     const milestone = await findMilestone(opts.node, opts.cfg, milestoneSlug);
     if (!milestone) {
@@ -240,6 +242,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
         hint: "Create it first with `fkanban milestone add`, or omit --milestone.",
       });
     }
+    resolvedMilestoneState = milestone.state;
     const requestedNorthStar = opts.northStar ?? existing?.north_star ?? "";
     if (requestedNorthStar && milestone.north_star && requestedNorthStar !== milestone.north_star) {
       throw new FkanbanError({
@@ -328,6 +331,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       board: updated.board,
       column: updated.column,
     });
+    assertLivePrMilestone(updated, opts.force, { milestoneState: resolvedMilestoneState });
     sanitizeDefaultTodoLaneMetadata(updated);
     assertDefaultTodoPickupReady(updated, opts.force, rawBody);
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
@@ -382,6 +386,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     board: card.board,
     column: card.column,
   });
+  assertLivePrMilestone(card, opts.force, { milestoneState: resolvedMilestoneState });
   sanitizeDefaultTodoLaneMetadata(card);
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertSituationPreflightAllowed(card, opts.situationPreflight);
