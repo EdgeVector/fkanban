@@ -1,5 +1,8 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
+import { doneWhenPredicate } from "../pickup.ts";
 import {
   MILESTONE_PROOF_STATUSES,
   MILESTONE_STATES,
@@ -77,8 +80,43 @@ const ALLOWED_TRANSITIONS: Record<string, readonly string[]> = {
   abandoned: ["planned", "active"],
 };
 
+/**
+ * Terminal proof evidence for milestone completion.
+ *
+ * Accepts either:
+ * - an exact body line `PROOF: PASS` / `RESULT: PASS`, or
+ * - a satisfied `DONE-WHEN: file <path> matches /regex/` when the file exists
+ *   and the first line (or full content) matches (covers PASS / PASS-OFFLINE
+ *   North Star proof reports without requiring a second PROOF: line).
+ */
 export function hasPassingProofEvidence(body: string): boolean {
-  return /^[ \t]*(?:PROOF|RESULT):[ \t]*PASS[ \t]*$/im.test(body);
+  if (/^[ \t]*(?:PROOF|RESULT):[ \t]*PASS[ \t]*$/im.test(body)) return true;
+  return doneWhenFileProofSatisfied(body);
+}
+
+function expandProofPath(path: string): string {
+  if (path.startsWith("~/")) return `${homedir()}${path.slice(1)}`;
+  if (path.startsWith("$HOME/")) return `${homedir()}${path.slice(5)}`;
+  if (path.startsWith("${HOME}/")) return `${homedir()}${path.slice(7)}`;
+  return path;
+}
+
+/** Evaluate `DONE-WHEN: file <path> matches /regex/` as milestone proof evidence. */
+export function doneWhenFileProofSatisfied(body: string): boolean {
+  const predicate = doneWhenPredicate(body);
+  const match = predicate.match(/^file\s+(\S+)\s+matches\s+\/(.+)\/$/);
+  if (!match) return false;
+  const filePath = expandProofPath(match[1]!);
+  const regexSrc = match[2]!;
+  if (!existsSync(filePath)) return false;
+  try {
+    const content = readFileSync(filePath, "utf8");
+    const re = new RegExp(regexSrc, "m");
+    const firstLine = content.split(/\r?\n/, 1)[0] ?? "";
+    return re.test(firstLine) || re.test(content);
+  } catch {
+    return false;
+  }
 }
 
 export type MilestoneAddOptions = {
