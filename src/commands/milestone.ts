@@ -412,10 +412,37 @@ export async function milestoneGroomResult(opts: { cfg: Config; node: NodeClient
   const issues: MilestoneGroomIssue[] = snapshot.reconciled.flatMap((result) => result.warnings.map((warning) => ({ ...warning, milestone: result.milestone.slug })));
   const bySlug = new Map(snapshot.milestones.map((milestone) => [milestone.slug, milestone]));
   for (const card of snapshot.cards) {
-    if (!card.milestone) continue;
+    if (!card.milestone) {
+      // Live Kind:pr without a milestone — factory coverage gap (backlog/todo/doing).
+      if (
+        normalizeKind(card.kind) === "pr" &&
+        (card.column === "backlog" || card.column === "todo" || card.column === "doing") &&
+        (!opts.board || card.board === opts.board)
+      ) {
+        issues.push({
+          code: "live-pr-missing-milestone",
+          message: `Live Kind:pr card "${card.slug}" in ${card.column} has no milestone.`,
+          hint: "Attach with `fkanban add <slug> --milestone <ms>` or move to done if historical.",
+          card: card.slug,
+        });
+      }
+      continue;
+    }
     const milestone = bySlug.get(card.milestone);
     if (!milestone) issues.push({ code: "missing-milestone", message: `Card links to missing milestone "${card.milestone}".`, hint: "Repair or clear the card milestone link.", card: card.slug });
     else if (card.board !== milestone.board || (card.north_star && milestone.north_star && card.north_star !== milestone.north_star)) issues.push({ code: "milestone-link-mismatch", message: "Card board or North Star does not match its milestone.", hint: "Align the card and milestone relationship.", milestone: milestone.slug, card: card.slug });
+  }
+  for (const milestone of snapshot.milestones) {
+    // Ship/active coverage: planned+active outcomes should parent a North Star.
+    // blocked/proving/complete/abandoned are allowed without re-nagging.
+    if (!milestone.north_star && (milestone.state === "planned" || milestone.state === "active")) {
+      issues.push({
+        code: "milestone-missing-north-star",
+        message: `Milestone "${milestone.slug}" has no north_star.`,
+        hint: "Set --north-star on the milestone or abandon it with a reason.",
+        milestone: milestone.slug,
+      });
+    }
   }
   const text = issues.length ? ["Milestone grooming warnings:", ...issues.map((issue) => `- ${issue.code} ${issue.milestone ? `[${issue.milestone}] ` : ""}${issue.card ? `[card:${issue.card}] ` : ""}${issue.message} ${issue.hint}`)].join("\n") : "Milestone grooming: healthy — no warnings.";
   return { issues, text };
