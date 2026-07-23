@@ -331,7 +331,10 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       board: updated.board,
       column: updated.column,
     });
-    assertLivePrMilestone(updated, opts.force, { milestoneState: resolvedMilestoneState });
+    assertLivePrMilestone(updated, opts.force, {
+      milestoneState: resolvedMilestoneState,
+      enforce: opts.cfg.enforceLivePrMilestone === true,
+    });
     sanitizeDefaultTodoLaneMetadata(updated);
     assertDefaultTodoPickupReady(updated, opts.force, rawBody);
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
@@ -386,7 +389,10 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     board: card.board,
     column: card.column,
   });
-  assertLivePrMilestone(card, opts.force, { milestoneState: resolvedMilestoneState });
+  assertLivePrMilestone(card, opts.force, {
+    milestoneState: resolvedMilestoneState,
+    enforce: opts.cfg.enforceLivePrMilestone === true,
+  });
   sanitizeDefaultTodoLaneMetadata(card);
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertSituationPreflightAllowed(card, opts.situationPreflight);

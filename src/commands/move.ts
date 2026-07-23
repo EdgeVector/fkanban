@@ -109,11 +109,15 @@ async function promoteUnblockedBacklogDependents(opts: {
         warn: () => {},
       });
       let milestoneState = "";
-      if ((updated.milestone ?? "").trim()) {
-        const ms = await findMilestone(opts.node, opts.cfg, updated.milestone.trim());
+      const msSlug = (updated.milestone ?? "").trim();
+      if (msSlug) {
+        const ms = await findMilestone(opts.node, opts.cfg, msSlug);
         if (ms) milestoneState = ms.state;
       }
-      assertLivePrMilestone(updated, false, { milestoneState });
+      assertLivePrMilestone(updated, false, {
+        milestoneState,
+        enforce: opts.cfg.enforceLivePrMilestone === true,
+      });
       assertDefaultTodoPickupReady(updated, false, rawBody);
       await assertDepUnblocked(opts.node, opts.cfg, updated, false);
     } catch (err) {
@@ -158,11 +162,15 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   });
   sanitizeDefaultTodoLaneMetadata(updated);
   let milestoneState = "";
-  if ((updated.milestone ?? "").trim()) {
-    const ms = await findMilestone(opts.node, opts.cfg, updated.milestone.trim());
+  const msSlug = (updated.milestone ?? "").trim();
+  if (msSlug) {
+    const ms = await findMilestone(opts.node, opts.cfg, msSlug);
     if (ms) milestoneState = ms.state;
   }
-  assertLivePrMilestone(updated, opts.force, { milestoneState });
+  assertLivePrMilestone(updated, opts.force, {
+    milestoneState,
+    enforce: opts.cfg.enforceLivePrMilestone === true,
+  });
   assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);

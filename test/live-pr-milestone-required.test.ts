@@ -14,6 +14,7 @@ const cfg: Config = {
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
   schemaHashes: { card: "cardhash", board: "boardhash", milestone: "milestonehash" },
+  enforceLivePrMilestone: true,
 };
 
 function fakeNode(): NodeClient {
@@ -78,29 +79,51 @@ async function seedBoard(node: NodeClient): Promise<void> {
 }
 
 describe("assertLivePrMilestone", () => {
-  test("requires milestone for Kind:pr in live columns", () => {
+  test("requires milestone for Kind:pr in todo/doing (pickup lane)", () => {
     expect(() =>
-      assertLivePrMilestone({ slug: "x", kind: "pr", column: "todo", milestone: "" })
+      assertLivePrMilestone({ slug: "x", kind: "pr", column: "todo", milestone: "" }, false, {
+        enforce: true,
+      })
     ).toThrow(FkanbanError);
     try {
-      assertLivePrMilestone({ slug: "x", kind: "pr", column: "backlog", milestone: "" });
+      assertLivePrMilestone({ slug: "x", kind: "pr", column: "doing", milestone: "" }, false, {
+        enforce: true,
+      });
     } catch (err) {
       expect(err).toMatchObject({ code: "live_pr_milestone_required" });
     }
+    // backlog is allowed without milestone (hygiene flags; not hard-reject)
     expect(() =>
-      assertLivePrMilestone({ slug: "x", kind: "pr", column: "doing", milestone: "ms-a" })
+      assertLivePrMilestone({ slug: "x", kind: "pr", column: "backlog", milestone: "" }, false, {
+        enforce: true,
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertLivePrMilestone({ slug: "x", kind: "pr", column: "doing", milestone: "ms-a" }, false, {
+        enforce: true,
+      })
+    ).not.toThrow();
+    // enforce flag off → no-op (unit-test default)
+    expect(() =>
+      assertLivePrMilestone({ slug: "x", kind: "pr", column: "todo", milestone: "" })
     ).not.toThrow();
   });
 
-  test("allows non-pr, done column, and --force", () => {
+  test("allows non-pr, done column, backlog, and --force", () => {
     expect(() =>
-      assertLivePrMilestone({ slug: "x", kind: "validation", column: "todo", milestone: "" })
+      assertLivePrMilestone({ slug: "x", kind: "validation", column: "todo", milestone: "" }, false, {
+        enforce: true,
+      })
     ).not.toThrow();
     expect(() =>
-      assertLivePrMilestone({ slug: "x", kind: "pr", column: "done", milestone: "" })
+      assertLivePrMilestone({ slug: "x", kind: "pr", column: "done", milestone: "" }, false, {
+        enforce: true,
+      })
     ).not.toThrow();
     expect(() =>
-      assertLivePrMilestone({ slug: "x", kind: "pr", column: "todo", milestone: "" }, true)
+      assertLivePrMilestone({ slug: "x", kind: "pr", column: "todo", milestone: "" }, true, {
+        enforce: true,
+      })
     ).not.toThrow();
   });
 
@@ -109,7 +132,7 @@ describe("assertLivePrMilestone", () => {
       assertLivePrMilestone(
         { slug: "x", kind: "pr", column: "todo", milestone: "old" },
         false,
-        { milestoneState: "abandoned" },
+        { milestoneState: "abandoned", enforce: true },
       );
       throw new Error("expected throw");
     } catch (err) {

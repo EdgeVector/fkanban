@@ -1206,11 +1206,16 @@ export function assertPrWorkBrief(
   }
 }
 
-/** Columns where Kind:pr work is "live" factory fuel (not historical done). */
-export const LIVE_PR_COLUMNS = new Set(["backlog", "todo", "doing"]);
+/**
+ * Pickup-lane columns where Kind:pr must attach to a milestone.
+ * Backlog may still hold unattached PRs (groom / live-pr-milestone hygiene
+ * flags them); once they enter todo/doing the factory requires linkage.
+ * Matches card VERIFY for fkanban-enforce-live-pr-milestone.
+ */
+export const LIVE_PR_PICKUP_COLUMNS = new Set(["todo", "doing"]);
 
 /**
- * Refuse Kind:pr cards in live columns without a milestone link.
+ * Refuse Kind:pr cards in the pickup lane without a milestone link.
  * Escape with --force for intentional Unassigned/Operational exceptions.
  * Callers that already resolved a milestone should also pass its state so
  * abandoned milestones cannot anchor live PR work.
@@ -1218,11 +1223,14 @@ export const LIVE_PR_COLUMNS = new Set(["backlog", "todo", "doing"]);
 export function assertLivePrMilestone(
   card: Pick<Card, "slug" | "kind" | "column" | "milestone">,
   force?: boolean,
-  opts?: { milestoneState?: string },
+  opts?: { milestoneState?: string; enforce?: boolean },
 ): void {
   if (force) return;
+  // Production loadConfig sets enforceLivePrMilestone: true. Unit-test Config
+  // objects leave it undefined — pass enforce:false (or omit) to skip.
+  if (opts?.enforce !== true) return;
   if (normalizeKind(card.kind) !== "pr") return;
-  if (!LIVE_PR_COLUMNS.has(card.column)) return;
+  if (!LIVE_PR_PICKUP_COLUMNS.has(card.column)) return;
   const milestone = (card.milestone ?? "").trim();
   if (!milestone) {
     throw new FkanbanError({
