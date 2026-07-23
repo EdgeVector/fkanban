@@ -38,7 +38,7 @@ const OLD_CARD_FIELDS = [
 // transport a local node speaks now that the client is socket-only and the
 // loopback TCP listener is retired. A full-surface socket carries EVERY node route,
 // so init's control + data calls all land here.
-function makeNode(declaredCardHash: string) {
+function makeNode(declaredCardHash: string, opts: { legacyDeclareResponse?: boolean } = {}) {
   const store = new Map<string, Record<string, unknown>>();
   const dir = mkdtempSync(join(tmpdir(), "fkanban-init-node-"));
   const socketPath = join(dir, "folddb-full.sock");
@@ -66,8 +66,12 @@ function makeNode(declaredCardHash: string) {
           canonical,
           resolution: "mint",
           decision: "mint",
-          audit_event_id: `audit-${schema.descriptive_name}`,
-          bind_eligible: true,
+          ...(opts.legacyDeclareResponse
+            ? { ok: true, user_hash: "stub-user" }
+            : {
+                audit_event_id: `audit-${schema.descriptive_name}`,
+                bind_eligible: true,
+              }),
         });
       }
       if (url.pathname === "/api/schemas/load") {
@@ -149,6 +153,24 @@ describe("runInit write-probe guard", () => {
         configPath,
         // Point at the fixture's full-surface socket — socket-only routes every
         // call there; nodeUrl is just a loopback placeholder that's never dialed.
+        nodeSocketPath: node.socketPath,
+        print: () => {},
+      });
+      expect(config.schemaHashes.card).toBe(FULL_CARD_HASH);
+      const written = JSON.parse(readFileSync(configPath, "utf8"));
+      expect(written.schemaHashes.card).toBe(FULL_CARD_HASH);
+    } finally {
+      node.stop();
+    }
+  });
+
+  test("stable Mini compatibility: init accepts successful declare responses without bind_eligible", async () => {
+    const node = makeNode(FULL_CARD_HASH, { legacyDeclareResponse: true });
+    const configPath = join(tmp, "legacy-declare.json");
+    try {
+      const { config } = await runInit({
+        nodeUrl: `http://127.0.0.1:1`,
+        configPath,
         nodeSocketPath: node.socketPath,
         print: () => {},
       });

@@ -93,6 +93,15 @@ const server = Bun.serve({
         schema: "fkanban/Card",
         canonical: "catalog-card-hash",
         resolution: "reuse",
+        bind_eligible: false,
+      });
+    }
+    if (url.pathname === "/legacy-audit/api/apps/declare-schema") {
+      return Response.json({
+        app_id: "fkanban",
+        schema: "fkanban/Card",
+        canonical: "catalog-card-hash",
+        resolution: "reuse",
       });
     }
     if (url.pathname === "/api/query") {
@@ -197,7 +206,7 @@ describe("queryAll filter", () => {
 });
 
 describe("audited schema sync bind", () => {
-  test("accepts only a catalog sync carrying durable audit evidence", async () => {
+  test("accepts a catalog sync carrying durable audit evidence", async () => {
     const node = newNodeClient({ baseUrl: `${baseUrl}/good-audit`, userHash: "test-user" });
     const result = await node.declareAppSchema!("fkanban", { name: "Card" });
     expect(result).toMatchObject({
@@ -207,7 +216,17 @@ describe("audited schema sync bind", () => {
     });
   });
 
-  test("refuses an otherwise valid identity when Mini omits audit evidence", async () => {
+  test("accepts older Mini responses that omit audit metadata", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/legacy-audit`, userHash: "test-user" });
+    const result = await node.declareAppSchema!("fkanban", { name: "Card" });
+    expect(result).toMatchObject({
+      canonical: "catalog-card-hash",
+      bindEligible: true,
+    });
+    expect(result.auditEventId).toBeUndefined();
+  });
+
+  test("refuses an otherwise valid identity when Mini explicitly marks it ineligible", async () => {
     const node = newNodeClient({ baseUrl: `${baseUrl}/bad-audit`, userHash: "test-user" });
     await expect(node.declareAppSchema!("fkanban", { name: "Card" })).rejects.toMatchObject({
       code: "app_schema_declare_bad_response",
