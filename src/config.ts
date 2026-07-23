@@ -35,6 +35,13 @@ export type Config = {
   // Where this config was read from; never serialized. Lets a write-shape
   // discovery persist without re-deriving the env-dependent path.
   configPath?: string;
+  /**
+   * When true, Kind:pr cards cannot enter todo/doing without a milestone.
+   * Loaded configs default this to true. Inline unit-test Config objects omit
+   * it (treated as false) so fixtures stay focused on their own invariants;
+   * tests that cover the guard set `enforceLivePrMilestone: true` explicitly.
+   */
+  enforceLivePrMilestone?: boolean;
 };
 
 const SOCKET_FILE_NAME = "folddb.sock";
@@ -204,12 +211,18 @@ function assertConfigShape(path: string, raw: unknown): Config {
       ? (r.cardLegacyWriteHash as string)
       : undefined;
 
+  // Default ON for real loaded configs; operators may set false in config.json
+  // to temporarily disable. Inline unit-test Config objects omit the field
+  // (undefined → not enforced) unless a test opts in explicitly.
+  const enforceLivePrMilestone = r.enforceLivePrMilestone === false ? false : true;
+
   return {
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
     schemaServiceUrl,
     userHash: r.userHash as string,
     schemaHashes,
+    enforceLivePrMilestone,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
     ...(cardLegacyWriteHash !== undefined ? { cardLegacyWriteHash } : {}),
   };

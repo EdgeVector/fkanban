@@ -11,6 +11,7 @@ import {
   appendPosition,
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
+  assertLivePrMilestone,
   sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
   assertDbLocatorMatchesCard,
@@ -19,6 +20,7 @@ import {
   doneAtForColumnTransition,
   ensureBoardRecord,
   ensureColumn,
+  findMilestone,
   listBoards,
   listCards,
   nowIso,
@@ -62,7 +64,10 @@ export class ClaimConflictError extends FkanbanError {
 
 function isExpectedPromotionSkip(err: unknown): boolean {
   return err instanceof FkanbanError &&
-    (err.code === "default_todo_not_pickup_ready" || err.code === "card_blocked");
+    (err.code === "default_todo_not_pickup_ready" ||
+      err.code === "card_blocked" ||
+      err.code === "live_pr_milestone_required" ||
+      err.code === "live_pr_milestone_abandoned");
 }
 
 async function promoteUnblockedBacklogDependents(opts: {
@@ -102,6 +107,16 @@ async function promoteUnblockedBacklogDependents(opts: {
     try {
       await stampCardForWrite(opts.node, opts.cfg, updated, {
         warn: () => {},
+      });
+      let milestoneState = "";
+      const msSlug = (updated.milestone ?? "").trim();
+      if (msSlug) {
+        const ms = await findMilestone(opts.node, opts.cfg, msSlug);
+        if (ms) milestoneState = ms.state;
+      }
+      assertLivePrMilestone(updated, false, {
+        milestoneState,
+        enforce: opts.cfg.enforceLivePrMilestone === true,
       });
       assertDefaultTodoPickupReady(updated, false, rawBody);
       await assertDepUnblocked(opts.node, opts.cfg, updated, false);
@@ -146,6 +161,16 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     warn: !opts.force && updated.board === "default" && updated.column === "todo" ? () => {} : undefined,
   });
   sanitizeDefaultTodoLaneMetadata(updated);
+  let milestoneState = "";
+  const msSlug = (updated.milestone ?? "").trim();
+  if (msSlug) {
+    const ms = await findMilestone(opts.node, opts.cfg, msSlug);
+    if (ms) milestoneState = ms.state;
+  }
+  assertLivePrMilestone(updated, opts.force, {
+    milestoneState,
+    enforce: opts.cfg.enforceLivePrMilestone === true,
+  });
   assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
