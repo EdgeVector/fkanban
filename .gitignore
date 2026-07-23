@@ -12,3 +12,4 @@ dist/
 # Local fold_db node data dir — created when a CLI/test run points init at a
 # node rooted in the checkout (sled db + blobs + snapshots). Never committed.
 /data/
+.portal-worktree
