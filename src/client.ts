@@ -111,7 +111,7 @@ export type AppSchemaDeclaration = {
   canonical: string;
   resolution: "mint" | "link" | string;
   decision?: string;
-  auditEventId: string;
+  auditEventId?: string;
   bindEligible: true;
 };
 
@@ -754,13 +754,13 @@ export function newNodeClient(opts: {
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
       const schemaName = typeof b.schema === "string" ? b.schema : "";
       const resolution = typeof b.resolution === "string" ? b.resolution : "";
-      const auditEventId = typeof b.audit_event_id === "string" ? b.audit_event_id : "";
-      const bindEligible = b.bind_eligible === true;
-      if (!canonical || !schemaName || !resolution || !auditEventId || !bindEligible) {
+      const auditEventId = typeof b.audit_event_id === "string" ? b.audit_event_id : undefined;
+      const explicitBindRejected = b.bind_eligible === false;
+      if (!canonical || !schemaName || !resolution || explicitBindRejected) {
         throw new FkanbanError({
           code: "app_schema_declare_bad_response",
           message: `Node /api/apps/declare-schema returned an incomplete response: ${JSON.stringify(body).slice(0, 300)}.`,
-          hint: "Upgrade the node or inspect the app-schema declaration response. F-Kanban binds only an audited catalog sync with bind_eligible=true.",
+          hint: "Upgrade the node or inspect the app-schema declaration response. F-Kanban binds only schemas Mini accepts as app-declared catalog identities.",
         });
       }
       return {
