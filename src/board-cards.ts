@@ -9,7 +9,7 @@
 // sks for the same slug so column list previews cannot diverge from show.
 
 import type { Config } from "./config.ts";
-import { FkanbanError, type NodeClient } from "./client.ts";
+import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
@@ -113,6 +113,28 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
     pr_url: str("pr_url"),
     branch: str("branch"),
   };
+}
+
+function boardCardRowsToCards(rows: QueryRow[], column?: string): Card[] {
+  return rows
+    .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
+    .filter((c) => c.slug.length > 0)
+    .filter((c) => !column || c.column === column);
+}
+
+async function queryBoardCardsRows(
+  node: NodeClient,
+  schemaHash: string,
+  filter: QueryFilter,
+): Promise<QueryRow[]> {
+  try {
+    const res = await node.queryAll({ schemaHash, fields: [...BOARD_CARDS_FIELDS], filter });
+    return res.results;
+  } catch (err) {
+    if (!isCreatedByFieldMiss(err)) throw err;
+    const res = await node.queryAll({ schemaHash, fields: [...LEGACY_BOARD_CARDS_FIELDS], filter });
+    return res.results;
+  }
 }
 
 async function deleteBoardCardSk(
@@ -256,30 +278,27 @@ export async function listBoardCardsPartition(
       column && column.length > 0
         ? { HashRangePrefix: { hash: board, prefix: `${column}#` } }
         : { HashKey: board }
-    ) as import("./client.ts").QueryFilter;
-    let res;
-    try {
-      res = await node.queryAll({ schemaHash, fields: [...BOARD_CARDS_FIELDS], filter });
-    } catch (err) {
-      if (!isCreatedByFieldMiss(err)) throw err;
-      res = await node.queryAll({ schemaHash, fields: [...LEGACY_BOARD_CARDS_FIELDS], filter });
-    }
-    return res.results
-      .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
-      .filter((c) => c.slug.length > 0)
-      .filter((c) => !column || c.column === column);
+    ) as QueryFilter;
+    const cards = boardCardRowsToCards(await queryBoardCardsRows(node, schemaHash, filter), column);
+    if (!column || cards.length > 0) return cards;
+
+    // Guard against false-empty HashRangePrefix results (for example when the
+    // node cannot compare an encrypted/OPE range key to a plaintext prefix).
+    // The cross-check stays on the same thin BoardCards partition and only runs
+    // for empty column reads, so hot nonempty lists remain one indexed query.
+    const partition = boardCardRowsToCards(
+      await queryBoardCardsRows(node, schemaHash, { HashKey: board }),
+      column,
+    );
+    return partition.length > 0 ? partition : cards;
   } catch {
     // Prefix filter may be rejected on older Mini — fall back to full partition.
     if (column) {
       try {
-        const res = await node.queryAll({
-          schemaHash,
-          fields: [...BOARD_CARDS_FIELDS],
-          filter: { HashKey: board },
-        });
-        return res.results
-          .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
-          .filter((c) => c.slug.length > 0 && c.column === column);
+        return boardCardRowsToCards(
+          await queryBoardCardsRows(node, schemaHash, { HashKey: board }),
+          column,
+        );
       } catch {
         return null;
       }
