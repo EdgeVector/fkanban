@@ -1906,15 +1906,15 @@ async function listCardsWithFields(
     try {
       const boards = await listBoards(node, cfg);
       const partitioned = await listAllBoardCards(node, cfg, boards);
-      if (partitioned !== null && partitioned.length > 0) {
-        // BoardCards rows are already body-free; promote any structured fields.
-        return partitioned
-          .filter((c) => !isHiddenCard(c))
-          .map((c) => Object.assign(c, deriveStructuredFields(c)));
+      if (partitioned !== null) {
+        const merged = await mergeBoardCardsWithIndexedTruth(node, cfg, partitioned, fields);
+        if (merged.length > 0) {
+          // BoardCards rows are already body-free; promote any structured fields.
+          return merged
+            .filter((c) => !isHiddenCard(c))
+            .map((c) => Object.assign(c, deriveStructuredFields(c)));
+        }
       }
-      // Empty partition may mean "no cards" OR "not dual-written yet".
-      // Fall through to CardListIndex when partitions are empty so dual-read
-      // still sees legacy boards until backfill.
       if (partitioned !== null && partitioned.length === 0) {
         const indexedEmpty = await readCardListIndex(node, cfg);
         if (indexedEmpty !== null && indexedEmpty.length === 0) {
@@ -2155,7 +2155,10 @@ export async function listCardsByColumn(
     try {
       const part = await listBoardCardsPartition(node, cfg, board, { column });
       if (part !== null) {
-        const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+        const reconciled = await mergeBoardCardsWithIndexedTruth(node, cfg, part, fields, {
+          predicate: (c) => (c.board || DEFAULT_BOARD_SLUG) === board && c.column === column,
+          hydrateMissing: true,
+        });
         return reconciled
           .filter((c) => !isHiddenCard(c))
           .map((c) => Object.assign(c, deriveStructuredFields(c)));
@@ -2183,18 +2186,22 @@ export async function listCardsOnBoard(
   try {
     const part = await listBoardCardsPartition(node, cfg, board);
     if (part !== null && part.length > 0) {
-      const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+      const reconciled = await mergeBoardCardsWithIndexedTruth(node, cfg, part, fields, {
+        predicate: (c) => (c.board || DEFAULT_BOARD_SLUG) === board,
+      });
       return reconciled
         .filter((c) => !isHiddenCard(c))
         .map((c) => Object.assign(c, deriveStructuredFields(c)));
     }
     if (part !== null && part.length === 0) {
       // Empty board vs not dual-written: check index for this board only.
-      const indexed = await readCardListIndex(node, cfg);
-      if (indexed !== null) {
-        return (indexed.filter((c) => !isHiddenCard(c as Card) && c.board === board) as Card[]).map(
-          (c) => Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
-        );
+      const indexed = await mergeBoardCardsWithIndexedTruth(node, cfg, [], fields, {
+        predicate: (c) => (c.board || DEFAULT_BOARD_SLUG) === board,
+      });
+      if (indexed.length > 0) {
+        return indexed
+          .filter((c) => !isHiddenCard(c))
+          .map((c) => Object.assign(c, deriveStructuredFields(c)));
       }
       return [];
     }
@@ -2229,7 +2236,9 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
 
   const indexed = await readBoardListIndex(node, cfg);
   if (indexed !== null) {
-    return live(
+    const boards = await hydrateSparseIndexedBoards(
+      node,
+      cfg,
       indexed.map((b) => ({
         slug: b.slug,
         title: b.title,
@@ -2239,6 +2248,7 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
         updated_at: b.updated_at,
       })),
     );
+    return live(boards);
   }
 
   // Seed once via admin full scan when index not declared/seeded yet.
@@ -2355,6 +2365,92 @@ function cardListProjectionFields(fields: string[]): string[] {
     "pr_url",
     "branch",
   ]);
+}
+
+async function mergeBoardCardsWithIndexedTruth(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+  fields: string[],
+  opts: {
+    predicate?: (card: Card) => boolean;
+    hydrateMissing?: boolean;
+  } = {},
+): Promise<Card[]> {
+  const reconciled = await reconcileBoardCardSummaries(node, cfg, cards, fields);
+  const bySlug = new Map<string, Card>();
+  for (const card of reconciled) {
+    if (!opts.predicate || opts.predicate(card)) bySlug.set(card.slug, card);
+  }
+
+  let indexed;
+  try {
+    indexed = await readCardListIndex(node, cfg);
+  } catch {
+    return [...bySlug.values()];
+  }
+  if (indexed === null) return [...bySlug.values()];
+
+  const projection = opts.hydrateMissing ? cardListProjectionFields(fields) : [];
+  for (const summary of indexed) {
+    if (!summary.slug || bySlug.has(summary.slug)) continue;
+    const indexedCard = Object.assign({ ...(summary as Card), body: "" }, deriveStructuredFields(summary as Card));
+    if (opts.predicate && !opts.predicate(indexedCard)) continue;
+    if (!opts.hydrateMissing) {
+      bySlug.set(indexedCard.slug, indexedCard);
+      continue;
+    }
+
+    const truth = await findCardWithFields(node, cfg, summary.slug, projection);
+    if (!truth) continue;
+    Object.assign(truth, deriveStructuredFields(truth));
+    if (opts.predicate && !opts.predicate(truth)) continue;
+    try {
+      await upsertBoardCard(node, cfg, truth, null);
+    } catch {
+      // best-effort read repair; returning the point-read truth is still safer
+      // than hiding a live card because BoardCards is partial.
+    }
+    bySlug.set(truth.slug, truth);
+  }
+  return [...bySlug.values()];
+}
+
+async function hydrateSparseIndexedBoards(
+  node: NodeClient,
+  cfg: Config,
+  boards: Board[],
+): Promise<Board[]> {
+  let changed = false;
+  const out: Board[] = [];
+  for (const board of boards) {
+    if (board.columns.length > 0) {
+      out.push(board);
+      continue;
+    }
+    const point = await findBoard(node, cfg, board.slug);
+    if (point && point.columns.length > 0) {
+      out.push(point);
+      changed = true;
+    } else {
+      out.push(board);
+    }
+  }
+  if (changed) {
+    try {
+      await writeBoardListIndex(node, cfg, out.map((b) => ({
+        slug: b.slug,
+        title: b.title,
+        body: b.body,
+        columns: b.columns,
+        created_at: b.created_at,
+        updated_at: b.updated_at,
+      })));
+    } catch {
+      // best-effort read repair only.
+    }
+  }
+  return out;
 }
 
 function arraysEqual(a: string[], b: string[]): boolean {
