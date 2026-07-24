@@ -9,7 +9,6 @@ import {
   findMilestone,
   listBoards,
   listCardsOnBoard,
-  listMilestones,
   type Milestone,
 } from "../record.ts";
 
