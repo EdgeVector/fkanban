@@ -22,11 +22,13 @@ Default columns: `backlog → todo → doing → done`.
 > build/test/run/dogfood + PR workflow and the non-obvious gotchas.
 
 > **Just want to use kanban?** Skip straight to
-> [Prerequisites](#prerequisites) + [Quick start](#quick-start). `kanban init`
-> asks Mini to register/resolve the `fkanban/*` schemas and seeds the default
-> board.
+> [Prerequisites](#prerequisites) + [Quick start](#quick-start).
+> **`kanban init` is first-time setup only** (no config yet). If
+> `~/.fkanban/config.json` or `~/.kanban/config.json` already exists and
+> `kanban list` works, **do not re-run init** — see
+> [When *not* to run `init`](#when-not-to-run-init).
 
-Schema setup has one supported path: `kanban init` calls Mini's
+Schema setup for a **new** install: `kanban init` calls Mini's
 `POST /api/apps/declare-schema`. Mini resolves an existing catalog identity or
 registers a novel shape with Schema Service, anchors added fields as an
 expansion of the prior identity, loads the exact catalog definition, and only
@@ -54,13 +56,13 @@ bun install
 ```
 
 **3. A running folddb node.** kanban is a thin client — it needs a running
-**folddb node** to talk to (`init` defaults to `Unix socket ~/.lastdb/data/folddb.sock (local)`). Start
-one before `init` in one of two ways:
+**folddb node** to talk to (defaults to Unix socket
+`~/.lastdb/data/folddb.sock`). Start one in one of two ways:
 
 - **Homebrew (recommended for just using kanban):** install folddb from the
   [EdgeVector/homebrew-folddb](https://github.com/EdgeVector/homebrew-folddb)
-  tap and start the daemon. It serves the Unix socket **~/.lastdb/data/folddb.sock** by default — exactly
-  `init`'s default `--node-url`.
+  tap and start the daemon. It serves the Unix socket
+  **~/.lastdb/data/folddb.sock** by default — the same socket the CLI uses.
 
   ```bash
   brew install edgevector/folddb/folddb
@@ -69,12 +71,10 @@ one before `init` in one of two ways:
 
   (`folddb daemon start` works too if you'd rather not run it as a service.)
 
-  You don't need to run `folddb setup` first: `kanban init` auto-provisions
-  the node identity on first run against a fresh, unprovisioned node — so a
-  kanban-only user can skip it (handy for headless/SSH/CI: just start a node,
-  then `kanban init`, no interactive wizard required). `folddb setup` remains
-  the way to set up a full folddb identity (24-word recovery phrase, cloud
-  sync) if you want one.
+  You don't need to run `folddb setup` first: on a **fresh** machine, first-time
+  `kanban init` auto-provisions node identity against an unprovisioned node
+  (handy for headless/SSH/CI). `folddb setup` remains the way to set up a full
+  folddb identity (24-word recovery phrase, cloud sync) if you want one.
 
 - **From the fold monorepo (for fold devs):**
 
@@ -82,8 +82,13 @@ one before `init` in one of two ways:
   cd fold/fold_db_node && ./run.sh --local --dev
   ```
 
-Once a node is up, run `bun src/cli.ts doctor` to confirm it's reachable, then
-`bun src/cli.ts init` to bootstrap the board.
+Once a node is up:
+
+```bash
+bun src/cli.ts doctor    # confirm reachable
+# Only if you have NO kanban/fkanban config yet:
+bun src/cli.ts init      # first-time bootstrap — see "When not to run init"
+```
 
 ## Install the global `kanban` shim
 
@@ -141,15 +146,17 @@ a folddb node up), from inside the `kanban` repo:
 ```bash
 bun run install-cli   # one-time: put kanban on PATH (see "Install the global shim")
 
-# Bootstrap the node, register/resolve the fkanban schemas, and seed the
-# default board. On a fresh bootstrap, `init` ends by printing a "Next steps" block —
-# including the `claude mcp add fkanban …` command to register the MCP server
-# (the form is picked for you based on whether the `kanban` shim is on PATH).
+# --- First-time only (no ~/.fkanban/config.json and no ~/.kanban/config.json) ---
+# Bootstrap identity, register/resolve fkanban schemas, seed the default board.
+# On a fresh bootstrap, `init` prints a "Next steps" block including
+# `claude mcp add fkanban …` when useful.
+#
+# If config already exists and `kanban list` works — skip this. Re-running init
+# on a live board is a common agent footgun (see below).
 kanban init
 
-# …or point at an ephemeral dev node. The CLI's --schema-service-url is recorded
-# in config for diagnostics only (it shows in `kanban doctor`); Mini owns the
-# required Schema Service registration call.
+# …or point first-time setup at an ephemeral dev node. --schema-service-url is
+# recorded for diagnostics only; Mini owns Schema Service registration.
 kanban init \
   --node-url http://127.0.0.1:9105 \
   --schema-service-url https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com
@@ -163,14 +170,53 @@ kanban list
 (Haven't installed the shim? Every `kanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
+### When *not* to run `init`
+
+**If kanban is already working on this machine, do not re-run `init` as a heal.**
+
+Preflight before any `init`:
+
+```bash
+test -f ~/.fkanban/config.json -o -f ~/.kanban/config.json && echo "config present"
+kanban list --column todo    # or: kanban board list
+```
+
+| Situation | Do this |
+|-----------|---------|
+| No config file, first install | `kanban init` once |
+| Config present, `kanban list` works | **Stop.** Use normal commands; not init |
+| Board empty / weird after someone re-init'd | Do **not** init again — recover pins / indexes; see below |
+| New EXTRA schema keys (e.g. reverse indexes) on an existing board | Prefer a **targeted** declare + patch of *only* the new `schemaHashes` keys + load + heal — **not** full init |
+| Ephemeral throwaway node / CI | `init` against that node’s socket with a **separate** `KANBAN_CONFIG` path |
+
+Why re-init is unsafe as a “heal”:
+
+1. **Re-declares every schema** (card, board, milestone, extras), not just the
+   one you care about, and **rewrites the whole** `schemaHashes` map in config.
+2. If Mini resolve returns a **different Board hash** than the one your cards
+   were written against, `findBoard("default")` looks at an empty namespace and
+   **seeds a fresh Board row** titled `Default board` with slug still
+   `default` — same slug, empty shell. Cards live in the Card schema; they are
+   not children of the Board row, so this looks like a “new empty default board.”
+3. Board seed is only “idempotent” **under the currently pinned Board hash**.
+   It is not a safe global “ensure my real board exists.”
+
+Health checks and recovery: prefer `kanban doctor`, `kanban list`,
+`kanban board list`, and feature-specific heals (e.g.
+`kanban groom board-cards-heal`, `kanban groom milestone-indexes-heal`). Do
+**not** treat `init` as the default repair for timeouts, empty columns, or
+missing index rows.
+
 If `init` reports `app_schema_declare_unsupported`, the node does not expose
 Mini's registered app-schema declaration route. Upgrade LastDB/FoldDB to a Mini
 build whose `/api/apps/declare-schema` resolves or registers every proposal
 with Schema Service; `--schema-service-url` is diagnostic because Mini owns the
-service call.
+service call. This error is about **first-time** declare capability — it is not
+a reason to re-init a working primary board.
 
 Schema synchronization has one executable transport: F-Kanban's node client
-calls Mini's `POST /api/apps/declare-schema` (normally through `kanban init`).
+calls Mini's `POST /api/apps/declare-schema` (normally through first-time
+`kanban init`, or a deliberate targeted declare for new EXTRA keys).
 F-Kanban must not call Schema Service, use the legacy owner-declare route,
 accept `local_mint`, or copy rows as part of a field expansion. The LastGit CI gate runs
 `bun run check:schema-sync-boundary` and rejects those bypasses. An incompatible
@@ -180,12 +226,13 @@ never inferred from schema synchronization.
 If `init` reports `schema_not_writable`, the node has a `fkanban/*` schema that
 **resolves but isn't writable for all fields** — usually an older, narrower
 version of the schema (fewer fields than this kanban build expects), sometimes
-loaded *alongside* the current one. `init` now refuses to adopt such a hash
+loaded *alongside* the current one. `init` refuses to adopt such a hash
 (it would 400 every subsequent write) and **leaves your existing config
-untouched**, so the board keeps working. The fix is node-side: repair or
-upgrade Mini's registered schema declaration path, then re-run `kanban init`. `init`
-and `kanban doctor` write-probe the schema hashes before trusting them, so a
-stale duplicate can't silently break writes.
+untouched**, so the board keeps working. Fix node-side (repair/upgrade Mini
+declare path). Only re-run `init` after that if you still have **no** working
+config — if the board already works under the old pins, keep them and do not
+re-init “to be safe.” `init` and `kanban doctor` write-probe hashes before
+trusting them.
 
 ```
 Default board  (default)
@@ -206,7 +253,7 @@ DONE  (0)
 
 | Command | What it does |
 |---|---|
-| `kanban init` | bootstrap node + register/resolve schemas + seed default board (idempotent) |
+| `kanban init` | **first-time only:** bootstrap + declare/resolve schemas + seed `default` board. Not a heal — see [When not to run init](#when-not-to-run-init) |
 | `kanban add <slug>` | create/update a card (`--title --board --column --assignee --tags --deps --replace-deps --surfaces --priority P0-P3 --milestone <slug> --kind pr\|registry\|tracker\|umbrella\|meta\|program\|capstone\|validation --body`, or pipe body on stdin) |
 | `kanban mark <slug> <line>` | append one marker line to an existing card body, idempotently (`--json`) |
 | `kanban move <slug> <column>` | move a card to a column (`--from/--expect COL` as a compare-and-swap claim guard, `--position N`, `--force` as an explicit override for dependency blocks and default/todo pickup-readiness policy) |
@@ -614,9 +661,11 @@ or not-yet-complete cards expose it as an empty string.
 ## Registered vs Shared Schemas
 
 The `fkanban/Card` and `fkanban/Board` schemas are private in visibility, but
-every identity is registered with Schema Service. `kanban init` asks Mini to
-resolve/register them and persists the returned catalog hashes in config after
-write-probing them.
+every identity is registered with Schema Service. On **first-time** setup,
+`kanban init` asks Mini to resolve/register them and persists the returned
+catalog hashes in config after write-probing them. An existing install already
+has those pins; do not re-init just to “refresh” hashes (see
+[When not to run init](#when-not-to-run-init)).
 
 Shared-surface publication is only for contracts fkanban deliberately exposes
 to another app or an external surface. Ordinary board storage does not publish
