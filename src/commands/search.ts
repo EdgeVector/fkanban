@@ -24,6 +24,7 @@ import {
 import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
+import { querySearchPlane } from "../search-plane.ts";
 
 export type SearchOptions = {
   cfg: Config;
@@ -111,16 +112,46 @@ function legacyNativeHitToAppSearchHit(hit: unknown): AppSearchHit | null {
 }
 
 async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: string[]; saturated: boolean } | null> {
+  const cardHash = opts.cfg.schemaHashes.card ?? "";
+  // Primary: first-party Search app plane (shared with brain).
+  const plane = await querySearchPlane({
+    query: opts.query,
+    k: NATIVE_INDEX_RESULT_CAP,
+    schemas: cardHash ? [cardHash, "fkanban/Card", "Card"] : undefined,
+  });
+  if (plane !== null && plane.length > 0) {
+    const slugs: string[] = [];
+    const seen = new Set<string>();
+    for (const h of plane) {
+      const schemaOk =
+        !cardHash ||
+        h.schema_name === cardHash ||
+        h.schema_name === "fkanban/Card" ||
+        h.schema_name === "Card";
+      if (!schemaOk) continue;
+      const slug = h.key_hash;
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      slugs.push(slug);
+    }
+    if (slugs.length > 0) {
+      return {
+        slugs,
+        saturated: plane.length >= NATIVE_INDEX_RESULT_CAP,
+      };
+    }
+  }
+
   if (opts.node.search) {
     const hits = await opts.node.search(opts.query, { k: NATIVE_INDEX_RESULT_CAP });
     return {
-      slugs: appSearchCardSlugs(hits, opts.cfg.schemaHashes.card ?? ""),
+      slugs: appSearchCardSlugs(hits, cardHash),
       saturated: hits.length >= NATIVE_INDEX_RESULT_CAP,
     };
   }
   const res = await opts.node.rawCall("GET", nativeIndexPath(opts.query));
   if (res.status !== 200) return null;
-  const slugs = legacyNativeCardSlugs(res.json, opts.cfg.schemaHashes.card ?? "");
+  const slugs = legacyNativeCardSlugs(res.json, cardHash);
   return {
     slugs,
     saturated: slugs.length >= NATIVE_INDEX_RESULT_CAP,
