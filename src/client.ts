@@ -211,6 +211,16 @@ export type LoadedSchema = {
   fields: string[];
 };
 
+/** Live schema detail from GET /api/schema/{hash} (key layout for membership indexes). */
+export type SchemaDetail = {
+  name: string;
+  descriptive_name: string;
+  owner_app_id: string;
+  schema_type: string;
+  key: { hash_field: string; range_field: string | null };
+  fields: string[];
+};
+
 export type NodeClient = {
   baseUrl: string;
   userHash: string;
@@ -230,6 +240,8 @@ export type NodeClient = {
   // resolve `fkanban/<Name>` → canonical hash after the schemas are published
   // out-of-band via the exemem app-creation flow.
   listSchemas(): Promise<LoadedSchema[]>;
+  /** GET /api/schema/{hash} — key layout + fields for one loaded schema. */
+  getSchema?(schemaHash: string): Promise<SchemaDetail>;
   declareAppSchema?(appId: string, schema: Record<string, unknown>): Promise<AppSchemaDeclaration>;
   createRecord(opts: {
     schemaHash: string;
@@ -744,6 +756,27 @@ export function newNodeClient(opts: {
           : [],
       }));
     },
+    async getSchema(schemaHash: string) {
+      const path = `/api/schema/${encodeURIComponent(schemaHash)}`;
+      const { status, body } = await callJson(path, "GET");
+      if (status !== 200) throw mapNodeError(status, body, path);
+      const b = body as Record<string, unknown>;
+      const s = (b.schema && typeof b.schema === "object" ? b.schema : b) as Record<string, unknown>;
+      const keyRaw = s.key && typeof s.key === "object" ? (s.key as Record<string, unknown>) : {};
+      return {
+        name: typeof s.name === "string" ? s.name : schemaHash,
+        descriptive_name: typeof s.descriptive_name === "string" ? s.descriptive_name : "",
+        owner_app_id: typeof s.owner_app_id === "string" ? s.owner_app_id : "",
+        schema_type: typeof s.schema_type === "string" ? s.schema_type : "",
+        key: {
+          hash_field: typeof keyRaw.hash_field === "string" ? keyRaw.hash_field : "",
+          range_field: typeof keyRaw.range_field === "string" ? keyRaw.range_field : null,
+        },
+        fields: Array.isArray(s.fields)
+          ? (s.fields as unknown[]).filter((v): v is string => typeof v === "string")
+          : [],
+      };
+    },
     async declareAppSchema(appId, schema) {
       const { status, body } = await callJson("/api/apps/declare-schema", "POST", {
         app_id: appId,
@@ -1071,6 +1104,8 @@ const SOCKET_OWNER_ROUTES = [
   { method: "POST", path: "/api/query" },
   { method: "POST", path: "/api/mutation" },
   { method: "GET", path: "/api/schemas" },
+  // Prefix match: GET /api/schema/{hash} for membership key-layout doctor checks.
+  { method: "GET", path: "/api/schema" },
   { method: "GET", path: "/api/system/auto-identity" },
 ] as const;
 
@@ -1098,7 +1133,11 @@ function socketServesEveryNodeRoute(socketPath: string): boolean {
 
 function isSocketRoute(method: string, path: string, socketPath: string): boolean {
   if (socketServesEveryNodeRoute(socketPath)) return true;
-  return SOCKET_OWNER_ROUTES.some((r) => r.method === method && r.path === path);
+  return SOCKET_OWNER_ROUTES.some((r) => {
+    if (r.method !== method) return false;
+    // Exact match, or nested under a declared prefix (GET /api/schema/{hash}).
+    return path === r.path || path.startsWith(`${r.path}/`);
+  });
 }
 
 // A LOCAL node is reached only over its Unix socket — the loopback TCP listener

@@ -2387,6 +2387,18 @@ function boardCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
   );
 }
 
+/**
+ * Align BoardCards thin rows with Card point-reads for list previews.
+ *
+ * On mismatch: best-effort upsert BoardCards from Card truth (safe dual-write heal).
+ * On Card miss: **keep the BoardCards row and render the thin summary** — never delete.
+ * A point-read miss can mean Mini degradation, blind-key issues, or conflicted
+ * projection — not a true orphan. Destructive orphan cleanup is only
+ * `groom board-cards-heal --apply` (explicit, circuit-breakable).
+ *
+ * Incident 2026-07-23/24: list scrapers (Factory) deleted ~1k BoardCards rows when
+ * Card multi-field reads failed after schema expand + sync stress.
+ */
 async function reconcileBoardCardSummaries(
   node: NodeClient,
   cfg: Config,
@@ -2402,11 +2414,8 @@ async function reconcileBoardCardSummaries(
     seen.add(card.slug);
     const truth = await findCardWithFields(node, cfg, card.slug, projection);
     if (!truth) {
-      try {
-        await removeBoardCard(node, cfg, card);
-      } catch {
-        // best-effort read repair; omit the stale row either way
-      }
+      // Read-only on miss: surface the BoardCards thin row; do not removeBoardCard.
+      out.push(Object.assign({ ...card, body: card.body || "" }, deriveStructuredFields(card)));
       continue;
     }
 
