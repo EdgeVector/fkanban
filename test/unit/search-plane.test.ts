@@ -1,26 +1,37 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { querySearchPlane } from "../../src/search-plane.ts";
+import {
+  querySearchPlane,
+  resolveSearchModulePath,
+} from "../../src/search-plane.ts";
 
-const SEARCH_ENGINE = resolve(
+const VENDOR_ENGINE = resolve(
   import.meta.dirname,
-  "../../../search-kanban-search-as-app-implement/src/engine.ts",
+  "../../vendor/edgevector-search/src/engine.ts",
 );
 
 describe("fkanban search-plane cutover", () => {
-  test("querySearchPlane finds card fixture from Search engine", async () => {
+  test("resolveSearchModulePath finds vendored engine without env", () => {
+    delete process.env.LASTDB_SEARCH_MODULE;
+    expect(existsSync(VENDOR_ENGINE)).toBe(true);
+    const p = resolveSearchModulePath();
+    expect(p).not.toBeNull();
+    expect(p!.endsWith("vendor/edgevector-search/src/engine.ts")).toBe(true);
+  });
+
+  test("querySearchPlane finds card fixture from vendored Search engine", async () => {
     const home = mkdtempSync(join(tmpdir(), "fk-sp-"));
     const indexDir = join(home, "index");
     mkdirSync(indexDir, { recursive: true });
     mkdirSync(join(home, "inbox"), { recursive: true });
     const unique = `fkanban-plane-${Date.now()}-card9`;
-    process.env.LASTDB_SEARCH_MODULE = SEARCH_ENGINE;
+    delete process.env.LASTDB_SEARCH_MODULE;
     process.env.SEARCH_HOME = home;
 
-    const engMod = (await import(pathToFileURL(SEARCH_ENGINE).href)) as {
+    const engMod = (await import(pathToFileURL(VENDOR_ENGINE).href)) as {
       openSearchEngine: (d: string) => {
         applyChangeBatch: (b: unknown) => number;
         persist: () => void;

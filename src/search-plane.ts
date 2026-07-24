@@ -1,10 +1,11 @@
 /**
- * Shared Search app plane client for fkanban (same contract as brain).
- * @see EdgeVector/search — first-party keyword index via IndexChangeBatch.
+ * Shared Search app plane client for fkanban.
+ * Resolution: LASTDB_SEARCH_MODULE → vendor/edgevector-search → unavailable.
  */
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -14,23 +15,21 @@ export type SearchPlaneHit = {
   text: string;
 };
 
-function resolveSearchModulePath(): string | null {
+function packageRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+export function resolveSearchModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
-  const candidates = [
-    resolve(
-      import.meta.dirname,
-      "../../search-kanban-search-as-app-implement/src/engine.ts",
-    ),
-    resolve(
-      import.meta.dirname,
-      "../../../search-kanban-search-as-app-implement/src/engine.ts",
-    ),
-    resolve(import.meta.dirname, "../../../../search/src/engine.ts"),
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
+  const vendorEngine = join(
+    packageRoot(),
+    "vendor",
+    "edgevector-search",
+    "src",
+    "engine.ts",
+  );
+  if (existsSync(vendorEngine)) return vendorEngine;
   return null;
 }
 

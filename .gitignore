@@ -15,3 +15,5 @@ dist/
 .portal-worktree
 .portal-worktree
 node_modules
+!/vendor/edgevector-search/
+!/vendor/edgevector-search/**
