@@ -72,7 +72,10 @@ type CardQueryLog = { fields: string[]; filter?: QueryFilter; allowFullScan?: bo
 
 function fakeNode(opts: {
   boards: Board[];
+  indexedBoards?: Board[];
   cards: Card[];
+  boardCardOmitSlugs?: string[];
+  hashRangePrefixBroken?: boolean;
   cardScanError?: boolean;
   rejectUnallowedCardScan?: boolean;
   rejectColumnFilter?: boolean;
@@ -80,7 +83,8 @@ function fakeNode(opts: {
 }): NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[] } {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
   const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
-  const boardCardRows = opts.cards.map((c) => ({
+  const omitBoardCardSlugs = new Set(opts.boardCardOmitSlugs ?? []);
+  const boardCardRows = opts.cards.filter((c) => !omitBoardCardSlugs.has(c.slug)).map((c) => ({
     fields: boardCardFieldsFromCard(c),
     key: { hash: c.board, range: null },
   }));
@@ -131,7 +135,11 @@ function fakeNode(opts: {
             ok: true,
             results: [{
               key: { hash: BOARD_LIST_INDEX_KEY, range: null },
-              fields: { key: BOARD_LIST_INDEX_KEY, payload_json: JSON.stringify(opts.boards), updated_at: "2026-01-01T00:00:00.000Z" },
+              fields: {
+                key: BOARD_LIST_INDEX_KEY,
+                payload_json: JSON.stringify(opts.indexedBoards ?? opts.boards),
+                updated_at: "2026-01-01T00:00:00.000Z",
+              },
             }],
           };
         }
@@ -150,7 +158,9 @@ function fakeNode(opts: {
         let rows = boardCardRows;
         const rangePrefix = (q.filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)?.HashRangePrefix;
         if (rangePrefix?.hash && rangePrefix.prefix !== undefined) {
-          rows = rows.filter((r) => r.fields.board === rangePrefix.hash && typeof r.fields.sk === "string" && r.fields.sk.startsWith(rangePrefix.prefix!));
+          rows = opts.hashRangePrefixBroken
+            ? []
+            : rows.filter((r) => r.fields.board === rangePrefix.hash && typeof r.fields.sk === "string" && r.fields.sk.startsWith(rangePrefix.prefix!));
         } else if (q.filter?.HashKey) {
           rows = rows.filter((r) => r.fields.board === q.filter!.HashKey);
         }
@@ -245,6 +255,20 @@ describe("board list — per-board live-card counts", () => {
     expect(bySlug.get("scratch")!.cardCount).toBe(0);
     // Additive only — the existing Board shape is intact.
     expect(bySlug.get("default")!.columns).toEqual(["backlog", "todo", "doing", "done"]);
+  });
+
+  test("hydrates sparse all_boards index rows from board point-reads", async () => {
+    const fullDefault = board({ slug: "default", title: "Default board" });
+    const node = fakeNode({
+      boards: [fullDefault],
+      indexedBoards: [board({ slug: "default", title: "Default board", columns: [] })],
+      cards: [card({ slug: "a", board: "default" })],
+    });
+
+    const { boards } = await boardListResult({ cfg: cfgWithIndexes, node });
+
+    expect(boards[0]!.columns).toEqual(fullDefault.columns);
+    expect(boards[0]!.cardCount).toBe(1);
   });
 
   test("count scan failure degrades gracefully: boards still render, no counts", async () => {
@@ -544,5 +568,46 @@ describe("list — text path fetches body-free fields, structured views keep ful
     // Default JSON list does not point-read bodies for matching cards.
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "todo-a" && q.fields.includes("body"))).toBe(false);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "doing-b")).toBe(false);
+  });
+
+  test("--column fills missing BoardCards rows from CardListIndex point-read truth", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "todo-a", column: "todo" }),
+        card({ slug: "doing-b", column: "doing" }),
+      ],
+      boardCardOmitSlugs: ["todo-a"],
+      rejectUnallowedCardScan: true,
+    });
+
+    const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
+    const parsed = JSON.parse(out) as Card[];
+
+    expect(parsed.map((c) => c.slug)).toEqual(["todo-a"]);
+    expect(node.cardQueries).toContainEqual(expect.objectContaining({
+      filter: { HashKey: "todo-a" },
+      allowFullScan: undefined,
+    }));
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+  });
+
+  test("--column recovers when HashRangePrefix returns an empty encrypted-range result", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "todo-a", column: "todo" }),
+        card({ slug: "doing-b", column: "doing" }),
+      ],
+      hashRangePrefixBroken: true,
+      rejectUnallowedCardScan: true,
+    });
+
+    const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
+    const parsed = JSON.parse(out) as Card[];
+
+    expect(parsed.map((c) => c.slug)).toEqual(["todo-a"]);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "todo-a")).toBe(true);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
   });
 });
