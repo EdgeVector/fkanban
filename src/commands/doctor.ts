@@ -8,7 +8,11 @@ import pkg from "../../package.json" with { type: "json" };
 import { FkanbanError, isLoopbackNodeUrl, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
-import { listBoards, listCards, probeSchemaWritable } from "../record.ts";
+import { listBoards, listCards, findCard, probeSchemaWritable } from "../record.ts";
+import {
+  MEMBERSHIP_KEY_EXPECTATIONS,
+  checkMembershipKeyLayout,
+} from "../membership_schema_guard.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveLoadedSchema } from "../schemas.ts";
 
 // A single machine-readable health check. `pass`/`fail` checks flip `ok`;
@@ -204,6 +208,80 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     } catch (err) {
       check(false, "query round-trip", formatDoctorError(err));
     }
+  }
+
+  // Membership-index key layout (BoardCards must partition by board, not
+  // milestone). Catalog expand that rewrites hash_field empties list scrapers.
+  // Hard-fail so LaunchAgents can refuse to start Factory/list pollers.
+  if (typeof node.getSchema === "function") {
+    for (const exp of MEMBERSHIP_KEY_EXPECTATIONS) {
+      const hash = cfg.schemaHashes[exp.configKey];
+      if (!hash) {
+        info(
+          `${exp.label} key layout`,
+          `config hash unset — run \`kanban init\` to declare ${exp.configKey}`,
+        );
+        continue;
+      }
+      try {
+        const detail = await node.getSchema(hash);
+        const result = checkMembershipKeyLayout(
+          {
+            schema_type: detail.schema_type,
+            hash_field: detail.key.hash_field,
+            range_field: detail.key.range_field,
+          },
+          exp.expected,
+        );
+        check(
+          result.ok,
+          `${exp.label} key layout (hash_field=${exp.expected.hash_field})`,
+          result.ok
+            ? `${detail.schema_type} key=${detail.key.hash_field}/${detail.key.range_field ?? "—"}`
+            : result.reason,
+        );
+      } catch (err) {
+        check(
+          false,
+          `${exp.label} key layout (hash_field=${exp.expected.hash_field})`,
+          formatDoctorError(err),
+        );
+      }
+    }
+  } else {
+    info("membership key layout checks skipped", "node client has no getSchema");
+  }
+
+  // Multi-field Card smoke: point-read one live card and require more than slug.
+  // Slug-only projection was the 2026-07-24 Mini degradation signature.
+  try {
+    const sample = (await listCards(node, cfg)).find((c) => c.slug);
+    if (!sample) {
+      info("card multi-field smoke", "no cards to sample");
+    } else {
+      const full = await findCard(node, cfg, sample.slug);
+      if (!full) {
+        check(
+          false,
+          "card multi-field smoke",
+          `show/findCard missed slug ${sample.slug} (list thin row existed) — Mini may be degraded; do not run list scrapers that heal BoardCards`,
+        );
+      } else {
+        const hasShape =
+          (full.title && full.title.length > 0) ||
+          (full.board && full.board.length > 0) ||
+          (full.column && full.column.length > 0);
+        check(
+          Boolean(hasShape),
+          "card multi-field smoke",
+          hasShape
+            ? `${full.slug} has title/board/column`
+            : `${full.slug} returned slug-only projection (title/board/column empty) — Mini field join may be broken`,
+        );
+      }
+    }
+  } catch (err) {
+    check(false, "card multi-field smoke", formatDoctorError(err));
   }
 
   // Informational only — surface the MCP entrypoint + the exact, shim-aware

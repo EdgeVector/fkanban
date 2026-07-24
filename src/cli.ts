@@ -550,7 +550,8 @@ Subcommands:
                        human/parking candidates; --apply also parks unheld
                        non-pr-kind cards (tracker/validation/capstone/meta)
                        out of default/todo into backlog.
-  board-cards-heal     repair BoardCards membership so list --column agrees with
+  board-cards-heal     repair BoardCards membership (ONLY path that may delete orphans;
+                       list is read-only on Card miss) so list --column agrees with
                        show <slug> (delete orphan column#pos rows, upsert truth).
 
 Flags:

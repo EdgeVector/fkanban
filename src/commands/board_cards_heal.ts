@@ -1,6 +1,9 @@
 // Heal BoardCards membership drift: list/column previews must agree with
 // authoritative card column. Card point-reads are the source of truth;
 // CardListIndex only discovers slugs that have no BoardCards row yet.
+//
+// This is the ONLY path that may delete BoardCards rows for "orphans."
+// List/reconcile is read-only on Card miss (incident 2026-07-23/24).
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";

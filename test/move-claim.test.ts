@@ -227,6 +227,34 @@ describe("move claim guard", () => {
     expect(all).toMatchObject([{ slug: truth.slug, column: "done", position: "9" }]);
   });
 
+  test("list keeps BoardCards thin row when Card point-read misses (no orphan delete)", async () => {
+    // Regression 2026-07-23/24: list reconcile deleted BoardCards when Card was
+    // unreadable (Mini degradation), emptying Factory scrapers.
+    const node = fakeNode();
+    const thinOnly = card({ slug: "ghost-membership", column: "todo", position: "3" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: boardToFields(board()),
+    });
+    // BoardCards row only — no Card record.
+    await seedBoardCard(node, thinOnly);
+
+    // Board-wide list (HashKey partition) — not --column (HashRangePrefix).
+    const listed = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, json: true })) as Array<{
+      slug: string;
+      column: string;
+    }>;
+    expect(listed.map((c) => c.slug)).toContain("ghost-membership");
+    expect(listed.find((c) => c.slug === "ghost-membership")?.column).toBe("todo");
+
+    // Second list must still see the row (not deleted on first reconcile).
+    const again = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, json: true })) as Array<{
+      slug: string;
+    }>;
+    expect(again.map((c) => c.slug)).toContain("ghost-membership");
+  });
+
   test("move refuses an ambient DB that disagrees with the card home DB", async () => {
     const node = fakeNode();
     await seed(node);
