@@ -255,6 +255,28 @@ describe("move claim guard", () => {
     expect(again.map((c) => c.slug)).toContain("ghost-membership");
   });
 
+  test("column list cross-checks false-empty HashRangePrefix results against BoardCards partition", async () => {
+    // Regression 2026-07-24: encrypted/OPE range-key storage accepted the
+    // HashRangePrefix query but returned zero rows even though the board hash
+    // partition still held plaintext sk rows for that column. Pickup then saw
+    // an empty todo lane and no-oped.
+    const node = fakeNode();
+    const todo = card({ slug: "visible-todo", column: "todo", position: "3" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: boardToFields(board()),
+    });
+    await seedBoardCard(node, todo);
+
+    const listed = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, column: "todo", json: true })) as Array<{
+      slug: string;
+      column: string;
+    }>;
+    expect(listed.map((c) => c.slug)).toEqual(["visible-todo"]);
+    expect(listed[0]?.column).toBe("todo");
+  });
+
   test("move refuses an ambient DB that disagrees with the card home DB", async () => {
     const node = fakeNode();
     await seed(node);
