@@ -16,6 +16,18 @@ fbrain get concepts-fkanban-cli-gotchas # worktree node_modules, --body replaces
 fbrain ask "<question about kanban>"
 ```
 
+## LastDB access (board data)
+
+Kanban data lives in LastDB Mini. Treat it as **Dynamo-style NoSQL**: Card by
+slug is primary; BoardCards is a dual-written secondary for board/column list
+(not SQL WHERE, not full scan). Full agent brief:
+
+```bash
+brain get concepts-lastdb-agent-access-model
+# or: cat ~/.last-stack/docs/lastdb-agent-access-model.md
+# public: https://thelastdb.com/docs/agent-access-model
+```
+
 ## Self-improvement papercuts
 
 Follow Tom's standing preference:
