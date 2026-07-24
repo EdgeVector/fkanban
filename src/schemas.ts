@@ -418,11 +418,25 @@ export const boardMilestonesSchema: AddSchemaRequest = {
   schema: {
     name: "BoardMilestones",
     owner_app_id: OWNER_APP_ID,
-    // Unique descriptive_name so Mini does not expand/reuse a BoardCards-like
-    // composite missing completed_at (expand bug class 2026-07-23).
-    descriptive_name: "BoardMilestones_hashrange_v1_portfolio_20260723",
+    // descriptive_name must NOT share card/board-index vocabulary with
+    // `BoardCards_hashrange_v1`. Mini's declare resolver embeds the
+    // descriptive_name and expands/reuses the closest catalog schema; the old
+    // `BoardMilestones_hashrange_v1_portfolio_20260723` still embedded next to
+    // `BoardCards_hashrange_v1` and collapsed onto it — a composite MISSING
+    // `completed_at` (the 2026-07-23 expand bug; live pin was
+    // 1ef2e7a3…, descriptive_name "BoardCards_hashrange_v1"). Only a card-free,
+    // milestone-flavoured name resolves to a clean own-schema: declaring this
+    // exact name against the live node returned resolution=register with the
+    // proposal's OWN identity hash (verified 2026-07-24), because this schema's
+    // milestone fields (state/driver/proof_card/proof_status/completed_at) are
+    // not field-covered by any card composite.
+    //   NOTE: the sibling `milestone_cards` index can't be fixed this way — its
+    //   field set is card-shaped, so the resolver expands a card predecessor
+    //   onto it regardless of name. It stays a superset composite (functional:
+    //   right key + all fields) pending a structural field change.
+    descriptive_name: "FkanbanMilestonePortfolioByBoardIndex",
     purpose_statement:
-      "Thin per-board milestone membership (HashRange) so portfolio/list never full-scan Milestone",
+      "Per-board index of milestone outcomes and their proof/completion lifecycle; partitioned by board so the milestone portfolio and gap report load without a full Milestone scan",
     schema_type: "HashRange",
     key: { hash_field: "board", range_field: "sk" },
     fields: [...BOARD_MILESTONES_FIELDS],
