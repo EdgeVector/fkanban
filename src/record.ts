@@ -18,6 +18,7 @@ import {
 } from "./board-cards.ts";
 import {
   listAllBoardMilestones,
+  listBoardMilestonesPartition,
   removeBoardMilestone,
   upsertBoardMilestone,
 } from "./board-milestones.ts";
@@ -2580,22 +2581,35 @@ export function milestoneToFields(m: Milestone): Record<string, unknown> {
   };
 }
 
+function sortMilestones(milestones: Milestone[]): Milestone[] {
+  return milestones.sort(
+    (a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug),
+  );
+}
+
+/**
+ * Milestones on one board via BoardMilestones HashRange.
+ *
+ * When the index is bound and the partition query succeeds, an empty partition
+ * is authoritative. The admin-only heal command owns legacy backfill; hot list,
+ * portfolio, and gap-report paths must not product-scan Milestone just because
+ * an indexed board currently has no rows.
+ */
+export async function listMilestonesOnBoard(node: NodeClient, cfg: Config, board: string): Promise<Milestone[]> {
+  const fromIndex = await listBoardMilestonesPartition(node, cfg, board);
+  if (fromIndex !== null) return sortMilestones(fromIndex);
+  return (await listMilestones(node, cfg)).filter((m) => m.board === board);
+}
+
 /**
  * List milestones without product full-scan when BoardMilestones is bound:
  * one HashRange partition per board. Falls back to Milestone full-scan (+ sparse
- * HashKey hydrate) only when the index is unbound or empty after never dual-written.
+ * HashKey hydrate) only when the index is unbound or every partition query fails.
  */
 export async function listMilestones(node: NodeClient, cfg: Config): Promise<Milestone[]> {
   const boards = await listBoards(node, cfg);
   const fromIndex = await listAllBoardMilestones(node, cfg, boards);
-  // Use index only when it has at least one row that looks like a real milestone
-  // (state set). Junk/composite expand rows without dual-write layout are filtered
-  // in listBoardMilestonesPartition; empty after filter → fall through to fat path.
-  if (fromIndex !== null && fromIndex.some((m) => (m.state || "").length > 0 && (m.slug || "").length > 0)) {
-    return fromIndex.sort(
-      (a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug),
-    );
-  }
+  if (fromIndex !== null) return sortMilestones(fromIndex);
 
   // Fallback: full-scan + sparse hydrate (pre-index / empty backfill).
   const res = await node.queryAll({
@@ -2623,9 +2637,7 @@ export async function listMilestones(node: NodeClient, cfg: Config): Promise<Mil
       }),
     );
   }
-  return milestones.sort(
-    (a, b) => Number(a.position || 0) - Number(b.position || 0) || a.slug.localeCompare(b.slug),
-  );
+  return sortMilestones(milestones);
 }
 
 export async function findMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone | null> {

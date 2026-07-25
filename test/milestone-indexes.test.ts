@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { milestoneAddCmd, milestoneGapReportResult, milestoneReconcileResult } from "../src/commands/milestone.ts";
+import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
 import {
   boardToFields,
@@ -127,6 +127,90 @@ describe("milestone HashRange indexes", () => {
 
     const listed = await listMilestones(node, cfg);
     expect(listed.find((m) => m.slug === "ms-a")?.title).toBe("Outcome A");
+  });
+
+  test("list, portfolio, detail, and gap-report stay on milestone indexes", async () => {
+    const base = fakeNode();
+    await seedBoard(base);
+    await milestoneAddCmd({
+      cfg,
+      node: base,
+      slug: "ms-indexed",
+      title: "Indexed outcome",
+      state: "active",
+      northStar: "north-star-indexed",
+      driver: "last-stack-milestone-driver",
+    });
+    await milestoneAddCmd({
+      cfg,
+      node: base,
+      slug: "ms-other",
+      title: "Other outcome",
+      state: "active",
+      northStar: "north-star-other",
+      driver: "last-stack-milestone-driver",
+    });
+    await addCmd({
+      cfg,
+      node: base,
+      slug: "indexed-pr",
+      title: "Indexed PR",
+      milestone: "ms-indexed",
+      northStar: "north-star-indexed",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nIndexed child.\n\n## END STATE\nDone.\n",
+    });
+    await addCmd({
+      cfg,
+      node: base,
+      slug: "other-pr",
+      title: "Other PR",
+      milestone: "ms-other",
+      northStar: "north-star-other",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nOther child.\n\n## END STATE\nDone.\n",
+    });
+
+    const fullScanAttempts: string[] = [];
+    const node: NodeClient = {
+      ...base,
+      async queryAll(opts) {
+        if (opts.schemaHash === cfg.schemaHashes.milestone && !opts.filter && opts.allowFullScan) {
+          fullScanAttempts.push(opts.schemaHash);
+          throw new Error("Milestone full scan is forbidden in indexed milestone read paths");
+        }
+        return base.queryAll(opts);
+      },
+    };
+
+    const listed = await milestoneListResult({ cfg, node, board: "default" });
+    expect(listed.milestones.map((m) => m.slug)).toEqual(["ms-indexed", "ms-other"]);
+    expect(listed.milestones.find((m) => m.slug === "ms-indexed")?.north_star).toBe("north-star-indexed");
+
+    const portfolio = await milestonePortfolioResult({ cfg, node, board: "default" });
+    expect(portfolio.entries.find((entry) => entry.slug === "ms-indexed")).toMatchObject({
+      title: "Indexed outcome",
+      north_star: "north-star-indexed",
+      ready: ["indexed-pr"],
+    });
+
+    const detail = await milestoneDetailResult({ cfg, node, slug: "ms-indexed" });
+    expect(detail.detail.columns.todo?.map((card) => card.slug)).toEqual(["indexed-pr"]);
+    expect(detail.detail.children.map((card) => card.slug)).not.toContain("other-pr");
+
+    const { report } = await milestoneGapReportResult({ cfg, node, board: "default" });
+    expect(report.milestones.find((m) => m.slug === "ms-indexed")).toMatchObject({
+      title: "Indexed outcome",
+      north_star: "north-star-indexed",
+      status: "in_flight",
+    });
+    expect(fullScanAttempts).toEqual([]);
   });
 
   test("dual-write MilestoneCards on card add; reconcile uses partition", async () => {

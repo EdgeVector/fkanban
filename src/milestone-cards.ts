@@ -218,7 +218,12 @@ export async function listMilestoneCardsPartition(
       filter: { HashKey: milestone },
     });
     return res.results
-      .map((r) => cardFromMilestoneCardFields(r.fields as Record<string, unknown>))
+      .map((r) => {
+        const f = (r.fields ?? {}) as Record<string, unknown>;
+        if (String(f.layout ?? "") !== MILESTONE_CARDS_LAYOUT) return null;
+        return cardFromMilestoneCardFields(f);
+      })
+      .filter((c): c is Card => c !== null)
       .filter((c) => c.slug.length > 0);
   } catch {
     return null;

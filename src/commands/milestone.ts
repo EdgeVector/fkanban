@@ -16,6 +16,7 @@ import {
   listCardsOnBoard,
   listDependencyStatusesForCards,
   listMilestones,
+  listMilestonesOnBoard,
   hasPrWorkBrief,
   isSubstantiveCardBody,
   normalizeBlockStatus,
@@ -303,9 +304,10 @@ export function renderMilestone(milestone: Milestone): string {
 
 export async function milestoneListResult(opts: { cfg: Config; node: NodeClient; board?: string; state?: string }): Promise<{ text: string; milestones: Milestone[] }> {
   if (opts.state) validateState(opts.state);
-  const milestones = (await listMilestones(opts.node, opts.cfg)).filter(
-    (m) => (!opts.board || m.board === opts.board) && (!opts.state || m.state === opts.state),
-  );
+  const source = opts.board
+    ? await listMilestonesOnBoard(opts.node, opts.cfg, opts.board)
+    : await listMilestones(opts.node, opts.cfg);
+  const milestones = source.filter((m) => !opts.state || m.state === opts.state);
   const text = milestones.length
     ? milestones.map((m) => `${m.state.padEnd(9)} ${m.slug} — ${m.title}${m.proof_card ? ` [proof:${m.proof_status}]` : ""}`).join("\n")
     : "No milestones.";
@@ -405,7 +407,9 @@ function renderMilestoneReconcile(result: MilestoneReconcileResult): string {
 }
 
 async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ milestones: Milestone[]; cards: Card[]; reconciled: MilestoneReconcileResult[] }> {
-  const milestones = (await listMilestones(opts.node, opts.cfg)).filter((milestone) => !opts.board || milestone.board === opts.board);
+  const milestones = opts.board
+    ? await listMilestonesOnBoard(opts.node, opts.cfg, opts.board)
+    : await listMilestones(opts.node, opts.cfg);
   const boards = await listBoards(opts.node, opts.cfg);
   // Prefer per-milestone partitions when bound; else one board-wide card list.
   const childLists = await Promise.all(milestones.map(async (milestone) => {
