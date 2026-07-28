@@ -2852,8 +2852,15 @@ export async function createCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  await upsertBoardCard(opts.node, opts.cfg, card);
-  await upsertMilestoneCard(opts.node, opts.cfg, card);
+  // Multi-key membership: protein binds BoardCards ↔ MilestoneCards so shared
+  // fields stay coherent without app dual-write as the coherence mechanism.
+  // Falls back to legacy dual-write only when Mini lacks protein routes.
+  const { writeMembershipViaProtein } = await import("./protein.ts");
+  const usedProtein = await writeMembershipViaProtein(opts.node, opts.cfg, card);
+  if (!usedProtein) {
+    await upsertBoardCard(opts.node, opts.cfg, card);
+    await upsertMilestoneCard(opts.node, opts.cfg, card);
+  }
 }
 
 export async function updateCardRecord(
@@ -2865,8 +2872,44 @@ export async function updateCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "updateRecord", expected);
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  await upsertBoardCard(opts.node, opts.cfg, card, previous ?? null);
-  await upsertMilestoneCard(opts.node, opts.cfg, card, previous ?? null);
+  const { writeMembershipViaProtein } = await import("./protein.ts");
+  const usedProtein = await writeMembershipViaProtein(opts.node, opts.cfg, card);
+  if (!usedProtein) {
+    await upsertBoardCard(opts.node, opts.cfg, card, previous ?? null);
+    await upsertMilestoneCard(opts.node, opts.cfg, card, previous ?? null);
+    return;
+  }
+  // Protein wrote the new multi-key tips. Purge prior membership sks only when
+  // the card moved (protein does not delete the old key slot).
+  if (previous) {
+    const { purgeOtherBoardCardRows, boardCardSk, boardCardsHash } = await import(
+      "./board-cards.ts"
+    );
+    const { milestoneCardsHash, milestoneCardSk } = await import("./milestone-cards.ts");
+    const boardHash = boardCardsHash(opts.cfg);
+    const msHash = milestoneCardsHash(opts.cfg);
+    const nextBoard = card.board || "default";
+    const nextSk = boardCardSk(card.column, card.position, card.slug);
+    const prevBoard = previous.board || "default";
+    const prevSk = boardCardSk(previous.column, previous.position, previous.slug);
+    if (boardHash && (prevBoard !== nextBoard || prevSk !== nextSk)) {
+      await opts.node.deleteRecord({
+        schemaHash: boardHash,
+        keyHash: prevBoard,
+        rangeKey: prevSk,
+      });
+      await purgeOtherBoardCardRows(opts.node, opts.cfg, nextBoard, card.slug, nextSk);
+    }
+    const prevMs = (previous.milestone ?? "").trim();
+    const nextMs = (card.milestone ?? "").trim();
+    if (msHash && prevMs && (prevMs !== nextMs || prevSk !== nextSk)) {
+      await opts.node.deleteRecord({
+        schemaHash: msHash,
+        keyHash: prevMs,
+        rangeKey: milestoneCardSk(previous.column, previous.position, previous.slug),
+      });
+    }
+  }
 }
 
 /** Remove Card + dual indexes (BoardCards + CardListIndex + MilestoneCards). */
