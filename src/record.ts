@@ -2220,6 +2220,28 @@ export async function scanCardSummariesForReconcile(
 }
 
 /**
+ * Point-read one card's reconcile truth, body-free.
+ *
+ * Same source of truth and same key as `findCard` — the Card record at
+ * HashKey(slug) — so a reconciler keeps its "Card decides, indexes follow"
+ * invariant. The only difference is the projection: `body` is dropped, because
+ * BoardCards never stores one (`boardCardFieldsFromCard`) and every reconciler
+ * blanks it on arrival. A reconciler makes one of these per card, so shipping
+ * multi-KB bodies across the socket to decide a column#pos membership was the
+ * dominant cost of `groom board-cards-heal`.
+ *
+ * `reconcileBoardCardSummaries` already reads truth this way; this is the same
+ * projection, exported so heal stops being the one path that pays for bodies.
+ */
+export async function findCardSummaryForReconcile(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+): Promise<Card | null> {
+  return findCardWithFields(node, cfg, slug, cardListProjectionFields(fieldsFor("card")));
+}
+
+/**
  * Thin cards on one board only (one BoardCards partition — no empty-board fan-out).
  * `fields` is used only on the legacy CardListIndex / Card fallback path.
  */
