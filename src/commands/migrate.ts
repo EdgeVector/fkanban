@@ -196,6 +196,16 @@ export type MigrateLegacyColumnsOptions = {
  * and a stale scan row can never author a column change. The full read matters
  * for a second reason: a card write carries every field, so writing back a
  * body-free summary would blank the body.
+ *
+ * DO NOT "optimize" this by trusting the scan's `column` and skipping the
+ * point-read. Measured on the primary 2026-07-28: `scanCardSummariesForReconcile`
+ * returned 1054 rows for 791 distinct slugs, and 843 of those rows carried a
+ * slug with EVERY other projected field blank — `column: ""`, `board: ""`,
+ * `title: ""`. 580 slugs had no populated scan row at all, yet point-read fine
+ * (one of them had been updated that same day). A blank `column` is therefore
+ * "unknown", never "off-column", and the scan is a slug oracle only. That is
+ * why this reads truth for every candidate and why `board_cards_heal` does the
+ * same — both are correct today purely because neither believes the scan.
  */
 export async function migrateLegacyColumnsCmd(
   opts: MigrateLegacyColumnsOptions,

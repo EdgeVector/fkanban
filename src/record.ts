@@ -2194,6 +2194,22 @@ export async function listCardsByColumn(
  * more capable: the `all_cards` rollup was a lost-update-prone copy, so a card
  * dropped from it by a concurrent write was invisible to heal forever. Card is
  * the source of truth, so a row missing from *both* indexes is now findable.
+ *
+ * SLUG ORACLE ONLY — do not trust the field values on the rows this returns.
+ *
+ * Measured against the primary 2026-07-28: it returned 1054 rows for 791
+ * distinct slugs, and 843 of those rows carried a populated `slug` with every
+ * other projected field blank (`column: ""`, `board: ""`, `title: ""`). 263
+ * slugs came back TWICE — once populated, once as a blank shell — and 580 slugs
+ * had no populated row at all despite point-reading fine, including a card
+ * updated the same day. `column` IS in the projection
+ * (`cardListProjectionFields`), so this is not a missing-field bug on our side.
+ *
+ * Every caller must therefore point-read Card truth at HashKey(slug) before
+ * acting on a row, and must read a blank field as "unknown", never as a value.
+ * `board_cards_heal` and `migrate legacy-columns` both do; they are correct
+ * today only because neither believes the scan. A caller that treats
+ * `row.column` as authoritative will silently mis-handle ~73% of the board.
  */
 export async function scanCardSummariesForReconcile(
   node: NodeClient,
