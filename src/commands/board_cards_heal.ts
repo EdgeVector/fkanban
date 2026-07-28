@@ -15,12 +15,55 @@ import {
 } from "../board-cards.ts";
 import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "../card-list-index.ts";
 import {
-  findCard,
+  findCardSummaryForReconcile,
   listBoards,
   scanCardSummariesForReconcile,
   type Card,
   emptyStructuredFields,
 } from "../record.ts";
+
+/**
+ * Truth point-reads in flight at once.
+ *
+ * Deliberately modest: Mini sheds with "too many concurrent reads" under load,
+ * and heal is a maintenance path that must never starve the interactive board.
+ * Six is enough to hide socket latency on a few-hundred-card board without
+ * looking like a scraper.
+ */
+const TRUTH_READ_CONCURRENCY = 6;
+
+/**
+ * Resolve Card truth for every candidate slug, bounded-parallel.
+ *
+ * Truth is still one Card point-read per slug — the bulk scan above only
+ * *proposes* candidates, and a scan miss must never authorize a delete
+ * (incident 2026-07-23/24). What changes is cost, not authority: reads are
+ * body-free and overlap instead of running strictly one-at-a-time.
+ *
+ * Reading every candidate up front also shortens the TOCTOU window under
+ * `--apply`: previously a card examined last was point-read minutes after the
+ * first one, so its "truth" was already several minutes stale by the time the
+ * write landed.
+ */
+async function resolveTruthBySlug(
+  opts: BoardCardsHealOptions,
+  slugs: string[],
+): Promise<Map<string, Card | null>> {
+  const truth = new Map<string, Card | null>();
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = cursor++;
+      const slug = slugs[i];
+      if (slug === undefined) return;
+      truth.set(slug, await findCardSummaryForReconcile(opts.node, opts.cfg, slug));
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(TRUTH_READ_CONCURRENCY, slugs.length) }, worker),
+  );
+  return truth;
+}
 
 export type BoardCardsHealOptions = {
   cfg: Config;
@@ -134,9 +177,15 @@ export async function boardCardsHealResult(
 
   // Raw BoardCards partitions (may include multi-row orphans per slug).
   const rawRows: Array<{ board: string; column: string; position: string; slug: string }> = [];
+  // Partitions we actually read end-to-end. Only for these can heal claim to
+  // know every row for a slug and skip the per-write orphan rescan; a partition
+  // that failed to list (or a board with no Board record) keeps the defensive
+  // purge, because there heal is as blind as any single-card writer.
+  const enumeratedBoards = new Set<string>();
   for (const b of targetBoards) {
     const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug);
     if (!part) continue;
+    enumeratedBoards.add(b.slug);
     for (const c of part) {
       if (slugFilter && !slugFilter.has(c.slug)) continue;
       rawRows.push({
@@ -172,11 +221,19 @@ export async function boardCardsHealResult(
   let missing_card = 0;
   let drifted = 0;
 
+  // One point-read per distinct slug, not per (board, slug) key: the Card is
+  // keyed by slug alone, so the same card claimed by two boards resolved the
+  // identical record twice.
+  const truthBySlug = await resolveTruthBySlug(
+    opts,
+    [...new Set([...byKey.keys()].map((key) => key.split("\0")[1] as string))],
+  );
+
   for (const [key, rows] of byKey) {
     const [boardFromKey, slug] = key.split("\0") as [string, string];
     const board = boardFromKey || "default";
 
-    const point = await findCard(opts.node, opts.cfg, slug);
+    const point = truthBySlug.get(slug) ?? null;
     if (!point) {
       if (rows.length === 0) continue;
       missing_card += 1;
@@ -268,7 +325,13 @@ export async function boardCardsHealResult(
         reason: "missing BoardCards membership for truth column",
       });
       if (opts.apply) {
-        await upsertBoardCard(opts.node, opts.cfg, truth, null);
+        // rows.length === 0 on a partition heal listed in full: there is
+        // provably nothing to purge, so skip the rescan. This is the bulk of a
+        // real heal (241 of 241 repairs on the primary, 2026-07-28), and the
+        // rescan it replaces is a whole-partition read per card.
+        await upsertBoardCard(opts.node, opts.cfg, truth, null, {
+          skipOrphanPurge: enumeratedBoards.has(truthBoard),
+        });
         healed += 1;
       }
       continue;
@@ -292,16 +355,21 @@ export async function boardCardsHealResult(
     });
 
     if (opts.apply) {
-      // Purge all sks for slug on any board seen, then write truth.
+      // Purge all sks for slug on any board seen, then write truth. `rows` is
+      // already every row for this slug on the partitions heal enumerated, so
+      // the targeted deletes below are exhaustive and neither the deletes nor
+      // the upsert need to re-list the partition to hunt for more.
       for (const row of rows) {
-        await removeBoardCard(opts.node, opts.cfg, thinCard({
-          ...truth,
-          board: row.board,
-          column: row.column,
-          position: row.position,
-        }));
+        await removeBoardCard(
+          opts.node,
+          opts.cfg,
+          thinCard({ ...truth, board: row.board, column: row.column, position: row.position }),
+          { skipOrphanPurge: enumeratedBoards.has(row.board) },
+        );
       }
-      await upsertBoardCard(opts.node, opts.cfg, truth, null);
+      await upsertBoardCard(opts.node, opts.cfg, truth, null, {
+        skipOrphanPurge: enumeratedBoards.has(truthBoard),
+      });
       healed += 1;
     }
   }
