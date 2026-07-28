@@ -257,8 +257,10 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
   const capped = effectiveJsonLimit > 0 ? capPerColumn(board, cards, effectiveJsonLimit, opts.column) : cards;
   // Bodies are never loaded for board-wide list (BoardCards thin projection).
-  // --full-body hydrates ONLY the capped page via point-get, not N over the
-  // whole board before limit.
+  // --full-body is the explicit opt-in to the expensive surface: it suppresses
+  // the implicit page cap (see `implicitJsonDefault`), so it point-gets one body
+  // per card it RETURNS — proportional to the requested data, not amplified.
+  // Callers bound it with --limit, which caps before hydration.
   const withBodies = opts.fullBody
     ? await hydrateCardBodies(opts.node, opts.cfg, capped)
     : capped;
