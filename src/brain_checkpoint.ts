@@ -60,9 +60,52 @@ function brainClient(): BrainCheckpointClient | null {
   return fbrainCliClient;
 }
 
+/**
+ * The brain CLI is installed as `brain`; `fbrain` was the old name and is gone
+ * from `~/.local/bin`. Spawning the dead name failed with ENOENT, which this
+ * module catches and downgrades to a warning — so every completion checkpoint
+ * was silently skipped while `kanban move <slug> done` still reported success.
+ *
+ * Resolved once per process, newest name first, with an env escape hatch. The
+ * verb/flag contract is identical across the two names, so only the binary moves.
+ */
+const BRAIN_BIN_CANDIDATES = ["brain", "fbrain"] as const;
+let resolvedBrainBin: string | null = null;
+
+function brainBin(): string {
+  if (resolvedBrainBin) return resolvedBrainBin;
+  const override = process.env.FKANBAN_BRAIN_BIN;
+  if (override && override.length > 0) {
+    resolvedBrainBin = override;
+    return resolvedBrainBin;
+  }
+  // Pass PATH explicitly — Bun.which does not pick up a mutated process.env.PATH.
+  const path = process.env.PATH ?? "";
+  for (const candidate of BRAIN_BIN_CANDIDATES) {
+    if (Bun.which(candidate, { PATH: path })) {
+      resolvedBrainBin = candidate;
+      return resolvedBrainBin;
+    }
+  }
+  // None on PATH: spawn the current name so the error names what is missing.
+  resolvedBrainBin = BRAIN_BIN_CANDIDATES[0];
+  return resolvedBrainBin;
+}
+
+/** Test seam — forget a memoized resolution so a case can vary PATH. */
+export function resetBrainBinForTest(): void {
+  resolvedBrainBin = null;
+}
+
+/** Test seam — the resolved binary name, without spawning it. */
+export function brainBinForTest(): string {
+  return brainBin();
+}
+
 function runFbrain(args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("fbrain", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const bin = brainBin();
+    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -79,7 +122,7 @@ function runFbrain(args: string[], input?: string): Promise<string> {
         resolve(stdout);
         return;
       }
-      const detail = stderr.trim() || stdout.trim() || `fbrain exited ${code}`;
+      const detail = stderr.trim() || stdout.trim() || `${bin} exited ${code}`;
       reject(new Error(detail));
     });
     if (input !== undefined) child.stdin.end(input);
