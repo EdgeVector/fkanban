@@ -2,6 +2,7 @@
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
+import { mapWithConcurrency } from "./concurrency.ts";
 import {
   patchCardListIndex,
   readCardListIndex,
@@ -2197,6 +2198,22 @@ export async function listCardsByColumn(
  * more capable: the `all_cards` rollup was a lost-update-prone copy, so a card
  * dropped from it by a concurrent write was invisible to heal forever. Card is
  * the source of truth, so a row missing from *both* indexes is now findable.
+ *
+ * SLUG ORACLE ONLY — do not trust the field values on the rows this returns.
+ *
+ * Measured against the primary 2026-07-28: it returned 1054 rows for 791
+ * distinct slugs, and 843 of those rows carried a populated `slug` with every
+ * other projected field blank (`column: ""`, `board: ""`, `title: ""`). 263
+ * slugs came back TWICE — once populated, once as a blank shell — and 580 slugs
+ * had no populated row at all despite point-reading fine, including a card
+ * updated the same day. `column` IS in the projection
+ * (`cardListProjectionFields`), so this is not a missing-field bug on our side.
+ *
+ * Every caller must therefore point-read Card truth at HashKey(slug) before
+ * acting on a row, and must read a blank field as "unknown", never as a value.
+ * `board_cards_heal` and `migrate legacy-columns` both do; they are correct
+ * today only because neither believes the scan. A caller that treats
+ * `row.column` as authoritative will silently mis-handle ~73% of the board.
  */
 export async function scanCardSummariesForReconcile(
   node: NodeClient,
@@ -2599,19 +2616,31 @@ async function reconcileBoardCardSummaries(
   return out;
 }
 
-/** Point-get bodies for a small capped set (MCP preview / list --full-body). */
+/**
+ * Point-get bodies for a page of cards (MCP preview / list --full-body).
+ *
+ * The list read is body-free — BoardCards stores no body — so every card that
+ * needs one costs a Card point-read. That is proportional to the page, but the
+ * page is NOT always small: `--all` / `all:true` sets the cap to 0, and
+ * `capFlat`/`capPerColumn` read 0 as "no cap", so this runs over the whole
+ * board (552 cards on the primary as of 2026-07-28).
+ *
+ * Bounded-parallel for that reason. The previous unbounded `Promise.all` opened
+ * one socket per card and tipped Mini into "too many concurrent reads" exactly
+ * when the board was largest — the failure scaled with the board, so it stayed
+ * invisible until it wasn't. `board_cards_heal` had already learned this and
+ * capped itself at 6; this shares that pool rather than rediscovering it.
+ */
 export async function hydrateCardBodies(
   node: NodeClient,
   cfg: Config,
   cards: Card[],
 ): Promise<Card[]> {
-  return Promise.all(
-    cards.map(async (c) => {
-      if (c.body.length > 0) return c;
-      const full = await findCard(node, cfg, c.slug);
-      return full ? { ...c, body: full.body } : c;
-    }),
-  );
+  return mapWithConcurrency(cards, async (c) => {
+    if (c.body.length > 0) return c;
+    const full = await findCard(node, cfg, c.slug);
+    return full ? { ...c, body: full.body } : c;
+  });
 }
 
 // Resolve a card by slug, throwing the canonical `card_not_found` error when

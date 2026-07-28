@@ -82,6 +82,31 @@ const COLUMN_COLOR: Record<string, string> = {
   done: "green",
 };
 
+// The heading the off-column section renders under. Not a kanban column — see
+// `offColumnCards`.
+export const OFF_COLUMN_HEADING = "OFF-COLUMN";
+
+/**
+ * Cards whose `column` is not one of the fixed kanban columns.
+ *
+ * Every board view iterates the FIXED column set (`resolveColumns`), so a card
+ * holding any other value — `review`, from before the fixed-column decision
+ * (Tom 2026-07-16), or any future drift — used to be filtered out of the render
+ * AND out of `capPerColumn`, i.e. out of `list` and `list --json` alike, with
+ * no count and no warning. It still resolved fine through `show <slug>`, so the
+ * card looked present to anyone who knew its slug and absent to everyone else.
+ * That silent drop is the bug this exists to close: an off-column card is a
+ * data-repair signal and must be LOUD, never swallowed.
+ *
+ * Read surfaces do not rewrite the column — that would make `list` disagree
+ * with `show`. Repair belongs to `migrate legacy-columns`, which fixes the Card
+ * record itself.
+ */
+export function offColumnCards<T extends Card>(board: Board, cards: T[]): T[] {
+  const valid = new Set(resolveColumns(board.columns));
+  return cards.filter((c) => !valid.has(c.column));
+}
+
 export function renderBoard(
   board: Board,
   cards: Card[],
@@ -156,7 +181,39 @@ export function renderBoard(
     }
     lines.push("");
   }
+  renderOffColumnSection(lines, board, cards, color, opts, cap);
   return lines.join("\n").replace(/\n+$/, "\n");
+}
+
+/**
+ * Append the off-column section when (and only when) there is something to
+ * report. Skipped under a `--column` filter: that view is a deliberate look at
+ * one real column, and `ensureColumn` already rejects a non-column name there,
+ * so there is no way to ask for these cards and no reason to inject them.
+ */
+function renderOffColumnSection(
+  lines: string[],
+  board: Board,
+  cards: Card[],
+  color: boolean,
+  opts: RenderOptions,
+  cap: number,
+): void {
+  if (opts.column) return;
+  const off = sortCards(offColumnCards(board, cards));
+  if (off.length === 0) return;
+  lines.push(paint(color, "yellow", `${OFF_COLUMN_HEADING}  ${paint(color, "dim", `(${off.length})`)}`));
+  lines.push(
+    paint(color, "dim", `  not a kanban column (${resolveColumns(board.columns).join(" | ")}) — repair: fkanban migrate legacy-columns`),
+  );
+  const hidden = cap > 0 && off.length > cap ? off.length - cap : 0;
+  for (const c of hidden === 0 ? off : off.slice(0, cap)) {
+    lines.push(
+      `${renderCardLine(c, color, opts.blocked?.has(c.slug) ?? false)}  ${paint(color, "dim", `column:${c.column}`)}`,
+    );
+  }
+  if (hidden > 0) lines.push(paint(color, "dim", `  … ${hidden} more (--all)`));
+  lines.push("");
 }
 
 export function renderBoardGroupedByMilestone(
@@ -183,6 +240,15 @@ export function renderBoardGroupedByMilestone(
         : inColumn;
       for (const card of visible) lines.push(`  ${renderCardLine(card, color, opts.blocked?.has(card.slug) ?? false)}`);
       if (visible.length < inColumn.length) lines.push(paint(color, "dim", `    … ${inColumn.length - visible.length} more (--all)`));
+    }
+    // Same silent-drop guard as `renderBoard`: this view iterates the fixed
+    // columns too, so an off-column card in this milestone would vanish.
+    const off = sortCards(offColumnCards(board, group.cards));
+    if (!opts.column && off.length > 0) {
+      lines.push(`  ${paint(color, "yellow", `${OFF_COLUMN_HEADING} (${off.length})`)}`);
+      for (const card of cap > 0 ? off.slice(0, cap) : off) {
+        lines.push(`  ${renderCardLine(card, color, opts.blocked?.has(card.slug) ?? false)}  ${paint(color, "dim", `column:${card.column}`)}`);
+      }
     }
     lines.push("");
   }
@@ -217,6 +283,12 @@ export function capPerColumn<T extends Card>(
           : inCol.slice(0, limit);
     out.push(...visible);
   }
+  // Off-column cards belong to no iterated column, so capping used to DELETE
+  // them from the structured view rather than page them. Carry them through
+  // under the same cap the text render shows them at, so `--json` and the
+  // board agree card-for-card (see `offColumnCards`). A `--column` view asks
+  // for one real column and never includes them.
+  if (!column) out.push(...sortCards(offColumnCards(board, cards)).slice(0, limit));
   return out;
 }
 
