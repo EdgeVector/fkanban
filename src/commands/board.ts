@@ -57,7 +57,7 @@ export async function boardCreateCmd(opts: {
   const hash = schemaHashFor("board", opts.cfg);
   if (existing) {
     await opts.node.updateRecord({ schemaHash: hash, fields: boardToFields(board), keyHash: board.slug });
-  await patchBoardListIndex(opts.node, opts.cfg, board, "upsert");
+    await patchBoardListIndex(opts.node, opts.cfg, board, "upsert");
     return { slug: board.slug, action: "updated" };
   }
   await opts.node.createRecord({ schemaHash: hash, fields: boardToFields(board), keyHash: board.slug });
@@ -189,5 +189,13 @@ export async function boardRmCmd(opts: {
   }
   const hash = schemaHashFor("board", opts.cfg);
   await opts.node.deleteRecord({ schemaHash: hash, keyHash: board.slug });
+  // Drop it from `all_boards` too. `listBoards` reads that rollup and only falls
+  // back to a Board scan when the row is MISSING — so an entry left behind here
+  // is permanent: `board list` keeps showing a board whose record is gone, and
+  // every `kanban list` pays one dead BoardCards partition query for it, forever.
+  // Record first, index second: if this patch fails we leave a visible ghost
+  // (repairable with `groom board-list-heal`), never a live board that silently
+  // vanished from list along with all of its cards.
+  await patchBoardListIndex(opts.node, opts.cfg, board, "remove");
   return { slug: board.slug, deletedCards: live.map((c) => c.slug) };
 }
