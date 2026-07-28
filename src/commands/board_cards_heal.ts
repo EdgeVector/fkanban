@@ -13,8 +13,14 @@ import {
   removeBoardCard,
   upsertBoardCard,
 } from "../board-cards.ts";
-import { readCardListIndex, type CardSummary } from "../card-list-index.ts";
-import { findCard, listBoards, type Card, emptyStructuredFields } from "../record.ts";
+import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "../card-list-index.ts";
+import {
+  findCard,
+  listBoards,
+  scanCardSummariesForReconcile,
+  type Card,
+  emptyStructuredFields,
+} from "../record.ts";
 
 export type BoardCardsHealOptions = {
   cfg: Config;
@@ -98,13 +104,32 @@ export async function boardCardsHealResult(
 
   const slugFilter = opts.slugs?.length ? new Set(opts.slugs) : null;
 
-  // One bulk discovery source — CardListIndex is slug-keyed and updated on
-  // write, but it can be stale. Use it to find missing BoardCards rows only;
-  // each candidate slug is verified by point-read Card truth below.
-  const indexed = (await readCardListIndex(opts.node, opts.cfg)) ?? [];
+  // Bulk discovery of slugs that may have no BoardCards row. Candidates only —
+  // every one is verified by a point-read of Card truth below.
+  //
+  // Card scan first where BoardCards is bound: the `all_cards` rollup is a
+  // lost-update-prone copy (whole-document read-modify-write, no CAS), so a card
+  // it dropped was invisible to heal forever, and its write is now retired. Card
+  // is the source of truth, so scanning it finds rows missing from BOTH indexes.
+  // A scan is correct in a reconciler; it is only banned on hot read paths.
+  //
+  // `all_cards` is still unioned in while it holds entries, so a node that has
+  // not cut over — and a cutover node whose index is not yet cleared — keeps the
+  // old discovery too. Its tombstones (entries whose Card is gone) cost one
+  // point-read each and then fall out as "no rows, no card".
   const indexedBySlug = new Map<string, CardSummary>();
+  if (cardListIndexIsSuperseded(opts.cfg)) {
+    try {
+      for (const c of await scanCardSummariesForReconcile(opts.node, opts.cfg)) {
+        if (c.slug) indexedBySlug.set(c.slug, c as CardSummary);
+      }
+    } catch {
+      // Scan unavailable (older node / scan refused): fall back to the rollup.
+    }
+  }
+  const indexed = (await readCardListIndex(opts.node, opts.cfg)) ?? [];
   for (const c of indexed) {
-    if (c.slug) indexedBySlug.set(c.slug, c);
+    if (c.slug && !indexedBySlug.has(c.slug)) indexedBySlug.set(c.slug, c);
   }
 
   // Raw BoardCards partitions (may include multi-row orphans per slug).

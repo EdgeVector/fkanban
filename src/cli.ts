@@ -32,6 +32,7 @@ import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
 import { milestoneIndexesHealResult } from "./commands/milestone_indexes_heal.ts";
+import { cardListIndexRetireCmd } from "./commands/card_list_index_retire.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
@@ -81,6 +82,7 @@ Commands:
   pickup lanes         show logical pickup lanes, starvation, and next claim order
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
+  groom card-list-index-retire dry-run/apply clear the superseded all_cards rollup
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
@@ -543,6 +545,7 @@ Example:
 Usage:
   fkanban groom stale-blockers [--apply] [--json]
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
+  fkanban groom card-list-index-retire [--apply] [--json]
 
 Subcommands:
   stale-blockers       detect stale generated pickup/blocker metadata, malformed
@@ -553,6 +556,11 @@ Subcommands:
   board-cards-heal     repair BoardCards membership (ONLY path that may delete orphans;
                        list is read-only on Card miss) so list --column agrees with
                        show <slug> (delete orphan column#pos rows, upsert truth).
+  card-list-index-retire
+                       clear the superseded CardListIndex all_cards rollup. BoardCards
+                       already holds the same body-free summary one row per card; the
+                       rollup was one unbounded document rewritten in full per mutation.
+                       --apply refuses while any card lacks a BoardCards row.
 
 Flags:
   --apply              rewrite only generated boilerplate and structured fields
@@ -565,7 +573,9 @@ Examples:
   fkanban groom stale-blockers
   fkanban groom stale-blockers --apply
   fkanban groom board-cards-heal
-  fkanban groom board-cards-heal --apply`),
+  fkanban groom board-cards-heal --apply
+  fkanban groom card-list-index-retire
+  fkanban groom card-list-index-retire --apply`),
 
   hygiene: withFooter(`fkanban hygiene — local machine-hygiene helpers
 
@@ -1803,9 +1813,14 @@ async function dispatch(
 
     case "groom": {
       const sub = positionals[1];
-      if (sub !== "stale-blockers" && sub !== "board-cards-heal" && sub !== "milestone-indexes-heal") {
+      if (
+        sub !== "stale-blockers" &&
+        sub !== "board-cards-heal" &&
+        sub !== "milestone-indexes-heal" &&
+        sub !== "card-list-index-retire"
+      ) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom milestone-indexes-heal`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
         );
         return 2;
       }
@@ -1814,6 +1829,17 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, 2, "groom stale-blockers");
         if (extra !== undefined) return extra;
         console.log(await groomStaleBlockersCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          apply: values.apply as boolean | undefined,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      if (sub === "card-list-index-retire") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom card-list-index-retire");
+        if (extra !== undefined) return extra;
+        console.log(await cardListIndexRetireCmd({
           cfg: ctx.cfg,
           node: ctx.node,
           apply: values.apply as boolean | undefined,
