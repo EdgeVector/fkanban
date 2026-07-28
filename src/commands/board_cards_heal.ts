@@ -7,6 +7,7 @@
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
+import { mapWithConcurrency } from "../concurrency.ts";
 import {
   boardCardSk,
   listBoardCardsPartition,
@@ -23,16 +24,6 @@ import {
 } from "../record.ts";
 
 /**
- * Truth point-reads in flight at once.
- *
- * Deliberately modest: Mini sheds with "too many concurrent reads" under load,
- * and heal is a maintenance path that must never starve the interactive board.
- * Six is enough to hide socket latency on a few-hundred-card board without
- * looking like a scraper.
- */
-const TRUTH_READ_CONCURRENCY = 6;
-
-/**
  * Resolve Card truth for every candidate slug, bounded-parallel.
  *
  * Truth is still one Card point-read per slug — the bulk scan above only
@@ -44,25 +35,18 @@ const TRUTH_READ_CONCURRENCY = 6;
  * `--apply`: previously a card examined last was point-read minutes after the
  * first one, so its "truth" was already several minutes stale by the time the
  * write landed.
+ *
+ * The fan-out width lives in `concurrency.ts` — this path discovered why it has
+ * to be bounded, but every other N-read path needs the same ceiling.
  */
 async function resolveTruthBySlug(
   opts: BoardCardsHealOptions,
   slugs: string[],
 ): Promise<Map<string, Card | null>> {
-  const truth = new Map<string, Card | null>();
-  let cursor = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const i = cursor++;
-      const slug = slugs[i];
-      if (slug === undefined) return;
-      truth.set(slug, await findCardSummaryForReconcile(opts.node, opts.cfg, slug));
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(TRUTH_READ_CONCURRENCY, slugs.length) }, worker),
+  const resolved = await mapWithConcurrency(slugs, (slug) =>
+    findCardSummaryForReconcile(opts.node, opts.cfg, slug),
   );
-  return truth;
+  return new Map(slugs.map((slug, i) => [slug, resolved[i] ?? null]));
 }
 
 export type BoardCardsHealOptions = {

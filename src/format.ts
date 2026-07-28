@@ -78,6 +78,15 @@ export interface MigrateAreaTagsResult {
   cards: { slug: string; board: string; column: string; removed: string[]; added: string[] }[];
 }
 
+export interface MigrateLegacyColumnsResult {
+  scanned: number;
+  offColumn: number;
+  changed: number;
+  unmapped: number;
+  dryRun: boolean;
+  cards: { slug: string; board: string; from: string; to: string | null; reason?: string }[];
+}
+
 function emit(res: unknown, human: string, json: boolean | undefined): string {
   return json ? JSON.stringify(res) : human;
 }
@@ -150,5 +159,23 @@ export function formatMigrateAreaTags(res: MigrateAreaTagsResult, json?: boolean
   const head =
     `${verb} pickup area tags: ${res.changed} of ${res.scanned} active cards changed ` +
     `(${res.skippedDone} done/terminal skipped)${res.dryRun ? " — DRY RUN, no writes" : ""}`;
+  return res.cards.length ? `${head}\n${lines.join("\n")}` : head;
+}
+
+export function formatMigrateLegacyColumns(
+  res: MigrateLegacyColumnsResult,
+  json?: boolean,
+): string {
+  if (json) return JSON.stringify(res);
+  const verb = res.dryRun ? "would move" : "moved";
+  const lines = res.cards.map((c) =>
+    c.to === null
+      ? `  ${c.slug} (${c.board}) ${c.from} → SKIPPED (${c.reason ?? "unmapped"})`
+      : `  ${c.slug} (${c.board}) ${c.from} → ${c.to}`,
+  );
+  const head =
+    `${verb} off-column cards: ${res.dryRun ? res.offColumn - res.unmapped : res.changed} of ` +
+    `${res.offColumn} off-column card(s), ${res.unmapped} unmapped` +
+    `${res.dryRun ? " — DRY RUN, no writes" : ""}`;
   return res.cards.length ? `${head}\n${lines.join("\n")}` : head;
 }

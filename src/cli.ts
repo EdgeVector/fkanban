@@ -36,7 +36,7 @@ import { cardListIndexRetireCmd } from "./commands/card_list_index_retire.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
-import { migrateAreaTagsCmd } from "./commands/migrate.ts";
+import { migrateAreaTagsCmd, migrateLegacyColumnsCmd } from "./commands/migrate.ts";
 import { normalizePriority, PRIORITY_TIERS, writeBodyHeader, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import { FKANBAN_APP_ID, declareGatesLink, gatesCmd } from "./commands/gates.ts";
@@ -52,6 +52,7 @@ import {
   formatBoardRm,
   formatRank,
   formatMigrateAreaTags,
+  formatMigrateLegacyColumns,
   formatError,
 } from "./format.ts";
 
@@ -104,6 +105,7 @@ Commands:
   milestone groom      report actionable milestone health warnings
   milestone gap-report deterministic gap map (in-flight / promote / empty)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
+  migrate legacy-columns one-time: move cards off columns the board no longer defines (--dry-run)
   doctor               health-check the local setup (--json)
   which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
   mcp                  start an MCP server over stdio
@@ -522,8 +524,23 @@ Examples:
 
 Usage:
   fkanban migrate area-tags [--dry-run] [--json]
+  fkanban migrate legacy-columns [--dry-run] [--json] [--slug S]...
 
 Subcommands:
+  legacy-columns       move every card sitting on a column the board no longer
+                       defines onto the fixed set (backlog | todo | doing |
+                       done). Columns became fixed on 2026-07-16 and the write
+                       path has rejected anything else since; cards written
+                       before that keep their old value and are iterated by no
+                       board view, so \`list\` cannot see them while
+                       \`show <slug>\` renders them fine. Maps \`review\` →
+                       \`doing\` (an open PR is in-flight work, not a completed
+                       one) and REPORTS anything it has no mapping for rather
+                       than guessing. Run this BEFORE
+                       \`groom board-cards-heal --apply\`, which faithfully
+                       projects truth and would otherwise write index rows into
+                       a column nothing iterates.
+
   area-tags            re-derive the pickup \`area:*\` tags on every active
                        (non-done, non-tombstoned) card and rewrite only the
                        cards whose derived set changed. Clears stale boilerplate
@@ -533,12 +550,15 @@ Subcommands:
                        touches column, assignee, or an intentional block hold.
 
 Flags:
-  --dry-run            report the per-card tag deltas without writing anything
-  --json               machine-readable { scanned, changed, skippedDone, cards }
+  --dry-run            report the per-card deltas without writing anything
+  --slug S             (legacy-columns) limit to one or more card slugs
+  --json               machine-readable report
 
 Example:
-  fkanban migrate area-tags --dry-run   # preview
-  fkanban migrate area-tags             # apply`),
+  fkanban migrate area-tags --dry-run        # preview
+  fkanban migrate area-tags                  # apply
+  fkanban migrate legacy-columns --dry-run   # preview the column repair
+  fkanban migrate legacy-columns             # apply`),
 
   groom: withFooter(`fkanban groom — board hygiene reports and safe repairs
 
@@ -908,7 +928,8 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // board's subcommands read title/columns/body (create) and force (rm).
   board: new Set(["title", "columns", "body", "force"]),
   // migrate's one-time subcommands take --dry-run to preview without writing.
-  migrate: new Set(["dry-run"]),
+  // legacy-columns also takes repeatable --slug to migrate a named card at a time.
+  migrate: new Set(["dry-run", "slug"]),
   groom: new Set(["apply", "dry-run", "board", "slug"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
@@ -1678,7 +1699,22 @@ async function dispatch(
         console.log(formatMigrateAreaTags(res, values.json as boolean | undefined));
         return 0;
       }
-      console.error(`kanban: Unknown migrate subcommand "${sub ?? ""}". Try: migrate area-tags`);
+      if (sub === "legacy-columns") {
+        const extra = rejectExtraPositionals(positionals, 2, "migrate legacy-columns");
+        if (extra !== undefined) return extra;
+        const ctx = loadCtx({ verbose });
+        const res = await migrateLegacyColumnsCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          dryRun: values["dry-run"] as boolean | undefined,
+          slugs: values.slug as string[] | undefined,
+        });
+        console.log(formatMigrateLegacyColumns(res, values.json as boolean | undefined));
+        return 0;
+      }
+      console.error(
+        `kanban: Unknown migrate subcommand "${sub ?? ""}". Try: migrate area-tags, migrate legacy-columns`,
+      );
       return 2;
     }
 

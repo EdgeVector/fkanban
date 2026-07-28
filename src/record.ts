@@ -2,6 +2,7 @@
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
+import { mapWithConcurrency } from "./concurrency.ts";
 import {
   patchCardListIndex,
   readCardListIndex,
@@ -2538,19 +2539,31 @@ async function reconcileBoardCardSummaries(
   return out;
 }
 
-/** Point-get bodies for a small capped set (MCP preview / list --full-body). */
+/**
+ * Point-get bodies for a page of cards (MCP preview / list --full-body).
+ *
+ * The list read is body-free — BoardCards stores no body — so every card that
+ * needs one costs a Card point-read. That is proportional to the page, but the
+ * page is NOT always small: `--all` / `all:true` sets the cap to 0, and
+ * `capFlat`/`capPerColumn` read 0 as "no cap", so this runs over the whole
+ * board (552 cards on the primary as of 2026-07-28).
+ *
+ * Bounded-parallel for that reason. The previous unbounded `Promise.all` opened
+ * one socket per card and tipped Mini into "too many concurrent reads" exactly
+ * when the board was largest — the failure scaled with the board, so it stayed
+ * invisible until it wasn't. `board_cards_heal` had already learned this and
+ * capped itself at 6; this shares that pool rather than rediscovering it.
+ */
 export async function hydrateCardBodies(
   node: NodeClient,
   cfg: Config,
   cards: Card[],
 ): Promise<Card[]> {
-  return Promise.all(
-    cards.map(async (c) => {
-      if (c.body.length > 0) return c;
-      const full = await findCard(node, cfg, c.slug);
-      return full ? { ...c, body: full.body } : c;
-    }),
-  );
+  return mapWithConcurrency(cards, async (c) => {
+    if (c.body.length > 0) return c;
+    const full = await findCard(node, cfg, c.slug);
+    return full ? { ...c, body: full.body } : c;
+  });
 }
 
 // Resolve a card by slug, throwing the canonical `card_not_found` error when
