@@ -31,6 +31,7 @@ import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
+import { boardListHealCmd } from "./commands/board_list_heal.ts";
 import { milestoneIndexesHealResult } from "./commands/milestone_indexes_heal.ts";
 import { cardListIndexRetireCmd } from "./commands/card_list_index_retire.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
@@ -82,6 +83,8 @@ Commands:
   pickup lanes         show logical pickup lanes, starvation, and next claim order
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
+  groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
+                       and missing boards (live board whose cards list can't see)
   groom card-list-index-retire dry-run/apply clear the superseded all_cards rollup
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
@@ -545,6 +548,7 @@ Example:
 Usage:
   fkanban groom stale-blockers [--apply] [--json]
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
+  fkanban groom board-list-heal [--apply] [--json]
   fkanban groom card-list-index-retire [--apply] [--json]
 
 Subcommands:
@@ -556,6 +560,11 @@ Subcommands:
   board-cards-heal     repair BoardCards membership (ONLY path that may delete orphans;
                        list is read-only on Card miss) so list --column agrees with
                        show <slug> (delete orphan column#pos rows, upsert truth).
+  board-list-heal      repair the CardListIndex all_boards rollup against Board truth:
+                       drop GHOSTS (entry with no Board record — a deleted board that
+                       keeps showing in board list and costs a dead partition query
+                       on every list) and add MISSING boards (record live, no entry —
+                       every card on that board is invisible to list).
   card-list-index-retire
                        clear the superseded CardListIndex all_cards rollup. BoardCards
                        already holds the same body-free summary one row per card; the
@@ -574,6 +583,8 @@ Examples:
   fkanban groom stale-blockers --apply
   fkanban groom board-cards-heal
   fkanban groom board-cards-heal --apply
+  fkanban groom board-list-heal
+  fkanban groom board-list-heal --apply
   fkanban groom card-list-index-retire
   fkanban groom card-list-index-retire --apply`),
 
@@ -1816,15 +1827,27 @@ async function dispatch(
       if (
         sub !== "stale-blockers" &&
         sub !== "board-cards-heal" &&
+        sub !== "board-list-heal" &&
         sub !== "milestone-indexes-heal" &&
         sub !== "card-list-index-retire"
       ) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom board-list-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
         );
         return 2;
       }
       const ctx = loadCtx({ verbose });
+      if (sub === "board-list-heal") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom board-list-heal");
+        if (extra !== undefined) return extra;
+        console.log(await boardListHealCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          apply: values.apply as boolean | undefined,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
       if (sub === "stale-blockers") {
         const extra = rejectExtraPositionals(positionals, 2, "groom stale-blockers");
         if (extra !== undefined) return extra;

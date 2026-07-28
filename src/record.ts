@@ -10,6 +10,7 @@ import {
   toCardSummary,
   readBoardListIndex,
   writeBoardListIndex,
+  type BoardSummary,
 } from "./card-list-index.ts";
 import {
   listAllBoardCards,
@@ -2315,31 +2316,88 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
     );
   }
 
-  // Seed once via admin full scan when index not declared/seeded yet.
+  // Seed once via admin full scan when the index row is not declared/seeded yet.
+  const boards = await scanBoardsForReconcile(node, cfg);
+  try {
+    await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
+  } catch {
+    // best-effort
+  }
+  return boards;
+}
+
+export function toBoardSummary(b: Board): BoardSummary {
+  return {
+    slug: b.slug,
+    title: b.title,
+    body: b.body,
+    columns: b.columns,
+    created_at: b.created_at,
+    updated_at: b.updated_at,
+  };
+}
+
+/**
+ * Every live board this node can prove exists, read from Board truth rather than
+ * from the `all_boards` rollup. Discovery source for the `listBoards` cold-seed
+ * and for `groom board-list-heal`.
+ *
+ * A full scan here is a deliberate `allowFullScan` and the no-scan contract
+ * permits it: boards are bounded (a handful), and this is a seed/reconciler path,
+ * never a hot read (`concepts-lastdb-agent-access-model`).
+ *
+ * TWO RULES, BOTH LEARNED THE HARD WAY (measured read-only on the primary
+ * 2026-07-28 — papercut-lastdb-full-scan-drops-fields-on-conflicted-records):
+ *
+ * 1. A SCAN ROW CARRIES ONLY ITS KEY FIELD. For any record whose key atom has
+ *    `has_conflicts`, every other requested field is silently dropped — not
+ *    nulled, not an error (25 of 26 Board rows came back slug-only). Trusting
+ *    them would seed `all_boards` with `title:""`, `columns:[]`; since
+ *    `isTombstoned([])` is false those hollow boards read as LIVE and
+ *    `kanban list` would render a board with no columns. So the scan supplies
+ *    slugs and nothing else, and every board is hydrated by a point read.
+ *
+ * 2. A SCAN IS NOT A CENSUS. It omits live records that a point read returns:
+ *    the scan listed 34 Board slugs — `agent-dogfood-scratch2/3/4` among them —
+ *    while `agent-dogfood-scratch` and eight `zz-kstress-*` boards were absent
+ *    from it yet point-read fine, with real titles and columns. So **absence
+ *    from a scan is not evidence of deletion.** Callers that must decide whether
+ *    a record is gone (the reconciler deciding "ghost") pass those slugs in via
+ *    `alsoConsider` and let the point read be the verdict. Without that, a heal
+ *    would have deleted nine live boards' index entries and made every card on
+ *    them invisible to `kanban list` — the exact failure it exists to prevent.
+ */
+export async function scanBoardsForReconcile(
+  node: NodeClient,
+  cfg: Config,
+  /** Extra slugs to verify by point read even if the scan never listed them. */
+  alsoConsider?: Iterable<string>,
+): Promise<Board[]> {
   const hash = schemaHashFor("board", cfg);
   const res = await node.queryAll({
     schemaHash: hash,
     fields: fieldsFor("board"),
     allowFullScan: true,
   });
-  const boards = live(res.results.map(rowToBoard));
-  try {
-    await writeBoardListIndex(
-      node,
-      cfg,
-      boards.map((b) => ({
-        slug: b.slug,
-        title: b.title,
-        body: b.body,
-        columns: b.columns,
-        created_at: b.created_at,
-        updated_at: b.updated_at,
-      })),
-    );
-  } catch {
-    // best-effort
+
+  // Slugs only — see rule 1.
+  const slugs = new Set<string>();
+  for (const row of res.results) {
+    const slug = rowToBoard(row).slug;
+    if (slug.length > 0) slugs.add(slug);
   }
-  return boards;
+  // Rule 2: candidates the scan cannot be trusted to have listed.
+  for (const slug of alsoConsider ?? []) {
+    if (slug.length > 0) slugs.add(slug);
+  }
+
+  const boards: Board[] = [];
+  for (const slug of slugs) {
+    // findBoard point-reads and already drops tombstoned/hollow boards.
+    const board = await findBoard(node, cfg, slug);
+    if (board) boards.push(board);
+  }
+  return boards.sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 // Fields sufficient to resolve dependency status / card existence — everything
