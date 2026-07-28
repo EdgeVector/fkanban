@@ -2142,9 +2142,10 @@ export async function listPickupAreaPeers(node: NodeClient, cfg: Config, card: C
 }
 
 /**
- * Cards in one column. Prefer BoardCards HashRangePrefix on a single board
- * (one keyed query). Without board, falls back to full thin list + client filter
- * (legacy multi-board column scan — avoid on the hot list path).
+ * Cards in one column via BoardCards HashRangePrefix only (one keyed query).
+ *
+ * No client-filter / CardListIndex secondary path: if the prefix query fails
+ * or BoardCards is unconfigured, throw so we notice primary breakage.
  */
 export async function listCardsByColumn(
   node: NodeClient,
@@ -2153,23 +2154,25 @@ export async function listCardsByColumn(
   fields: string[],
   board?: string,
 ): Promise<Card[]> {
-  if (board) {
-    try {
-      const part = await listBoardCardsPartition(node, cfg, board, { column });
-      if (part !== null) {
-        const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
-        return reconciled
-          .filter((c) => !isHiddenCard(c))
-          .map((c) => Object.assign(c, deriveStructuredFields(c)));
-      }
-    } catch {
-      // fall through
-    }
+  if (!board) {
+    throw new FkanbanError({
+      code: "missing_argument",
+      message: "listCardsByColumn requires a board slug (BoardCards HashRangePrefix primary path).",
+      hint: "Pass the board id (e.g. default). Client-side multi-board column scan is removed.",
+    });
   }
-  return listCardsClientFiltered(node, cfg, fields, {
-    column,
-    ...(board ? { board } : {}),
-  });
+  const part = await listBoardCardsPartition(node, cfg, board, { column });
+  if (part === null) {
+    throw new FkanbanError({
+      code: "schema_not_configured",
+      message: `BoardCards schema hash missing; cannot list column "${column}" on board "${board}".`,
+      hint: "Run kanban init / ensure config.schemaHashes.board_cards is set. No secondary list path.",
+    });
+  }
+  const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+  return reconciled
+    .filter((c) => !isHiddenCard(c))
+    .map((c) => Object.assign(c, deriveStructuredFields(c)));
 }
 
 /**

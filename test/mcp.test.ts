@@ -28,6 +28,7 @@ import { FkanbanError } from "../src/client.ts";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { boardToFields, cardToFields, findCard, nowIso } from "../src/record.ts";
+import { upsertBoardCard } from "../src/board-cards.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { listCmd } from "../src/commands/list.ts";
 import { searchCmd, searchResult } from "../src/commands/search.ts";
@@ -40,7 +41,7 @@ const cfg: Config = {
   nodeUrl: "http://unused.invalid",
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
-  schemaHashes: { card: "cardhash", board: "boardhash" },
+  schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
 };
 
 const validPickupBody = (body = "MCP fixture work.") => `Repo: EdgeVector/fkanban\nBase: main\n\n${body}`;
@@ -50,7 +51,9 @@ const validPickupBody = (body = "MCP fixture work.") => `Repo: EdgeVector/fkanba
 // HashKey filter, exact field filters, full scans without one, and
 // create/update/delete upserts.
 function fakeNode(): NodeClient {
-  const store = new Map<string, Map<string, Record<string, unknown>>>();
+  type StoredRecord = { keyHash: string; rangeKey: string | null; fields: Record<string, unknown> };
+  const store = new Map<string, Map<string, StoredRecord>>();
+  const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
   const tableFor = (schemaHash: string) => {
     let t = store.get(schemaHash);
     if (!t) {
@@ -61,12 +64,20 @@ function fakeNode(): NodeClient {
   };
   const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const t = tableFor(schemaHash);
-    const entries = filter?.HashKey
-      ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : [])
-      : [...t.entries()].filter(([, fields]) =>
-          !filter || Object.entries(filter).every(([field, value]) => fields[field] === value)
-        );
-    return entries.map(([hash, fields]) => ({ fields, key: { hash, range: null } }));
+    const rangePrefix = (filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
+      ?.HashRangePrefix;
+    const entries = rangePrefix?.hash && rangePrefix.prefix !== undefined
+      ? [...t.values()].filter((rec) =>
+          rec.keyHash === rangePrefix.hash &&
+          rec.rangeKey !== null &&
+          rec.rangeKey.startsWith(rangePrefix.prefix!)
+        )
+      : filter?.HashKey
+        ? [...t.values()].filter((rec) => rec.keyHash === filter.HashKey)
+        : [...t.values()].filter((rec) =>
+            !filter || Object.entries(filter).every(([field, value]) => rec.fields[field] === value)
+          );
+    return entries.map(({ keyHash, rangeKey, fields }) => ({ fields, key: { hash: keyHash, range: rangeKey } }));
   };
   const notImpl = (m: string) => async (): Promise<never> => {
     throw new Error(`fakeNode.${m} not implemented`);
@@ -78,14 +89,14 @@ function fakeNode(): NodeClient {
     bootstrap: notImpl("bootstrap"),
     loadSchemas: notImpl("loadSchemas"),
     listSchemas: notImpl("listSchemas"),
-    async createRecord({ schemaHash, fields, keyHash }) {
-      tableFor(schemaHash).set(keyHash, fields);
+    async createRecord({ schemaHash, fields, keyHash, rangeKey }) {
+      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
     },
-    async updateRecord({ schemaHash, fields, keyHash }) {
-      tableFor(schemaHash).set(keyHash, fields);
+    async updateRecord({ schemaHash, fields, keyHash, rangeKey }) {
+      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
     },
-    async deleteRecord({ schemaHash, keyHash }) {
-      tableFor(schemaHash).delete(keyHash);
+    async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
     },
     async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
       const results = rowsFor(schemaHash, filter);
@@ -484,17 +495,21 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
       arguments: { slug: "ui", title: "UI work", body: "search me", column: "doing", deps: ["api"], force: true },
     });
     // New write APIs reject missing deps. Seed one directly so read tools still
-    // cover old rows written before that hardening.
+    // cover old rows written before that hardening. `list` is BoardCards-
+    // projection-authoritative, so the dangling dep has to land on BOTH the Card
+    // record and its thin membership row — a Card-only write is invisible to list.
     const ui = await findCard(node, cfg, "ui");
     expect(ui).not.toBeNull();
+    const uiWithGhost = { ...ui!, deps: ["api", "ghost"] };
     await node.updateRecord({
       schemaHash: cfg.schemaHashes.card!,
       keyHash: "ui",
-      fields: cardToFields({ ...ui!, deps: ["api", "ghost"] }),
+      fields: cardToFields(uiWithGhost),
     });
+    await upsertBoardCard(node, cfg, uiWithGhost);
   });
 
-  test("fkanban_list returns { cards } deep-equal to `list --json` (with blocked status, validated against outputSchema)", async () => {
+  test("fkanban_list returns { cards } matching `list --json` card-for-card, adding bounded body previews (validated against outputSchema)", async () => {
     const res = await client.callTool({ name: "fkanban_list", arguments: {} });
     const cliCards = JSON.parse(await listCmd({ cfg, node, json: true }));
     expect(res.structuredContent).toBeDefined();
@@ -502,16 +517,34 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     // an enriched-card-shape mismatch would fail this callTool, not just assert.
     // The structured array now carries a truncation signal; the small fixture is
     // under the default cap, so `truncated` is false and `cards` is the full set.
-    // Each card also now ships a single-line body PREVIEW + `bodyTruncated`. The
-    // fixture bodies are short (never truncated), but `api` sits in `todo` and so
-    // carries an auto-stamped multi-line `Repo:`/`Base:` header — the preview
-    // flattens whitespace to one line, so flatten the expected bodies to match.
-    const cliCardsPreviewed = cliCards.map((c: Record<string, unknown>) => ({
-      ...c,
-      body: (c.body as string).replace(/\s+/g, " ").trim(),
+    //
+    // BODY IS THE ONE DELIBERATE DIFFERENCE, so it is compared separately below.
+    // `list --json` renders the BoardCards projection, which is body-free by
+    // construction (BOARD_CARDS_FIELDS is CARD_FIELDS minus `body`). The MCP tool
+    // hydrates Card bodies for the CAPPED PAGE ONLY (bounded N, default 20 — not
+    // N over the whole board) so an agent gets a preview without a second call.
+    // Everything else must stay card-for-card identical.
+    const strip = (c: Record<string, unknown>) => {
+      const { body: _body, bodyTruncated: _bt, ...rest } = c;
+      return rest;
+    };
+    const mcp = res.structuredContent as {
+      cards: Array<Record<string, unknown>>;
+      total: number;
+      truncated: boolean;
+    };
+    expect(mcp.cards.map(strip)).toEqual(cliCards.map(strip));
+    expect({ total: mcp.total, truncated: mcp.truncated }).toEqual({
+      total: cliCards.length,
+      truncated: false,
+    });
+    // CLI list is body-free; the MCP page carries the real (flattened) body.
+    for (const c of cliCards as Array<Record<string, unknown>>) expect(c.body).toBe("");
+    const apiTruth = await findCard(node, cfg, "api");
+    expect(mcp.cards.find((c) => c.slug === "api")).toMatchObject({
+      body: apiTruth!.body.replace(/\s+/g, " ").trim(),
       bodyTruncated: false,
-    }));
-    expect(res.structuredContent).toEqual({ cards: cliCardsPreviewed, total: cliCards.length, truncated: false });
+    });
     // Each list card now carries the same resolved dep status `show` returns:
     // `ui` is blocked by the unfinished `api` and reports the dangling `ghost`;
     // missing deps are blocking too, but `blockedBy` already includes `api`.

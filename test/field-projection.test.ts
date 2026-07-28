@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import type { NodeClient, QueryResponse, QueryRow } from "../src/client.ts";
+import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
+import { boardCardFieldsFromCard } from "../src/board-cards.ts";
 import { listCmd } from "../src/commands/list.ts";
 import { searchCmd } from "../src/commands/search.ts";
 import { FIELD_NAMES, renderFieldProjection } from "../src/field_projection.ts";
@@ -20,7 +21,7 @@ const cfg: Config = {
   nodeUrl: "http://stub",
   schemaServiceUrl: "http://stub",
   userHash: "stub",
-  schemaHashes: { card: "cardhash", board: "boardhash", card_list_index: "cardlisthash" },
+  schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash", card_list_index: "cardlisthash" },
 };
 
 function card(partial: Partial<Card>): Card {
@@ -56,14 +57,33 @@ function board(partial: Partial<Board> = {}): Board {
 }
 
 function node(cards: Card[], boards: Board[] = [board()]): NodeClient {
-  const rows = (schemaHash: string, key?: string): QueryRow[] => {
+  const rows = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     if (schemaHash === "cardhash") {
       return cards.map((c) => ({ key: { hash: c.slug, range: null }, fields: cardToFields(c) }));
     }
     if (schemaHash === "boardhash") {
       return boards.map((b) => ({ key: { hash: b.slug, range: null }, fields: boardToFields(b) }));
     }
+    if (schemaHash === "boardcardshash") {
+      const rangePrefix = (filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
+        ?.HashRangePrefix;
+      let out = cards.map((c) => {
+        const fields = boardCardFieldsFromCard(c);
+        return { key: { hash: String(fields.board), range: String(fields.sk) }, fields };
+      });
+      if (rangePrefix?.hash && rangePrefix.prefix !== undefined) {
+        out = out.filter((r) =>
+          r.key.hash === rangePrefix.hash &&
+          r.key.range !== null &&
+          r.key.range.startsWith(rangePrefix.prefix!)
+        );
+      } else if (filter?.HashKey) {
+        out = out.filter((r) => r.key.hash === filter.HashKey);
+      }
+      return out;
+    }
     if (schemaHash === "cardlisthash") {
+      const key = filter?.HashKey;
       if (key === "all_boards") {
         return [
           {
@@ -100,8 +120,8 @@ function node(cards: Card[], boards: Board[] = [board()]): NodeClient {
     createRecord: async () => {},
     updateRecord: async () => {},
     deleteRecord: async () => {},
-    queryAll: async (q: { schemaHash: string; filter?: { HashKey?: string } }): Promise<QueryResponse> => {
-      const results = rows(q.schemaHash, q.filter?.HashKey);
+    queryAll: async (q: { schemaHash: string; filter?: QueryFilter }): Promise<QueryResponse> => {
+      const results = rows(q.schemaHash, q.filter);
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
     rawCall: async () => ({ status: 200, body: "" }),
