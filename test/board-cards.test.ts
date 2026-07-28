@@ -218,6 +218,26 @@ describe("board-cards membership integrity", () => {
     expect(listed![0]!.slug).toBe("my-card");
   });
 
+  test("skipOrphanPurge on create leaves no whole-partition list (mutation bar)", async () => {
+    // createCardRecord passes skipOrphanPurge so a brand-new slug does not pay
+    // listBoardCardsPartition on every add (measured multi-second on primary).
+    const node = fakeNode();
+    let partitionQueries = 0;
+    const origQuery = node.queryAll.bind(node);
+    node.queryAll = async (args: Parameters<typeof node.queryAll>[0]) => {
+      const f = args.filter as { HashKey?: string } | undefined;
+      if (f && typeof f === "object" && "HashKey" in f && f.HashKey === "default") {
+        partitionQueries += 1;
+      }
+      return origQuery(args);
+    };
+    const fresh = card({ slug: "brand-new-card", column: "todo", position: "1" });
+    await upsertBoardCard(node, cfgWithBoardCards, fresh, null, { skipOrphanPurge: true });
+    expect(partitionQueries).toBe(0);
+    const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
+    expect(listed!.some((c) => c.slug === "brand-new-card")).toBe(true);
+  });
+
   test("listAllBoardCards prefers fresher when duplicates exist", async () => {
     const node = fakeNode();
     const doing = card({ column: "doing", position: "1", updated_at: "2026-01-01T00:00:00.000Z" });

@@ -2913,7 +2913,11 @@ export async function createCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  await upsertBoardCard(opts.node, opts.cfg, card);
+  // Brand-new slug: there cannot be a prior BoardCards row for this card, so a
+  // whole-partition orphan purge is pure multi-second cost (HashKey board list)
+  // with zero deletes. skipOrphanPurge keeps create at one BoardCards mutation.
+  // Updates that omit `previous` still purge — they may be healing stale sks.
+  await upsertBoardCard(opts.node, opts.cfg, card, null, { skipOrphanPurge: true });
   await upsertMilestoneCard(opts.node, opts.cfg, card);
 }
 
