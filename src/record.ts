@@ -2879,36 +2879,67 @@ export async function updateCardRecord(
     await upsertMilestoneCard(opts.node, opts.cfg, card, previous ?? null);
     return;
   }
-  // Protein wrote the new multi-key tips. Purge prior membership sks only when
-  // the card moved (protein does not delete the old key slot).
+  // Protein wrote the new multi-key tips but does not delete old key slots.
+  // Mirror upsertBoardCard / upsertMilestoneCard purge policy so the invariant
+  // "at most one BoardCards row per (board, slug)" holds even when callers
+  // omit `previous` (add-update, backlog promote, pickup_claim).
+  const { purgeOtherBoardCardRows, boardCardSk, boardCardsHash } = await import(
+    "./board-cards.ts"
+  );
+  const {
+    purgeOtherMilestoneCardRows,
+    milestoneCardsHash,
+    milestoneCardSk,
+  } = await import("./milestone-cards.ts");
+  const boardHash = boardCardsHash(opts.cfg);
+  const msHash = milestoneCardsHash(opts.cfg);
+  const nextBoard = card.board || "default";
+  const nextSk = boardCardSk(card.column, card.position, card.slug);
+  const nextMs = (card.milestone ?? "").trim();
+
   if (previous) {
-    const { purgeOtherBoardCardRows, boardCardSk, boardCardsHash } = await import(
-      "./board-cards.ts"
-    );
-    const { milestoneCardsHash, milestoneCardSk } = await import("./milestone-cards.ts");
-    const boardHash = boardCardsHash(opts.cfg);
-    const msHash = milestoneCardsHash(opts.cfg);
-    const nextBoard = card.board || "default";
-    const nextSk = boardCardSk(card.column, card.position, card.slug);
     const prevBoard = previous.board || "default";
     const prevSk = boardCardSk(previous.column, previous.position, previous.slug);
     if (boardHash && (prevBoard !== nextBoard || prevSk !== nextSk)) {
-      await opts.node.deleteRecord({
-        schemaHash: boardHash,
-        keyHash: prevBoard,
-        rangeKey: prevSk,
-      });
-      await purgeOtherBoardCardRows(opts.node, opts.cfg, nextBoard, card.slug, nextSk);
+      try {
+        await opts.node.deleteRecord({
+          schemaHash: boardHash,
+          keyHash: prevBoard,
+          rangeKey: prevSk,
+        });
+      } catch {
+        // best-effort; purge scan below catches residuals
+      }
+    }
+    // Board transfer: drop leftovers for this slug on the old board.
+    if (prevBoard !== nextBoard && previous.slug) {
+      await purgeOtherBoardCardRows(opts.node, opts.cfg, prevBoard, previous.slug, null);
     }
     const prevMs = (previous.milestone ?? "").trim();
-    const nextMs = (card.milestone ?? "").trim();
-    if (msHash && prevMs && (prevMs !== nextMs || prevSk !== nextSk)) {
-      await opts.node.deleteRecord({
-        schemaHash: msHash,
-        keyHash: prevMs,
-        rangeKey: milestoneCardSk(previous.column, previous.position, previous.slug),
-      });
+    if (msHash && prevMs) {
+      const prevMsSk = milestoneCardSk(previous.column, previous.position, previous.slug);
+      if (prevMs !== nextMs || prevMsSk !== nextSk) {
+        try {
+          await opts.node.deleteRecord({
+            schemaHash: msHash,
+            keyHash: prevMs,
+            rangeKey: prevMsSk,
+          });
+        } catch {
+          // best-effort
+        }
+      }
+      if (prevMs !== nextMs) {
+        await purgeOtherMilestoneCardRows(opts.node, opts.cfg, prevMs, card.slug, null);
+      }
     }
+  }
+
+  // Always: keep only nextSk for this slug on the destination partitions —
+  // covers omitted-previous callers and residual multi-orphan rows.
+  await purgeOtherBoardCardRows(opts.node, opts.cfg, nextBoard, card.slug, nextSk);
+  if (msHash && nextMs) {
+    await purgeOtherMilestoneCardRows(opts.node, opts.cfg, nextMs, card.slug, nextSk);
   }
 }
 

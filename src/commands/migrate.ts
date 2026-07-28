@@ -103,7 +103,7 @@ export async function migrateAreaTagsCmd(
 
     if (!dryRun) {
       const updated: Card = { ...card, tags: after, updated_at: nowIso() };
-      await updateCardRecord(opts, updated);
+      await updateCardRecord(opts, updated, undefined, card);
     }
   }
 

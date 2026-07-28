@@ -346,7 +346,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       boardColumns: columns,
       reason: "done-transition",
     });
-    await updateCardRecord(opts, updated);
+    await updateCardRecord(opts, updated, undefined, existing);
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
 

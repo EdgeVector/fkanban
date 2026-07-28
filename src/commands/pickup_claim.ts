@@ -458,7 +458,12 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
           assignee: opts.worker.trim(),
           updated_at: nowIso(),
         };
-        await updateCardRecord({ cfg: opts.cfg, node: opts.node }, stamped);
+        await updateCardRecord(
+          { cfg: opts.cfg, node: opts.node },
+          stamped,
+          undefined,
+          claimedCard,
+        );
         claimedCard = stamped;
       }
 
