@@ -6,6 +6,7 @@ import {
   patchCardListIndex,
   readCardListIndex,
   writeCardListIndex,
+  cardListIndexIsSuperseded,
   toCardSummary,
   readBoardListIndex,
   writeBoardListIndex,
@@ -1929,7 +1930,14 @@ async function listCardsWithFields(
     }
 
     const indexed = await readCardListIndex(node, cfg);
-    if (indexed !== null) {
+    // A *retired* rollup is empty on purpose (`groom card-list-index-retire`
+    // stores `[]`, which reads back as an empty array, not a missing row). This
+    // fall-through is only reached when the BoardCards query THREW or the schema
+    // is unbound — so here an empty payload is absence of information, not proof
+    // of an empty board. Returning [] would report "the board has no cards" on a
+    // transient BoardCards error, and agents read an empty board as "no work".
+    // Treat it as a miss and seed from Card truth below instead.
+    if (indexed !== null && !(indexed.length === 0 && cardListIndexIsSuperseded(cfg))) {
       // CardListIndex is body-free by construction — never N+1 hydrate.
       return (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
         Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
@@ -2170,6 +2178,45 @@ export async function listCardsByColumn(
     column,
     ...(board ? { board } : {}),
   });
+}
+
+/**
+ * Every card slug the Card schema holds, body-free — the reconciler's discovery
+ * source for membership that no index knows about.
+ *
+ * This is a deliberate `allowFullScan` and the no-scan contract permits it: the
+ * contract bans scans on *hot read paths*, and repairs drift with an explicit
+ * reconciler that reads the primary (`concepts-lastdb-agent-access-model`).
+ * `groom board-cards-heal` is that reconciler — manual/scheduled, never a list.
+ *
+ * It replaces `readCardListIndex` as heal's discovery source, and is strictly
+ * more capable: the `all_cards` rollup was a lost-update-prone copy, so a card
+ * dropped from it by a concurrent write was invisible to heal forever. Card is
+ * the source of truth, so a row missing from *both* indexes is now findable.
+ */
+export async function scanCardSummariesForReconcile(
+  node: NodeClient,
+  cfg: Config,
+): Promise<Card[]> {
+  const hash = schemaHashFor("card", cfg);
+  const projection = cardListProjectionFields(fieldsFor("card"));
+  let res;
+  try {
+    res = await node.queryAll({ schemaHash: hash, fields: projection, allowFullScan: true });
+  } catch (err) {
+    if (!isOnlyOptionalFieldMiss(err, projection)) throw err;
+    res = await node.queryAll({
+      schemaHash: hash,
+      fields: projection.filter(
+        (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
+      ),
+      allowFullScan: true,
+    });
+  }
+  return res.results
+    .map(rowToCard)
+    .filter((c) => c.slug.length > 0 && !isHiddenCard(c))
+    .map((c) => ({ ...c, body: "" }));
 }
 
 /**
