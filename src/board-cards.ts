@@ -181,17 +181,36 @@ export async function purgeOtherBoardCardRows(
   return n;
 }
 
+export type BoardCardWriteOptions = {
+  /**
+   * Skip the defensive orphan-purge rescan for this slug.
+   *
+   * The purge is a whole-partition read, so it costs the same whether it finds
+   * an orphan or nothing. That is the right default for one-card writes (add,
+   * move, metadata) which have no idea what else is in the partition.
+   *
+   * It is the WRONG default for a bulk reconciler that already enumerated
+   * every partition up front: `groom board-cards-heal` re-listed the partition
+   * once per card, turning an O(cards) repair into O(cards) full-partition
+   * reads. Only pass this when the caller has the partition contents in hand
+   * and has already accounted for every row belonging to the slug.
+   */
+  skipOrphanPurge?: boolean;
+};
+
 /**
  * Upsert thin BoardCards row. When board/column/position change, delete the
- * previous sk first (same-board move or board transfer). Always purges any
+ * previous sk first (same-board move or board transfer). Also purges any
  * other rows for the same slug on the destination board so list cannot keep a
- * stale column membership after a successful card update.
+ * stale column membership after a successful card update — see
+ * `BoardCardWriteOptions.skipOrphanPurge` for the bulk-reconciler opt-out.
  */
 export async function upsertBoardCard(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
   previous?: Card | CardSummary | null,
+  opts: BoardCardWriteOptions = {},
 ): Promise<void> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return;
@@ -208,15 +227,15 @@ export async function upsertBoardCard(
       await deleteBoardCardSk(node, schemaHash, prevBoard, prevSk);
     }
     // Board transfer: drop any leftover rows for this slug on the old board.
-    if (prevBoard !== nextBoard && previous.slug) {
+    if (prevBoard !== nextBoard && previous.slug && !opts.skipOrphanPurge) {
       await purgeOtherBoardCardRows(node, cfg, prevBoard, previous.slug, null);
     }
     // Column/position change: also purge any other sks on the next board
     // (covers multi-orphan rows left by older clients).
-    if (prevSk !== nextSk || prevBoard !== nextBoard) {
+    if ((prevSk !== nextSk || prevBoard !== nextBoard) && !opts.skipOrphanPurge) {
       await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
     }
-  } else {
+  } else if (!opts.skipOrphanPurge) {
     // No previous sk: callers that omit it (legacy/add/metadata) can leave
     // orphan column#pos rows. Scan once and drop every sk except nextSk.
     await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
@@ -245,6 +264,7 @@ export async function removeBoardCard(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
+  opts: BoardCardWriteOptions = {},
 ): Promise<void> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return;
@@ -252,7 +272,7 @@ export async function removeBoardCard(
   const sk = boardCardSk(card.column, card.position, card.slug);
   await deleteBoardCardSk(node, schemaHash, board, sk);
   // Also purge any orphan sks for the same slug (stale column membership).
-  if (card.slug) {
+  if (card.slug && !opts.skipOrphanPurge) {
     await purgeOtherBoardCardRows(node, cfg, board, card.slug, null);
   }
 }

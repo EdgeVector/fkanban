@@ -365,3 +365,90 @@ describe("board-cards membership integrity", () => {
     expect(listed![0]!.column).toBe("done");
   });
 });
+
+/**
+ * Cost regressions, not behaviour regressions.
+ *
+ * A heal that is merely correct can still be unusable: on the primary
+ * (2026-07-28, ~310 cards) a read-only dry run took 5m19s, because every
+ * candidate was point-read WITH its multi-KB body — a body BoardCards never
+ * stores and the heal blanks on arrival — strictly one at a time, and every
+ * repair then re-listed the whole partition hunting orphans it already knew
+ * were absent. These lock the shape of the reads, which is what made it slow.
+ */
+describe("board-cards heal read cost", () => {
+  /** Wrap a node, recording every query so a test can assert on read shape. */
+  function recordingNode(inner: NodeClient): {
+    node: NodeClient;
+    queries: Array<{ schemaHash: string; fields: string[] }>;
+  } {
+    const queries: Array<{ schemaHash: string; fields: string[] }> = [];
+    const node: NodeClient = {
+      ...inner,
+      async queryAll(req) {
+        queries.push({ schemaHash: req.schemaHash, fields: [...(req.fields ?? [])] });
+        return inner.queryAll(req);
+      },
+    };
+    return { node, queries };
+  }
+
+  /** Board + `count` cards, none of which has a BoardCards row yet. */
+  async function seedUnprojectedCards(node: NodeClient, count: number): Promise<void> {
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: {
+        slug: "default",
+        title: "Default",
+        body: "",
+        columns: ["backlog", "todo", "doing", "done"],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    for (let i = 0; i < count; i += 1) {
+      const c = card({ slug: `card-${i}`, position: String(i), body: "x".repeat(4096) });
+      await node.createRecord({
+        schemaHash: cfgWithBoardCards.schemaHashes.card!,
+        keyHash: c.slug,
+        fields: { ...c, body: c.body },
+      });
+    }
+  }
+
+  test("never asks the node for card bodies it is about to discard", async () => {
+    const { node, queries } = recordingNode(fakeNode());
+    await seedUnprojectedCards(node, 5);
+    queries.length = 0;
+
+    const dry = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    expect(dry.report.drifted).toBe(5);
+
+    const cardReads = queries.filter((q) => q.schemaHash === cfgWithBoardCards.schemaHashes.card);
+    expect(cardReads.length).toBeGreaterThan(0);
+    for (const read of cardReads) expect(read.fields).not.toContain("body");
+  });
+
+  test("--apply does not re-list the partition once per repaired card", async () => {
+    const { node, queries } = recordingNode(fakeNode());
+    await seedUnprojectedCards(node, 5);
+    queries.length = 0;
+
+    const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
+    expect(applied.report.healed).toBe(5);
+
+    // One partition read for discovery. The old code added one whole-partition
+    // rescan per upsert, so this grew with the number of cards repaired.
+    const partitionReads = queries.filter(
+      (q) => q.schemaHash === cfgWithBoardCards.schemaHashes.board_cards,
+    );
+    expect(partitionReads.length).toBeLessThanOrEqual(2);
+
+    // ...and the repair still actually happened.
+    const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
+    expect(listed).toHaveLength(5);
+    const clean = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    expect(clean.report.drifted).toBe(0);
+  });
+});
