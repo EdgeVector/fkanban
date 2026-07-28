@@ -36,7 +36,11 @@ function casError(actual: unknown): FkanbanError {
   });
 }
 
-function fakeNode(): NodeClient {
+// `prefixBlind` models a node that ACCEPTS a HashRangePrefix query but answers
+// no rows (the OPE/encrypted-range-key failure mode). Column list is
+// HashRangePrefix-only, so a prefix-blind node must render an empty column
+// rather than silently degrading to a HashKey partition scan.
+function fakeNode(opts: { prefixBlind?: boolean } = {}): NodeClient {
   type StoredRecord = { keyHash: string; rangeKey: string | null; fields: Record<string, unknown> };
   const store = new Map<string, Map<string, StoredRecord>>();
   const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
@@ -50,11 +54,25 @@ function fakeNode(): NodeClient {
   };
   const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const t = tableFor(schemaHash);
-    const entries = filter?.HashKey
-      ? [...t.values()].filter((rec) => rec.keyHash === filter.HashKey)
-      : [...t.values()].filter((rec) =>
-          !filter || Object.entries(filter).every(([field, value]) => rec.fields[field] === value)
-        );
+    const rangePrefix = (filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
+      ?.HashRangePrefix;
+    let entries: StoredRecord[];
+    if (rangePrefix?.hash && rangePrefix.prefix !== undefined) {
+      entries = opts.prefixBlind
+        ? []
+        : [...t.values()].filter(
+            (rec) =>
+              rec.keyHash === rangePrefix.hash &&
+              typeof rec.rangeKey === "string" &&
+              rec.rangeKey.startsWith(rangePrefix.prefix!),
+          );
+    } else if (filter?.HashKey) {
+      entries = [...t.values()].filter((rec) => rec.keyHash === filter.HashKey);
+    } else {
+      entries = [...t.values()].filter((rec) =>
+        !filter || Object.entries(filter).every(([field, value]) => rec.fields[field] === value)
+      );
+    }
     return entries.map(({ keyHash, rangeKey, fields }) => ({ fields, key: { hash: keyHash, range: rangeKey } }));
   };
   const checkExpected = (fields: Record<string, unknown>, expected?: CasExpectation) => {
@@ -266,12 +284,11 @@ describe("move claim guard", () => {
     expect(again.map((c) => c.slug)).toContain("ghost-membership");
   });
 
-  test("column list cross-checks false-empty HashRangePrefix results against BoardCards partition", async () => {
-    // Regression 2026-07-24: encrypted/OPE range-key storage accepted the
-    // HashRangePrefix query but returned zero rows even though the board hash
-    // partition still held plaintext sk rows for that column. Pickup then saw
-    // an empty todo lane and no-oped.
-    const node = fakeNode();
+  test("column list does not rescue false-empty HashRangePrefix results with a partition scan", async () => {
+    // Column list primary path is HashRangePrefix only. If the node accepts the
+    // prefix query but returns no rows, fkanban must not silently paper over the
+    // primary-path breakage with a HashKey partition scan.
+    const node = fakeNode({ prefixBlind: true });
     const todo = card({ slug: "visible-todo", column: "todo", position: "3" });
     await node.createRecord({
       schemaHash: cfgWithBoardCards.schemaHashes.board!,
@@ -284,8 +301,7 @@ describe("move claim guard", () => {
       slug: string;
       column: string;
     }>;
-    expect(listed.map((c) => c.slug)).toEqual(["visible-todo"]);
-    expect(listed[0]?.column).toBe("todo");
+    expect(listed).toEqual([]);
   });
 
   test("move refuses an ambient DB that disagrees with the card home DB", async () => {

@@ -23,13 +23,15 @@ const cfg: Config = {
   nodeUrl: "http://unused.invalid",
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
-  schemaHashes: { card: "cardhash", board: "boardhash" },
+  schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
 };
 
 const validPickupBody = "Repo: EdgeVector/fkanban\nBase: main\n\nRead validation fixture.";
 
 function fakeNode(): NodeClient {
-  const store = new Map<string, Map<string, Record<string, unknown>>>();
+  type StoredRecord = { keyHash: string; rangeKey: string | null; fields: Record<string, unknown> };
+  const store = new Map<string, Map<string, StoredRecord>>();
+  const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
   const tableFor = (schemaHash: string) => {
     let t = store.get(schemaHash);
     if (!t) {
@@ -40,12 +42,20 @@ function fakeNode(): NodeClient {
   };
   const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const t = tableFor(schemaHash);
-    const entries = filter?.HashKey
-      ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : [])
-      : [...t.entries()].filter(([, fields]) =>
-          !filter || Object.entries(filter).every(([field, value]) => fields[field] === value)
-        );
-    return entries.map(([hash, fields]) => ({ fields, key: { hash, range: null } }));
+    const rangePrefix = (filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
+      ?.HashRangePrefix;
+    const entries = rangePrefix?.hash && rangePrefix.prefix !== undefined
+      ? [...t.values()].filter((rec) =>
+          rec.keyHash === rangePrefix.hash &&
+          rec.rangeKey !== null &&
+          rec.rangeKey.startsWith(rangePrefix.prefix!)
+        )
+      : filter?.HashKey
+        ? [...t.values()].filter((rec) => rec.keyHash === filter.HashKey)
+        : [...t.values()].filter((rec) =>
+            !filter || Object.entries(filter).every(([field, value]) => rec.fields[field] === value)
+          );
+    return entries.map(({ keyHash, rangeKey, fields }) => ({ fields, key: { hash: keyHash, range: rangeKey } }));
   };
   const notImpl = (m: string) => async (): Promise<never> => {
     throw new Error(`fakeNode.${m} not implemented`);
@@ -57,14 +67,14 @@ function fakeNode(): NodeClient {
     bootstrap: notImpl("bootstrap"),
     loadSchemas: notImpl("loadSchemas"),
     listSchemas: notImpl("listSchemas"),
-    async createRecord({ schemaHash, fields, keyHash }) {
-      tableFor(schemaHash).set(keyHash, fields);
+    async createRecord({ schemaHash, fields, keyHash, rangeKey }) {
+      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
     },
-    async updateRecord({ schemaHash, fields, keyHash }) {
-      tableFor(schemaHash).set(keyHash, fields);
+    async updateRecord({ schemaHash, fields, keyHash, rangeKey }) {
+      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
     },
-    async deleteRecord({ schemaHash, keyHash }) {
-      tableFor(schemaHash).delete(keyHash);
+    async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
     },
     async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
       const results = rowsFor(schemaHash, filter);

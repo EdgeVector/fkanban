@@ -38,6 +38,8 @@ import {
   type Card,
 } from "../src/record.ts";
 import { FkanbanError, type NodeClient, type QueryResponse, type QueryRow } from "../src/client.ts";
+import type { QueryFilter } from "../src/client.ts";
+import { boardCardFieldsFromCard } from "../src/board-cards.ts";
 import { DEFAULT_COLUMN_LIMIT, listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
 import {
   GATES_LOCAL_SCHEMA,
@@ -78,6 +80,30 @@ function card(partial: Partial<Card>): Card {
     updated_at: "2026-01-01T00:00:00.000Z",
     ...partial,
   };
+}
+
+function boardCardRow(c: Card): QueryRow {
+  const fields = boardCardFieldsFromCard(c);
+  return {
+    fields,
+    key: { hash: String(fields.board), range: String(fields.sk) },
+  } as QueryRow;
+}
+
+function filterBoardCardRows(rows: QueryRow[], filter?: QueryFilter): QueryRow[] {
+  const rangePrefix = (filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
+    ?.HashRangePrefix;
+  if (rangePrefix?.hash && rangePrefix.prefix !== undefined) {
+    return rows.filter((r) =>
+      r.fields.board === rangePrefix.hash &&
+      typeof r.fields.sk === "string" &&
+      r.fields.sk.startsWith(rangePrefix.prefix!)
+    );
+  }
+  if (filter?.HashKey) return rows.filter((r) => r.fields.board === filter.HashKey);
+  return rows.filter((r) =>
+    !filter || Object.entries(filter).every(([field, value]) => r.fields[field] === value)
+  );
 }
 
 describe("schemas", () => {
@@ -957,7 +983,7 @@ describe("listCmd empty board", () => {
     nodeUrl: "http://stub",
     schemaServiceUrl: "http://stub",
     userHash: "stub",
-    schemaHashes: { card: "cardhash", board: "boardhash" },
+    schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
   };
 
   test("default empty board (text) shows the getting-started hint", async () => {
@@ -1097,6 +1123,7 @@ describe("listCmd --tag / --assignee filters", () => {
 
   function populatedNode(cards: Card[]): NodeClient {
     const empty: QueryResponse = { ok: true, results: [] };
+    const boardCardRows = cards.map(boardCardRow);
     return {
       baseUrl: "http://stub",
       userHash: "stub",
@@ -1109,8 +1136,14 @@ describe("listCmd --tag / --assignee filters", () => {
       deleteRecord: async () => {},
       // Cards live under `cardhash`; the board read (`boardhash`) returns empty,
       // so the default-board synthesis path is used.
-      queryAll: async (q: { schemaHash: string }): Promise<QueryResponse> =>
-        q.schemaHash === "cardhash" ? { ok: true, results: cards.map(cardRow) } : empty,
+      queryAll: async (q: { schemaHash: string; filter?: QueryFilter }): Promise<QueryResponse> => {
+        if (q.schemaHash === "cardhash") return { ok: true, results: cards.map(cardRow) };
+        if (q.schemaHash === "boardcardshash") {
+          const results = filterBoardCardRows(boardCardRows, q.filter);
+          return { ok: true, results, returned_count: results.length, total_count: results.length };
+        }
+        return empty;
+      },
       rawCall: async () => ({ status: 200, body: "" }),
     } as unknown as NodeClient;
   }
@@ -1147,7 +1180,7 @@ describe("listCmd --tag / --assignee filters", () => {
     nodeUrl: "http://stub",
     schemaServiceUrl: "http://stub",
     userHash: "stub",
-    schemaHashes: { card: "cardhash", board: "boardhash" },
+    schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
   };
 
   test("--tag is an exact membership filter (not fuzzy)", async () => {
@@ -1235,6 +1268,7 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
 
   function populatedNode(cards: Card[]): NodeClient {
     const empty: QueryResponse = { ok: true, results: [] };
+    const boardCardRows = cards.map(boardCardRow);
     return {
       baseUrl: "http://stub",
       userHash: "stub",
@@ -1245,8 +1279,14 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
       createRecord: async () => {},
       updateRecord: async () => {},
       deleteRecord: async () => {},
-      queryAll: async (q: { schemaHash: string }): Promise<QueryResponse> =>
-        q.schemaHash === "cardhash" ? { ok: true, results: cards.map(cardRow) } : empty,
+      queryAll: async (q: { schemaHash: string; filter?: QueryFilter }): Promise<QueryResponse> => {
+        if (q.schemaHash === "cardhash") return { ok: true, results: cards.map(cardRow) };
+        if (q.schemaHash === "boardcardshash") {
+          const results = filterBoardCardRows(boardCardRows, q.filter);
+          return { ok: true, results, returned_count: results.length, total_count: results.length };
+        }
+        return empty;
+      },
       rawCall: async () => ({ status: 200, body: "" }),
     } as unknown as NodeClient;
   }
@@ -1256,7 +1296,7 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
     nodeUrl: "http://stub",
     schemaServiceUrl: "http://stub",
     userHash: "stub",
-    schemaHashes: { card: "cardhash", board: "boardhash" },
+    schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
   };
 
   async function jsonSlugs(opts: Partial<ListOptions>): Promise<string[]> {
@@ -1264,7 +1304,11 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
     return (JSON.parse(out) as Card[]).map((c) => c.slug);
   }
 
-  test("no --limit → broad JSON uses the default per-column cap and body previews", async () => {
+  // A BoardCards-derived list is body-free by construction: BOARD_CARDS_FIELDS is
+  // CARD_FIELDS minus `body`, so there is nothing to preview and nothing to
+  // truncate. Re-reading Card per row to synthesise a preview is exactly the 1+N
+  // storm removed in "trust the BoardCards projection". `show <slug>` serves body.
+  test("no --limit → broad JSON uses the default per-column cap and is body-free", async () => {
     const out = await listCmd({ cfg, node: populatedNode(corpus), json: true });
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed.map((c) => c.slug).sort()).toEqual([
@@ -1273,18 +1317,18 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
       "d3",
       ...Array.from({ length: DEFAULT_COLUMN_LIMIT }, (_, i) => `t${i + 1}`),
     ].sort());
-    expect(parsed.find((c) => c.slug === "t1")!.body.length).toBeLessThanOrEqual(200);
-    expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
+    expect(parsed.find((c) => c.slug === "t1")!.body).toBe("");
+    expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(false);
   });
 
-  test("column-filtered JSON is uncapped by default and still body previews", async () => {
+  test("column-filtered JSON is uncapped by default and is body-free", async () => {
     const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, column: "todo" });
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed.map((c) => c.slug)).toEqual(
       Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
     );
-    expect(parsed.find((c) => c.slug === "t1")!.body.length).toBeLessThanOrEqual(200);
-    expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(true);
+    expect(parsed.find((c) => c.slug === "t1")!.body).toBe("");
+    expect(parsed.find((c) => c.slug === "t1")!.bodyTruncated).toBe(false);
   });
 
   test("explicit --limit caps a single column to N (matches the text head slice)", async () => {

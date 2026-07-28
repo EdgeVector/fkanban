@@ -7,9 +7,16 @@
 //     fetches CARD_DISPLAY_FIELDS (no `body`) while `--json`/`--wide` keep full
 //     fields.
 //
-// No live :9001 brain — the fake node honours the HashKey point-read filter and
+// No live brain node — the fake node honours the HashKey point-read filter and
 // records the `fields` each query asks for, so we can assert what went over the
-// wire.
+// wire. (Reached over the LastDB unix socket in production; the retired :9001
+// TCP port is not a health signal.)
+//
+// Column reads are HashRangePrefix-only against BoardCards. There is deliberately
+// no HashKey + client-filter secondary: a prefix path that silently degrades to a
+// partition scan hides its own breakage, which is how the OPE range-key bug stayed
+// invisible. A prefix-blind node must therefore render an EMPTY column, and the
+// fixtures here assert exactly that rather than papering over it.
 
 import { describe, expect, test } from "bun:test";
 
@@ -487,12 +494,9 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(scan).toContain("updated_at");
   });
 
-  // The live node's /api/query filter is a HashRangeFilter — field-equality
-  // filters like {column: "todo"} are not a node capability and 400 on every
-  // call (2026-07-17 request-ops investigation: one guaranteed error plus an
-  // N+1 fallback per column list). The contract is now: NEVER send a field
-  // filter; filter client-side over a body-free scan; keep bodies point-read
-  // per MATCHING card only.
+  // Column list primary path is BoardCards HashRangePrefix only — never a
+  // field-equality filter on Card, and never a silent full-board Card scan
+  // fallback when the prefix path is the contract under test.
   test("--column never sends a field filter to the node", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
@@ -501,11 +505,12 @@ describe("list — text path fetches body-free fields, structured views keep ful
         card({ slug: "doing-b", column: "doing" }),
       ],
     });
-    const out = await listCmd({ cfg, node, column: "todo", json: true });
+    const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
     expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
 
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
-    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(true);
+    // No secondary full-board Card scan for column list.
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
   });
 
   test("--column point-reads dependency statuses for blocked metadata", async () => {
@@ -517,7 +522,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
         card({ slug: "unrelated", column: "review" }),
       ],
     });
-    const out = await listCmd({ cfg, node, column: "todo", json: true });
+    const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
     const parsed = JSON.parse(out) as Array<Card & { blocked: boolean; blockedBy: string[] }>;
     expect(parsed.map((c) => c.slug)).toEqual(["todo-a"]);
     expect(parsed[0]!.blocked).toBe(true);
@@ -536,11 +541,11 @@ describe("list — text path fetches body-free fields, structured views keep ful
       ],
       rejectColumnFilter: true,
     });
-    const out = await listCmd({ cfg, node, column: "todo", json: true });
+    const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
     expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
 
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
-    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
     // Default JSON list does not point-read bodies for matching cards.
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "todo-a" && q.fields.includes("body"))).toBe(false);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "doing-b")).toBe(false);
