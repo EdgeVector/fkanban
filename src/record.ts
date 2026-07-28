@@ -13,6 +13,7 @@ import {
 import {
   listAllBoardCards,
   listBoardCardsPartition,
+  preferFresherBoardCard,
   removeBoardCard,
   upsertBoardCard,
 } from "./board-cards.ts";
@@ -2389,34 +2390,68 @@ function boardCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
 }
 
 /**
- * Align BoardCards thin rows with Card point-reads for list previews.
+ * Collapse a BoardCards partition to one card per slug — pure, no node reads.
  *
- * On mismatch: best-effort upsert BoardCards from Card truth (safe dual-write heal).
- * On Card miss: **keep the BoardCards row and render the thin summary** — never delete.
- * A point-read miss can mean Mini degradation, blind-key issues, or conflicted
- * projection — not a true orphan. Destructive orphan cleanup is only
- * `groom board-cards-heal --apply` (explicit, circuit-breakable).
+ * Duplicate sks for a slug are an invariant violation (board-cards.ts keeps at
+ * most one row per (board, slug)); when one slips through, prefer the fresher
+ * `updated_at` rather than first-wins, which used to pin a stale `doing#` ghost
+ * ahead of the real `done#` row forever.
+ */
+function dedupeBoardCardSummaries(cards: Card[]): Card[] {
+  const bySlug = new Map<string, Card>();
+  for (const card of cards) {
+    const prev = bySlug.get(card.slug);
+    bySlug.set(card.slug, prev ? preferFresherBoardCard(prev, card) : card);
+  }
+  return [...bySlug.values()].map((card) =>
+    Object.assign({ ...card, body: card.body || "" }, deriveStructuredFields(card)),
+  );
+}
+
+/**
+ * Read model for board/column list previews.
  *
- * Incident 2026-07-23/24: list scrapers (Factory) deleted ~1k BoardCards rows when
- * Card multi-field reads failed after schema expand + sync stress.
+ * **Default: trust the projection.** BoardCards is an app-owned dual-written
+ * secondary carrying CARD_FIELDS minus `body` (compare BOARD_CARDS_FIELDS with
+ * CARD_FIELDS), and `cardListProjectionFields` strips `body` — so a per-row Card
+ * point-read returns exactly the fields the BoardCards row already holds and
+ * yields no new data on the happy path. Re-reading Card per row turned one keyed
+ * partition query into 1+N serial point-reads: `list --column todo` rendering 10
+ * cards cost 11 Card queries / 26.6s against the live node, and a drifted row
+ * additionally triggered a full-partition purge scan inside `upsertBoardCard`.
+ * Dynamo-shaped reads trust the GSI; drift is repaired by an explicit
+ * reconciler, not by the hot read path (`concepts-lastdb-agent-access-model`).
+ *
+ * `verify: true` opts back into Card-authoritative reconciliation for paths that
+ * are *about* drift rather than about rendering. It stays 1+N by construction,
+ * so callers must bound the input.
+ *
+ * On Card miss under `verify`: **keep the BoardCards row and render the thin
+ * summary** — never delete. A point-read miss can mean Mini degradation,
+ * blind-key issues, or conflicted projection — not a true orphan. Destructive
+ * orphan cleanup is only `groom board-cards-heal --apply` (explicit,
+ * circuit-breakable). Incident 2026-07-23/24: list scrapers (Factory) deleted
+ * ~1k BoardCards rows when Card multi-field reads failed after schema expand +
+ * sync stress.
  */
 async function reconcileBoardCardSummaries(
   node: NodeClient,
   cfg: Config,
   cards: Card[],
   fields: string[],
+  opts: { verify?: boolean } = {},
 ): Promise<Card[]> {
+  const deduped = dedupeBoardCardSummaries(cards);
+  if (!opts.verify) return deduped;
+
   const projection = cardListProjectionFields(fields);
   const out: Card[] = [];
-  const seen = new Set<string>();
 
-  for (const card of cards) {
-    if (seen.has(card.slug)) continue;
-    seen.add(card.slug);
+  for (const card of deduped) {
     const truth = await findCardWithFields(node, cfg, card.slug, projection);
     if (!truth) {
       // Read-only on miss: surface the BoardCards thin row; do not removeBoardCard.
-      out.push(Object.assign({ ...card, body: card.body || "" }, deriveStructuredFields(card)));
+      out.push(card);
       continue;
     }
 

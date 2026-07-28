@@ -204,7 +204,16 @@ describe("move claim guard", () => {
     expect(doing.map((c: { slug: string }) => c.slug)).not.toContain(initial.slug);
   });
 
-  test("list repairs a stale BoardCards row from point-read card truth", async () => {
+  // Contract change: `list` is BoardCards-projection-authoritative and does NOT
+  // point-read Card per row to repair drift. Verifying per row made one keyed
+  // partition query into 1+N serial point-reads (measured: `list --column todo`
+  // rendering 10 cards cost 11 Card queries / 26.6s on the live node), and no
+  // bound helps — even a 12-per-column cap is ~31s at the live per-read cost.
+  // Stale rows are repaired by `groom board-cards-heal`, which owns this exact
+  // scenario and proves it in board-cards.test.ts ("board-cards-heal deletes
+  // stale doing when card is done"). Writes dual-write BoardCards, so this state
+  // only arises from a partial write, not from ordinary use.
+  test("list renders the BoardCards projection without per-row Card point-reads", async () => {
     const node = fakeNode();
     const stale = card({ column: "doing", position: "2", updated_at: "2026-01-01T00:00:00.000Z" });
     const truth = card({ column: "done", position: "9", updated_at: "2026-01-02T00:00:00.000Z" });
@@ -220,11 +229,13 @@ describe("move claim guard", () => {
     });
     await seedBoardCard(node, stale);
 
+    // The projection is what renders — the un-updated BoardCards row still shows
+    // its own column until an explicit heal runs.
     const doing = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));
-    expect(doing.map((c: { slug: string }) => c.slug)).not.toContain(truth.slug);
+    expect(doing.map((c: { slug: string }) => c.slug)).toEqual([stale.slug]);
 
     const all = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, json: true }));
-    expect(all).toMatchObject([{ slug: truth.slug, column: "done", position: "9" }]);
+    expect(all).toMatchObject([{ slug: stale.slug, column: "doing", position: "2" }]);
   });
 
   test("list keeps BoardCards thin row when Card point-read misses (no orphan delete)", async () => {
