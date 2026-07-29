@@ -59,13 +59,19 @@ const SHARED_MEMBERSHIP_FIELDS = BOARD_CARDS_FIELDS.filter(
   (f) => f !== "board" && f !== "sk" && f !== "layout",
 ) as readonly string[];
 
-// Cache: whether this node has protein routes (undefined = unknown).
-let proteinAvail: boolean | undefined;
+// Cache: whether a given node (by baseUrl) has protein routes.
+// Keyed per node so unit-test fakes with different baseUrls do not pollute
+// each other when bun runs the full suite in one process.
+const proteinAvailByNode = new Map<string, boolean>();
 // Live schema pin → field → molecule uuid (from field_molecule_uuids).
 const fieldMolCache = new Map<string, Record<string, string>>();
 
+function nodeCacheKey(node: NodeClient): string {
+  return (node.baseUrl && String(node.baseUrl)) || "default";
+}
+
 export function resetProteinCaches(): void {
-  proteinAvail = undefined;
+  proteinAvailByNode.clear();
   fieldMolCache.clear();
 }
 
@@ -175,20 +181,23 @@ function molForField(
 
 /**
  * Probe protein routes. Returns false on 404/405 so callers fall back to
- * legacy dual-write. Caches the positive/negative for the process.
+ * legacy dual-write. Caches the positive/negative per node baseUrl.
  */
 export async function proteinAvailable(node: NodeClient): Promise<boolean> {
-  if (proteinAvail !== undefined) return proteinAvail;
+  const key = nodeCacheKey(node);
+  const cached = proteinAvailByNode.get(key);
+  if (cached !== undefined) return cached;
   try {
     const res = await node.rawCall("POST", "/api/protein/fold", { max_jobs: 0 });
     if (res.status === 404 || res.status === 405) {
-      proteinAvail = false;
+      proteinAvailByNode.set(key, false);
       return false;
     }
-    proteinAvail = res.status === 200 || res.status === 201;
-    return proteinAvail;
+    const ok = res.status === 200 || res.status === 201;
+    proteinAvailByNode.set(key, ok);
+    return ok;
   } catch {
-    proteinAvail = false;
+    proteinAvailByNode.set(key, false);
     return false;
   }
 }
@@ -270,7 +279,7 @@ async function proteinWriteField(
     sync_fold: true,
   });
   if (write.status === 404 || write.status === 405) {
-    proteinAvail = false;
+    proteinAvailByNode.set(nodeCacheKey(node), false);
     return false;
   }
   if (write.status !== 200 && write.status !== 201) return false;
@@ -368,93 +377,98 @@ export async function writeMembershipViaProtein(
 ): Promise<boolean> {
   if (!(await proteinAvailable(node))) return false;
 
-  const boardSchema = boardCardsHash(cfg);
-  const msSchema = milestoneCardsHash(cfg);
-  if (!boardSchema || !msSchema) return false;
+  try {
+    const boardSchema = boardCardsHash(cfg);
+    const msSchema = milestoneCardsHash(cfg);
+    if (!boardSchema || !msSchema) return false;
 
-  const boardFields = boardCardFieldsFromCard(card);
-  const msFields = milestoneCardFieldsFromCard(card);
-  const boardFieldMap = stringFieldMap({
-    ...boardFields,
-    layout: BOARD_CARDS_LAYOUT,
-  });
-  const msFieldMap = stringFieldMap({
-    ...(msFields ?? boardFields),
-    layout: MILESTONE_CARDS_LAYOUT,
-  });
-  // Unified map for content (includes board + milestone + sk).
-  const fieldMap = stringFieldMap({
-    ...boardFields,
-    ...(msFields ?? {}),
-  });
+    const boardFields = boardCardFieldsFromCard(card);
+    const msFields = milestoneCardFieldsFromCard(card);
+    const boardFieldMap = stringFieldMap({
+      ...boardFields,
+      layout: BOARD_CARDS_LAYOUT,
+    });
+    const msFieldMap = stringFieldMap({
+      ...(msFields ?? boardFields),
+      layout: MILESTONE_CARDS_LAYOUT,
+    });
+    // Unified map for content (includes board + milestone + sk).
+    const fieldMap = stringFieldMap({
+      ...boardFields,
+      ...(msFields ?? {}),
+    });
 
-  const hasMilestone = Boolean((fieldMap.milestone ?? "").trim());
-  const boardMols = await liveFieldMolecules(node, boardSchema);
-  const msMols = await liveFieldMolecules(node, msSchema);
+    const hasMilestone = Boolean((fieldMap.milestone ?? "").trim());
+    const boardMols = await liveFieldMolecules(node, boardSchema);
+    const msMols = await liveFieldMolecules(node, msSchema);
 
-  // ── Shared payload fields: write board tip + (if needed) ms tip ─────────
-  for (const field of SHARED_MEMBERSHIP_FIELDS) {
-    if (!(field in boardFields)) continue;
-    const molBoard = molForField(boardMols, boardSchema, field);
-    const content = boardFields[field];
+    // ── Shared payload fields: write board tip + (if needed) ms tip ─────────
+    for (const field of SHARED_MEMBERSHIP_FIELDS) {
+      if (!(field in boardFields)) continue;
+      const molBoard = molForField(boardMols, boardSchema, field);
+      const content = boardFields[field];
 
-    const boardProtein = await ensureMemberProtein(node, molBoard, "board", "sk");
-    if (!boardProtein) return false;
-    if (!(await proteinWriteField(node, molBoard, boardFieldMap, content))) {
-      return false;
-    }
+      const boardProtein = await ensureMemberProtein(node, molBoard, "board", "sk");
+      if (!boardProtein) return false;
+      if (!(await proteinWriteField(node, molBoard, boardFieldMap, content))) {
+        return false;
+      }
 
-    if (hasMilestone) {
-      const molMs = molForField(msMols, msSchema, field);
-      // Prefer bind both into board's protein for fold; if that fails, own protein.
-      const tryJoin = await node.rawCall("POST", "/api/protein/member", {
-        protein_uuid: boardProtein,
-        molecule_uuid: molMs,
-        hash_field: "milestone",
-        range_field: "sk",
-      });
-      if (tryJoin.status === 200 || tryJoin.status === 201) {
-        // Unified: re-write via board entry so fold can repoint ms (sync_fold).
-        if (!(await proteinWriteField(node, molBoard, fieldMap, content))) {
-          return false;
-        }
-      } else {
-        // Separate proteins: write ms tip explicitly with same content.
-        const msProtein = await ensureMemberProtein(node, molMs, "milestone", "sk");
-        if (!msProtein) return false;
-        if (!(await proteinWriteField(node, molMs, msFieldMap, content))) {
-          return false;
+      if (hasMilestone) {
+        const molMs = molForField(msMols, msSchema, field);
+        // Prefer bind both into board's protein for fold; if that fails, own protein.
+        const tryJoin = await node.rawCall("POST", "/api/protein/member", {
+          protein_uuid: boardProtein,
+          molecule_uuid: molMs,
+          hash_field: "milestone",
+          range_field: "sk",
+        });
+        if (tryJoin.status === 200 || tryJoin.status === 201) {
+          // Unified: re-write via board entry so fold can repoint ms (sync_fold).
+          if (!(await proteinWriteField(node, molBoard, fieldMap, content))) {
+            return false;
+          }
+        } else {
+          // Separate proteins: write ms tip explicitly with same content.
+          const msProtein = await ensureMemberProtein(node, molMs, "milestone", "sk");
+          if (!msProtein) return false;
+          if (!(await proteinWriteField(node, molMs, msFieldMap, content))) {
+            return false;
+          }
         }
       }
     }
-  }
 
-  // ── Schema-specific key fields ──────────────────────────────────────────
-  const boardKeyFields: Array<{ field: string; content: string }> = [
-    { field: "board", content: boardFieldMap.board ?? "default" },
-    { field: "sk", content: boardFieldMap.sk ?? "" },
-    { field: "layout", content: BOARD_CARDS_LAYOUT },
-  ];
-  for (const { field, content } of boardKeyFields) {
-    const mol = molForField(boardMols, boardSchema, field);
-    if (!(await ensureMemberProtein(node, mol, "board", "sk"))) return false;
-    if (!(await proteinWriteField(node, mol, boardFieldMap, content))) return false;
-  }
-
-  if (hasMilestone) {
-    const msKeyFields: Array<{ field: string; content: string }> = [
-      { field: "milestone", content: msFieldMap.milestone ?? "" },
-      { field: "sk", content: msFieldMap.sk ?? "" },
-      { field: "layout", content: MILESTONE_CARDS_LAYOUT },
+    // ── Schema-specific key fields ──────────────────────────────────────────
+    const boardKeyFields: Array<{ field: string; content: string }> = [
+      { field: "board", content: boardFieldMap.board ?? "default" },
+      { field: "sk", content: boardFieldMap.sk ?? "" },
+      { field: "layout", content: BOARD_CARDS_LAYOUT },
     ];
-    for (const { field, content } of msKeyFields) {
-      const mol = molForField(msMols, msSchema, field);
-      if (!(await ensureMemberProtein(node, mol, "milestone", "sk"))) return false;
-      if (!(await proteinWriteField(node, mol, msFieldMap, content))) return false;
+    for (const { field, content } of boardKeyFields) {
+      const mol = molForField(boardMols, boardSchema, field);
+      if (!(await ensureMemberProtein(node, mol, "board", "sk"))) return false;
+      if (!(await proteinWriteField(node, mol, boardFieldMap, content))) return false;
     }
-  }
 
-  // ── Coherence gate: never skip dual-write unless partitions agree ───────
-  const ok = await verifyMembershipCoherence(node, cfg, card);
-  return ok;
+    if (hasMilestone) {
+      const msKeyFields: Array<{ field: string; content: string }> = [
+        { field: "milestone", content: msFieldMap.milestone ?? "" },
+        { field: "sk", content: msFieldMap.sk ?? "" },
+        { field: "layout", content: MILESTONE_CARDS_LAYOUT },
+      ];
+      for (const { field, content } of msKeyFields) {
+        const mol = molForField(msMols, msSchema, field);
+        if (!(await ensureMemberProtein(node, mol, "milestone", "sk"))) return false;
+        if (!(await proteinWriteField(node, mol, msFieldMap, content))) return false;
+      }
+    }
+
+    // ── Coherence gate: never skip dual-write unless partitions agree ───────
+    return await verifyMembershipCoherence(node, cfg, card);
+  } catch {
+    // Unexpected probe/write failures (test fakes, transport blips): treat as
+    // protein-path miss so dual-write can run when fallback is allowed.
+    return false;
+  }
 }

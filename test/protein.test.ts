@@ -6,7 +6,7 @@
  * Mini. The coherence gate must fail closed: usedProtein=true only when
  * BoardCards and MilestoneCards partitions agree on shared fields.
  */
-import { describe, expect, test, beforeEach } from "bun:test";
+import { afterAll, describe, expect, test, beforeEach } from "bun:test";
 import { createHash } from "node:crypto";
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow, RawResponse } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
@@ -22,7 +22,7 @@ import {
   SHARED_COHERENCE_FIELDS,
   writeMembershipViaProtein,
 } from "../src/protein.ts";
-import { BOARD_CARDS_LAYOUT, MILESTONE_CARDS_LAYOUT, BOARD_CARDS_FIELDS, MILESTONE_CARDS_FIELDS } from "../src/schemas.ts";
+import { BOARD_CARDS_FIELDS, MILESTONE_CARDS_FIELDS } from "../src/schemas.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
 import { boardCardSk } from "../src/board-cards.ts";
 
@@ -57,12 +57,11 @@ function card(partial: Partial<Card> = {}): Card {
     assignee: "tom",
     tags: ["protein", "t"],
     deps: ["dep-a"],
-    surfaces: ["src/**"],
     created_at: "2026-01-01T00:00:00.000Z",
     created_by: "test",
     updated_at: "2026-01-02T00:00:00.000Z",
-    done_at: "",
     ...emptyStructuredFields(),
+    surfaces: ["src/**"],
     kind: "pr",
     repo: "EdgeVector/fkanban",
     milestone: "ms-1",
@@ -123,11 +122,14 @@ function proteinFakeNode(opts?: {
     const fieldMols = schemaHash === BOARD_HASH ? boardMols : msMols;
     // Discover range keys from the sk molecule tips under this hash.
     const skMol = fieldMols.sk;
+    if (!skMol) return [];
     const skTips = tips.get(skMol);
     if (!skTips) return [];
     const rows: QueryRow[] = [];
-    for (const [k, tip] of skTips) {
-      const [h, range] = k.split("\0");
+    for (const [k] of skTips) {
+      const parts = k.split("\0");
+      const h = parts[0] ?? "";
+      const range = parts[1] ?? "";
       if (h !== hashKey) continue;
       const fieldVals: Record<string, unknown> = {};
       for (const f of fields) {
@@ -305,10 +307,10 @@ function proteinFakeNode(opts?: {
           : "";
     const results = reconstruct(q.schemaHash, q.fields, hashKey);
     return {
-      schema: q.schemaHash,
-      rowCount: results.length,
+      ok: true,
       results,
-      page: null,
+      total_count: results.length,
+      returned_count: results.length,
     };
   };
 
@@ -337,6 +339,12 @@ function proteinFakeNode(opts?: {
 
 beforeEach(() => {
   resetProteinCaches();
+});
+
+afterAll(() => {
+  resetProteinCaches();
+  delete process.env.FKANBAN_DUAL_WRITE_FALLBACK;
+  delete process.env.FKANBAN_REQUIRE_PROTEIN;
 });
 
 describe("protein multi-key helpers", () => {

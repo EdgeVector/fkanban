@@ -28,7 +28,6 @@ import {
 } from "./board-milestones.ts";
 import {
   removeMilestoneCard,
-  upsertMilestoneCard,
 } from "./milestone-cards.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {

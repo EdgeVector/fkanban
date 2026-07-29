@@ -41,6 +41,7 @@ function card(partial: Partial<Card> & { slug: string }): Card {
     block_status: partial.block_status ?? "",
     block_reason: partial.block_reason ?? "",
     db: partial.db ?? "",
+    branch: partial.branch ?? "",
     done_at: partial.done_at ?? "",
   };
 }

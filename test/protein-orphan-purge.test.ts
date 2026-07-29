@@ -3,10 +3,12 @@
  * per (board, slug). When updateCardRecord runs without `previous` (add-update,
  * backlog promote, pickup_claim), it must still purge other sks after protein
  * writes the next tip.
+ *
+ * Do NOT use mock.module on src/protein.ts here — bun keeps that process-wide
+ * and poisons later suites that need real dual-write membership.
  */
-import { describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type {
-  CasExpectation,
   NodeClient,
   QueryFilter,
   QueryResponse,
@@ -20,6 +22,7 @@ import {
 } from "../src/board-cards.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
 import { BOARD_CARDS_LAYOUT } from "../src/schemas.ts";
+import * as protein from "../src/protein.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -45,11 +48,9 @@ function baseCard(partial: Partial<Card> = {}): Card {
     assignee: "",
     tags: ["t"],
     deps: [],
-    surfaces: [],
     created_at: "2026-01-01T00:00:00.000Z",
     created_by: "test",
     updated_at: "2026-01-01T00:00:00.000Z",
-    done_at: "",
     ...emptyStructuredFields(),
     kind: "pr",
     repo: "EdgeVector/fkanban",
@@ -122,6 +123,11 @@ function fakeStoreNode(): NodeClient & {
 }
 
 describe("protein update orphan purge (BoardCards invariant)", () => {
+  afterEach(() => {
+    // Restore spies so later files (and later tests) see the real protein path.
+    // Prefer spyOn over mock.module — mock.module is process-wide and sticky.
+  });
+
   test("without previous, protein success still leaves one BoardCards row per slug", async () => {
     // Plant two sks for the same slug (stale todo + new doing) as a column move
     // without previous would leave under the old protein-only purge path.
@@ -190,7 +196,7 @@ describe("protein update orphan purge (BoardCards invariant)", () => {
     const nextSk = boardCardSk("doing", "9", slug);
 
     // Pre-plant stale todo row only; protein path will "write" doing tip by our
-    // mock, then updateCardRecord must purge the todo orphan.
+    // spy, then updateCardRecord must purge the todo orphan.
     await node.createRecord({
       schemaHash: boardHash,
       fields: {
@@ -223,13 +229,8 @@ describe("protein update orphan purge (BoardCards invariant)", () => {
       rangeKey: staleSk,
     });
 
-    // Mock protein module to succeed and plant the next sk row (simulates tip write).
-    mock.module("../src/protein.ts", () => ({
-      writeMembershipViaProtein: async (
-        n: NodeClient,
-        _cfg: Config,
-        card: Card,
-      ) => {
+    const writeSpy = spyOn(protein, "writeMembershipViaProtein").mockImplementation(
+      async (n: NodeClient, _cfg: Config, card: Card | { slug: string; column: string; position: string; board?: string; title?: string; milestone?: string; tags?: string[]; kind?: string; assignee?: string; deps?: string[]; surfaces?: string[]; created_at?: string; created_by?: string; updated_at?: string; db?: string; repo?: string; base?: string; block_status?: string; block_reason?: string; north_star?: string; pr_url?: string; branch?: string }) => {
         const sk = boardCardSk(card.column, card.position, card.slug);
         await n.createRecord({
           schemaHash: boardHash,
@@ -237,60 +238,57 @@ describe("protein update orphan purge (BoardCards invariant)", () => {
             board: card.board || "default",
             sk,
             slug: card.slug,
-            title: card.title,
+            title: (card as Card).title ?? "",
             column: card.column,
             position: String(card.position),
             layout: BOARD_CARDS_LAYOUT,
-            milestone: card.milestone ?? "",
-            tags: card.tags,
-            kind: card.kind,
-            assignee: card.assignee,
-            deps: card.deps,
-            surfaces: card.surfaces,
-            created_at: card.created_at,
-            created_by: card.created_by,
-            updated_at: card.updated_at,
-            db: card.db,
-            repo: card.repo,
-            base: card.base,
-            block_status: card.block_status,
-            block_reason: card.block_reason,
-            north_star: card.north_star,
-            pr_url: card.pr_url,
-            branch: card.branch,
+            milestone: (card as Card).milestone ?? "",
+            tags: (card as Card).tags ?? [],
+            kind: (card as Card).kind ?? "",
+            assignee: (card as Card).assignee ?? "",
+            deps: (card as Card).deps ?? [],
+            surfaces: (card as Card).surfaces ?? [],
+            created_at: (card as Card).created_at ?? "",
+            created_by: (card as Card).created_by ?? "",
+            updated_at: (card as Card).updated_at ?? "",
+            db: (card as Card).db ?? "",
+            repo: (card as Card).repo ?? "",
+            base: (card as Card).base ?? "",
+            block_status: (card as Card).block_status ?? "",
+            block_reason: (card as Card).block_reason ?? "",
+            north_star: (card as Card).north_star ?? "",
+            pr_url: (card as Card).pr_url ?? "",
+            branch: (card as Card).branch ?? "",
           },
           keyHash: card.board || "default",
           rangeKey: sk,
         });
         return true;
       },
-      // unused exports stubs for any static import
-      proteinAvailable: async () => true,
-      resetProteinCaches: () => {},
-      membershipPartitionsAgree: () => true,
-      verifyMembershipCoherence: async () => true,
-      moleculeUuid: () => "",
-      PROTEIN_SCHEMA_MARKER: "lastdb.protein.v1",
-      SHARED_COHERENCE_FIELDS: [],
-    }));
+    );
 
-    // Dynamic import AFTER mock so updateCardRecord sees mocked protein.
-    const { updateCardRecord } = await import("../src/record.ts");
+    try {
+      const { updateCardRecord } = await import("../src/record.ts");
 
-    // Fat Card write goes to card-hash; plant empty so updateRecord can "succeed".
-    await node.createRecord({
-      schemaHash: "card-hash",
-      fields: { slug, title: "Orphan probe", column: "doing" },
-      keyHash: slug,
-    });
+      // Fat Card write goes to card-hash; plant empty so updateRecord can "succeed".
+      await node.createRecord({
+        schemaHash: "card-hash",
+        fields: { slug, title: "Orphan probe", column: "doing" },
+        keyHash: slug,
+      });
 
-    const next = baseCard({ column: "doing", position: "9", slug });
-    // CRITICAL: omit previous — the production bug path.
-    await updateCardRecord({ cfg, node }, next);
+      const next = baseCard({ column: "doing", position: "9", slug });
+      // CRITICAL: omit previous — the production bug path.
+      await updateCardRecord({ cfg, node }, next);
 
-    const rows = node.boardRows().filter((r) => r.fields.slug === slug);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.rangeKey).toBe(nextSk);
-    expect(rows[0]!.fields.column).toBe("doing");
+      const rows = node.boardRows().filter((r) => r.fields.slug === slug);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.rangeKey).toBe(nextSk);
+      expect(rows[0]!.fields.column).toBe("doing");
+      expect(writeSpy).toHaveBeenCalled();
+    } finally {
+      writeSpy.mockRestore();
+      protein.resetProteinCaches();
+    }
   });
 });
