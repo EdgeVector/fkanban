@@ -124,7 +124,7 @@ async function promoteUnblockedBacklogDependents(opts: {
       if (isExpectedPromotionSkip(err)) continue;
       throw err;
     }
-    await updateCardRecord(opts, updated);
+    await updateCardRecord(opts, updated, undefined, candidate);
     promoted.push(updated.slug);
 
     const idx = cardsWithMovedDependency.findIndex((c) => c.slug === updated.slug);
