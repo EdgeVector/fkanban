@@ -286,12 +286,20 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
 };
 
 
-// Body-free rollup of all live cards (slug+metadata, no body). One Hash-keyed
-// row (`all_cards`) is patched on every card create/update/delete so list/pickup
-// never full-scan the Card schema. Declared at init as fkanban/CardListIndex.
+// Body-free rollup of all live cards (slug+metadata, no body), one Hash-keyed
+// row (`all_cards`). Declared at init as fkanban/CardListIndex.
 //
-// Prefer BoardCards (HashRange, hash=board) for list; CardListIndex remains a
-// dual-write compatibility index until boards are fully backfilled.
+// RETIRED as a write target wherever `board_cards` is bound (2026-07-28).
+// BoardCards (HashRange, hash=board) already holds the same body-free summary
+// one row per card and is the primary read path, so `all_cards` was a redundant
+// second copy rewritten IN FULL on every card mutation — 272 KB per write,
+// growing ~1.9 KB/h toward the atom-size ceiling, never dropping deleted cards,
+// and losing updates under concurrency (no CAS on the read-modify-write).
+// Full autopsy: src/card-list-index.ts.
+//
+// Reads still dual-read it while it holds entries; `groom card-list-index-retire`
+// clears the payload once BoardCards coverage is proven. The `all_boards` row on
+// this same schema is NOT retired — it is bounded by board count.
 export const CARD_LIST_INDEX_KEY = "all_cards";
 export const CARD_LIST_INDEX_FIELDS = ["key", "payload_json", "updated_at"] as const;
 
