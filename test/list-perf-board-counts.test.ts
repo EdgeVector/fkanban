@@ -513,7 +513,10 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
   });
 
-  test("--column point-reads dependency statuses for blocked metadata", async () => {
+  test("--column resolves blocked metadata without Card HashKey N+1", async () => {
+    // Hot path (list.ts): dep / 🔒 status from BoardCards rows only — never Card
+    // fan-out. Unresolved same-board or missing deps still mark blocked/blockedBy
+    // without point-reading Card by slug.
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -529,7 +532,9 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(parsed[0]!.blockedBy).toEqual(["dep-a"]);
 
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
-    expect(node.cardQueries.some((q) => q.filter?.HashKey === "dep-a")).toBe(true);
+    // No Card HashKey N+1 for any dep slug on the list hot path.
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "dep-a")).toBe(false);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey !== undefined)).toBe(false);
   });
 
   test("--column list stays thin (no per-card body hydrate without --full-body)", async () => {
