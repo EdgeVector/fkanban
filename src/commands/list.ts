@@ -15,7 +15,6 @@ import {
   listCardsByColumn,
   listCardsForDisplay,
   listCardsOnBoard,
-  listDependencyStatusesForCards,
   listMilestones,
   requireBoard,
   sortCards,
@@ -155,36 +154,70 @@ export async function listResult(
   if (opts.column !== undefined) ensureColumn(opts.column, resolvedBoard.columns);
 
   // Body-free fetch on the text path (`displayOnly`): the render + filters need
-  // CARD_DISPLAY_FIELDS, never `body`. Hot path is always board-scoped BoardCards
-  // (one HashKey / HashRangePrefix query) — never fan out empty stress boards.
-  // With --column: BoardCards prefix on this board, then point-read deps only.
-  // Without --column: this board's partition; multi-board footer uses a separate
-  // thin cross-board sample only when other boards exist.
+  // CARD_DISPLAY_FIELDS, never `body`.
+  //
+  // Latency bar (measured primary under HashGroup thrash):
+  //   - BoardCards HashRangePrefix one column ≈ 1–2s
+  //   - Full board HashKey partition ≈ 2–7s (798 rows)
+  //   - Card HashKey point-read ≈ 0.7–10s each (N+1 dep fan-out was the storm)
+  //
+  // Hot path — **no Card point-reads on list**:
+  //   - With --column: BoardCards prefix for that column. If any row has deps,
+  //     also prefix the board's terminal column so finished same-board deps
+  //     clear 🔒 without loading the whole partition or hitting Card.
+  //   - Without --column: one full board partition (all columns already present).
+  // show/move still call listDependencyStatusesForCards for authoritative checks.
   const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : fieldsFor("card");
-  const columnCards = opts.column
-    ? await listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields, boardSlug)
-    : null;
-  // Board-scoped BoardCards (one partition). Avoids querying empty stress boards.
-  // Pass visibleFields so legacy (no BoardCards hash) stubs still omit body on text path.
-  const boardCards = columnCards
-    ? null
-    : await listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);
-  const allCards = columnCards
-    ? await listDependencyStatusesForCards(opts.node, opts.cfg, columnCards)
-    : boardCards!;
-  // Terminal column per board (board slug → last column) so a dep counts as
-  // done at its OWN board's final column, not only a literal `done`. Resolved
-  // against ALL boards because blocked status spans cross-board deps below.
+  // Terminal map first — needed for dep seed column and blocked rendering.
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
-  const cards = sortCards(
-    (columnCards ?? allCards).filter(
-      (c) =>
-        c.board === boardSlug &&
-        (!opts.column || c.column === opts.column) &&
-        (!opts.tag || c.tags?.includes(opts.tag)) &&
-        (!opts.assignee || c.assignee === opts.assignee),
-    ),
-  );
+  const terminalCol = boardTerminal.get(boardSlug) ?? "done";
+
+  let boardCards: Card[];
+  let cards: Card[];
+  if (opts.column) {
+    const columnOnly = await listCardsByColumn(
+      opts.node,
+      opts.cfg,
+      opts.column,
+      visibleFields,
+      boardSlug,
+    );
+    cards = sortCards(
+      columnOnly.filter(
+        (c) =>
+          (!opts.tag || c.tags?.includes(opts.tag)) &&
+          (!opts.assignee || c.assignee === opts.assignee),
+      ),
+    );
+    if (cards.some((c) => (c.deps?.length ?? 0) > 0) && opts.column !== terminalCol) {
+      // Seed finished-dep columns without a full-board HashKey scan.
+      const terminalCards = await listCardsByColumn(
+        opts.node,
+        opts.cfg,
+        terminalCol,
+        visibleFields,
+        boardSlug,
+      );
+      const bySlug = new Map<string, Card>();
+      for (const c of columnOnly) bySlug.set(c.slug, c);
+      for (const c of terminalCards) bySlug.set(c.slug, c);
+      boardCards = [...bySlug.values()];
+    } else {
+      boardCards = columnOnly;
+    }
+  } else {
+    boardCards = await listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);
+    cards = sortCards(
+      boardCards.filter(
+        (c) =>
+          c.board === boardSlug &&
+          (!opts.tag || c.tags?.includes(opts.tag)) &&
+          (!opts.assignee || c.assignee === opts.assignee),
+      ),
+    );
+  }
+  // Dep / 🔒 status from BoardCards rows only — never Card fan-out on list.
+  const allCards = boardCards;
 
   // Resolve blocked status against ALL live cards so cross-board deps count.
   // Text render cap: an explicit `--limit` (always >= 1 after flag parsing),
@@ -212,9 +245,9 @@ export async function listResult(
   // Multi-board discoverability footer (column-text path only). Board-scoped
   // main read no longer includes other boards' cards, so one thin cross-board
   // list when rendering the default text board. Skip for --json / --wide /
-  // --column (wide never shows the footer; column is the hot single-query path).
+  // --column (wide never shows the footer; column is a focused view).
   let footer = "";
-  if (!columnCards && !opts.json && !opts.wide) {
+  if (!opts.column && !opts.json && !opts.wide) {
     const cross = await listCardsForDisplay(opts.node, opts.cfg);
     footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation());
   }

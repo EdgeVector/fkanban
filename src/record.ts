@@ -2440,16 +2440,35 @@ async function findCardWithFields(
   return card ?? null;
 }
 
+/**
+ * Resolve dep status for `cards` by merging them with optional `knownCards`
+ * (e.g. the whole BoardCards board partition) and point-reading only slugs
+ * still missing.
+ *
+ * Hot list path passes the full board partition as `knownCards` so same-board
+ * deps never pay Card HashKey point-reads (measured multi-second under
+ * HashGroup thrash). Cross-board / unknown deps still point-read.
+ */
 export async function listDependencyStatusesForCards(
   node: NodeClient,
   cfg: Config,
   cards: Card[],
+  knownCards?: Card[],
 ): Promise<Card[]> {
   const bySlug = new Map<string, Card>();
-  for (const card of cards) bySlug.set(card.slug, card);
+  for (const card of knownCards ?? []) {
+    if (card.slug) bySlug.set(card.slug, card);
+  }
+  for (const card of cards) {
+    if (card.slug) bySlug.set(card.slug, card);
+  }
 
   const depSlugs = [...new Set(cards.flatMap((c) => c.deps))].filter((slug) => !bySlug.has(slug));
-  const deps = await Promise.all(depSlugs.map((slug) => findCardWithFields(node, cfg, slug, CARD_STATUS_FIELDS)));
+  if (depSlugs.length === 0) return [...bySlug.values()];
+
+  const deps = await Promise.all(
+    depSlugs.map((slug) => findCardWithFields(node, cfg, slug, CARD_STATUS_FIELDS)),
+  );
   for (const dep of deps) {
     if (dep) bySlug.set(dep.slug, dep);
   }
