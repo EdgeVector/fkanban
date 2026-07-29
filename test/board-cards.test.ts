@@ -238,6 +238,35 @@ describe("board-cards membership integrity", () => {
     expect(listed!.some((c) => c.slug === "brand-new-card")).toBe(true);
   });
 
+  test("upsert with previous sk does not re-list the BoardCards partition (move bar)", async () => {
+    // Hot move path already deletes the known previous sk; a second full-board
+    // partition scan for multi-orphan purge was pure latency
+    // (papercut-fkanban-move-pays-whole-partition-orphan-scan).
+    const node = fakeNode();
+    const prev = card({ slug: "move-me", column: "todo", position: "1" });
+    const next = card({ slug: "move-me", column: "doing", position: "2" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board_cards!,
+      keyHash: "default",
+      rangeKey: boardCardSk(prev.column, prev.position, prev.slug),
+      fields: boardCardFieldsFromCard(prev),
+    });
+    let partitionQueries = 0;
+    const origQuery = node.queryAll.bind(node);
+    node.queryAll = async (args: Parameters<typeof node.queryAll>[0]) => {
+      const f = args.filter as { HashKey?: string } | undefined;
+      if (f && typeof f === "object" && "HashKey" in f && f.HashKey === "default") {
+        partitionQueries += 1;
+      }
+      return origQuery(args);
+    };
+    await upsertBoardCard(node, cfgWithBoardCards, next, prev);
+    expect(partitionQueries).toBe(0);
+    const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
+    expect(listed).toHaveLength(1);
+    expect(listed![0]!.column).toBe("doing");
+  });
+
   test("listAllBoardCards prefers fresher when duplicates exist", async () => {
     const node = fakeNode();
     const doing = card({ column: "doing", position: "1", updated_at: "2026-01-01T00:00:00.000Z" });

@@ -202,20 +202,18 @@ export async function upsertBoardCard(
     const prevBoard = previous.board || "default";
     const prevSk = boardCardSk(previous.column, previous.position, previous.slug);
     if (prevBoard !== nextBoard || prevSk !== nextSk) {
+      // Targeted delete of the known previous sk only. A whole-partition
+      // orphan scan here (purgeOtherBoardCardRows) re-lists every BoardCards
+      // row on the board on every move/tag — multi-second under HashGroup
+      // thrash (papercut-fkanban-move-pays-whole-partition-orphan-scan).
+      // Multi-orphan drift is repaired by `groom board-cards-heal`, not the
+      // hot write path.
       await deleteBoardCardSk(node, schemaHash, prevBoard, prevSk);
-    }
-    // Board transfer: drop any leftover rows for this slug on the old board.
-    if (prevBoard !== nextBoard && previous.slug && !opts.skipOrphanPurge) {
-      await purgeOtherBoardCardRows(node, cfg, prevBoard, previous.slug, null);
-    }
-    // Column/position change: also purge any other sks on the next board
-    // (covers multi-orphan rows left by older clients).
-    if ((prevSk !== nextSk || prevBoard !== nextBoard) && !opts.skipOrphanPurge) {
-      await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
     }
   } else if (!opts.skipOrphanPurge) {
     // No previous sk: callers that omit it (legacy/add/metadata) can leave
     // orphan column#pos rows. Scan once and drop every sk except nextSk.
+    // Brand-new creates pass skipOrphanPurge (createCardRecord).
     await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
   }
 
