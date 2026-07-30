@@ -28,6 +28,7 @@ import {
 } from "./board-milestones.ts";
 import {
   removeMilestoneCard,
+  upsertMilestoneCard,
 } from "./milestone-cards.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
@@ -2960,17 +2961,28 @@ export async function createCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  // Multi-key membership: protein binds BoardCards ↔ MilestoneCards (shared
-  // atoms + fold). Dual-write only when protein is unavailable/fails AND
-  // dual-write fallback is allowed (see protein dualWriteFallbackEnabled).
-  const { writeMembershipViaProtein, applyMembershipAfterProtein } = await import(
-    "./protein.ts"
-  );
-  const usedProtein = await writeMembershipViaProtein(opts.node, opts.cfg, card);
-  if (usedProtein) return;
-  await applyMembershipAfterProtein(opts.node, opts.cfg, card, null, {
-    skipOrphanPurge: true,
-  });
+  await writeCardMembership(opts, card, null, { skipOrphanPurge: true });
+}
+
+/**
+ * State the keyed membership rows this card should have.
+ *
+ * Multi-key coherence is the node's job, not ours: LastDB recognises BoardCards
+ * and MilestoneCards as one product under two keys, binds their matching fields
+ * into proteins on schema load, and folds a write on one key onto the other's
+ * tip. fkanban used to drive that itself through `/api/protein/*` — creating
+ * proteins, binding members, ordering folds, and verifying partitions agreed
+ * afterwards — which put a storage-layer invariant in application code and made
+ * every app that wanted a second key reimplement it. Those routes are gone.
+ */
+async function writeCardMembership(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+  previous: Card | null,
+  writeOpts: { skipOrphanPurge?: boolean } = {},
+): Promise<void> {
+  await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
+  await upsertMilestoneCard(opts.node, opts.cfg, card, previous);
 }
 
 export async function updateCardRecord(
@@ -2982,76 +2994,7 @@ export async function updateCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "updateRecord", expected);
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  const { writeMembershipViaProtein, applyMembershipAfterProtein } = await import(
-    "./protein.ts"
-  );
-  const usedProtein = await writeMembershipViaProtein(opts.node, opts.cfg, card);
-  if (!usedProtein) {
-    await applyMembershipAfterProtein(opts.node, opts.cfg, card, previous ?? null);
-    return;
-  }
-  // Protein wrote the new multi-key tips but does not delete old key slots.
-  // Mirror upsertBoardCard / upsertMilestoneCard purge policy so the invariant
-  // "at most one BoardCards row per (board, slug)" holds even when callers
-  // omit `previous` (add-update, backlog promote, pickup_claim).
-  const { purgeOtherBoardCardRows, boardCardSk, boardCardsHash } = await import(
-    "./board-cards.ts"
-  );
-  const {
-    purgeOtherMilestoneCardRows,
-    milestoneCardsHash,
-    milestoneCardSk,
-  } = await import("./milestone-cards.ts");
-  const boardHash = boardCardsHash(opts.cfg);
-  const msHash = milestoneCardsHash(opts.cfg);
-  const nextBoard = card.board || "default";
-  const nextSk = boardCardSk(card.column, card.position, card.slug);
-  const nextMs = (card.milestone ?? "").trim();
-
-  if (previous) {
-    const prevBoard = previous.board || "default";
-    const prevSk = boardCardSk(previous.column, previous.position, previous.slug);
-    if (boardHash && (prevBoard !== nextBoard || prevSk !== nextSk)) {
-      try {
-        await opts.node.deleteRecord({
-          schemaHash: boardHash,
-          keyHash: prevBoard,
-          rangeKey: prevSk,
-        });
-      } catch {
-        // best-effort; purge scan below catches residuals
-      }
-    }
-    // Board transfer: drop leftovers for this slug on the old board.
-    if (prevBoard !== nextBoard && previous.slug) {
-      await purgeOtherBoardCardRows(opts.node, opts.cfg, prevBoard, previous.slug, null);
-    }
-    const prevMs = (previous.milestone ?? "").trim();
-    if (msHash && prevMs) {
-      const prevMsSk = milestoneCardSk(previous.column, previous.position, previous.slug);
-      if (prevMs !== nextMs || prevMsSk !== nextSk) {
-        try {
-          await opts.node.deleteRecord({
-            schemaHash: msHash,
-            keyHash: prevMs,
-            rangeKey: prevMsSk,
-          });
-        } catch {
-          // best-effort
-        }
-      }
-      if (prevMs !== nextMs) {
-        await purgeOtherMilestoneCardRows(opts.node, opts.cfg, prevMs, card.slug, null);
-      }
-    }
-  }
-
-  // Always: keep only nextSk for this slug on the destination partitions —
-  // covers omitted-previous callers and residual multi-orphan rows.
-  await purgeOtherBoardCardRows(opts.node, opts.cfg, nextBoard, card.slug, nextSk);
-  if (msHash && nextMs) {
-    await purgeOtherMilestoneCardRows(opts.node, opts.cfg, nextMs, card.slug, nextSk);
-  }
+  await writeCardMembership(opts, card, previous ?? null);
 }
 
 /** Remove Card + dual indexes (BoardCards + CardListIndex + MilestoneCards). */
