@@ -15,6 +15,7 @@ import {
   assertDepUnblocked,
   assertLivePrMilestone,
   assertPrWorkBrief,
+  assertUnlessAlreadyViolating,
   sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
   BLOCK_STATUSES,
@@ -326,17 +327,48 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       },
       warn: suppressDefaultTodoWarning(updated, opts.force) ? () => {} : undefined,
     });
+    // Lane guards, applied as ENTRY guards (assertUnlessAlreadyViolating): an
+    // update that leaves the card where it is and does not introduce a new
+    // violation must stay writable, or a card the board damaged can never be
+    // repaired. Anything that moves the card is still fully enforced.
+    const placementUnchanged = existing.board === updated.board && existing.column === updated.column;
     // Kind:pr: reject empty shells everywhere; require GOAL+END STATE in default/todo.
-    assertPrWorkBrief(updated.slug, updated.kind, rawBody, opts.force, {
-      board: updated.board,
-      column: updated.column,
-    });
-    assertLivePrMilestone(updated, opts.force, {
-      milestoneState: resolvedMilestoneState,
-      enforce: opts.cfg.enforceLivePrMilestone === true,
-    });
+    assertUnlessAlreadyViolating(
+      placementUnchanged,
+      () =>
+        assertPrWorkBrief(updated.slug, updated.kind, rawBody, opts.force, {
+          board: updated.board,
+          column: updated.column,
+        }),
+      () =>
+        assertPrWorkBrief(existing.slug, existing.kind, existing.body, opts.force, {
+          board: existing.board,
+          column: existing.column,
+        }),
+    );
+    assertUnlessAlreadyViolating(
+      placementUnchanged,
+      () =>
+        assertLivePrMilestone(updated, opts.force, {
+          milestoneState: resolvedMilestoneState,
+          enforce: opts.cfg.enforceLivePrMilestone === true,
+        }),
+      () =>
+        assertLivePrMilestone(existing, opts.force, {
+          // Only reuse the resolved state when the write keeps the SAME
+          // milestone. Swapping one abandoned milestone for another is a new
+          // violation, not a pre-existing one.
+          milestoneState:
+            (existing.milestone ?? "") === (updated.milestone ?? "") ? resolvedMilestoneState : "",
+          enforce: opts.cfg.enforceLivePrMilestone === true,
+        }),
+    );
     sanitizeDefaultTodoLaneMetadata(updated);
-    assertDefaultTodoPickupReady(updated, opts.force, rawBody);
+    assertUnlessAlreadyViolating(
+      placementUnchanged,
+      () => assertDefaultTodoPickupReady(updated, opts.force, rawBody),
+      () => assertDefaultTodoPickupReady({ ...existing }, opts.force, existing.body),
+    );
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
     await checkpointCardCompletion({
