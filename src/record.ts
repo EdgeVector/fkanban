@@ -2643,6 +2643,31 @@ export async function findCard(node: NodeClient, cfg: Config, slug: string): Pro
   return findCardWithFields(node, cfg, slug, fieldsFor("card"));
 }
 
+/**
+ * Does a Card record exist for `slug`? Projects `slug` and nothing else.
+ *
+ * Every other card read projects ~20 fields, and LastDB returns a row only if
+ * EVERY projected field has an atom on it — so a card missing one field reads
+ * as ABSENT, with no error to distinguish it from a card that was deleted.
+ * Anywhere that merely asks "does this exist?" that is a false negative, and
+ * where the answer authorizes a DELETE it is a false negative that destroys
+ * data: `board-cards-heal` treats a missed point-read as proof the card is
+ * gone and reaps its board membership, which would silently drop a live card
+ * off the board.
+ *
+ * `slug` is the hash key, so it is present on every row that exists at all.
+ * This read cannot produce that false negative. Use it to CONFIRM absence
+ * before acting on absence — never to fetch a card.
+ */
+export async function cardExists(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+): Promise<boolean> {
+  const cards = await listCardsWithFields(node, cfg, ["slug"], { HashKey: slug });
+  return cards.some((c) => c.slug === slug);
+}
+
 function cardListProjectionFields(fields: string[]): string[] {
   const bodyFree = fields.filter((field) => field !== "body");
   return withRequiredFields(bodyFree, [
