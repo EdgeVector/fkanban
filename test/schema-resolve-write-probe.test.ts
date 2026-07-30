@@ -36,8 +36,22 @@ const OLD_FIELDS = [
   "updated_at",
 ];
 
-function loaded(name: string, fields: string[]): LoadedSchema {
-  return { name, descriptive_name: "Card", owner_app_id: "fkanban", fields };
+function loaded(
+  name: string,
+  fields: string[],
+  opts: {
+    descriptive_name?: string;
+    key?: { hash_field: string; range_field: string | null } | null;
+  } = {},
+): LoadedSchema {
+  return {
+    name,
+    descriptive_name: opts.descriptive_name ?? "Card",
+    owner_app_id: "fkanban",
+    fields,
+    // Entities are Hash-keyed by `slug` unless a test says otherwise.
+    key: opts.key === undefined ? { hash_field: "slug", range_field: null } : opts.key,
+  };
 }
 
 describe("resolveLoadedSchema (field-superset preference)", () => {
@@ -85,9 +99,9 @@ describe("resolveLoadedSchema (field-superset preference)", () => {
     // Wrong owner / wrong descriptive_name do not match.
     expect(
       resolveLoadedSchema("card", [
-        { name: "x", descriptive_name: "Card", owner_app_id: "other", fields: fieldsFor("card") },
-        { name: "y", descriptive_name: "Board", owner_app_id: "fkanban", fields: fieldsFor("card") },
-      ]).kind,
+        loaded("x", fieldsFor("card")),
+        loaded("y", fieldsFor("card"), { descriptive_name: "Board" }),
+      ].map((s, i) => (i === 0 ? { ...s, owner_app_id: "other" } : s))).kind,
     ).toBe("missing");
   });
 
@@ -97,6 +111,71 @@ describe("resolveLoadedSchema (field-superset preference)", () => {
       loaded("anotherfullhash", fieldsFor("card")),
     ]);
     expect(r.kind === "ok" && r.ambiguous).toBe(true);
+  });
+});
+
+// Regression: an entity must not resolve to its own membership index.
+//
+// The 2026-07-23 multi-key expand registered `MilestoneCards` under
+// descriptive_name `Milestone`, so the live primary carries two `fkanban/Milestone`
+// schemas: the Hash `slug` entity (15 fields) and the HashRange `milestone/sk`
+// index (30 fields). A membership index PROJECTS the entity's fields and adds its
+// own, so it is a strict field superset BY CONSTRUCTION and wins the widest-superset
+// contest every time. Measured on the primary 2026-07-30: `Milestone` resolved to
+// the index `69e7…` over the correctly-pinned entity `614c…`, so `kanban doctor`
+// reported a healthy config as wrong and advised `kanban init` — a remedy that
+// cannot change the outcome, since `init` declares by definition and gets `614c…`
+// back. Only the key layout separates them.
+describe("resolveLoadedSchema (entity vs. its own membership index)", () => {
+  const REAL_MILESTONE = "614c4f47";
+  const MILESTONE_CARDS_INDEX = "69e76079";
+
+  // The real primary's shape: the index carries every entity field plus its own,
+  // and sorts EARLIER in the node's listing (position 55 vs 1060).
+  const entity = loaded(REAL_MILESTONE, fieldsFor("milestone"), {
+    descriptive_name: "Milestone",
+    key: { hash_field: "slug", range_field: null },
+  });
+  const index = loaded(
+    MILESTONE_CARDS_INDEX,
+    [...fieldsFor("milestone"), "sk", "layout", "milestone", "column", "repo", "kind"],
+    { descriptive_name: "Milestone", key: { hash_field: "milestone", range_field: "sk" } },
+  );
+
+  test("the index really is a strict field superset (the reason fields cannot decide)", () => {
+    for (const f of fieldsFor("milestone")) expect(index.fields).toContain(f);
+    expect(index.fields.length).toBeGreaterThan(entity.fields.length);
+  });
+
+  test("resolves to the Hash-keyed entity, not the HashRange index listed first", () => {
+    const r = resolveLoadedSchema("milestone", [index, entity]);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.hash).toBe(REAL_MILESTONE);
+      // Only one candidate survives the layout filter, so nothing is ambiguous.
+      expect(r.ambiguous).toBe(false);
+    }
+  });
+
+  test("order-independent: entity first also resolves to the entity", () => {
+    const r = resolveLoadedSchema("milestone", [entity, index]);
+    expect(r.kind === "ok" && r.hash).toBe(REAL_MILESTONE);
+  });
+
+  test("a differently-keyed schema is not a candidate at all, not merely outranked", () => {
+    // With ONLY the index loaded the entity is genuinely absent. It must report
+    // `missing` — never `ok` pointing at the index, and never `narrower` (which
+    // would invite adopting an index as the write target).
+    expect(resolveLoadedSchema("milestone", [index]).kind).toBe("missing");
+  });
+
+  test("a node that omits key layouts keeps the pre-layout behavior", () => {
+    // Older nodes report no `key`. Unknown must not read as mismatched, or every
+    // schema would resolve to `missing` on such a node.
+    const r = resolveLoadedSchema("milestone", [
+      loaded(REAL_MILESTONE, fieldsFor("milestone"), { descriptive_name: "Milestone", key: null }),
+    ]);
+    expect(r.kind === "ok" && r.hash).toBe(REAL_MILESTONE);
   });
 });
 

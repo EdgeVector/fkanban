@@ -172,19 +172,37 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         continue;
       }
       // The config hash IS loaded. Is it the write-compatible version?
-      if (resolution.kind === "ok" && resolution.hash !== configHash) {
+      const pinnedIsNotResolved = resolution.kind === "ok" && resolution.hash !== configHash;
+      if (pinnedIsNotResolved) {
         check(
           false,
           `${OWNER_APP_ID}/${descriptive} config hash is the writable version`,
           `config is pinned to ${configHash} but the node's write-compatible ${descriptive} is ${resolution.hash} — run \`kanban init\` to adopt it`,
         );
-        continue;
+      } else {
+        check(true, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, configHash);
       }
-      check(true, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, configHash);
+
+      // Ambiguity is a real finding, not a detail to drop: it means several
+      // loaded schemas share this identity AND are all write-compatible, so the
+      // one picked came from node listing order. Report it either way.
+      if (resolution.kind === "ok" && resolution.ambiguous) {
+        info(
+          `${OWNER_APP_ID}/${descriptive} resolution is ambiguous`,
+          `several loaded schemas match ${descriptive} and all accept a full-field write; resolved to ${resolution.hash} by node listing order`,
+        );
+      }
 
       // Write-probe the configured hash — the actual "can the board be written?"
       // signal. A red here is the #94 outage made visible (instead of a green
       // doctor over a write-broken board).
+      //
+      // This runs even when the resolution check above FAILED. It used to
+      // `continue` past it, which meant a schema whose resolution looked wrong
+      // never got the one check that answers the question that matters — so a
+      // FALSE resolution failure silently disabled the real #94 detector for
+      // that schema. The configured hash is what every write actually targets,
+      // so probing it is most valuable precisely when resolution is in doubt.
       const probe = await probeSchemaWritable(node, configHash!, entry.key);
       check(
         probe.writable,
