@@ -24,6 +24,47 @@ function isCreatedByFieldMiss(err: unknown): boolean {
     err.message.includes("created_by");
 }
 
+/**
+ * The membership SPINE: the only fields a BoardCards row is guaranteed to
+ * carry, because `board` is the partition, `sk` is the range key, and
+ * column/position/slug are the three components `sk` is built from.
+ *
+ * Why this exists — LastDB projection semantics (measured on the primary,
+ * 2026-07-30). A query returns a row only if EVERY projected field has an
+ * atom on that row. A field missing from the *schema* is a loud
+ * `unknown_fields` error (see `isCreatedByFieldMiss`); a field missing from a
+ * *row* is a SILENT DROP of the whole row — no error, no null, the row simply
+ * is not in `results`.
+ *
+ * That bit us for real: the 2026-07-23 multi-key catalog expand added
+ * `milestone` to this index and never backfilled it, so on the live board
+ * `HashKey=default` returned 896 rows projecting `slug` and 761 projecting
+ * `slug,milestone`. The 135-row difference was invisible to every wide read —
+ * including `board-cards-heal`, whose whole job is to reap orphan rows and
+ * which therefore reported `missing_card: 0` while 58 orphans sat in the
+ * partition it had just enumerated.
+ *
+ * So: anything that must see EVERY row (reconcilers, orphan reaping, parity
+ * checks) reads the spine. Display paths keep the wide projection — a card
+ * missing a display field is worth hiding, a row missing one is not worth
+ * losing.
+ */
+export const BOARD_CARDS_SPINE_FIELDS = [
+  "board",
+  "sk",
+  "slug",
+  "column",
+  "position",
+] as const;
+
+export type BoardCardSpineRow = {
+  board: string;
+  sk: string;
+  slug: string;
+  column: string;
+  position: string;
+};
+
 /** Sort key: column#pos(8)#slug — ordered, column-prefix filterable. */
 export function boardCardSk(column: string, position: string | number, slug: string): string {
   const pos = String(position).padStart(8, "0");
@@ -290,6 +331,53 @@ export async function listBoardCardsPartition(
     .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
     .filter((c) => c.slug.length > 0)
     .filter((c) => !column || c.column === column);
+}
+
+/**
+ * Every row in a board partition, projecting only {@link BOARD_CARDS_SPINE_FIELDS}.
+ *
+ * This is the drop-free read. `listBoardCardsPartition` projects all 24 fields
+ * and silently loses any row missing one of them; this one cannot, because a
+ * row that lacks a spine field could not have been keyed into the partition in
+ * the first place. Use it wherever "did I see every row?" is the question.
+ */
+export async function listBoardCardsPartitionSpine(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  opts?: { column?: string },
+): Promise<BoardCardSpineRow[] | null> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash) return null;
+  const column = opts?.column?.trim();
+  const filter = (
+    column && column.length > 0
+      ? { HashRangePrefix: { hash: board, prefix: `${column}#` } }
+      : { HashKey: board }
+  ) as QueryFilter;
+  const res = await node.queryAll({
+    schemaHash,
+    fields: [...BOARD_CARDS_SPINE_FIELDS],
+    filter,
+  });
+  const out: BoardCardSpineRow[] = [];
+  for (const r of res.results) {
+    const f = r.fields as Record<string, unknown>;
+    const sk = typeof f.sk === "string" ? f.sk : "";
+    // `sk` is the authority for column/position/slug — the copied scalar
+    // fields can drift, the range key cannot (it IS the row's address).
+    const parsed = parseBoardCardSk(sk);
+    const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
+    if (slug.length === 0) continue;
+    out.push({
+      board: (typeof f.board === "string" && f.board) || board,
+      sk,
+      slug,
+      column: parsed?.column ?? (typeof f.column === "string" ? f.column : ""),
+      position: parsed?.position ?? String(f.position ?? ""),
+    });
+  }
+  return out;
 }
 
 /**

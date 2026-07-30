@@ -12,7 +12,12 @@ import { listBoards, listCards, findCard, probeSchemaWritable } from "../record.
 import {
   MEMBERSHIP_KEY_EXPECTATIONS,
   checkMembershipKeyLayout,
+  checkProjectionParity,
 } from "../membership_schema_guard.ts";
+import {
+  listBoardCardsPartition,
+  listBoardCardsPartitionSpine,
+} from "../board-cards.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveLoadedSchema } from "../schemas.ts";
 
 // A single machine-readable health check. `pass`/`fail` checks flip `ok`;
@@ -232,6 +237,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
             range_field: detail.key.range_field,
           },
           exp.expected,
+          exp.alsoAccepts ?? [],
         );
         check(
           result.ok,
@@ -250,6 +256,48 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     }
   } else {
     info("membership key layout checks skipped", "node client has no getSchema");
+  }
+
+  // BoardCards projection parity — the check that catches silent row loss.
+  //
+  // Key layout above is metadata; this is behaviour, and behaviour is what the
+  // board actually serves. Two things it proves that nothing else does:
+  //
+  //   1. The board partition ANSWERS. That is the real question the key-layout
+  //      check was reaching for, and it survives a multi-key expand that moves
+  //      the catalog's reported hash_field.
+  //   2. The wide projection sees every row the spine sees. LastDB drops a row
+  //      from a result set when any projected field has no atom on it — with no
+  //      error — so a card can fall out of list/pickup/overlap while every
+  //      other check stays green. On 2026-07-30 that was 58 rows on the live
+  //      board, and `board-cards-heal` reported missing_card: 0 because it was
+  //      reading through the same lossy projection.
+  try {
+    const boards = await listBoards(node, cfg);
+    for (const b of boards) {
+      const spine = await listBoardCardsPartitionSpine(node, cfg, b.slug);
+      if (spine === null) {
+        info(`BoardCards partition probe (${b.slug})`, "board_cards not bound — skipped");
+        continue;
+      }
+      const wide = await listBoardCardsPartition(node, cfg, b.slug);
+      if (wide === null) {
+        check(false, `BoardCards partition probe (${b.slug})`, "wide partition read returned no result");
+        continue;
+      }
+      const wideSlugs = new Set(wide.map((c) => c.slug));
+      const droppedSlugs = [...new Set(spine.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
+      const parity = checkProjectionParity(spine.length, wide.length, droppedSlugs);
+      check(
+        parity.ok,
+        `BoardCards projection parity (${b.slug})`,
+        parity.ok
+          ? `${parity.rows} rows, spine agrees`
+          : parity.reason,
+      );
+    }
+  } catch (err) {
+    check(false, "BoardCards projection parity", formatDoctorError(err));
   }
 
   // Multi-field Card smoke: point-read one live card and require more than slug.

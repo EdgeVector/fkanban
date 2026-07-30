@@ -12,11 +12,13 @@ import {
   boardCardFieldsFromCard,
   boardCardSk,
   listBoardCardsPartition,
+  listBoardCardsPartitionSpine,
   removeBoardCard,
   upsertBoardCard,
 } from "../board-cards.ts";
 import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "../card-list-index.ts";
 import {
+  cardExists,
   findCardSummaryForReconcile,
   listBoards,
   scanCardSummariesForReconcile,
@@ -223,14 +225,68 @@ export async function boardCardsHealResult(
     const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug);
     if (!part) continue;
     enumeratedBoards.add(b.slug);
+    const seenSk = new Set<string>();
     for (const c of part) {
       if (slugFilter && !slugFilter.has(c.slug)) continue;
+      seenSk.add(`${c.board || b.slug}\0${boardCardSk(c.column, c.position, c.slug)}`);
       rawRows.push({
         board: c.board || b.slug,
         column: c.column,
         position: String(c.position),
         slug: c.slug,
         full: c,
+      });
+    }
+
+    // SPARSE ROWS. The wide read above projects all 24 BoardCards fields, and
+    // LastDB drops any row missing even one of them — silently, with no error
+    // (see BOARD_CARDS_SPINE_FIELDS). So a row that predates a field the
+    // catalog later added is invisible to the wide read, and heal — the ONLY
+    // path allowed to delete orphans — could never see the orphans it exists
+    // to reap. Measured on the live board 2026-07-30: 58 orphan rows present,
+    // `missing_card: 0` reported.
+    //
+    // The spine read cannot drop rows, so it closes the gap. Each sparse row
+    // then falls through the SAME decision below as any other: no Card truth →
+    // delete-orphan; Card truth present → thin-field drift → upsert, which
+    // rewrites the row with every field and backfills what it was missing.
+    const spine = await listBoardCardsPartitionSpine(opts.node, opts.cfg, b.slug);
+    if (!spine) continue;
+    for (const s of spine) {
+      if (slugFilter && !slugFilter.has(s.slug)) continue;
+      const board = s.board || b.slug;
+      if (seenSk.has(`${board}\0${s.sk}`)) continue;
+      rawRows.push({
+        board,
+        column: s.column,
+        position: s.position,
+        slug: s.slug,
+        // Deliberately empty beyond the spine: this row's other fields are
+        // genuinely absent on the node, so an empty `full` is the truthful
+        // projection. Drift comparison will see it and rewrite from Card.
+        full: thinCard({
+          slug: s.slug,
+          title: "",
+          body: "",
+          board,
+          column: s.column,
+          position: s.position,
+          assignee: "",
+          tags: [],
+          deps: [],
+          surfaces: [],
+          created_at: "",
+          updated_at: "",
+          db: "",
+          repo: "",
+          base: "",
+          kind: "",
+          block_status: "",
+          block_reason: "",
+          north_star: "",
+          pr_url: "",
+          branch: "",
+        }),
       });
     }
   }
@@ -274,6 +330,36 @@ export async function boardCardsHealResult(
     const point = truthBySlug.get(slug) ?? null;
     if (!point) {
       if (rows.length === 0) continue;
+
+      // CONFIRM the absence before reaping. The point-read above projects ~20
+      // card fields, and LastDB drops a row from a result set when any
+      // projected field has no atom on it — so "no rows" means EITHER the card
+      // is gone OR it is alive and merely sparse. Those two are
+      // indistinguishable from a wide read, and this branch deletes board
+      // membership: guessing wrong takes a live card off the board.
+      //
+      // `cardExists` projects the hash key alone, so it cannot false-negative.
+      // If it says the card is there, the row is not an orphan — it is a live
+      // card whose Card record is missing a field, which the upsert path
+      // repairs rather than deletes.
+      if (await cardExists(opts.node, opts.cfg, slug)) {
+        for (const row of rows) {
+          actions.push({
+            slug,
+            board,
+            list_column: row.column,
+            list_position: row.position,
+            truth_column: null,
+            truth_position: null,
+            action: "noop-match",
+            reason:
+              "card is present on a slug-only read but absent from the wide " +
+              "projection — sparse Card record, NOT an orphan; refusing to delete membership",
+          });
+        }
+        continue;
+      }
+
       missing_card += 1;
       drifted += 1;
       for (const row of rows) {
