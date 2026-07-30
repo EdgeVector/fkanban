@@ -596,7 +596,11 @@ export type LoadedSchemaCandidate = {
 };
 
 export type SchemaResolution =
-  | { kind: "ok"; hash: string; ambiguous: boolean }
+  // `hash` is the RANKED-BEST write target; `compatible` is every write target,
+  // so a caller holding a pinned hash can ask "is mine acceptable?" instead of
+  // "is mine the one you picked?". Those are different questions and only the
+  // first one has a stable answer — see `resolveLoadedSchema` step 2.
+  | { kind: "ok"; hash: string; ambiguous: boolean; compatible: string[] }
   | { kind: "missing" }
   | { kind: "narrower"; hash: string; missingFields: string[] };
 
@@ -616,9 +620,10 @@ export type SchemaResolution =
 //      index under descriptive_name `Milestone`, so the node carries a HashRange
 //      `milestone/sk` schema and the Hash `slug` entity under one name.
 //   2. Among those, PREFER a schema whose `fields` SUPERSET the local definition
-//      (so a write of every local field is accepted). If several do, that's
-//      benign ambiguity (they're all write-compatible) — pick the first and flag
-//      `ambiguous` so the caller can warn.
+//      (so a write of every local field is accepted). If several do, return them
+//      ALL in `compatible`, rank them deterministically, and flag `ambiguous` so
+//      the caller can warn. The ranking is widest field set first, then hash
+//      ascending — never the node's listing order (see below).
 //   3. If NONE supersets the local fields, the only candidates are narrower than
 //      the app expects — return `narrower` with the missing fields so the caller
 //      refuses to adopt it (rather than silently pinning a write-broken hash).
@@ -639,6 +644,18 @@ export type SchemaResolution =
 // this record type; it is a DIFFERENT record type that happens to share a name,
 // and it can never be a write target for these keys. So it is excluded from the
 // candidate set entirely rather than ranked within it.
+//
+// Step 2's tiebreak must NOT be the node's listing order, because that order is
+// not stable across restarts. Measured on the primary: six `fkanban/Card`
+// schemas are loaded (10/18/19/21/22/23 fields), all Hash/`slug`, and the
+// required Card field set is 19 of 23 (four are optional), so FOUR of them are
+// write-compatible. Before the 2026-07-30T21:58Z restart the configured 23-field
+// `bc941d…` happened to sort first and `superset[0]` was right by luck; after the
+// restart the 19-field `eacad7…` sorted first (position 450 vs 576) and `doctor`
+// hard-FAILED (exit 1) on a board whose writes were never broken for a moment —
+// gating the Factory LaunchAgents on a coin flip that a restart re-tossed.
+// Ranking widest-first, then hash ascending, gives the same answer on every node
+// with the same schema set, and prefers the most capable write target.
 //
 // When the node omits `key` (older nodes) every candidate has `key == null` and
 // the layout filter admits everything — preserving the pre-existing behavior
@@ -683,11 +700,18 @@ export function resolveLoadedSchema(
   );
   if (candidates.length === 0) return { kind: "missing" };
 
-  const superset = candidates.filter((s) =>
-    localFields.every((f) => s.fields.includes(f)),
-  );
+  // Widest field set first, then hash ascending. Deterministic given the same
+  // candidate set, regardless of the order the node listed them in.
+  const superset = candidates
+    .filter((s) => localFields.every((f) => s.fields.includes(f)))
+    .sort((a, b) => b.fields.length - a.fields.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   if (superset.length > 0) {
-    return { kind: "ok", hash: superset[0]!.name, ambiguous: superset.length > 1 };
+    return {
+      kind: "ok",
+      hash: superset[0]!.name,
+      ambiguous: superset.length > 1,
+      compatible: superset.map((s) => s.name),
+    };
   }
 
   // No write-compatible candidate. Report the BEST (widest) narrower one and the

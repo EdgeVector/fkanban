@@ -8,6 +8,7 @@ import {
   MILESTONE_STATES,
   ensureBoardRecord,
   boardTerminalMap,
+  cardExists,
   depStatus,
   findCard,
   findMilestone,
@@ -167,7 +168,14 @@ async function validateLinks(opts: MilestoneAddOptions, milestone: Milestone): P
       });
     }
   }
-  if (milestone.proof_card && !(await findCard(opts.node, opts.cfg, milestone.proof_card))) {
+  // Existence is a KEY-ONLY question, so ask it with a key-only read. `findCard`
+  // projects ~20 fields, and a LastDB keyed query returns a row only when EVERY
+  // projected field has an atom on it — so one missing field makes a live card
+  // read as ABSENT, indistinguishable from deleted. Gating a write on that
+  // false-negative made a live-but-sparse proof card unlinkable, with an error
+  // sending the operator to look for a card sitting right there. `cardExists`
+  // projects `slug` alone and cannot false-negative.
+  if (milestone.proof_card && !(await cardExists(opts.node, opts.cfg, milestone.proof_card))) {
     throw new FkanbanError({
       code: "milestone_proof_card_not_found",
       message: `Proof card "${milestone.proof_card}" not found.`,
@@ -189,8 +197,26 @@ async function proofGate(
       hint: "Link a live validation card with --proof-card, then retry.",
     });
   }
+  // This one genuinely needs the fields (board/milestone/kind below), so it stays
+  // a wide read — but a wide read that MISSES must not be reported as "not
+  // found". Confirm absence with a key-only read first, so a sparse card gets an
+  // error that names the real problem instead of sending the operator hunting for
+  // a card that is right there.
   const proof = await findCard(opts.node, opts.cfg, milestone.proof_card);
   if (!proof) {
+    if (await cardExists(opts.node, opts.cfg, milestone.proof_card)) {
+      throw new FkanbanError({
+        code: "milestone_proof_card_unreadable",
+        message: `Proof card "${milestone.proof_card}" exists but could not be read in full.`,
+        hint:
+          "The card is missing one or more indexed fields, so the wide read that gates this" +
+          " transition drops it. Repair it with `kanban show " +
+          milestone.proof_card +
+          "` then re-save the card, or run `kanban groom board-cards-heal --slug " +
+          milestone.proof_card +
+          " --apply`.",
+      });
+    }
     throw new FkanbanError({
       code: "milestone_proof_card_not_found",
       message: `Proof card "${milestone.proof_card}" not found.`,
@@ -338,7 +364,11 @@ export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeCl
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
   const boards = await listBoards(opts.node, opts.cfg);
   const proofCard = milestone.proof_card ? await findCard(opts.node, opts.cfg, milestone.proof_card) : null;
-  const result = milestoneReconcileFromSnapshot(milestone, children, statuses, boards, proofCard);
+  // Only pay for the extra key-only read when the wide read came back empty —
+  // that is the only case where "absent" and "sparse" are in question.
+  const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
+    && (await cardExists(opts.node, opts.cfg, milestone.proof_card!));
+  const result = milestoneReconcileFromSnapshot(milestone, children, statuses, boards, proofCard, proofCardSparse);
   return { ...result, text: renderMilestoneReconcile(result) };
 }
 
@@ -348,6 +378,12 @@ export function milestoneReconcileFromSnapshot(
   statuses: Card[],
   boards: Board[],
   proofCard: Card | null,
+  // The proof card exists (key-only read found it) but the wide read that
+  // produced `proofCard` dropped it — a sparse record, not a missing one. The
+  // two need different warnings, or the report sends the operator to recreate a
+  // card that is sitting right there. Defaults false so a caller that hasn't
+  // checked keeps the old, conservative "missing" wording.
+  proofCardSparse = false,
 ): MilestoneReconcileResult {
   const children = boardCards.filter((card) => card.milestone === milestone.slug);
   const terminals = boardTerminalMap(boards);
@@ -368,6 +404,7 @@ export function milestoneReconcileFromSnapshot(
   const warnings: MilestoneWarning[] = [];
   if (!milestone.driver) warnings.push({ code: "no-driver", message: "Milestone has no reconciliation driver.", hint: "Assign --driver to a person, agent, or routine." });
   if (!milestone.proof_card) warnings.push({ code: "no-proof-card", message: "Milestone has no terminal proof card.", hint: "Create and link a validation card with --proof-card." });
+  else if (!proofCard && proofCardSparse) warnings.push({ code: "unreadable-proof-card", message: `Linked proof card "${milestone.proof_card}" exists but could not be read in full.`, hint: `The card is missing one or more indexed fields, so wide reads drop it. Re-save it, or run \`kanban groom board-cards-heal --slug ${milestone.proof_card} --apply\`.` });
   else if (!proofCard) warnings.push({ code: "missing-proof-card", message: `Linked proof card "${milestone.proof_card}" is missing.`, hint: "Repair the proof link before proving." });
   else if (proofCard.board !== milestone.board || proofCard.milestone !== milestone.slug) warnings.push({ code: "proof-card-mismatch", message: "Proof card board or milestone link does not match.", hint: "Align the proof card's --board and --milestone fields." });
   if (milestone.state === "blocked" && !milestone.block_reason) warnings.push({ code: "blocked-no-reason", message: "Blocked milestone has no reason.", hint: "Add --block-reason or return it to active." });
@@ -420,8 +457,14 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   const cards = childLists.flat();
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, cards);
   const proofs = new Map<string, Card | null>();
+  // Slugs whose wide read missed but whose key-only read found them: sparse, not
+  // absent. The key-only read is only issued for the slugs actually in question.
+  const sparseProofs = new Set<string>();
   await Promise.all(milestones.map(async (milestone) => {
     if (milestone.proof_card && !proofs.has(milestone.proof_card)) proofs.set(milestone.proof_card, await findCard(opts.node, opts.cfg, milestone.proof_card));
+  }));
+  await Promise.all([...proofs.entries()].map(async ([slug, card]) => {
+    if (!card && (await cardExists(opts.node, opts.cfg, slug))) sparseProofs.add(slug);
   }));
   return {
     milestones,
@@ -433,6 +476,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
         statuses,
         boards,
         proofs.get(milestone.proof_card) ?? null,
+        sparseProofs.has(milestone.proof_card),
       )),
   };
 }
