@@ -18,9 +18,44 @@ FIXED_COLUMNS="backlog,todo,doing,done"
 findings=()
 errors=()
 created=()
+# Throwaway boards this run created. Registered at creation time, reaped by the
+# EXIT trap, so an interrupted or crashed run cannot leave them behind.
+scratch_boards=()
 
 finding() { findings+=("$1 | $2"); printf 'FINDING: %s | %s\n' "$1" "$2"; }
 errlog() { errors+=("$1"); printf 'ERROR: %s\n' "$1"; }
+
+# Reap everything this run created. Cleanup used to be a linear block at the end
+# of the script, which meant any early exit — a crash, a timeout, a ^C — leaked
+# its scratch boards onto the live board list. Seven of them were still there on
+# 2026-07-30, and every board-wide list pays one keyed query per ghost board.
+# Idempotent: a signal reaps and exits, and bash then runs this again on EXIT.
+cleanup_scratch() {
+  [ -n "${cleanup_done:-}" ] && return 0
+  cleanup_done=1
+  if [ "${#scratch_boards[@]}" -gt 0 ]; then
+    for b in "${scratch_boards[@]}"; do "$FK" board rm "$b" --force >/dev/null 2>&1 || true; done
+  fi
+  if [ "${#created[@]}" -gt 0 ]; then
+    for s in "${created[@]}"; do "$FK" rm "$s" >/dev/null 2>&1 || true; done
+  fi
+}
+
+# A signal handler MUST exit. Bash runs the handler and then resumes the script,
+# so a handler that only reaps lets the run continue and create more scratch
+# boards, which the already-fired cleanup will never see. Exit 0 keeps the
+# harness's contract that scheduled callers can always parse the report instead
+# of treating the run as a queue-canceling failure; the ERROR line is what marks
+# it as interrupted.
+on_signal() {
+  printf 'ERROR: %s\n' "run interrupted by signal - scratch boards reaped"
+  cleanup_scratch
+  printf 'SUMMARY: findings=%s errors=%s board=%s run=%s\n' \
+    "${#findings[@]}" "$(( ${#errors[@]} + 1 ))" "$BOARD" "$RUN"
+  exit 0
+}
+trap cleanup_scratch EXIT
+trap on_signal INT TERM
 
 fkjson() { "$FK" show "$1" --json 2>/dev/null; }
 field() { fkjson "$1" | jq -r "$2 // empty" 2>/dev/null; }
@@ -200,6 +235,8 @@ board_state() {
 
 bd=(zz-kstress-bd-1 zz-kstress-bd-2 zz-kstress-bd-3)
 for b in "${bd[@]}"; do
+  # Register BEFORE creating: a create that ACKs and then dies still gets reaped.
+  scratch_boards+=("$b")
   if ensure_board "$b" "kstress board-durability"; then
     case "$(board_state "$b")" in
       missing) finding "board-create-not-readback" "$b: board create ACKed but confirmed absent from board list";;
@@ -219,6 +256,7 @@ tmpbc=$(mktemp -d 2>/dev/null || echo "/tmp/kstress-bc.$$"); mkdir -p "$tmpbc"
 i=0
 while [ "$i" -lt 4 ]; do
   b="zz-kstress-bcburst-$i"
+  scratch_boards+=("$b")
   ( "$FK" board create "$b" --title "bc $RUN" --columns "$FIXED_COLUMNS" --json >"$tmpbc/bc$i.out" 2>&1; echo $? >"$tmpbc/bc$i.rc" ) &
   i=$((i+1))
 done
@@ -241,12 +279,6 @@ done
 [ "$rf" -gt 0 ] && errlog "board list unreadable for $rf/4 concurrent-burst re-checks"
 rm -rf "$tmpbc" 2>/dev/null || true
 
-for b in "${bd[@]}" zz-kstress-bcburst-0 zz-kstress-bcburst-1 zz-kstress-bcburst-2 zz-kstress-bcburst-3; do
-  "$FK" board rm "$b" --force >/dev/null 2>&1 || true
-done
-
-if [ "${#created[@]}" -gt 0 ]; then
-  for s in "${created[@]}"; do "$FK" rm "$s" >/dev/null 2>&1 || true; done
-fi
-
+# Scratch boards and cards are reaped by cleanup_scratch via the EXIT trap, so
+# the happy path and every early exit take the same path out.
 echo "SUMMARY: findings=${#findings[@]} errors=${#errors[@]} board=$BOARD run=$RUN"
