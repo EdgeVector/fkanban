@@ -83,3 +83,27 @@ describe("pickup explain render", () => {
     expect(c.ready).toBe(false);
   });
 });
+
+describe("classify live-milestone requirement", () => {
+  const dep = { blocked: false, blockedBy: [], missing: [] };
+
+  test("a milestone-less pr card in default/todo is not ready when required", () => {
+    const card = baseCard({ slug: "no-ms" });
+    const c = classifyPickupCard(card, [card], dep, undefined, { requireLiveMilestone: true });
+    expect(c.ready).toBe(false);
+    expect(c.category).toBe("malformed-routing");
+    expect(c.reason).toBe("missing milestone linkage");
+  });
+
+  test("a milestone-linked card stays ready under the same requirement", () => {
+    const card = baseCard({ slug: "with-ms", milestone: "ms-1" });
+    const c = classifyPickupCard(card, [card], dep, undefined, { requireLiveMilestone: true });
+    expect(c.ready).toBe(true);
+  });
+
+  test("without the option, classification is unchanged", () => {
+    const card = baseCard({ slug: "no-ms-legacy" });
+    const c = classifyPickupCard(card, [card], dep);
+    expect(c.ready).toBe(true);
+  });
+});

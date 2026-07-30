@@ -964,3 +964,172 @@ describe("pickup claim", () => {
     expect(result.skipped.some((s) => s.slug === "first" && s.reason === "claim_conflict")).toBe(true);
   });
 });
+
+// ── Live-milestone claim gate ────────────────────────────────────────────────
+//
+// moveCmd enforces assertLivePrMilestone on the way into doing. Before these
+// tests, a queue head failing that gate threw OUT of the candidate loop and
+// nooped the entire claim run — pickup re-selected the same head every fire
+// while eligible cards sat behind it
+// (papercut-pickup-write-guard-failing-cards-poison-queue-head; live
+// heartbeats: `no-claim reason=pickup-claim-write-guard detail=missing-milestone`).
+
+import { milestoneToFields, type Milestone } from "../src/record.ts";
+import { pickupExplainResult } from "../src/commands/pickup_explain.ts";
+
+const cfgEnforced: Config = {
+  ...cfg,
+  enforceLivePrMilestone: true,
+  schemaHashes: { ...cfg.schemaHashes, milestone: "milestonehash" },
+};
+
+function milestoneFixture(partial: Partial<Milestone> & { slug: string; state: string }): Milestone {
+  const now = nowIso();
+  return {
+    title: partial.slug,
+    body: "",
+    board: "default",
+    position: "10",
+    north_star: "",
+    driver: "",
+    deps: [],
+    proof_card: "",
+    proof_status: "",
+    block_reason: "",
+    created_at: now,
+    updated_at: now,
+    completed_at: "",
+    ...partial,
+  };
+}
+
+async function seedMilestone(node: NodeClient, m: Milestone) {
+  await node.createRecord({
+    schemaHash: "milestonehash",
+    keyHash: m.slug,
+    fields: milestoneToFields(m),
+  });
+}
+
+describe("pickup claim live-milestone gate", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedBoard(node, board());
+  });
+
+  test("an abandoned-milestone queue head is skipped, not a full-run noop", async () => {
+    await seedMilestone(node, milestoneFixture({ slug: "ms-dead", state: "abandoned" }));
+    await seedMilestone(node, milestoneFixture({ slug: "ms-live", state: "active" }));
+    await seedCard(node, card({
+      slug: "poisoned-head",
+      milestone: "ms-dead",
+      created_at: "2026-01-01T00:00:00.000Z",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nPriority: P0\n\n## GOAL\nHead.\n\n## END STATE\nDone.\n",
+    }));
+    await seedCard(node, card({
+      slug: "next-eligible",
+      milestone: "ms-live",
+      created_at: "2026-01-02T00:00:00.000Z",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nPriority: P3\n\n## GOAL\nNext.\n\n## END STATE\nDone.\n",
+    }));
+
+    const result = await pickupClaimResult({ cfg: cfgEnforced, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("next-eligible");
+    expect(result.skipped.some(
+      (s) => s.slug === "poisoned-head" && s.reason === "live_pr_milestone_abandoned",
+    )).toBe(true);
+
+    // The head stays in todo for a human/groomer — it is not claimed, moved,
+    // or able to block the run.
+    const head = await findCard(node, cfgEnforced, "poisoned-head");
+    expect(head?.column).toBe("todo");
+  });
+
+  test("a milestone-less pr card is excluded from ranking when enforcement is on", async () => {
+    await seedCard(node, card({ slug: "nomiles" }));
+
+    const result = await pickupClaimResult({ cfg: cfgEnforced, node });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.scanned_ready).toBe(0);
+    expect(result.todo_blockers).toBe(1);
+    expect(result.todo_blocker_exemplars?.[0]?.reason).toBe("missing milestone linkage");
+  });
+
+  test("milestone-less claims still work when enforcement is off", async () => {
+    await seedCard(node, card({ slug: "nomiles-legacy" }));
+
+    const result = await pickupClaimResult({ cfg, node });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("nomiles-legacy");
+  });
+
+  test("explain agrees with the claim gate: milestone-less card is not eligible", async () => {
+    await seedCard(node, card({ slug: "nomiles-explain" }));
+
+    const report = await pickupExplainResult({ cfg: cfgEnforced, node, slug: "nomiles-explain" });
+
+    expect(report.ready).toBe(false);
+    expect(report.write_guard.ok).toBe(false);
+    expect(report.write_guard.code).toBe("live_pr_milestone_required");
+    expect(report.eligible_for_claim).toBe(false);
+  });
+
+  test("explain fails the write-guard on an abandoned milestone even though classify is ready", async () => {
+    await seedMilestone(node, milestoneFixture({ slug: "ms-gone", state: "abandoned" }));
+    await seedCard(node, card({ slug: "abandoned-ms-card", milestone: "ms-gone" }));
+
+    const report = await pickupExplainResult({ cfg: cfgEnforced, node, slug: "abandoned-ms-card" });
+
+    // Classification cannot see milestone state (that needs the record), so
+    // the write-guard is the gate that must catch it — and eligibility must
+    // follow the guard, not contradict it.
+    expect(report.ready).toBe(true);
+    expect(report.write_guard.ok).toBe(false);
+    expect(report.write_guard.code).toBe("live_pr_milestone_abandoned");
+    expect(report.eligible_for_claim).toBe(false);
+  });
+
+  test("a failing self-heal write on one todo card does not kill the claim run", async () => {
+    await seedCard(node, card({
+      slug: "unhealable",
+      block_status: "needs_human",
+      block_reason: "Pickup area overlap: shares area:pickup with old-peer in doing; serialize or retag one card.",
+      tags: ["area:pickup"],
+      body:
+        "Repo: EdgeVector/fkanban\nBase: main\nPriority: P0\n\n" +
+        "BLOCKED: fkanban-pickup cannot pick up stale overlap metadata.\nImplement it.",
+    }));
+    await seedCard(node, card({
+      slug: "old-peer",
+      column: "done",
+      tags: ["area:pickup"],
+    }));
+    await seedCard(node, card({
+      slug: "healthy",
+      created_at: "2026-01-02T00:00:00.000Z",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nPriority: P3\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    }));
+
+    const failing: NodeClient = {
+      ...node,
+      async updateRecord(args) {
+        if (args.keyHash === "unhealable") {
+          throw new FkanbanError({ code: "destructive_body_replace", message: "refused by test" });
+        }
+        return node.updateRecord(args);
+      },
+    };
+
+    const result = await pickupClaimResult({ cfg, node: failing, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("healthy");
+  });
+});

@@ -126,11 +126,24 @@ function hasStaleDoneAt(card: Card): boolean {
   return card.column !== "done" && card.done_at.trim().length > 0;
 }
 
+export type ClassifyPickupCardOpts = {
+  /**
+   * Mirror moveCmd's assertLivePrMilestone gate in classification. When on, a
+   * milestone-less Kind:pr card in default/todo is NOT pickup-ready: the claim
+   * write would reject it (live_pr_milestone_required), so ranking it first
+   * only re-selects an unclaimable queue head. Callers with a Config pass
+   * `cfg.enforceLivePrMilestone === true`; policy-free callers keep today's
+   * behavior.
+   */
+  requireLiveMilestone?: boolean;
+};
+
 export function classifyPickupCard(
   card: Card,
   allCards: Card[],
   dep: DepStatus,
   situationFence?: SituationFenceResult,
+  opts?: ClassifyPickupCardOpts,
 ): PickupClassification {
   const kind = normalizeKind(card.kind);
   const blockStatus = normalizeBlockStatus(card.block_status);
@@ -196,6 +209,21 @@ export function classifyPickupCard(
   if (!base) {
     return out("malformed-routing", "missing Base header/field", "Set `Base: main` or pass `--base main`.");
   }
+  // kind === "pr" is established above (non-pr kinds returned already). The
+  // abandoned-milestone variant still needs a Milestone read, so the claim
+  // loop keeps its per-card skip for live_pr_milestone_abandoned.
+  if (
+    opts?.requireLiveMilestone === true &&
+    card.board === "default" &&
+    card.column === "todo" &&
+    !(card.milestone ?? "").trim()
+  ) {
+    return out(
+      "malformed-routing",
+      "missing milestone linkage",
+      "Attach an outcome with `fkanban add <slug> --milestone <slug>`; the claim write-guard (assertLivePrMilestone) rejects milestone-less Kind:pr claims.",
+    );
+  }
   if (dep.blocked) {
     details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
     return out("blocked-on-dependency", "unfinished dependency", "Finish or retarget the dependency before pickup.");
@@ -228,11 +256,12 @@ export function buildPickupStatusReport(
   cards: Card[],
   boards: Board[],
   situationFences: Map<string, SituationFenceResult> = new Map(),
+  classifyOpts?: ClassifyPickupCardOpts,
 ): PickupStatusReport {
   const active = sortCards(activeCards(cards, boards));
   const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
   const classifications = active.map((card) =>
-    classifyPickupCard(card, cards, depStatus(card, cards, terminalByBoard), situationFences.get(card.slug)),
+    classifyPickupCard(card, cards, depStatus(card, cards, terminalByBoard), situationFences.get(card.slug), classifyOpts),
   );
   const counts = Object.fromEntries(PICKUP_CATEGORIES.map((category) => [category, 0])) as Record<PickupCategory, number>;
   for (const c of classifications) counts[c.category] += 1;
@@ -258,7 +287,10 @@ export async function buildPickupStatusReportWithSituations(
   depsContext?: { cfg: Config; node: NodeClient },
 ): Promise<PickupStatusReport> {
   const cardsWithDeps = await withDependencyStatuses(depsContext, cards);
-  const local = buildPickupStatusReport(cardsWithDeps, boards);
+  const classifyOpts: ClassifyPickupCardOpts | undefined = depsContext
+    ? { requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true }
+    : undefined;
+  const local = buildPickupStatusReport(cardsWithDeps, boards, undefined, classifyOpts);
   const activeBySlug = new Map(activeCards(cardsWithDeps, boards).map((card) => [card.slug, card]));
   const fences = new Map<string, SituationFenceResult>();
   await Promise.all(local.cards
@@ -269,7 +301,7 @@ export async function buildPickupStatusReportWithSituations(
       const result = await checkSituationFence(card, preflight);
       if (!result.allowed) fences.set(card.slug, result);
     }));
-  return fences.size > 0 ? buildPickupStatusReport(cardsWithDeps, boards, fences) : local;
+  return fences.size > 0 ? buildPickupStatusReport(cardsWithDeps, boards, fences, classifyOpts) : local;
 }
 
 export function renderPickupStatus(report: PickupStatusReport): string {

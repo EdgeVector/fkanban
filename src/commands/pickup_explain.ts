@@ -6,7 +6,9 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   assertDefaultTodoPickupReady,
+  assertLivePrMilestone,
   depStatus,
+  findMilestone,
   listBoards,
   listCards,
   listDependencyStatusesForCards,
@@ -59,9 +61,20 @@ export type PickupExplainReport = {
   gates: { name: string; ok: boolean; note: string }[];
 };
 
-function writeGuardFor(card: Card): WriteGuardStep {
+function writeGuardFor(
+  card: Card,
+  opts?: { enforceLivePrMilestone?: boolean; milestoneState?: string },
+): WriteGuardStep {
   try {
     const probe: Card = { ...card, board: "default", column: "todo" };
+    // Mirror moveCmd's gate order so explain's verdict is the CLAIM's verdict:
+    // the live-milestone gate fires before the todo-readiness policy. Explain
+    // saying YES on a card the claim write then rejects is exactly the
+    // contradiction that let one unclaimable head noop pickup for hours.
+    assertLivePrMilestone(probe, false, {
+      milestoneState: opts?.milestoneState ?? "",
+      enforce: opts?.enforceLivePrMilestone === true,
+    });
     assertDefaultTodoPickupReady(probe);
     return { ok: true };
   } catch (err) {
@@ -152,22 +165,37 @@ export async function pickupExplainResult(opts: {
   const dep = depStatus(card, cards, terminalByBoard);
 
   const fence = await checkSituationFence(card, opts.situationPreflight);
+  const enforceLivePrMilestone = opts.cfg.enforceLivePrMilestone === true;
   const classification = classifyPickupCard(
     card,
     cards,
     dep,
     fence.allowed ? undefined : fence,
+    { requireLiveMilestone: enforceLivePrMilestone },
   );
 
-  const writeGuard = writeGuardFor(card);
+  // The abandoned-milestone gate needs the Milestone record; a read failure
+  // degrades to state "" (gate passes on state, still fails on a missing
+  // milestone) rather than failing the whole explain.
+  let milestoneState = "";
+  const msSlug = (card.milestone ?? "").trim();
+  if (msSlug && enforceLivePrMilestone) {
+    const ms = await findMilestone(opts.node, opts.cfg, msSlug).catch(() => null);
+    if (ms) milestoneState = ms.state;
+  }
+  const writeGuard = writeGuardFor(card, { enforceLivePrMilestone, milestoneState });
   const lane = laneOf(card);
   const overlap = overlapAgainstCards(card, cards);
   const wouldSkipOverlap = overlap.conflicts.length > 0;
 
+  // write_guard is part of eligibility: "eligible_for_claim: YES" next to a
+  // FAIL write-guard gate was a live contradiction (the claim would reject
+  // what explain endorsed).
   const eligible =
     classification.ready &&
     classification.column === "todo" &&
     classification.board === "default" &&
+    writeGuard.ok &&
     !wouldSkipOverlap &&
     fence.allowed;
 
