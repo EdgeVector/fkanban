@@ -4,6 +4,7 @@ import {
   assertBodyLoaded,
   depStatus,
   hasPrWorkBrief,
+  hydrateCardBodies,
   isBodyOmitted,
   isCardKind,
   isRegistryCard,
@@ -85,6 +86,50 @@ function generatedReason(reason: string): boolean {
 
 function baseForPickup(card: Card): string {
   return (card.base || card.body.match(/^[ \t]*Base:[ \t]*(\S+)/im)?.[1] || "").trim();
+}
+
+/**
+ * Does classifying this card require its body?
+ *
+ * `classifyPickupCard` is sync and pure, but three of its signals fall back to
+ * a BODY header when the structured field is empty — repo, base, and the
+ * registry/recipe test. On a body-free projection those fallbacks read `""`
+ * and the card is reported `malformed-routing` about a body nobody fetched.
+ * Callers that hold a node hydrate exactly this set first; it is bounded by
+ * "cards whose routing is not already in structured fields" (14 of 212 active
+ * cards on the live board), not by the board size.
+ *
+ * Deliberately NOT included: the generated-BLOCKED-prose scan behind the
+ * `stale-metadata` verdict. It only fires on cards that DO carry structured
+ * repo+base, so including it would mean hydrating the whole active board to
+ * refine an advisory grooming hint — and `groom` already reads real bodies
+ * (`listBoardCardsWithBodies`) to produce that same finding.
+ */
+export function pickupClassificationNeedsBody(card: Card): boolean {
+  if (!isBodyOmitted(card)) return false;
+  if (card.board === HUMAN_BOARD_SLUG) return false;
+  const blockStatus = normalizeBlockStatus(card.block_status);
+  if (blockStatus !== "none") return false;
+  if (normalizeKind(card.kind) !== "pr") return false;
+  return (
+    card.repo.trim().length === 0 ||
+    card.base.trim().length === 0 ||
+    !isCardKind(card.kind)
+  );
+}
+
+/** Hydrate only the cards whose pickup verdict would otherwise be a guess. */
+export async function hydrateForPickupClassification(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+): Promise<Card[]> {
+  const needsBody = cards.filter(pickupClassificationNeedsBody);
+  if (needsBody.length === 0) return cards;
+  const hydrated = new Map(
+    (await hydrateCardBodies(node, cfg, needsBody)).map((card) => [card.slug, card]),
+  );
+  return cards.map((card) => hydrated.get(card.slug) ?? card);
 }
 
 function repoForDisplay(card: Card): string {
@@ -195,18 +240,40 @@ export function classifyPickupCard(
   if (kind !== "pr") {
     return out("parked/non-work", `non-pickup kind: ${kind}`, "Leave grouping/tracker/program/capstone/validation cards out of default todo, or split a concrete PR card.");
   }
-  if (!isCardKind(card.kind) && isRegistryCard(card.body, card.title)) {
+  // The registry test reads the body; on a body-free projection only its title
+  // rule can fire, so pass an empty body rather than let an unread one look
+  // like "definitely not a registry card".
+  if (!isCardKind(card.kind) && isRegistryCard(isBodyOmitted(card) ? "" : card.body, card.title)) {
     return out("parked/non-work", "registry/recipe card", "Registry/recipe cards target brain records, not code PRs; file a concrete PR card with explicit kind: pr when code is ready.");
   }
   if (card.board !== "default") {
     return out("parked/non-work", `card is on non-default board ${card.board}`, "Move to default/todo only when an agent should pick it up.");
   }
+  // Repo and Base both fall back to a body header. Report the missing routing
+  // only when we actually read the body we are accusing — otherwise say so, so
+  // an unhydrated caller cannot present a phantom next to a real blocker.
   const repoResolution = resolvePickupRepo(card);
   if (!repoResolution.ok) {
+    if (isBodyOmitted(card) && card.repo.trim().length === 0) {
+      details.push("card body was not read");
+      return out(
+        "malformed-routing",
+        "repo unresolved: no repo field, and the body was not read",
+        "Re-run through a hydrating surface (`kanban pickup status`, `pickup explain <slug>`), then set a bare `Repo: owner/name` header or `--repo owner/name`.",
+      );
+    }
     details.push(repoResolution.reason);
     return out("malformed-routing", repoResolution.reason, "Set a bare `Repo: owner/name` header or `--repo owner/name`.");
   }
   if (!base) {
+    if (isBodyOmitted(card)) {
+      details.push("card body was not read");
+      return out(
+        "malformed-routing",
+        "base unresolved: no base field, and the body was not read",
+        "Re-run through a hydrating surface (`kanban pickup status`, `pickup explain <slug>`), then set `Base: main` or pass `--base main`.",
+      );
+    }
     return out("malformed-routing", "missing Base header/field", "Set `Base: main` or pass `--base main`.");
   }
   // kind === "pr" is established above (non-pr kinds returned already). The
@@ -286,7 +353,13 @@ export async function buildPickupStatusReportWithSituations(
   preflight?: SituationPreflight,
   depsContext?: { cfg: Config; node: NodeClient },
 ): Promise<PickupStatusReport> {
-  const cardsWithDeps = await withDependencyStatuses(depsContext, cards);
+  const withDeps = await withDependencyStatuses(depsContext, cards);
+  // Board lists are body-free by design. Fetch the handful of bodies the
+  // verdict actually depends on before classifying, so `malformed-routing`
+  // means "the card is malformed", not "we never looked".
+  const cardsWithDeps = depsContext
+    ? await hydrateForPickupClassification(depsContext.node, depsContext.cfg, withDeps)
+    : withDeps;
   const classifyOpts: ClassifyPickupCardOpts | undefined = depsContext
     ? { requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true }
     : undefined;

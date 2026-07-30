@@ -2203,7 +2203,10 @@ function summarizePickupPeer(card: Card, targetRepo: string, targetAreas: Set<st
 }
 
 async function hydratePickupPeer(node: NodeClient, cfg: Config, card: Card): Promise<Card | null> {
-  if (card.body.length > 0) return card;
+  // `isBodyOmitted` — not `body.length` — is the discriminator: a card whose
+  // stored body really is empty is already answered, and re-reading it pays a
+  // point read per peer to learn nothing. See `Card[BODY_OMITTED]`.
+  if (!isBodyOmitted(card)) return card;
   return findCardWithFields(node, cfg, card.slug, [...PICKUP_AREA_PEER_BODY_FIELDS]);
 }
 

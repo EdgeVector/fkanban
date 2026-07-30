@@ -31,11 +31,14 @@ import {
   type Card,
 } from "../src/record.ts";
 import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
+import { classifyPickupCard, pickupClassificationNeedsBody } from "../src/pickup.ts";
 import { groomStaleBlockersResult } from "../src/commands/groom.ts";
 import { rankCmd } from "../src/commands/rank.ts";
 import { moveCmd } from "../src/commands/move.ts";
+import { overlapAgainstCards, overlapCmd } from "../src/commands/overlap.ts";
 import { pickupClaimResult } from "../src/commands/pickup_claim.ts";
 import { pickupExplainResult } from "../src/commands/pickup_explain.ts";
+import { pickupStatusResult } from "../src/commands/pickup_status.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -315,5 +318,121 @@ describe("pickup claim over the body-free projection", () => {
     expect(stored.column).toBe("doing");
     expect(stored.assignee).toBe("w1");
     expect(stored.body).toBe(BRIEF);
+  });
+});
+
+// ── Read-only surfaces ─────────────────────────────────────────────────────
+// These three never write, which is why they were split out of the CR that
+// fixed the write paths. They still reported a body-derived VERDICT about a
+// body they never fetched, which is its own kind of damage: a conflict that
+// is never seen, and a routing complaint about a card that routes fine.
+
+const BODY_ONLY_ROUTING = [
+  "Repo: EdgeVector/kanban",
+  "Base: main",
+  "Surfaces: src/pickup.ts",
+  "",
+  "## GOAL",
+  "Declare routing and surfaces in the body, the way older cards do.",
+  "",
+  "## END STATE",
+  "Overlap and pickup status both see these.",
+  "",
+].join("\n");
+
+describe("overlap against a doing peer", () => {
+  test("sees a conflict whose surfaces are declared only in the peer's body", async () => {
+    const node = fakeNode([
+      card({ slug: "candidate", column: "todo", surfaces: ["src/pickup.ts"] }),
+      card({
+        slug: "peer",
+        column: "doing",
+        position: "1",
+        body: BODY_ONLY_ROUTING,
+        surfaces: [],
+      }),
+    ]);
+
+    const { result } = await overlapCmd({ cfg, node, slug: "candidate" });
+
+    // Before hydration the peer's `Surfaces:` header was invisible, so this
+    // read "no surfaces; overlap unknown" and the claim gate let a colliding
+    // card through.
+    expect(result.conflicts.map((c) => c.slug)).toEqual(["peer"]);
+  });
+
+  test("a peer whose repo is unread is reported unknown, not filtered away as a different repo", async () => {
+    const listed = await listCards(
+      fakeNode([
+        card({ slug: "peer", column: "doing", position: "1", repo: "", body: BODY_ONLY_ROUTING }),
+      ]),
+      cfg,
+    );
+    const candidate = card({ slug: "candidate", surfaces: ["src/pickup.ts"] });
+
+    const result = overlapAgainstCards(candidate, listed);
+
+    expect(isBodyOmitted(listed[0]!)).toBe(true);
+    expect(result.warnings.join("\n")).toContain("body was not read");
+    expect(result.warnings.join("\n")).toContain("peer");
+  });
+
+  test("an honest absence still reads as an absence, not as an unread body", async () => {
+    const node = fakeNode([
+      card({ slug: "candidate", column: "todo", surfaces: ["src/pickup.ts"] }),
+      card({ slug: "peer", column: "doing", position: "1", surfaces: [], body: BRIEF }),
+    ]);
+
+    const { result } = await overlapCmd({ cfg, node, slug: "candidate" });
+
+    expect(result.conflicts).toEqual([]);
+    expect(result.warnings.join("\n")).toContain("no surfaces");
+    expect(result.warnings.join("\n")).not.toContain("body was not read");
+  });
+});
+
+describe("pickup status", () => {
+  test("a card whose Repo/Base live only in its body is pickup-ready, not malformed-routing", async () => {
+    const node = fakeNode([
+      card({ slug: "body-routed", repo: "", base: "", body: BODY_ONLY_ROUTING }),
+    ]);
+
+    const { report } = await pickupStatusResult({ cfg, node });
+
+    const classification = report.cards.find((c) => c.slug === "body-routed")!;
+    expect(classification.category).toBe("pickup-ready");
+    expect(classification.repo).toBe("EdgeVector/kanban");
+    expect(classification.base).toBe("main");
+  });
+
+  test("a card that really has no routing is still reported malformed", async () => {
+    const node = fakeNode([
+      card({ slug: "unrouted", repo: "", base: "", body: "## GOAL\nNo routing anywhere.\n" }),
+    ]);
+
+    const { report } = await pickupStatusResult({ cfg, node });
+
+    const classification = report.cards.find((c) => c.slug === "unrouted")!;
+    expect(classification.category).toBe("malformed-routing");
+    expect(classification.reason).toBe("missing Repo header");
+    // The complaint is about a body we read, so it must not hedge.
+    expect(classification.details.join(" ")).not.toContain("not read");
+  });
+
+  test("classification never judges routing off a body it did not read", async () => {
+    const [unread] = await listCards(
+      fakeNode([card({ slug: "thin", repo: "", base: "", body: BODY_ONLY_ROUTING })]),
+      cfg,
+    );
+
+    const result = classifyPickupCard(unread!, [unread!], {
+      blocked: false,
+      blockedBy: [],
+      missing: [],
+    });
+
+    expect(pickupClassificationNeedsBody(unread!)).toBe(true);
+    expect(result.reason).toContain("the body was not read");
+    expect(result.details).toContain("card body was not read");
   });
 });
