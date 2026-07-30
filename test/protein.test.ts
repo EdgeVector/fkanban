@@ -81,10 +81,13 @@ type MolTips = Map<string, Tip>; // key = hash\0range
 function proteinFakeNode(opts?: {
   /** When true, protein writes to milestone-keyed members silently no-op. */
   dropMilestoneWrites?: boolean;
+  /** Simulate an older Mini without GET /api/protein/of-molecule. */
+  missingProteinLookup?: boolean;
 }): NodeClient & {
   tips: Map<string, MolTips>;
   proteins: Map<string, { members: Array<{ molecule_uuid: string; hash_field: string; range_field?: string }> }>;
   molToProtein: Map<string, string>;
+  calls: Array<{ method: string; path: string }>;
 } {
   const tips = new Map<string, MolTips>();
   const proteins = new Map<
@@ -92,6 +95,7 @@ function proteinFakeNode(opts?: {
     { members: Array<{ molecule_uuid: string; hash_field: string; range_field?: string }> }
   >();
   const molToProtein = new Map<string, string>();
+  const calls: Array<{ method: string; path: string }> = [];
   let proteinSeq = 0;
 
   const boardMols: Record<string, string> = {};
@@ -149,10 +153,27 @@ function proteinFakeNode(opts?: {
   }
 
   const rawCall = async (method: string, path: string, body?: unknown): Promise<RawResponse> => {
+    calls.push({ method, path });
     const jsonBody = (body ?? {}) as Record<string, unknown>;
 
     if (method === "POST" && path === "/api/protein/fold") {
       return { status: 200, headers: new Headers(), body: "{}", json: { folds_applied: 0, schema: PROTEIN_SCHEMA_MARKER } };
+    }
+    if (method === "GET" && path.startsWith("/api/protein/of-molecule/")) {
+      if (opts?.missingProteinLookup) {
+        return { status: 404, headers: new Headers(), body: "Not Found", json: null };
+      }
+      const moleculeUuid = decodeURIComponent(path.slice("/api/protein/of-molecule/".length));
+      return {
+        status: 200,
+        headers: new Headers(),
+        body: "{}",
+        json: {
+          ok: true,
+          molecule_uuid: moleculeUuid,
+          protein_uuid: molToProtein.get(moleculeUuid) ?? null,
+        },
+      };
     }
     if (method === "POST" && path === "/api/protein") {
       // UUID-shaped so adoption parsers and Mini-shaped ids match.
@@ -318,6 +339,7 @@ function proteinFakeNode(opts?: {
     tips,
     proteins,
     molToProtein,
+    calls,
     baseUrl: "http://127.0.0.1:9",
     userHash: "user",
     autoIdentity: async () => ({ provisioned: true as const, userHash: "user" }),
@@ -335,6 +357,32 @@ function proteinFakeNode(opts?: {
     rawCall,
     nodeTransport: () => ({ transport: "socket" as const, socketPath: "/tmp/fake.sock" }),
   };
+}
+
+async function bindMolecule(
+  node: ReturnType<typeof proteinFakeNode>,
+  moleculeUuid: string,
+  hashField: string,
+  rangeField: string,
+): Promise<string> {
+  const protein = await node.rawCall("POST", "/api/protein", {});
+  const proteinUuid = (protein.json as { uuid: string }).uuid;
+  await node.rawCall("POST", "/api/protein/member", {
+    protein_uuid: proteinUuid,
+    molecule_uuid: moleculeUuid,
+    hash_field: hashField,
+    range_field: rangeField,
+  });
+  return proteinUuid;
+}
+
+async function bindAllMembershipMolecules(node: ReturnType<typeof proteinFakeNode>): Promise<void> {
+  for (const field of BOARD_CARDS_FIELDS) {
+    await bindMolecule(node, mol(BOARD_HASH, field), "board", "sk");
+  }
+  for (const field of MILESTONE_CARDS_FIELDS) {
+    await bindMolecule(node, mol(MS_HASH, field), "milestone", "sk");
+  }
 }
 
 beforeEach(() => {
@@ -416,6 +464,41 @@ describe("writeMembershipViaProtein (shipped multi-key path)", () => {
     expect(msRow!.tags).toEqual(["a", "b"]);
     expect(boardRow!.kind).toBe("pr");
     expect(msRow!.kind).toBe("pr");
+  });
+
+  test("adopts existing molecules via lookup without creating proteins", async () => {
+    const node = proteinFakeNode();
+    await bindAllMembershipMolecules(node);
+    node.calls.length = 0;
+
+    const c = card({
+      slug: "lookup-adopt-card",
+      title: "Lookup adopt",
+      column: "done",
+      tags: ["lookup"],
+      milestone: "ms-lookup",
+    });
+    expect(await writeMembershipViaProtein(node, cfg, c)).toBe(true);
+
+    expect(node.calls.some((call) => call.path.startsWith("/api/protein/of-molecule/"))).toBe(true);
+    expect(
+      node.calls.filter((call) => call.method === "POST" && call.path === "/api/protein"),
+    ).toHaveLength(0);
+  });
+
+  test("falls back to create-first adoption when lookup route is missing", async () => {
+    const node = proteinFakeNode({ missingProteinLookup: true });
+    const c = card({
+      slug: "lookup-missing-card",
+      title: "Lookup missing",
+      milestone: "ms-old-node",
+    });
+    expect(await writeMembershipViaProtein(node, cfg, c)).toBe(true);
+
+    expect(node.calls.some((call) => call.path.startsWith("/api/protein/of-molecule/"))).toBe(true);
+    expect(
+      node.calls.filter((call) => call.method === "POST" && call.path === "/api/protein").length,
+    ).toBeGreaterThan(0);
   });
 
   test("returns false (do not skip dual-write) when milestone tips fail to land", async () => {
