@@ -1,13 +1,12 @@
 /**
- * Protein success path must preserve BoardCards invariant: at most one row
- * per (board, slug). When updateCardRecord runs without `previous` (add-update,
- * backlog promote, pickup_claim), it must still purge other sks after protein
- * writes the next tip.
+ * BoardCards invariant: at most one row per (board, slug).
  *
- * Do NOT use mock.module on src/protein.ts here — bun keeps that process-wide
- * and poisons later suites that need real dual-write membership.
+ * The path that breaks it is `updateCardRecord` called without `previous`
+ * (add-update, backlog promote, pickup_claim) — nothing names the old
+ * `column#position#slug`, so a column move leaves the stale sk behind unless the
+ * membership write scans for it.
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type {
   NodeClient,
   QueryFilter,
@@ -22,7 +21,6 @@ import {
 } from "../src/board-cards.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
 import { BOARD_CARDS_LAYOUT } from "../src/schemas.ts";
-import * as protein from "../src/protein.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -122,58 +120,37 @@ function fakeStoreNode(): NodeClient & {
   };
 }
 
-describe("protein update orphan purge (BoardCards invariant)", () => {
-  afterEach(() => {
-    // Restore spies so later files (and later tests) see the real protein path.
-    // Prefer spyOn over mock.module — mock.module is process-wide and sticky.
-  });
-
-  test("without previous, protein success still leaves one BoardCards row per slug", async () => {
-    // Plant two sks for the same slug (stale todo + new doing) as a column move
-    // without previous would leave under the old protein-only purge path.
+describe("membership orphan purge (BoardCards invariant)", () => {
+  test("the purge helper collapses a slug's rows down to the current sk", async () => {
     const node = fakeStoreNode();
     const boardHash = "board-cards-hash";
     const slug = "orphan-card";
     const staleSk = boardCardSk("todo", "1", slug);
     const nextSk = boardCardSk("doing", "9", slug);
-    await node.createRecord({
-      schemaHash: boardHash,
-      fields: {
-        board: "default",
-        sk: staleSk,
-        slug,
-        title: "Orphan probe",
-        column: "todo",
-        position: "1",
-        layout: BOARD_CARDS_LAYOUT,
-        milestone: "ms-1",
-        tags: ["t"],
-        kind: "pr",
-      },
-      keyHash: "default",
-      rangeKey: staleSk,
-    });
-    await node.createRecord({
-      schemaHash: boardHash,
-      fields: {
-        board: "default",
-        sk: nextSk,
-        slug,
-        title: "Orphan probe",
-        column: "doing",
-        position: "9",
-        layout: BOARD_CARDS_LAYOUT,
-        milestone: "ms-1",
-        tags: ["t"],
-        kind: "pr",
-      },
-      keyHash: "default",
-      rangeKey: nextSk,
-    });
+    for (const [sk, column, position] of [
+      [staleSk, "todo", "1"],
+      [nextSk, "doing", "9"],
+    ] as const) {
+      await node.createRecord({
+        schemaHash: boardHash,
+        fields: {
+          board: "default",
+          sk,
+          slug,
+          title: "Orphan probe",
+          column,
+          position,
+          layout: BOARD_CARDS_LAYOUT,
+          milestone: "ms-1",
+          tags: ["t"],
+          kind: "pr",
+        },
+        keyHash: "default",
+        rangeKey: sk,
+      });
+    }
     expect(node.boardRows().filter((r) => r.fields.slug === slug)).toHaveLength(2);
 
-    // Drive the real purge helper the protein success path must call when
-    // previous is omitted (same entry point as upsertBoardCard no-previous).
     const purged = await purgeOtherBoardCardRows(node, cfg, "default", slug, nextSk);
     expect(purged).toBeGreaterThanOrEqual(1);
 
@@ -188,15 +165,13 @@ describe("protein update orphan purge (BoardCards invariant)", () => {
     expect(hits[0]!.column).toBe("doing");
   });
 
-  test("updateCardRecord protein success without previous purges orphans", async () => {
+  test("updateCardRecord without previous purges the orphan it cannot name", async () => {
     const node = fakeStoreNode();
     const boardHash = "board-cards-hash";
     const slug = "orphan-card";
     const staleSk = boardCardSk("todo", "1", slug);
     const nextSk = boardCardSk("doing", "9", slug);
 
-    // Pre-plant stale todo row only; protein path will "write" doing tip by our
-    // spy, then updateCardRecord must purge the todo orphan.
     await node.createRecord({
       schemaHash: boardHash,
       fields: {
@@ -229,66 +204,22 @@ describe("protein update orphan purge (BoardCards invariant)", () => {
       rangeKey: staleSk,
     });
 
-    const writeSpy = spyOn(protein, "writeMembershipViaProtein").mockImplementation(
-      async (n: NodeClient, _cfg: Config, card: Card | { slug: string; column: string; position: string; board?: string; title?: string; milestone?: string; tags?: string[]; kind?: string; assignee?: string; deps?: string[]; surfaces?: string[]; created_at?: string; created_by?: string; updated_at?: string; db?: string; repo?: string; base?: string; block_status?: string; block_reason?: string; north_star?: string; pr_url?: string; branch?: string }) => {
-        const sk = boardCardSk(card.column, card.position, card.slug);
-        await n.createRecord({
-          schemaHash: boardHash,
-          fields: {
-            board: card.board || "default",
-            sk,
-            slug: card.slug,
-            title: (card as Card).title ?? "",
-            column: card.column,
-            position: String(card.position),
-            layout: BOARD_CARDS_LAYOUT,
-            milestone: (card as Card).milestone ?? "",
-            tags: (card as Card).tags ?? [],
-            kind: (card as Card).kind ?? "",
-            assignee: (card as Card).assignee ?? "",
-            deps: (card as Card).deps ?? [],
-            surfaces: (card as Card).surfaces ?? [],
-            created_at: (card as Card).created_at ?? "",
-            created_by: (card as Card).created_by ?? "",
-            updated_at: (card as Card).updated_at ?? "",
-            db: (card as Card).db ?? "",
-            repo: (card as Card).repo ?? "",
-            base: (card as Card).base ?? "",
-            block_status: (card as Card).block_status ?? "",
-            block_reason: (card as Card).block_reason ?? "",
-            north_star: (card as Card).north_star ?? "",
-            pr_url: (card as Card).pr_url ?? "",
-            branch: (card as Card).branch ?? "",
-          },
-          keyHash: card.board || "default",
-          rangeKey: sk,
-        });
-        return true;
-      },
-    );
+    const { updateCardRecord } = await import("../src/record.ts");
 
-    try {
-      const { updateCardRecord } = await import("../src/record.ts");
+    // Fat Card write goes to card-hash; plant empty so updateRecord can succeed.
+    await node.createRecord({
+      schemaHash: "card-hash",
+      fields: { slug, title: "Orphan probe", column: "doing" },
+      keyHash: slug,
+    });
 
-      // Fat Card write goes to card-hash; plant empty so updateRecord can "succeed".
-      await node.createRecord({
-        schemaHash: "card-hash",
-        fields: { slug, title: "Orphan probe", column: "doing" },
-        keyHash: slug,
-      });
+    const next = baseCard({ column: "doing", position: "9", slug });
+    // CRITICAL: omit previous — the production bug path.
+    await updateCardRecord({ cfg, node }, next);
 
-      const next = baseCard({ column: "doing", position: "9", slug });
-      // CRITICAL: omit previous — the production bug path.
-      await updateCardRecord({ cfg, node }, next);
-
-      const rows = node.boardRows().filter((r) => r.fields.slug === slug);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.rangeKey).toBe(nextSk);
-      expect(rows[0]!.fields.column).toBe("doing");
-      expect(writeSpy).toHaveBeenCalled();
-    } finally {
-      writeSpy.mockRestore();
-      protein.resetProteinCaches();
-    }
+    const rows = node.boardRows().filter((r) => r.fields.slug === slug);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.rangeKey).toBe(nextSk);
+    expect(rows[0]!.fields.column).toBe("doing");
   });
 });
