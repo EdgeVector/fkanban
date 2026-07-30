@@ -1,7 +1,6 @@
 /**
  * Shared Search app plane client for fkanban.
- * Semantic Search plane only (schema-scoped vectors). Keyword LastStore removed
- * from the product path (2026-07-30).
+ * Semantic Search plane only (schema-scoped MiniLM vectors).
  *
  * Resolution: LASTDB_SEARCH_SEMANTIC_MODULE → host-track semantic → semantic CLI.
  */
