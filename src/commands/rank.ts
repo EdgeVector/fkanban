@@ -16,7 +16,7 @@ import {
   RANK_POSITION_STEP,
   ensureColumn,
   isMetaCardKind,
-  listCards,
+  listBoardCardsWithBodies,
   priorityOf,
   rankCards,
   requireBoard,
@@ -42,7 +42,11 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult> {
   const board = await requireBoard(opts.node, opts.cfg, boardSlug);
   ensureColumn(column, board.columns);
 
-  const all = await listCards(opts.node, opts.cfg);
+  // Bodies required on both halves of this command: the priority SIGNAL is a
+  // `Priority:` body header (the tag is only the fallback), and each reordered
+  // card is written back whole — the body-free list silently demoted every
+  // header-only card to P2 and blanked the brief it rewrote.
+  const all = await listBoardCardsWithBodies(opts.node, opts.cfg);
   const inColumn = all.filter((c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind));
   const ranked = rankCards(inColumn);
 

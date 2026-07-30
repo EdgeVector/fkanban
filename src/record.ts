@@ -43,6 +43,9 @@ import {
   type RecordType,
 } from "./schemas.ts";
 
+/** See `Card[BODY_OMITTED]`. */
+export const BODY_OMITTED: unique symbol = Symbol("kanban.card.bodyOmitted");
+
 export type Card = {
   slug: string;
   title: string;
@@ -84,6 +87,21 @@ export type Card = {
   milestone?: string; // fkanban Milestone slug this card advances
   pr_url: string; // PR driving this card, when in flight
   branch: string; // worktree/feature branch
+  // ── Projection provenance (in-process only) ─────────────────────────────
+  // Set when this Card came back through a BODY-FREE projection (BoardCards
+  // partitions, the CardListIndex rollup, or any field list that omitted
+  // `body`). Such a card carries `body: ""` because the body was never READ —
+  // not because the stored card is empty, and the two are otherwise
+  // indistinguishable by value. Policy code that judges the body and the card
+  // write path must both refuse it: judging produces a confident wrong
+  // verdict, and writing blanks the stored brief (`cardToFields` writes the
+  // whole record). Read it with `isBodyOmitted`, clear it with
+  // `withLoadedBody`.
+  //
+  // A SYMBOL key on purpose: object spread carries it (so `{...card}` inside a
+  // groom/heal pass stays honest about its provenance), while JSON.stringify
+  // ignores it (so the `--json` / MCP card shape stays exactly what it was).
+  [BODY_OMITTED]?: true;
 };
 
 export type Board = {
@@ -1318,6 +1336,13 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
   if (force) return;
   if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return;
 
+  // The brief checks below read the body. A caller that passes a body-free
+  // projection gets a loud "hydrate first" instead of a confident "this card
+  // is empty" about a body nobody fetched. `rawBody` only overrides when it
+  // is a real body — the pre-derive text of a card being written — not the
+  // same "" the projection already handed us.
+  if (rawBody === undefined || rawBody === "") assertBodyLoaded(card, "pickup-readiness check");
+
   // Defense in depth if a caller forgot sanitizeDefaultTodoLaneMetadata.
   sanitizeDefaultTodoLaneMetadata(card);
 
@@ -1891,6 +1916,43 @@ export function milestoneQueryFieldsLookSparse(fields: Record<string, unknown> |
   return nonEmptyNonSlug === 0;
 }
 
+// ── Body-free projection provenance ────────────────────────────────────────
+// See `Card[BODY_OMITTED]`. These three helpers are the whole contract: list
+// paths MARK, hydration paths CLEAR, and policy/write paths ASSERT.
+
+function markBodyOmitted(cards: Card[]): Card[] {
+  for (const card of cards) card[BODY_OMITTED] = true;
+  return cards;
+}
+
+/** Did this card's body come from LastDB, or was it never read? */
+export function isBodyOmitted(card: Card): boolean {
+  return card[BODY_OMITTED] === true;
+}
+
+/** A hydrated copy of a body-free projection: real body in, marker off. */
+export function withLoadedBody(card: Card, body: string): Card {
+  const next: Card = { ...card, body };
+  delete next[BODY_OMITTED];
+  return next;
+}
+
+/**
+ * Refuse to judge or persist a card whose body was never read. This is a
+ * programming error at the call site (fetch the body first), not a data
+ * problem with the card — hence a distinct code from the policy failures,
+ * so callers that legitimately swallow `default_todo_not_pickup_ready`
+ * (move's dependency auto-promotion) can never swallow this.
+ */
+export function assertBodyLoaded(card: Card, operation: string): void {
+  if (!isBodyOmitted(card)) return;
+  throw new FkanbanError({
+    code: "card_body_not_loaded",
+    message: `${operation} needs the body of "${card.slug}", which was read through a body-free projection.`,
+    hint: "Hydrate first — findCard/requireCard for one card, listCardsWithBodies for a whole-board sweep — then re-run. Board lists (BoardCards/CardListIndex) never carry bodies.",
+  });
+}
+
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
 // Native deletes are hidden by the node before this point.
@@ -1912,9 +1974,11 @@ async function listCardsWithFields(
       const partitioned = await listAllBoardCards(node, cfg, boards);
       if (partitioned !== null && partitioned.length > 0) {
         // BoardCards rows are already body-free; promote any structured fields.
-        return partitioned
-          .filter((c) => !isHiddenCard(c))
-          .map((c) => Object.assign(c, deriveStructuredFields(c)));
+        return markBodyOmitted(
+          partitioned
+            .filter((c) => !isHiddenCard(c))
+            .map((c) => Object.assign(c, deriveStructuredFields(c))),
+        );
       }
       // Empty partition may mean "no cards" OR "not dual-written yet".
       // Fall through to CardListIndex when partitions are empty so dual-read
@@ -1940,8 +2004,10 @@ async function listCardsWithFields(
     // Treat it as a miss and seed from Card truth below instead.
     if (indexed !== null && !(indexed.length === 0 && cardListIndexIsSuperseded(cfg))) {
       // CardListIndex is body-free by construction — never N+1 hydrate.
-      return (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
-        Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
+      return markBodyOmitted(
+        (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
+          Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
+        ),
       );
     }
     if (opts.allowFullScanFallback === false) {
@@ -1962,6 +2028,7 @@ async function listCardsWithFields(
       });
     }
     const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+    if (!fields.includes("body")) markBodyOmitted(cards);
     try {
       await writeCardListIndex(node, cfg, cards.map(toCardSummary));
     } catch {
@@ -1985,7 +2052,8 @@ async function listCardsWithFields(
     if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
     res = await query(fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)));
   }
-  return res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+  const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+  return fields.includes("body") ? cards : markBodyOmitted(cards);
 }
 
 function isOnlyOptionalFieldMiss(err: unknown, fields: string[]): boolean {
@@ -2041,15 +2109,18 @@ async function listCardsClientFiltered(
 
 export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
   // Thin board list — no bodies (BoardCards / index). Use findCard for one body,
-  // or listCardsWithBodiesForSearch for complete-body search (one admin scan).
+  // or listCardsWithBodies for complete-body search (one admin scan).
   return listCardsWithFields(node, cfg, fieldsFor("card"));
 }
 
 /**
- * Complete-body card set for free-text search only: ONE admin full-scan of Card
- * (allowFullScan), not N point-gets. Prefer native index / thin list for hot paths.
+ * Complete-body card set: ONE admin full-scan of Card (allowFullScan), not N
+ * point-gets. Prefer the native index / thin list for hot paths — this is for
+ * free-text search and for whole-board sweeps that JUDGE or REWRITE bodies
+ * (`groom stale-blockers`, `rank`, `migrate area-tags`), which cannot use the
+ * body-free list without deciding on a body they never read.
  */
-export async function listCardsWithBodiesForSearch(
+export async function listCardsWithBodies(
   node: NodeClient,
   cfg: Config,
 ): Promise<Card[]> {
@@ -2072,6 +2143,33 @@ export async function listCardsWithBodiesForSearch(
     });
   }
   return res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+}
+
+/**
+ * The BOARD's cards with their bodies filled in — for whole-board sweeps that
+ * judge or rewrite bodies (`groom stale-blockers`, `rank`, `migrate
+ * area-tags`).
+ *
+ * Two reads, not N: `listCards` for the universe and ONE admin scan for the
+ * bodies. Taking the universe from the board list rather than from the scan is
+ * deliberate — the scan returns every Card record, including ones with no
+ * BoardCards row, so sweeping it directly would silently widen a board command
+ * to off-board records (522 rows vs the board's 245 on the primary,
+ * 2026-07-30). Same cards as every other board command, now with bodies.
+ *
+ * A card the scan doesn't cover (BoardCards/Card drift) is point-read rather
+ * than handed back as a false empty — the whole failure this guards against.
+ */
+export async function listBoardCardsWithBodies(node: NodeClient, cfg: Config): Promise<Card[]> {
+  const cards = await listCards(node, cfg);
+  if (cards.length === 0) return cards;
+  if (!cards.some(isBodyOmitted)) return cards;
+
+  const bodies = new Map((await listCardsWithBodies(node, cfg)).map((c) => [c.slug, c.body]));
+  const covered = cards.map((c) =>
+    isBodyOmitted(c) && bodies.has(c.slug) ? withLoadedBody(c, bodies.get(c.slug)!) : c,
+  );
+  return hydrateCardBodies(node, cfg, covered);
 }
 
 type PickupPeerPlan = { action: "ready"; card: Card } | { action: "hydrate"; card: Card } | { action: "skip" };
@@ -2606,10 +2704,13 @@ async function reconcileBoardCardSummaries(
   fields: string[],
   opts: { verify?: boolean } = {},
 ): Promise<Card[]> {
-  const deduped = dedupeBoardCardSummaries(cards);
+  // BoardCards rows carry no body — mark them so nothing downstream mistakes
+  // `body: ""` for an empty brief (see `Card[BODY_OMITTED]`).
+  const deduped = markBodyOmitted(dedupeBoardCardSummaries(cards));
   if (!opts.verify) return deduped;
 
   const projection = cardListProjectionFields(fields);
+  const bodyVerified = projection.includes("body");
   const out: Card[] = [];
 
   for (const card of deduped) {
@@ -2621,6 +2722,7 @@ async function reconcileBoardCardSummaries(
     }
 
     Object.assign(truth, deriveStructuredFields(truth));
+    if (!bodyVerified) truth[BODY_OMITTED] = true;
     if (!boardCardSummaryMatchesTruth(card, truth)) {
       try {
         await upsertBoardCard(node, cfg, truth, card);
@@ -2655,9 +2757,12 @@ export async function hydrateCardBodies(
   cards: Card[],
 ): Promise<Card[]> {
   return mapWithConcurrency(cards, async (c) => {
-    if (c.body.length > 0) return c;
+    // Only a card whose body was never READ needs a point-read. A card already
+    // carrying its stored body — including a stored body that really is empty —
+    // is done, and re-reading it would pay N reads to learn nothing.
+    if (!isBodyOmitted(c) || c.body.length > 0) return c;
     const full = await findCard(node, cfg, c.slug);
-    return full ? { ...c, body: full.body } : c;
+    return full ? withLoadedBody(c, full.body) : c;
   });
 }
 
@@ -2928,6 +3033,13 @@ async function writeCardRecordWithOptionalFieldFallback(
   op: CardWriteOp,
   expected?: CasExpectation,
 ): Promise<void> {
+  // Single choke point for every card write. `cardToFields` emits the WHOLE
+  // record, so persisting a body-free projection silently blanks the stored
+  // brief — the failure mode `rank`, `migrate area-tags`, `groom --apply` and
+  // `pickup claim` each had, invisibly, because a thin card and a genuinely
+  // empty one look identical. Refuse here rather than at four call sites, so
+  // no future caller can reintroduce it.
+  assertBodyLoaded(card, `writing card "${card.slug}"`);
   const hash = schemaHashFor("card", opts.cfg);
   // A hash already proven to reject the optional fields writes the legacy
   // shape directly — the full-shape attempt would fail the same way it did

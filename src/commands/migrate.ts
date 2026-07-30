@@ -24,7 +24,7 @@ import {
   findCard,
   isPickupAreaTag,
   listBoards,
-  listCards,
+  listBoardCardsWithBodies,
   nowIso,
   scanCardSummariesForReconcile,
   updateCardRecord,
@@ -66,7 +66,11 @@ export async function migrateAreaTagsCmd(
   opts: MigrateAreaTagsOptions,
 ): Promise<MigrateAreaTagsResult> {
   const dryRun = opts.dryRun ?? false;
-  const cards = await listCards(opts.node, opts.cfg);
+  // Bodies, for the same two reasons `migrateLegacyColumnsCmd` point-reads
+  // truth above: `pickupAreaTagsForCard` derives areas from `Area:`/`Feature
+  // Area:` BODY headers, and each retagged card is written back whole. On the
+  // body-free list this stripped body-declared area tags and blanked briefs.
+  const cards = await listBoardCardsWithBodies(opts.node, opts.cfg);
   const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
 
   const result: MigrateAreaTagsResult = {

@@ -136,11 +136,15 @@ export async function pickupExplainResult(opts: {
   const boards = await listBoards(opts.node, opts.cfg);
   cards = await listDependencyStatusesForCards(opts.node, opts.cfg, cards);
 
-  let card = cards.find((c) => c.slug === slug);
-  if (!card) {
-    card = await requireCard(opts.node, opts.cfg, slug);
-    cards = [...cards.filter((c) => c.slug !== slug), card];
-  }
+  // The peer set stays thin — dep status, overlap and lane all read real
+  // fields (deps/column/repo/surfaces), never the body. The SUBJECT card is
+  // point-read for its body, because the write-guard and the registry
+  // classifier both judge it: on the thin list every card came back "empty or
+  // annotation-only body" for a body that was never fetched, and the report
+  // presented that phantom next to real blockers as if they were the same
+  // kind of finding.
+  const card = await requireCard(opts.node, opts.cfg, slug);
+  cards = [...cards.filter((c) => c.slug !== slug), card];
 
   const terminalByBoard = new Map(
     boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]),

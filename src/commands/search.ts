@@ -13,7 +13,7 @@ import {
   listDependencyStatusesForCards,
   listBoards,
   listCardsByFilter,
-  listCardsWithBodiesForSearch,
+  listCardsWithBodies,
   queryTerms,
   requireBoard,
   cardMatchesQuery,
@@ -261,7 +261,7 @@ export async function searchResult(
   let matches: Card[];
   if (complete) {
     // One admin Card scan with bodies (search must match body text). Not N+1.
-    const all = await listCardsWithBodiesForSearch(opts.node, opts.cfg);
+    const all = await listCardsWithBodies(opts.node, opts.cfg);
     allCards = all;
     const scoped = allCards.filter(
       (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),

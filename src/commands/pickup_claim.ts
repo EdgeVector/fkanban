@@ -11,6 +11,7 @@ import { type Config, schemaHashFor } from "../config.ts";
 import {
   boardToFields,
   findCard,
+  isBodyOmitted,
   findBoard,
   listBoards,
   listCards,
@@ -311,8 +312,23 @@ async function selfHealTargetTodoBlockers(opts: {
   let nextCards = opts.cards;
   for (const card of opts.cards) {
     if (card.board !== opts.board || card.column !== "todo") continue;
-    const healed = selfHealPickupTodoBlocker(card, nextCards);
+    let healed = selfHealPickupTodoBlocker(card, nextCards);
     if (!healed.changed || !healed.issues.some((issue) => issue.applyable)) continue;
+
+    // The pass above ran on the body-free board list — cheap, and enough to
+    // decide THAT this card needs healing from its block_status/block_reason
+    // fields. Writing it is a different matter: a card write carries every
+    // field, so persisting the projection would blank the brief. Point-read
+    // the real card and re-run the heal on it, which also gives the
+    // body-dependent branch (stale BLOCKED prose) its only real evaluation.
+    // One read per card actually healed, not per card on the board.
+    if (isBodyOmitted(card)) {
+      const full = await findCard(opts.node, opts.cfg, card.slug);
+      if (!full) continue;
+      healed = selfHealPickupTodoBlocker(full, nextCards);
+      if (!healed.changed || !healed.issues.some((issue) => issue.applyable)) continue;
+    }
+
     nextCards = nextCards.map((c) => c.slug === card.slug ? healed.card : c);
     if (!opts.dryRun) {
       await writeGroomedCard({ cfg: opts.cfg, node: opts.node }, healed.card);

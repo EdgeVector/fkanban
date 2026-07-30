@@ -1,8 +1,10 @@
 import { type NodeClient } from "./client.ts";
 import { type Config } from "./config.ts";
 import {
+  assertBodyLoaded,
   depStatus,
   hasPrWorkBrief,
+  isBodyOmitted,
   isCardKind,
   isRegistryCard,
   isSubstantiveCardBody,
@@ -371,6 +373,12 @@ export function isSupportedDoneWhenPredicate(predicate: string): boolean {
 }
 
 export function groomCard(card: Card, allCards: Card[]): { card: Card; issues: GroomIssue[]; changed: boolean } {
+  // Almost every issue below is a verdict on the body (malformed Repo header,
+  // stale BLOCKED prose, hollow brief, DONE-WHEN predicate) and the caller
+  // writes the result back. A body-free projection can only produce confident
+  // nonsense here, so refuse it outright instead of grooming a body nobody
+  // read — see `Card[BODY_OMITTED]`.
+  assertBodyLoaded(card, "grooming card");
   const issues: GroomIssue[] = [];
   const next: Card = { ...card, tags: [...card.tags], deps: [...card.deps] };
 
@@ -597,9 +605,18 @@ export function selfHealPickupTodoBlocker(card: Card, allCards: Card[]): PickupG
     blockStatus = "none";
   }
 
+  // Unlike groomCard, this runs on the body-free board list by design —
+  // `pickup claim` calls it over every todo card and must not pay a point-read
+  // each. The branches above are field-only (block_status/block_reason) and are
+  // safe there; this one is not. On a projection the body was never read, so
+  // "no generated BLOCKED prose remains" would be a claim about text we don't
+  // have — skip it, and let the caller hydrate and re-run for the cards a
+  // field-signal branch actually flagged.
   const resolvedRepo = resolvePickupRepo(next).ok;
   const resolvedBase = baseForPickup(next).length > 0;
-  const blockedLines = removeGeneratedBlockedLines(next.body);
+  const blockedLines = isBodyOmitted(card)
+    ? { body: next.body, changed: false }
+    : removeGeneratedBlockedLines(next.body);
   if (blockedLines.changed && resolvedRepo && resolvedBase) {
     issues.push({
       kind: "stale-blocked-prose",

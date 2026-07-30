@@ -20,6 +20,7 @@ import {
   doneAtForColumnTransition,
   ensureBoardRecord,
   ensureColumn,
+  findCard,
   findMilestone,
   listBoards,
   listCards,
@@ -94,8 +95,18 @@ async function promoteUnblockedBacklogDependents(opts: {
   ensureColumn("todo", defaultBoard.columns);
   const promoted: string[] = [];
 
-  for (const candidate of candidates) {
-    if (depStatus(candidate, cardsWithMovedDependency, boardTerminal).blocked) continue;
+  for (const thin of candidates) {
+    if (depStatus(thin, cardsWithMovedDependency, boardTerminal).blocked) continue;
+
+    // `candidates` come from the body-free board list, and everything below
+    // this line needs the body: the pickup-readiness gate reads the brief, and
+    // the write carries the whole record. Without this hydrate the gate saw an
+    // empty body on EVERY dependent, threw `default_todo_not_pickup_ready`,
+    // and `isExpectedPromotionSkip` swallowed it — so dependency
+    // auto-promotion silently never fired on a board with BoardCards. One
+    // point-read per unblocked dependent, not per card on the board.
+    const candidate = await findCard(opts.node, opts.cfg, thin.slug);
+    if (!candidate) continue;
 
     const updated: Card = {
       ...candidate,
