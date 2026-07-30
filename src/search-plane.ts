@@ -58,19 +58,6 @@ function resolveIndexDir(searchHome?: string): string {
   return resolve(home, "apps/search/index");
 }
 
-function resolveInboxDir(searchHome?: string): string {
-  if (process.env.SEARCH_INBOX?.trim()) return process.env.SEARCH_INBOX.trim();
-  if (searchHome) return resolve(searchHome, "inbox");
-  if (process.env.SEARCH_HOME?.trim()) {
-    return resolve(process.env.SEARCH_HOME.trim(), "inbox");
-  }
-  const home =
-    process.env.LASTDB_HOME?.trim() ||
-    process.env.FOLDDB_HOME?.trim() ||
-    `${process.env.HOME ?? ""}/.lastdb`;
-  return resolve(home, "apps/search/inbox");
-}
-
 function resolveSearchHome(searchHome?: string): string {
   if (searchHome) return searchHome;
   if (process.env.SEARCH_HOME?.trim()) return process.env.SEARCH_HOME.trim();
@@ -162,7 +149,7 @@ export async function querySearchPlane(opts: {
 }): Promise<SearchPlaneHit[] | null> {
   // Semantic first — do not drain keyword-only vendor (avoids inbox steal).
   const sem = await querySemantic(opts);
-  if (sem !== null) return sem;
+  if (sem !== null && sem.length > 0) return sem;
 
   const modPath = resolveSearchModulePath();
   if (!modPath) return null;

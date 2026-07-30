@@ -63,6 +63,7 @@ const SHARED_MEMBERSHIP_FIELDS = BOARD_CARDS_FIELDS.filter(
 // Keyed per node so unit-test fakes with different baseUrls do not pollute
 // each other when bun runs the full suite in one process.
 const proteinAvailByNode = new Map<string, boolean>();
+const proteinLookupAvailByNode = new Map<string, boolean>();
 // Live schema pin → field → molecule uuid (from field_molecule_uuids).
 const fieldMolCache = new Map<string, Record<string, string>>();
 
@@ -72,6 +73,7 @@ function nodeCacheKey(node: NodeClient): string {
 
 export function resetProteinCaches(): void {
   proteinAvailByNode.clear();
+  proteinLookupAvailByNode.clear();
   fieldMolCache.clear();
 }
 
@@ -215,6 +217,75 @@ function alreadyBoundProteinUuid(body: unknown): string | null {
   return m?.[1] ?? null;
 }
 
+type MoleculeProteinLookup =
+  | { supported: false }
+  | { supported: true; ok: true; proteinUuid: string | null }
+  | { supported: true; ok: false };
+
+async function proteinOfMolecule(
+  node: NodeClient,
+  moleculeUuid: string,
+): Promise<MoleculeProteinLookup> {
+  const key = nodeCacheKey(node);
+  if (proteinLookupAvailByNode.get(key) === false) return { supported: false };
+
+  try {
+    const res = await node.rawCall(
+      "GET",
+      `/api/protein/of-molecule/${encodeURIComponent(moleculeUuid)}`,
+    );
+    if (res.status === 404 || res.status === 405) {
+      proteinLookupAvailByNode.set(key, false);
+      return { supported: false };
+    }
+    proteinLookupAvailByNode.set(key, true);
+    if (res.status !== 200 && res.status !== 201) return { supported: true, ok: false };
+    const body = (res.json && typeof res.json === "object"
+      ? res.json
+      : {}) as Record<string, unknown>;
+    const proteinUuid = body.protein_uuid;
+    return {
+      supported: true,
+      ok: true,
+      proteinUuid: typeof proteinUuid === "string" && proteinUuid.length > 0 ? proteinUuid : null,
+    };
+  } catch {
+    // A supported route that cannot be read is not proof the molecule is unbound.
+    return { supported: true, ok: false };
+  }
+}
+
+async function addMoleculeToProtein(
+  node: NodeClient,
+  proteinUuid: string,
+  moleculeUuid: string,
+  hashField: string,
+  rangeField: string,
+): Promise<string | null> {
+  const add = await node.rawCall("POST", "/api/protein/member", {
+    protein_uuid: proteinUuid,
+    molecule_uuid: moleculeUuid,
+    hash_field: hashField,
+    range_field: rangeField,
+  });
+  if (add.status === 200 || add.status === 201) return proteinUuid;
+
+  const adopted = alreadyBoundProteinUuid(add.json ?? add.body);
+  if (!adopted) return null;
+  if (adopted === proteinUuid) return proteinUuid;
+
+  const add2 = await node.rawCall("POST", "/api/protein/member", {
+    protein_uuid: adopted,
+    molecule_uuid: moleculeUuid,
+    hash_field: hashField,
+    range_field: rangeField,
+  });
+  if (add2.status === 200 || add2.status === 201) return adopted;
+  if (alreadyBoundProteinUuid(add2.json ?? add2.body) === adopted) return adopted;
+  // The molecule is on that protein; layout may already match and remains usable.
+  return adopted;
+}
+
 /**
  * Ensure `molecule` is a protein member under `hashField`/`rangeField`.
  * Returns the protein uuid used, or null on hard failure.
@@ -229,6 +300,20 @@ async function ensureMemberProtein(
   hashField: string,
   rangeField: string,
 ): Promise<string | null> {
+  const existing = await proteinOfMolecule(node, moleculeUuid);
+  if (existing.supported) {
+    if (!existing.ok) return null;
+    if (existing.proteinUuid) {
+      return await addMoleculeToProtein(
+        node,
+        existing.proteinUuid,
+        moleculeUuid,
+        hashField,
+        rangeField,
+      );
+    }
+  }
+
   const created = await node.rawCall("POST", "/api/protein", {});
   if (created.status !== 200 && created.status !== 201) return null;
   const body = (created.json && typeof created.json === "object"
@@ -237,29 +322,7 @@ async function ensureMemberProtein(
   let uuid = typeof body.uuid === "string" ? body.uuid : "";
   if (!uuid) return null;
 
-  const add = await node.rawCall("POST", "/api/protein/member", {
-    protein_uuid: uuid,
-    molecule_uuid: moleculeUuid,
-    hash_field: hashField,
-    range_field: rangeField,
-  });
-  if (add.status === 200 || add.status === 201) return uuid;
-
-  const adopted = alreadyBoundProteinUuid(add.json ?? add.body);
-  if (!adopted) return null;
-
-  // Molecule already on another protein — ensure this layout is registered there.
-  const add2 = await node.rawCall("POST", "/api/protein/member", {
-    protein_uuid: adopted,
-    molecule_uuid: moleculeUuid,
-    hash_field: hashField,
-    range_field: rangeField,
-  });
-  if (add2.status === 200 || add2.status === 201) return adopted;
-  // Already has this exact layout on that protein.
-  if (alreadyBoundProteinUuid(add2.json ?? add2.body) === adopted) return adopted;
-  // Molecule is on that protein; layout may already match — still usable for writes.
-  return adopted;
+  return await addMoleculeToProtein(node, uuid, moleculeUuid, hashField, rangeField);
 }
 
 /**
@@ -416,21 +479,41 @@ export async function writeMembershipViaProtein(
 
       if (hasMilestone) {
         const molMs = molForField(msMols, msSchema, field);
-        // Prefer bind both into board's protein for fold; if that fails, own protein.
-        const tryJoin = await node.rawCall("POST", "/api/protein/member", {
-          protein_uuid: boardProtein,
-          molecule_uuid: molMs,
-          hash_field: "milestone",
-          range_field: "sk",
-        });
-        if (tryJoin.status === 200 || tryJoin.status === 201) {
+        const existingMsProtein = await proteinOfMolecule(node, molMs);
+        let joinedToBoard = false;
+        let msProtein: string | null = null;
+        if (existingMsProtein.supported) {
+          if (!existingMsProtein.ok) return false;
+          if (existingMsProtein.proteinUuid && existingMsProtein.proteinUuid !== boardProtein) {
+            msProtein = await ensureMemberProtein(node, molMs, "milestone", "sk");
+          } else {
+            const joined = await addMoleculeToProtein(
+              node,
+              boardProtein,
+              molMs,
+              "milestone",
+              "sk",
+            );
+            if (!joined) return false;
+            joinedToBoard = joined === boardProtein;
+            if (!joinedToBoard) msProtein = joined;
+          }
+        } else {
+          // Older Mini: keep the legacy bind-and-adopt path.
+          const joined = await addMoleculeToProtein(node, boardProtein, molMs, "milestone", "sk");
+          if (!joined) return false;
+          joinedToBoard = joined === boardProtein;
+          if (!joinedToBoard) msProtein = joined;
+        }
+
+        if (joinedToBoard) {
           // Unified: re-write via board entry so fold can repoint ms (sync_fold).
           if (!(await proteinWriteField(node, molBoard, fieldMap, content))) {
             return false;
           }
         } else {
           // Separate proteins: write ms tip explicitly with same content.
-          const msProtein = await ensureMemberProtein(node, molMs, "milestone", "sk");
+          if (!msProtein) msProtein = await ensureMemberProtein(node, molMs, "milestone", "sk");
           if (!msProtein) return false;
           if (!(await proteinWriteField(node, molMs, msFieldMap, content))) {
             return false;
