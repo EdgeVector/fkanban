@@ -105,6 +105,20 @@ export type PickupClaimResult = {
   /** Count of non-ready cards still parked in the target board's todo column. */
   todo_blockers: number;
   skipped: PickupClaimSkip[];
+  /**
+   * Why the surface-overlap gate could not adjudicate this claim.
+   *
+   * `overlapAgainstCards` returns BOTH `conflicts` (a surface pair matched) and
+   * `warnings` ("candidate has no surfaces; overlap unknown"). Only a conflict
+   * blocks. A warning means the gate ran and could not answer — which on this
+   * board is the normal case, because `surfaces` is empty on effectively every
+   * card. Discarding it made an inert gate indistinguishable from a passing one:
+   * the claim reported success for a check that had no input.
+   *
+   * This does NOT gate. It records that no collision guarantee was obtained, so
+   * the absence of a conflict is never read as proof of safety.
+   */
+  overlap_unadjudicated?: string[];
   /** Sample of non-ready todo cards blocking pickup hygiene. */
   todo_blocker_exemplars?: PickupClaimDiagnosticExemplar[];
   diagnostics?: PickupClaimDiagnostics;
@@ -472,6 +486,14 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
       continue;
     }
 
+    // No conflict. That is only a safety claim when the gate had something to
+    // compare; `warnings` is how `overlapAgainstCards` says it did not. Carry
+    // them onto the result rather than dropping them here — see
+    // `PickupClaimResult.overlap_unadjudicated`.
+    const overlapUnadjudicated = overlap.warnings.length > 0
+      ? { overlap_unadjudicated: overlap.warnings }
+      : {};
+
     if (opts.dryRun) {
       return {
         claimed: true,
@@ -484,6 +506,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         todo_count: todoCount,
         ...todoBlockerFields(diagnostics),
         skipped,
+        ...overlapUnadjudicated,
         ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
     }
@@ -534,6 +557,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         todo_count: todoCount,
         ...todoBlockerFields(diagnostics),
         skipped,
+        ...overlapUnadjudicated,
         ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
     } catch (err) {
@@ -601,6 +625,13 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
       for (const s of result.skipped.slice(0, 12)) {
         lines.push(`    - ${s.slug}: ${s.reason}${s.detail ? ` (${s.detail})` : ""}`);
       }
+    }
+    // Printed on a SUCCESSFUL claim on purpose: this is the case where the
+    // absence of a conflict would otherwise read as a clean collision check.
+    if (result.overlap_unadjudicated?.length) {
+      lines.push(`  surface-overlap gate did not adjudicate (${result.overlap_unadjudicated.length}):`);
+      for (const w of result.overlap_unadjudicated.slice(0, 6)) lines.push(`    - ${w}`);
+      lines.push("    declare Surfaces: on these cards to make the collision gate effective");
     }
     if (result.diagnostics) appendTodoBlockerDiagnostics(lines, result.diagnostics);
     return lines.join("\n");
