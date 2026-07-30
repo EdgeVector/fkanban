@@ -40,6 +40,7 @@ import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
 import { migrateAreaTagsCmd, migrateLegacyColumnsCmd } from "./commands/migrate.ts";
 import { normalizePriority, PRIORITY_TIERS, writeBodyHeader, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
+import { pingCommand } from "./commands/ping.ts";
 import { FKANBAN_APP_ID, declareGatesLink, gatesCmd } from "./commands/gates.ts";
 import { suggestClosest } from "./suggest.ts";
 import {
@@ -109,6 +110,7 @@ Commands:
   milestone gap-report deterministic gap map (in-flight / promote / empty)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
   migrate legacy-columns one-time: move cards off columns the board no longer defines (--dry-run)
+  ping                 one cheap liveness request to the node (--json)
   doctor               health-check the local setup (--json)
   which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
   mcp                  start an MCP server over stdio
@@ -629,6 +631,19 @@ Flags:
 Examples:
   fkanban hygiene orphan-bun
   fkanban hygiene orphan-bun --apply`),
+
+  ping: withFooter(`fkanban ping — one cheap liveness request to the node
+
+Usage:
+  fkanban ping [--json]
+
+Sends a single unauthenticated status read over the node's socket — no board
+read, no schema resolution — and exits 0 iff the node answered. Use this for
+"is the node up" health checks instead of \`kanban list\`; reach for
+\`kanban doctor\` only when something is actually misconfigured.
+
+Flags:
+  --json               machine-readable { ok, latency_ms, version, ... } report`),
 
   doctor: withFooter(`fkanban doctor — health-check the local setup
 
@@ -1393,6 +1408,12 @@ async function dispatch(
       // from package.json (same source as `--version`/`-V`) and exit 0.
       console.log(pkg.version);
       return 0;
+    }
+
+    case "ping": {
+      const extra = rejectExtraPositionals(positionals, 1, "ping");
+      if (extra !== undefined) return extra;
+      return pingCommand({ json: values.json === true, verbose });
     }
 
     case "doctor": {

@@ -85,7 +85,8 @@ like organic ones; undiverged CoW files make pruning even cheaper.)
 
 ```bash
 bun run src/cli.ts <cmd>     # or the bin/kanban shim once on PATH
-bun run src/cli.ts list      # socket-backed health check / smoke read
+bun run src/cli.ts ping      # liveness check: ONE status read, no board read
+bun run src/cli.ts list      # smoke read (board data-plane round-trip)
 ```
 
 The CLI needs a running LastDB/FoldDB node. Tom's primary brain is reached over

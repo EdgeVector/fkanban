@@ -1,0 +1,57 @@
+// `kanban ping` — one cheap liveness request to the node. The socket-safe
+// answer to "is the node up", replacing the `kanban list` health-check
+// convention: a status read costs the node one request, a list costs a board
+// read. Report shape is shared verbatim by `ping --json` and the MCP
+// `fkanban_ping` tool so the two can't diverge (same pattern as doctor).
+
+import pkg from "../../package.json" with { type: "json" };
+import { pingNode, type PingReport, type Verbose } from "../client.ts";
+import { resolveSocketPath, tryReadConfig } from "../config.ts";
+
+// `version` is the installed fkanban CLI version (same source as
+// `kanban --version`) — a report field, not a liveness signal.
+export type PingCommandReport = PingReport & { version: string };
+
+export type PingOptions = {
+  configPath?: string;
+  json?: boolean;
+  verbose?: Verbose;
+  print?: (line: string) => void;
+};
+
+// Run the probe and return the structured report without printing. Missing
+// config is an unreachable-node report, not a throw: ping is used from health
+// checks that must always get an answer.
+export async function runPingStructured(
+  opts: Omit<PingOptions, "json" | "print"> = {},
+): Promise<PingCommandReport> {
+  const cfg = tryReadConfig(opts.configPath);
+  if (!cfg) {
+    return {
+      ok: false,
+      latency_ms: 0,
+      version: pkg.version,
+      error: "config missing — run `kanban init`",
+    };
+  }
+  const report = await pingNode({
+    nodeUrl: cfg.nodeUrl,
+    socketPath: resolveSocketPath(cfg),
+    verbose: opts.verbose,
+  });
+  return { ...report, version: pkg.version };
+}
+
+export async function pingCommand(opts: PingOptions = {}): Promise<number> {
+  const print = opts.print ?? ((l: string) => console.log(l));
+  const report = await runPingStructured(opts);
+  if (opts.json) {
+    print(JSON.stringify(report));
+  } else if (report.ok) {
+    const version = report.node_version ? ` (node ${report.node_version})` : "";
+    print(`✓ node ok in ${report.latency_ms}ms${version}`);
+  } else {
+    print(`✗ node unreachable — ${report.error}`);
+  }
+  return report.ok ? 0 : 1;
+}

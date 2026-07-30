@@ -24,6 +24,7 @@ import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestone
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
+import { runPingStructured } from "../commands/ping.ts";
 import { CARD_KINDS, MILESTONE_PROOF_STATUSES, MILESTONE_STATES, PRIORITY_TIERS, hydrateCardBodies, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
@@ -51,6 +52,7 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_milestone_detail",
   "fkanban_milestone_groom",
   "fkanban_doctor",
+  "fkanban_ping",
 ] as const;
 export const FKANBAN_WRITE_TOOLS = [
   "fkanban_add",
@@ -96,6 +98,7 @@ export const FKANBAN_MCP_INSTRUCTIONS = [
   "fkanban_show <slug> for one card's full body. Prefer fkanban_show over full_body when",
   "you only need one card — it's cheaper.",
   "",
+  "Health check: fkanban_ping (one cheap status read) — not fkanban_list.",
   "Discovery: if anything seems misconfigured, start with fkanban_doctor.",
 ].join("\n");
 
@@ -1277,6 +1280,36 @@ export function createFkanbanMcpServer(
         const { ok, version, checks, lines } = await runDoctorStructured();
         const report = lines.join("\n");
         return toolResult(report, { ok, version, checks }, { isError: !ok });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_ping",
+    {
+      title: "Ping the node",
+      description:
+        "One cheap liveness request to the LastDB node (a single unauthenticated status read — no board read, no schema resolution). Use this for \"is the node up\" health checks instead of fkanban_list; use fkanban_doctor only when something is actually misconfigured.",
+      annotations: { title: "Ping the node", readOnlyHint: true, openWorldHint: false },
+      inputSchema: {},
+      outputSchema: {
+        ok: z.boolean(),
+        latency_ms: z.number().describe("Wall time of the single status request, also on failure."),
+        version: z.string().describe("The installed fkanban CLI version (from package.json)."),
+        node_version: z.string().optional().describe("The node's own version when the status body carries one."),
+        socket_path: z.string().optional(),
+        error: z.string().optional(),
+      },
+    },
+    async () => {
+      try {
+        const report = await runPingStructured();
+        const line = report.ok
+          ? `✓ node ok in ${report.latency_ms}ms${report.node_version ? ` (node ${report.node_version})` : ""}`
+          : `✗ node unreachable — ${report.error}`;
+        return toolResult(line, { ...report }, { isError: !report.ok });
       } catch (err) {
         return errorResult(err);
       }
