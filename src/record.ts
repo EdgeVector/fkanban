@@ -2970,10 +2970,11 @@ export async function createCardRecord(
  * Multi-key coherence is the node's job, not ours: LastDB recognises BoardCards
  * and MilestoneCards as one product under two keys, binds their matching fields
  * into proteins on schema load, and folds a write on one key onto the other's
- * tip. fkanban used to drive that itself through `/api/protein/*` — creating
- * proteins, binding members, ordering folds, and verifying partitions agreed
- * afterwards — which put a storage-layer invariant in application code and made
- * every app that wanted a second key reimplement it. Those routes are gone.
+ * tip. fkanban used to drive that itself through the node's protein routes —
+ * creating proteins, binding members, ordering folds, and verifying partitions
+ * agreed afterwards — which put a storage-layer invariant in application code
+ * and made every app that wanted a second key reimplement it. Those routes are
+ * gone, and test/no-protein-reach.test.ts keeps them gone.
  */
 async function writeCardMembership(
   opts: { cfg: Config; node: NodeClient },
