@@ -209,7 +209,31 @@ export type LoadedSchema = {
   // Empty when the node omits `fields` (older nodes) — callers fall back to
   // descriptive_name matching + a write probe.
   fields: string[];
+  // The schema's key layout, as reported in `/api/schemas`. Fields alone CANNOT
+  // separate an entity from its own secondary index: a membership index carries
+  // the entity's fields plus its index fields, so it is a strict field superset
+  // of the entity BY CONSTRUCTION and wins any "widest superset" contest. The
+  // key layout is what actually distinguishes them — `MilestoneCards` is
+  // HashRange `milestone/sk`, the `Milestone` entity is Hash `slug` — and a
+  // schema keyed differently can never be the write target for this record type.
+  // `null` when the node omits `key` (older nodes); callers must then fall back
+  // rather than treat a missing layout as a match.
+  key: { hash_field: string; range_field: string | null } | null;
 };
+
+// Read a `/api/schemas` entry's key layout. Returns `null` — NOT a zero value —
+// when the node omits `key` or reports no `hash_field`, so a caller can tell
+// "this node doesn't report layouts" apart from "this schema is keyed by ''".
+// Collapsing those two would let an older node's silence read as a layout match.
+function readKeyLayout(raw: unknown): { hash_field: string; range_field: string | null } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const k = raw as Record<string, unknown>;
+  if (typeof k.hash_field !== "string" || k.hash_field.length === 0) return null;
+  return {
+    hash_field: k.hash_field,
+    range_field: typeof k.range_field === "string" && k.range_field.length > 0 ? k.range_field : null,
+  };
+}
 
 /** Live schema detail from GET /api/schema/{hash} (key layout for membership indexes). */
 export type SchemaDetail = {
@@ -754,6 +778,7 @@ export function newNodeClient(opts: {
         fields: Array.isArray(s.fields)
           ? (s.fields as unknown[]).filter((v): v is string => typeof v === "string")
           : [],
+        key: readKeyLayout(s.key),
       }));
     },
     async getSchema(schemaHash: string) {

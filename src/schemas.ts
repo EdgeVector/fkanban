@@ -589,6 +589,10 @@ export type LoadedSchemaCandidate = {
   descriptive_name: string;
   owner_app_id: string;
   fields: string[];
+  // Key layout as the node reports it, or `null`/absent when the node omits it.
+  // See `resolveLoadedSchema` step 2 for why fields alone cannot separate an
+  // entity from its own membership index.
+  key?: { hash_field: string; range_field: string | null } | null;
 };
 
 export type SchemaResolution =
@@ -605,7 +609,12 @@ export type SchemaResolution =
 // the narrower version, and then EVERY write 400s because fkanban always emits
 // its full field set. So:
 //
-//   1. Filter to schemas matching this app's `owner_app_id` + `descriptive_name`.
+//   1. Filter to schemas matching this app's `owner_app_id` + `descriptive_name`,
+//      AND — when the node reports a key layout — whose layout matches the local
+//      definition's. `descriptive_name` is NOT unique per record type: the
+//      2026-07-23 multi-key expand registered the `MilestoneCards` membership
+//      index under descriptive_name `Milestone`, so the node carries a HashRange
+//      `milestone/sk` schema and the Hash `slug` entity under one name.
 //   2. Among those, PREFER a schema whose `fields` SUPERSET the local definition
 //      (so a write of every local field is accepted). If several do, that's
 //      benign ambiguity (they're all write-compatible) — pick the first and flag
@@ -615,9 +624,48 @@ export type SchemaResolution =
 //      refuses to adopt it (rather than silently pinning a write-broken hash).
 //   4. No match at all → `missing`.
 //
+// Step 1's layout filter is load-bearing, and step 2 CANNOT substitute for it. A
+// membership index projects the entity's fields and adds its own, so it is a
+// strict field superset of the entity BY CONSTRUCTION — it always wins step 2's
+// "widest superset" contest against the entity it indexes. Live proof on the
+// primary: `Milestone` resolved to `69e7…` (HashRange `milestone/sk`, 30 fields,
+// the MilestoneCards index) over the real `614c…` (Hash `slug`, 15 fields),
+// because the index's fields are a strict superset and it sorts earlier in the
+// node's listing. `doctor` then reported the correctly-pinned config as wrong
+// and told the operator to `kanban init` — a remedy that cannot change the
+// outcome, because `init` declares by definition and gets `614c…` back.
+//
+// A schema with a different key layout is not a narrower or staler version of
+// this record type; it is a DIFFERENT record type that happens to share a name,
+// and it can never be a write target for these keys. So it is excluded from the
+// candidate set entirely rather than ranked within it.
+//
+// When the node omits `key` (older nodes) every candidate has `key == null` and
+// the layout filter admits everything — preserving the pre-existing behavior
+// rather than resolving to `missing` on a node that simply doesn't report
+// layouts. The caller's write-probe remains the backstop there.
+//
 // A node that omits `fields` (older nodes) yields empty `fields` for every
 // candidate, so no candidate supersets a non-empty local set → `narrower`; the
 // caller's write-probe (which exercises a real create) is the backstop there.
+// Does a loaded schema's key layout match the local definition's?
+//
+// `loadedKey == null` means the node did not report a layout — unknown, not
+// mismatched — so it is admitted (older nodes keep the pre-layout behavior).
+// A REPORTED layout must agree on both components: `hash_field` identifies the
+// partition and `range_field` separates a Hash entity from a HashRange index
+// over that same entity, which is exactly the pair this filter exists to split.
+function keyLayoutMatches(
+  local: { hash_field: string; range_field?: string },
+  loadedKey: { hash_field: string; range_field: string | null } | null | undefined,
+): boolean {
+  if (!loadedKey) return true;
+  return (
+    loadedKey.hash_field === local.hash_field &&
+    loadedKey.range_field === (local.range_field ?? null)
+  );
+}
+
 export function resolveLoadedSchema(
   type: RecordType,
   loaded: LoadedSchemaCandidate[],
@@ -630,7 +678,8 @@ export function resolveLoadedSchema(
     (s) =>
       s.owner_app_id === def.owner_app_id &&
       s.descriptive_name === def.descriptive_name &&
-      s.name.length > 0,
+      s.name.length > 0 &&
+      keyLayoutMatches(def.key, s.key),
   );
   if (candidates.length === 0) return { kind: "missing" };
 
