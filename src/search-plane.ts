@@ -1,15 +1,14 @@
 /**
  * Shared Search app plane client for fkanban.
- * Prefers semantic Search plane (schema-scoped vectors); falls back to keyword vendor.
+ * Semantic Search plane only (schema-scoped vectors). Keyword LastStore removed
+ * from the product path (2026-07-30).
  *
- * Resolution: LASTDB_SEARCH_SEMANTIC_MODULE → semantic CLI → LASTDB_SEARCH_MODULE
- * → vendor/edgevector-search → unavailable.
+ * Resolution: LASTDB_SEARCH_SEMANTIC_MODULE → host-track semantic → semantic CLI.
  */
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -19,43 +18,12 @@ export type SearchPlaneHit = {
   text: string;
 };
 
-function packageRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
-}
-
-export function resolveSearchModulePath(): string | null {
-  const env = process.env.LASTDB_SEARCH_MODULE?.trim();
-  if (env && existsSync(env)) return resolve(env);
-  const vendorEngine = join(
-    packageRoot(),
-    "vendor",
-    "edgevector-search",
-    "src",
-    "engine.ts",
-  );
-  if (existsSync(vendorEngine)) return vendorEngine;
-  return null;
-}
-
 function resolveSemanticModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_SEMANTIC_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
   const c = `${process.env.HOME ?? ""}/.host-track/apps/search/current/src/semantic.ts`;
   if (existsSync(c)) return c;
   return null;
-}
-
-function resolveIndexDir(searchHome?: string): string {
-  if (process.env.SEARCH_INDEX_DIR?.trim()) return process.env.SEARCH_INDEX_DIR.trim();
-  if (searchHome) return resolve(searchHome, "index");
-  if (process.env.SEARCH_HOME?.trim()) {
-    return resolve(process.env.SEARCH_HOME.trim(), "index");
-  }
-  const home =
-    process.env.LASTDB_HOME?.trim() ||
-    process.env.FOLDDB_HOME?.trim() ||
-    `${process.env.HOME ?? ""}/.lastdb`;
-  return resolve(home, "apps/search/index");
 }
 
 function resolveSearchHome(searchHome?: string): string {
@@ -126,10 +94,7 @@ async function querySemantic(opts: {
   for (const s of opts.schemas ?? []) args.push("--schema", s);
   const r = spawnSync(bin, args, {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      SEARCH_EMBEDDER: process.env.SEARCH_EMBEDDER ?? "deterministic",
-    },
+    env: process.env,
     timeout: 60_000,
   });
   if (r.error || r.status !== 0) return null;
@@ -147,26 +112,8 @@ export async function querySearchPlane(opts: {
   schemas?: string[];
   searchHome?: string;
 }): Promise<SearchPlaneHit[] | null> {
-  // Semantic first — do not drain keyword-only vendor (avoids inbox steal).
+  // Semantic only — empty hits still count as a live plane (return []).
   const sem = await querySemantic(opts);
-  if (sem !== null && sem.length > 0) return sem;
-
-  const modPath = resolveSearchModulePath();
-  if (!modPath) return null;
-  try {
-    const engMod = (await import(pathToFileURL(modPath).href)) as {
-      openSearchEngine: (d: string) => {
-        search: (
-          q: string,
-          o?: { k?: number; schemas?: string[] },
-        ) => SearchPlaneHit[];
-        size: number;
-      };
-    };
-    // Keyword fallback only — no drain (Search app owns drain/online-backfill).
-    const eng = engMod.openSearchEngine(resolveIndexDir(opts.searchHome));
-    return eng.search(opts.query, { k: opts.k ?? 50, schemas: opts.schemas });
-  } catch {
-    return null;
-  }
+  if (sem !== null) return sem;
+  return null;
 }
