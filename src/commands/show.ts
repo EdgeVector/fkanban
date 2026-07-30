@@ -41,17 +41,19 @@ export async function showResult(opts: {
   // POINT-READ only this card's deps rather than scanning the whole card table:
   // `depStatus` only consults `card.deps`, so fetching all ~1000s of cards here
   // was a full-collection scan (the dominant per-`show` cost) for no benefit.
-  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
-  const relevant = await listDependencyStatusesForCards(opts.node, opts.cfg, [card]);
+  //
+  // These three only need `card`, and every node query pays a flat ~120ms
+  // regardless of rows, so serializing them made `show` the sum of four
+  // round-trips. Run them concurrently: wall ≈ card read + slowest branch.
+  // The pipeline join stays best-effort — never fail show if lastgit schemas
+  // are absent or the node is busy on that partition.
+  const [boards, relevant, pipeline] = await Promise.all([
+    listBoards(opts.node, opts.cfg),
+    listDependencyStatusesForCards(opts.node, opts.cfg, [card]),
+    attachPipelineStatus(opts.node, card).catch((): PipelineAttachResult | undefined => undefined),
+  ]);
+  const boardTerminal = boardTerminalMap(boards);
   const status = depStatus(card, relevant, boardTerminal);
-  // Best-effort LastgitCiStatus join — never fail show if lastgit schemas are
-  // absent or the node is busy on that partition.
-  let pipeline: PipelineAttachResult | undefined;
-  try {
-    pipeline = await attachPipelineStatus(opts.node, card);
-  } catch {
-    pipeline = undefined;
-  }
   const detail: CardDetail = {
     ...card,
     blocked: status.blocked,
