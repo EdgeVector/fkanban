@@ -31,6 +31,22 @@ F-Brain, and create or update a matching F-Kanban card when the issue is
 actionable. Prefer dedupe/update over duplicate records. Do this
 opportunistically, unless filing it would materially derail urgent user work.
 
+## Body-free card projections (read this before touching a list path)
+
+`listCards` serves the board from the BoardCards partitions, which carry no
+`body` — so the Card it returns is `body: ""` whether or not the stored card
+has a brief. Cards from that path are marked `body_omitted`; `assertBodyLoaded`
+refuses them at the card WRITE choke point and in body-judging policy code
+(`groomCard`, `assertDefaultTodoPickupReady`), because a card write carries
+every field and would blank the stored brief.
+
+- Judging or rewriting a body → `listCardsWithBodies` (one admin scan) for a
+  whole-board sweep, `findCard`/`requireCard` for one card.
+- Reading real fields (column, deps, repo, base, kind, block_status, surfaces)
+  → `listCards`, which is what those fields are for. Do not hydrate for them.
+- A test fake whose `queryAll` ignores the requested `fields` cannot catch this
+  class. See `test/body-omitted-projection.test.ts` for a faithful one.
+
 ## Build / test
 
 ```bash

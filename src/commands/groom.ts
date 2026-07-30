@@ -1,6 +1,6 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { listBoards, listCards, sortCards } from "../record.ts";
+import { listBoards, listBoardCardsWithBodies, sortCards } from "../record.ts";
 import {
   groomCard,
   writeGroomedCard,
@@ -39,8 +39,13 @@ export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions):
   text: string;
   report: GroomReport;
 }> {
+  // Bodies, not the thin board list: every issue this groomer reports (hollow
+  // brief, stale generated BLOCKED prose, DONE-WHEN predicate) is a judgement
+  // ABOUT the body, and `--apply` rewrites the card. On the body-free list it
+  // called 238 of 245 live cards hollow and would have demoted the entire
+  // pickup lane. One admin scan per sweep is the correct cost here.
   const [cards, boards] = await Promise.all([
-    listCards(opts.node, opts.cfg),
+    listBoardCardsWithBodies(opts.node, opts.cfg),
     listBoards(opts.node, opts.cfg),
   ]);
   const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
