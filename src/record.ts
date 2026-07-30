@@ -1200,6 +1200,54 @@ export function hasPrWorkBrief(body: string): boolean {
 }
 
 /**
+ * Run a lane guard so it only fires on an ACTUAL lane entry.
+ *
+ * The guards below (`assertPrWorkBrief`, `assertLivePrMilestone`,
+ * `assertDefaultTodoPickupReady`) all say "cannot enter" / "cannot be placed",
+ * and that is what they are for: keeping a card out of a lane it does not
+ * qualify for. Applied to every write they mean something stricter — an
+ * already-live card that fails them can no longer be EDITED. On 2026-07-30 that
+ * blocked the recovery of briefs the board itself had wiped: restoring a lost
+ * brief onto a milestone-less todo card was rejected with "cannot enter todo",
+ * for a card already sitting in todo, and `fkanban mark` (which appends through
+ * `add`) was unusable on exactly the damaged cards it exists to protect — its
+ * only offered escape, `--force`, is a flag `mark` does not have.
+ *
+ * So: run `assertNext`, and swallow its rejection only when this write is not
+ * the one that caused it — the card stays in the same place AND `assertPrevious`
+ * already failed identically. A move, a board change, or a write that
+ * introduces a different violation is still rejected. Claim-time enforcement is
+ * unaffected: a pickup claim moves todo -> doing, which is a real entry.
+ */
+export function assertUnlessAlreadyViolating(
+  placementUnchanged: boolean,
+  assertNext: () => void,
+  assertPrevious: () => void,
+): void {
+  const nextErr = captureFkanbanError(assertNext);
+  if (!nextErr) return;
+  if (!placementUnchanged) throw nextErr;
+  const prevErr = captureFkanbanError(assertPrevious);
+  // Same code, same placement: the card was already in this state before the
+  // write, so refusing the write only protects the damage.
+  if (prevErr && prevErr.code === nextErr.code) return;
+  throw nextErr;
+}
+
+// Run `fn` and return the FkanbanError it raised, or null when it passed.
+// Anything that is not an FkanbanError is a real fault (node, transport, bug)
+// and propagates untouched rather than being read as a policy rejection.
+function captureFkanbanError(fn: () => void): FkanbanError | null {
+  try {
+    fn();
+    return null;
+  } catch (err) {
+    if (err instanceof FkanbanError) return err;
+    throw err;
+  }
+}
+
+/**
  * Refuse Kind:pr creates/updates into the pickup/work lanes without a real brief.
  *
  * - default/todo and default/doing: require a substantive body (not empty /
