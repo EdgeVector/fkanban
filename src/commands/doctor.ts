@@ -171,9 +171,21 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         check(false, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, `config hash ${configHash ?? "(unset)"} not loaded on node`);
         continue;
       }
-      // The config hash IS loaded. Is it the write-compatible version?
-      const pinnedIsNotResolved = resolution.kind === "ok" && resolution.hash !== configHash;
-      if (pinnedIsNotResolved) {
+      // The config hash IS loaded. Is it A write-compatible version?
+      //
+      // NOT "is it the one the resolver picked". Several loaded schemas can be
+      // write-compatible at once (measured: four of the six `fkanban/Card`
+      // schemas on the primary), and every one of them accepts a full-field
+      // write, so pinning any of them is correct. Comparing against the single
+      // ranked pick turned a tiebreak into a hard FAIL: the 2026-07-30T21:58Z
+      // restart reordered the node's listing, the pick moved from the configured
+      // 23-field hash to an equally-writable 19-field one, and `doctor` exited 1
+      // over a board that had never lost a write — advising `kanban init`, which
+      // declares BY DEFINITION and hands the same configured hash straight back.
+      // A red no operator action can clear is how doctors get ignored.
+      const pinnedIsWritable =
+        resolution.kind === "ok" && resolution.compatible.includes(configHash!);
+      if (resolution.kind === "ok" && !pinnedIsWritable) {
         check(
           false,
           `${OWNER_APP_ID}/${descriptive} config hash is the writable version`,
@@ -183,13 +195,18 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         check(true, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, configHash);
       }
 
-      // Ambiguity is a real finding, not a detail to drop: it means several
-      // loaded schemas share this identity AND are all write-compatible, so the
-      // one picked came from node listing order. Report it either way.
+      // Ambiguity is a real finding, not a detail to drop: several loaded schemas
+      // share this identity AND all accept a full-field write, so the resolver
+      // has no principled reason to prefer one. It is informational (never flips
+      // `ok`) precisely BECAUSE the pinned hash being among them is fine — but it
+      // is worth saying out loud, since stale identities holding records are how
+      // writes end up spread across more than one version of a record type.
       if (resolution.kind === "ok" && resolution.ambiguous) {
         info(
           `${OWNER_APP_ID}/${descriptive} resolution is ambiguous`,
-          `several loaded schemas match ${descriptive} and all accept a full-field write; resolved to ${resolution.hash} by node listing order`,
+          `${resolution.compatible.length} loaded schemas match ${descriptive} and all accept a full-field write` +
+            ` — ranked pick ${resolution.hash} (widest field set, then hash)` +
+            `; config pins ${configHash}${pinnedIsWritable ? " (write-compatible)" : ""}`,
         );
       }
 

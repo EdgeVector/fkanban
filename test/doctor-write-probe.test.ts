@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { doctor } from "../src/commands/doctor.ts";
-import { fieldsFor } from "../src/schemas.ts";
+import { CARD_OPTIONAL_SCHEMA_FIELDS, fieldsFor } from "../src/schemas.ts";
 
 const FULL_CARD_HASH = "doctorfullhash18";
 const STALE_CARD_HASH = "doctorstalehash10";
@@ -208,6 +208,47 @@ describe("doctor write-probe", () => {
       expect(ok).toBe(false);
       expect(report).toContain("✗ fkanban/Card config hash is the writable version");
       expect(report).toContain(FULL_CARD_HASH);
+    } finally {
+      node.stop();
+    }
+  });
+
+  // Regression: doctor must not hard-FAIL because the resolver's TIEBREAK moved.
+  //
+  // Live on the primary 2026-07-30: six `fkanban/Card` schemas loaded, four of
+  // them write-compatible (the required set is 19 of 23 fields — four optional).
+  // The 21:58Z node restart reordered `/api/schemas`, the pick moved from the
+  // configured 23-field hash to an equally-writable 19-field one, and `doctor`
+  // exited 1 over a board whose writes had never broken — advising `kanban init`,
+  // which declares BY DEFINITION and returns the same configured hash, so the red
+  // was unclearable. The question doctor must ask is "is my pin write-compatible?",
+  // not "is my pin the one you happened to rank first".
+  test("green: config pinned to a wide hash survives a narrower WRITABLE version listed first", async () => {
+    const REQUIRED_ONLY_HASH = "doctorrequiredonly19";
+    const requiredOnly = fieldsFor("card").filter(
+      (f) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(f),
+    );
+    // Sanity: this really is narrower than the config's schema, and really is a
+    // write target (it carries every required field) — the exact live shape.
+    expect(requiredOnly.length).toBeLessThan(fieldsFor("card").length);
+
+    const node = makeNode([
+      { name: REQUIRED_ONLY_HASH, fields: requiredOnly },
+      { name: FULL_CARD_HASH, fields: fieldsFor("card") },
+    ]);
+    const cfgPath = writeCfg("narrower-but-writable-first.json", FULL_CARD_HASH, node.socketPath);
+    const lines: string[] = [];
+    try {
+      const ok = await doctor({ configPath: cfgPath, print: (l) => lines.push(l) });
+      const report = lines.join("\n");
+      expect(ok).toBe(true);
+      expect(report).not.toContain("✗ fkanban/Card config hash is the writable version");
+      expect(report).toContain(`✓ fkanban/Card loaded + matches config — ${FULL_CARD_HASH}`);
+      expect(report).toContain("✓ fkanban/Card write-probe");
+      // The ambiguity is still SAID — it is a real finding — but as an advisory
+      // that names the pin as acceptable, so nothing gates on it.
+      expect(report).toContain("· fkanban/Card resolution is ambiguous");
+      expect(report).toContain("(write-compatible)");
     } finally {
       node.stop();
     }

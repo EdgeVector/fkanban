@@ -18,7 +18,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { FkanbanError, newNodeClient, type LoadedSchema } from "../src/client.ts";
 import { listCards, probeSchemaWritable, WRITE_PROBE_SLUG } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
-import { fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
+import { CARD_OPTIONAL_SCHEMA_FIELDS, fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
 
 // The current full Card hash (writable) and a stale 10-field duplicate.
 const FULL_CARD_HASH = "fullcardhash";
@@ -111,6 +111,83 @@ describe("resolveLoadedSchema (field-superset preference)", () => {
       loaded("anotherfullhash", fieldsFor("card")),
     ]);
     expect(r.kind === "ok" && r.ambiguous).toBe(true);
+  });
+});
+
+// Regression: the pick among several write-compatible versions must not depend
+// on the node's listing order, because that order is NOT stable across restarts.
+//
+// Measured on the live primary 2026-07-30. Six `fkanban/Card` schemas are loaded,
+// all Hash/`slug`, so the layout filter separates none of them. The required Card
+// field set is 19 (23 minus 4 optional), so the 19/21/22/23-field versions are ALL
+// write-compatible. Before the 21:58Z node restart the configured 23-field
+// `bc941d…` sorted first and `superset[0]` was right by luck; after the restart the
+// 19-field `eacad7…` sorted first (position 450 vs 576), the pick moved, and
+// `kanban doctor` exited 1 — on a board that had never lost a write — advising
+// `kanban init`, which declares by definition and returns the same configured hash.
+describe("resolveLoadedSchema (stable ranking among write-compatible versions)", () => {
+  // The real primary's six, with the field counts and hashes it reports.
+  const CONFIG_HASH = "bc941dbc630f"; // 23 fields — what config pins
+  const NARROW_OK = "eacad7322a1e"; //  19 fields — exactly the required set
+  const cards23 = loaded(CONFIG_HASH, fieldsFor("card"));
+  const cards22 = loaded("5c064c3e9204", fieldsFor("card").filter((f) => f !== "db"));
+  const cards21 = loaded("35b0d28467ed", fieldsFor("card").filter((f) => f !== "db" && f !== "surfaces"));
+  const cards19 = loaded(
+    NARROW_OK,
+    fieldsFor("card").filter((f) => !CARD_OPTIONAL_SCHEMA_FIELDS.includes(f as never)),
+  );
+  const cards18 = loaded("22851869b3f8", OLD_FIELDS);
+  const cards10 = loaded("183416179f84", OLD_FIELDS.slice(0, 8));
+
+  // The post-restart order, which is what broke the live doctor.
+  const postRestart = [cards19, cards23, cards22, cards10, cards18, cards21];
+
+  test("the four wide versions really are all write-compatible (why order decided it)", () => {
+    const r = resolveLoadedSchema("card", postRestart);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.compatible.sort()).toEqual(
+        [CONFIG_HASH, NARROW_OK, "5c064c3e9204", "35b0d28467ed"].sort(),
+      );
+    }
+  });
+
+  test("ranks the WIDEST write-compatible version first, not the first-listed one", () => {
+    // Pre-fix this returned NARROW_OK — the live primary's exact wrong answer.
+    const r = resolveLoadedSchema("card", postRestart);
+    expect(r.kind === "ok" && r.hash).toBe(CONFIG_HASH);
+  });
+
+  test("the answer is identical under every listing order", () => {
+    const orders = [
+      postRestart,
+      [...postRestart].reverse(),
+      [cards23, cards19, cards21, cards22, cards18, cards10],
+      [cards10, cards18, cards21, cards19, cards22, cards23],
+    ];
+    const answers = new Set(
+      orders.map((o) => {
+        const r = resolveLoadedSchema("card", o);
+        return r.kind === "ok" ? r.hash : r.kind;
+      }),
+    );
+    expect([...answers]).toEqual([CONFIG_HASH]);
+  });
+
+  test("equal-width candidates tie-break on hash, not position", () => {
+    const a = loaded("aaaa1111", fieldsFor("card"));
+    const z = loaded("zzzz9999", fieldsFor("card"));
+    expect(resolveLoadedSchema("card", [z, a]).kind === "ok" && resolveLoadedSchema("card", [z, a])).toMatchObject({ hash: "aaaa1111" });
+    expect(resolveLoadedSchema("card", [a, z])).toMatchObject({ hash: "aaaa1111" });
+  });
+
+  test("`compatible` lists every acceptable pin, so a caller need not match the pick", () => {
+    // The doctor-side contract: a config pinned to ANY of these is correct.
+    const r = resolveLoadedSchema("card", postRestart);
+    expect(r.kind === "ok" && r.compatible.includes(NARROW_OK)).toBe(true);
+    expect(r.kind === "ok" && r.compatible.includes(CONFIG_HASH)).toBe(true);
+    // A genuinely narrower version is never acceptable.
+    expect(r.kind === "ok" && r.compatible.includes("22851869b3f8")).toBe(false);
   });
 });
 
