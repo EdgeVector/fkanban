@@ -31,6 +31,7 @@ import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd } from "./commands/groom.ts";
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
+import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
 import { milestoneIndexesHealResult } from "./commands/milestone_indexes_heal.ts";
 import { cardListIndexRetireCmd } from "./commands/card_list_index_retire.ts";
@@ -85,6 +86,7 @@ Commands:
   pickup lanes         show logical pickup lanes, starvation, and next claim order
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
+  groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
   groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
                        and missing boards (live board whose cards list can't see)
   groom card-list-index-retire dry-run/apply clear the superseded all_cards rollup
@@ -570,6 +572,7 @@ Example:
 Usage:
   fkanban groom stale-blockers [--apply] [--json]
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
+  fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
   fkanban groom board-list-heal [--apply] [--json]
   fkanban groom card-list-index-retire [--apply] [--json]
 
@@ -582,6 +585,10 @@ Subcommands:
   board-cards-heal     repair BoardCards membership (ONLY path that may delete orphans;
                        list is read-only on Card miss) so list --column agrees with
                        show <slug> (delete orphan column#pos rows, upsert truth).
+  board-cards-heal-scheduled
+                       scheduled wrapper for the default board: dry-run first,
+                       report drifted count, apply only when drift is non-zero
+                       and at or below --max-drift.
   board-list-heal      repair the CardListIndex all_boards rollup against Board truth:
                        drop GHOSTS (entry with no Board record — a deleted board that
                        keeps showing in board list and costs a dead partition query
@@ -599,12 +606,15 @@ Flags:
   --json               machine-readable report
   --board SLUG         (board-cards-heal) limit to one board partition
   --slug S             (board-cards-heal) limit to one or more card slugs
+  --max-drift N        (board-cards-heal-scheduled) refuse to apply above this
+                       count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
 
 Examples:
   fkanban groom stale-blockers
   fkanban groom stale-blockers --apply
   fkanban groom board-cards-heal
   fkanban groom board-cards-heal --apply
+  fkanban groom board-cards-heal-scheduled --json
   fkanban groom board-list-heal
   fkanban groom board-list-heal --apply
   fkanban groom card-list-index-retire
@@ -956,7 +966,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug"]),
+  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -1165,6 +1175,7 @@ async function main(argv: string[]): Promise<number> {
         apply: { type: "boolean" },
         "min-age-hours": { type: "string" },
         "pileup-threshold": { type: "string" },
+        "max-drift": { type: "string" },
         body: { type: "string" },
         columns: { type: "string" },
         from: { type: "string" },
@@ -1884,12 +1895,13 @@ async function dispatch(
       if (
         sub !== "stale-blockers" &&
         sub !== "board-cards-heal" &&
+        sub !== "board-cards-heal-scheduled" &&
         sub !== "board-list-heal" &&
         sub !== "milestone-indexes-heal" &&
         sub !== "card-list-index-retire"
       ) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom board-list-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
         );
         return 2;
       }
@@ -1936,6 +1948,23 @@ async function dispatch(
           board: typeof values.board === "string" ? values.board : undefined,
         });
         console.log(values.json ? JSON.stringify(healed, null, 2) : healed.text);
+        return 0;
+      }
+      if (sub === "board-cards-heal-scheduled") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom board-cards-heal-scheduled");
+        if (extra !== undefined) return extra;
+        const maxDrift =
+          values["max-drift"] !== undefined
+            ? parseIntFlag(values["max-drift"] as string, "max-drift", "groom", { min: 1 })
+            : undefined;
+        console.log(await boardCardsHealScheduledCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          board: typeof values.board === "string" ? values.board : undefined,
+          maxDrift,
+          dryRunOnly: values["dry-run"] as boolean | undefined,
+          json: values.json as boolean | undefined,
+        }));
         return 0;
       }
       // board-cards-heal: optional extra positionals are slugs; --slug also works.
