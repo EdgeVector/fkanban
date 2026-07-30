@@ -1,5 +1,5 @@
 /**
- * fkanban search plane is semantic-only (keyword LastStore removed 2026-07-30).
+ * fkanban search plane is semantic-only (host-track Search or explicit module).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
@@ -18,51 +18,25 @@ const HOST_DETERMINISTIC = resolve(
 );
 
 describe("fkanban search-plane semantic-only", () => {
-  test("keyword-only ingest is not returned by querySearchPlane", async () => {
-    const home = mkdtempSync(join(tmpdir(), "fk-sp-kw-"));
-    const indexDir = join(home, "index");
-    mkdirSync(indexDir, { recursive: true });
+  test("querySearchPlane returns null when semantic module and CLI are unavailable", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fk-sp-nosem-"));
     mkdirSync(join(home, "inbox"), { recursive: true });
-    const unique = `fkanban-kw-should-not-${Date.now()}`;
+    const fakeHome = mkdtempSync(join(tmpdir(), "fk-sp-home-"));
+    const prevHome = process.env.HOME;
+    process.env.HOME = fakeHome;
     process.env.SEARCH_HOME = home;
     process.env.LASTDB_SEARCH_BIN = "/nonexistent/search-bin-xyz";
     delete process.env.LASTDB_SEARCH_SEMANTIC_MODULE;
 
-    const vendorEngine = resolve(
-      import.meta.dirname,
-      "../../vendor/edgevector-search/src/engine.ts",
-    );
-    if (existsSync(vendorEngine)) {
-      const engMod = (await import(pathToFileURL(vendorEngine).href)) as {
-        openSearchEngine: (d: string) => {
-          applyChangeBatch: (b: unknown) => number;
-          persist: () => void;
-        };
-      };
-      engMod.openSearchEngine(indexDir).applyChangeBatch({
-        schema_name: "fkanban/Card",
-        searchable_fields: ["body"],
-        changes: [
-          {
-            mutation_id: "m1",
-            kind: "upsert",
-            key_value: { hash: "card-x", range: null },
-            fields_and_values: { body: unique },
-          },
-        ],
-      });
-    }
-
     const hits = await querySearchPlane({
-      query: unique,
+      query: "anything-unique-marker-xyz",
       k: 10,
       searchHome: home,
       schemas: ["fkanban/Card"],
     });
-    if (hits !== null) {
-      expect(hits.every((h) => !h.text.includes(unique))).toBe(true);
-    }
+    expect(hits).toBeNull();
 
+    process.env.HOME = prevHome;
     delete process.env.SEARCH_HOME;
     delete process.env.LASTDB_SEARCH_BIN;
   });
