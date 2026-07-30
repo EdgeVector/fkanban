@@ -197,6 +197,25 @@ async function persistLaneClaimState(opts: {
   }
 }
 
+// Per-card policy rejections a claim's moveCmd can raise: the CANDIDATE is
+// unclaimable, the RUN is fine. Anything in this set skips to the next ready
+// card. Before this set existed, one guard-FAIL queue head (live: a
+// milestone-less card raising live_pr_milestone_required) escaped the catch,
+// killed the whole run, and was re-selected every fire — pickup nooped for
+// hours while eligible cards sat behind it
+// (papercut-pickup-write-guard-failing-cards-poison-queue-head).
+// Codes NOT in the set (node/transport/config errors) still abort the run:
+// they would fail every candidate identically, so skipping is pure churn.
+const PER_CARD_CLAIM_POLICY_CODES = new Set([
+  "card_blocked",
+  "default_todo_not_pickup_ready",
+  "situation_blocked",
+  "live_pr_milestone_required",
+  "live_pr_milestone_abandoned",
+  "pr_body_missing_work_brief",
+  "destructive_body_replace",
+]);
+
 const DIAGNOSTIC_EXEMPLARS_PER_CATEGORY = 3;
 const INFLIGHT_WITHOUT_ARTIFACT_EXEMPLARS = 3;
 const TODO_BLOCKER_EXEMPLARS = 8;
@@ -312,26 +331,35 @@ async function selfHealTargetTodoBlockers(opts: {
   let nextCards = opts.cards;
   for (const card of opts.cards) {
     if (card.board !== opts.board || card.column !== "todo") continue;
-    let healed = selfHealPickupTodoBlocker(card, nextCards);
-    if (!healed.changed || !healed.issues.some((issue) => issue.applyable)) continue;
-
-    // The pass above ran on the body-free board list — cheap, and enough to
-    // decide THAT this card needs healing from its block_status/block_reason
-    // fields. Writing it is a different matter: a card write carries every
-    // field, so persisting the projection would blank the brief. Point-read
-    // the real card and re-run the heal on it, which also gives the
-    // body-dependent branch (stale BLOCKED prose) its only real evaluation.
-    // One read per card actually healed, not per card on the board.
-    if (isBodyOmitted(card)) {
-      const full = await findCard(opts.node, opts.cfg, card.slug);
-      if (!full) continue;
-      healed = selfHealPickupTodoBlocker(full, nextCards);
+    // A heal that fails for ONE card must not kill the claim run before
+    // ranking even starts — that turns a single unhealable todo card into a
+    // full-run noop (the same poison-the-queue-head shape the candidate loop
+    // guards against). Skip it un-healed; selection still sees the original.
+    try {
+      let healed = selfHealPickupTodoBlocker(card, nextCards);
       if (!healed.changed || !healed.issues.some((issue) => issue.applyable)) continue;
-    }
 
-    nextCards = nextCards.map((c) => c.slug === card.slug ? healed.card : c);
-    if (!opts.dryRun) {
-      await writeGroomedCard({ cfg: opts.cfg, node: opts.node }, healed.card);
+      // The pass above ran on the body-free board list — cheap, and enough to
+      // decide THAT this card needs healing from its block_status/block_reason
+      // fields. Writing it is a different matter: a card write carries every
+      // field, so persisting the projection would blank the brief. Point-read
+      // the real card and re-run the heal on it, which also gives the
+      // body-dependent branch (stale BLOCKED prose) its only real evaluation.
+      // One read per card actually healed, not per card on the board.
+      if (isBodyOmitted(card)) {
+        const full = await findCard(opts.node, opts.cfg, card.slug);
+        if (!full) continue;
+        healed = selfHealPickupTodoBlocker(full, nextCards);
+        if (!healed.changed || !healed.issues.some((issue) => issue.applyable)) continue;
+      }
+
+      nextCards = nextCards.map((c) => c.slug === card.slug ? healed.card : c);
+      if (!opts.dryRun) {
+        await writeGroomedCard({ cfg: opts.cfg, node: opts.node }, healed.card);
+      }
+    } catch (err) {
+      if (!(err instanceof FkanbanError)) throw err;
+      continue;
     }
   }
   return nextCards;
@@ -518,11 +546,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         );
         continue;
       }
-      if (err instanceof FkanbanError && (
-        err.code === "card_blocked" ||
-        err.code === "default_todo_not_pickup_ready" ||
-        err.code === "situation_blocked"
-      )) {
+      if (err instanceof FkanbanError && PER_CARD_CLAIM_POLICY_CODES.has(err.code)) {
         skipped.push({
           slug: candidate.slug,
           reason: err.code,

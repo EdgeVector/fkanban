@@ -9,6 +9,7 @@ import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import {
+  boardCardFieldsFromCard,
   boardCardSk,
   listBoardCardsPartition,
   removeBoardCard,
@@ -67,7 +68,7 @@ export type BoardCardsHealAction = {
   list_position: string;
   truth_column: string | null;
   truth_position: string | null;
-  action: "delete-orphan" | "upsert-truth" | "delete-stale-and-upsert" | "noop-match";
+  action: "delete-orphan" | "upsert-truth" | "delete-stale-and-upsert" | "refresh-thin-fields" | "noop-match";
   reason: string;
 };
 
@@ -103,9 +104,59 @@ function thinCard(summary: CardSummary | Card): Card {
     block_status: summary.block_status || "",
     block_reason: summary.block_reason || "",
     north_star: summary.north_star || "",
+    // milestone/created_by must ride along: this Card feeds upsertBoardCard,
+    // so dropping them here silently blanked the row's milestone (and reset
+    // created_by to "unknown") on every heal write.
+    milestone: summary.milestone ?? "",
+    ...(summary.created_by !== undefined ? { created_by: summary.created_by } : {}),
     pr_url: summary.pr_url || "",
     branch: summary.branch || "",
   };
+}
+
+// Shared thin fields the BoardCards projection copies from Card truth,
+// compared field-by-field when membership (sk) already matches. board /
+// column / position / slug are the sk itself; body is never on a row;
+// created_by is excluded because legacy-schema nodes cannot store it, which
+// would flag every row on every run forever.
+const THIN_COMPARE_FIELDS = [
+  "title",
+  "assignee",
+  "tags",
+  "deps",
+  "surfaces",
+  "created_at",
+  "updated_at",
+  "db",
+  "repo",
+  "base",
+  "kind",
+  "block_status",
+  "block_reason",
+  "north_star",
+  "milestone",
+  "pr_url",
+  "branch",
+] as const;
+
+/**
+ * Field names whose projected value differs between a BoardCards row and Card
+ * truth. Both sides go through `boardCardFieldsFromCard` so the comparison is
+ * exactly "what an upsert would write" vs "what the row holds".
+ */
+function thinFieldDrift(row: Card, truth: Card): string[] {
+  const actual = boardCardFieldsFromCard(row);
+  const expected = boardCardFieldsFromCard(truth);
+  const drift: string[] = [];
+  for (const field of THIN_COMPARE_FIELDS) {
+    const a = actual[field];
+    const b = expected[field];
+    const equal = Array.isArray(a) || Array.isArray(b)
+      ? JSON.stringify(a) === JSON.stringify(b)
+      : a === b;
+    if (!equal) drift.push(field);
+  }
+  return drift;
 }
 
 export async function boardCardsHealResult(
@@ -160,7 +211,9 @@ export async function boardCardsHealResult(
   }
 
   // Raw BoardCards partitions (may include multi-row orphans per slug).
-  const rawRows: Array<{ board: string; column: string; position: string; slug: string }> = [];
+  // `full` keeps the parsed row so the thin-field comparison below can judge
+  // the projection's copied fields, not just its membership sk.
+  const rawRows: Array<{ board: string; column: string; position: string; slug: string; full: Card }> = [];
   // Partitions we actually read end-to-end. Only for these can heal claim to
   // know every row for a slug and skip the per-write orphan rescan; a partition
   // that failed to list (or a board with no Board record) keeps the defensive
@@ -177,6 +230,7 @@ export async function boardCardsHealResult(
         column: c.column,
         position: String(c.position),
         slug: c.slug,
+        full: c,
       });
     }
   }
@@ -280,6 +334,33 @@ export async function boardCardsHealResult(
     );
 
     if (stale.length === 0 && matching.length === 1) {
+      // Membership (sk) matches — but the row also COPIES shared thin fields
+      // (title, kind, block_status, milestone, …), and a partial dual-write
+      // can leave those stale while column/position still agree. Before this
+      // check the heal reported drifted=0 on rows whose copied fields were
+      // wrong, so that drift class was invisible to it
+      // (papercut-pickup-write-guard-failing-cards-poison-queue-head, item 3).
+      const drift = thinFieldDrift(matching[0]!.full, truth);
+      if (drift.length > 0) {
+        drifted += 1;
+        actions.push({
+          slug,
+          board: truthBoard,
+          list_column: matching[0]!.column,
+          list_position: matching[0]!.position,
+          truth_column: truth.column,
+          truth_position: String(truth.position),
+          action: "refresh-thin-fields",
+          reason: `thin field drift: ${drift.join(",")}`,
+        });
+        if (opts.apply) {
+          await upsertBoardCard(opts.node, opts.cfg, truth, null, {
+            skipOrphanPurge: enumeratedBoards.has(truthBoard),
+          });
+          healed += 1;
+        }
+        continue;
+      }
       if (opts.json) {
         actions.push({
           slug,

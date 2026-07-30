@@ -34,6 +34,7 @@ import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import { groomStaleBlockersResult } from "../src/commands/groom.ts";
 import { rankCmd } from "../src/commands/rank.ts";
 import { moveCmd } from "../src/commands/move.ts";
+import { pickupClaimResult } from "../src/commands/pickup_claim.ts";
 import { pickupExplainResult } from "../src/commands/pickup_explain.ts";
 
 const cfg: Config = {
@@ -294,5 +295,25 @@ describe("move into the terminal column", () => {
     // and the promotion loop swallowed it — so this silently never happened.
     expect(node.stored("dependent")!.column).toBe("todo");
     expect(node.stored("dependent")!.body).toBe(BRIEF);
+  });
+});
+
+describe("pickup claim over the body-free projection", () => {
+  test("claims a card whose list row is body-free and leaves the stored brief intact", async () => {
+    // The live poison-queue shape: every BoardCards row serves body:"" while
+    // the stored Card carries a full brief. The claim must read Card truth at
+    // the write choke points — and every write it performs along the way
+    // (move, assignee stamp, self-heal) must leave the stored brief alone.
+    const node = fakeNode([card({ slug: "blank-row" })]);
+
+    const result = await pickupClaimResult({ cfg, node, worker: "w1" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("blank-row");
+
+    const stored = node.stored("blank-row")!;
+    expect(stored.column).toBe("doing");
+    expect(stored.assignee).toBe("w1");
+    expect(stored.body).toBe(BRIEF);
   });
 });

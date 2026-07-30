@@ -501,3 +501,78 @@ describe("board-cards heal read cost", () => {
     expect(clean.report.drifted).toBe(0);
   });
 });
+
+// Membership (sk) can match while the row's COPIED fields are stale — a
+// partial dual-write leaves title/kind/milestone/… wrong with column and
+// position still agreeing. Until the thin-field comparison, heal reported
+// drifted=0 on such rows, so the class was invisible to it
+// (papercut-pickup-write-guard-failing-cards-poison-queue-head, item 3).
+describe("board-cards-heal thin-field drift", () => {
+  test("refreshes a membership-matching row whose copied fields went stale (incl. milestone)", async () => {
+    const node = fakeNode();
+    const truth = card({ title: "New title", column: "todo", position: "3", milestone: "ms-live" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: {
+        slug: "default",
+        title: "Default",
+        body: "",
+        columns: ["backlog", "todo", "doing", "done"],
+        created_at: truth.created_at,
+        updated_at: truth.updated_at,
+      },
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card!,
+      keyHash: truth.slug,
+      fields: {
+        slug: truth.slug,
+        title: truth.title,
+        body: "REAL BRIEF — never on a row",
+        board: truth.board,
+        column: truth.column,
+        position: truth.position,
+        assignee: truth.assignee,
+        tags: truth.tags,
+        deps: truth.deps,
+        surfaces: truth.surfaces,
+        created_at: truth.created_at,
+        updated_at: truth.updated_at,
+        kind: truth.kind,
+        repo: truth.repo,
+        base: truth.base,
+        milestone: "ms-live",
+        block_status: "none",
+      },
+    });
+    // Same sk as truth (todo, position 3) but stale title and no milestone.
+    const staleRow = card({ title: "Old title", column: "todo", position: "3" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board_cards!,
+      keyHash: "default",
+      rangeKey: boardCardSk("todo", "3", truth.slug),
+      fields: boardCardFieldsFromCard(staleRow),
+    });
+
+    const dry = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    expect(dry.report.drifted).toBe(1);
+    const drift = dry.report.actions.find((a) => a.action === "refresh-thin-fields");
+    expect(drift).toBeDefined();
+    expect(drift!.reason).toContain("title");
+    expect(drift!.reason).toContain("milestone");
+
+    const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
+    expect(applied.report.healed).toBe(1);
+
+    const rows = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
+    expect(rows).toHaveLength(1);
+    expect(rows![0]!.title).toBe("New title");
+    // Regression: thinCard used to drop milestone, so a heal write blanked it
+    // on the row — which also made the heal non-idempotent.
+    expect(rows![0]!.milestone).toBe("ms-live");
+
+    const clean = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    expect(clean.report.drifted).toBe(0);
+  });
+});
