@@ -4,6 +4,8 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
+  hydrateCardBodies,
+  isBodyOmitted,
   listCards,
   normalizeSurfaces,
   parseBodyHeader,
@@ -36,6 +38,43 @@ export function claimedSurfaces(card: Card): string[] {
   return card.surfaces.length > 0
     ? normalizeSurfaces(card.surfaces)
     : parseBodyListHeader(card.body, "Surfaces");
+}
+
+// Both claims above fall back to a BODY header when the structured field is
+// empty. On a body-free projection that fallback reads `""` and returns the
+// same answer as "the card declares nothing" — so an unread body looks exactly
+// like an honest absence, and the difference is a missed conflict. See
+// `Card[BODY_OMITTED]`: these two say when we are guessing.
+function repoUnread(card: Card): boolean {
+  return card.repo.trim().length === 0 && isBodyOmitted(card);
+}
+
+function surfacesUnread(card: Card): boolean {
+  return card.surfaces.length === 0 && isBodyOmitted(card);
+}
+
+/**
+ * Point-read the bodies overlap is about to judge.
+ *
+ * Bounded on purpose: only cards in `doing` can be an overlap peer, and only
+ * those whose repo or surfaces claim is missing from the structured fields need
+ * their body at all. On the live board that is at most the WIP set (single
+ * digits), not the 200-card active list — hydrating the whole list is the N+1
+ * storm `listCards` exists to avoid.
+ */
+export async function hydrateOverlapPeers(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+): Promise<Card[]> {
+  const needsBody = cards.filter(
+    (card) => card.column === "doing" && (repoUnread(card) || surfacesUnread(card)),
+  );
+  if (needsBody.length === 0) return cards;
+  const hydrated = new Map(
+    (await hydrateCardBodies(node, cfg, needsBody)).map((card) => [card.slug, card]),
+  );
+  return cards.map((card) => hydrated.get(card.slug) ?? card);
 }
 
 function cleanPattern(pattern: string): string {
@@ -90,22 +129,45 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
   const warnings: string[] = [];
   const conflicts: SurfaceConflict[] = [];
 
-  if (!repo) warnings.push(`candidate ${candidate.slug} has no repo; overlap skipped`);
-  if (surfaces.length === 0) warnings.push(`candidate ${candidate.slug} has no surfaces; overlap unknown`);
+  if (!repo) {
+    warnings.push(
+      repoUnread(candidate)
+        ? `candidate ${candidate.slug} has no repo field and its body was not read; overlap skipped`
+        : `candidate ${candidate.slug} has no repo; overlap skipped`,
+    );
+  }
+  if (surfaces.length === 0) {
+    warnings.push(
+      surfacesUnread(candidate)
+        ? `candidate ${candidate.slug} has no surfaces field and its body was not read; overlap unknown`
+        : `candidate ${candidate.slug} has no surfaces; overlap unknown`,
+    );
+  }
   if (!repo || surfaces.length === 0) {
     return { slug: candidate.slug, repo, surfaces, conflicts, warnings };
   }
 
+  // A peer whose repo lives only in an unread body cannot be ruled out of the
+  // candidate's repo, so it stays in the set and is reported as unknown rather
+  // than filtered away as "different repo".
   const inFlight = cards.filter((card) =>
     card.slug !== candidate.slug &&
     card.column === "doing" &&
-    claimedRepo(card) === repo
+    (claimedRepo(card) === repo || repoUnread(card))
   );
 
   for (const card of inFlight) {
+    if (repoUnread(card)) {
+      warnings.push(`${card.slug} is in ${card.column} with no repo field and its body was not read; overlap unknown`);
+      continue;
+    }
     const otherSurfaces = claimedSurfaces(card);
     if (otherSurfaces.length === 0) {
-      warnings.push(`${card.slug} is in ${card.column} for ${repo} with no surfaces; overlap unknown`);
+      warnings.push(
+        surfacesUnread(card)
+          ? `${card.slug} is in ${card.column} for ${repo} with no surfaces field and its body was not read; overlap unknown`
+          : `${card.slug} is in ${card.column} for ${repo} with no surfaces; overlap unknown`,
+      );
       continue;
     }
     const matches = matchedPairs(surfaces, otherSurfaces);
@@ -129,7 +191,7 @@ export async function overlapResult(opts: {
   slug: string;
 }): Promise<OverlapResult> {
   const candidate = await requireCard(opts.node, opts.cfg, opts.slug);
-  const cards = await listCards(opts.node, opts.cfg);
+  const cards = await hydrateOverlapPeers(opts.node, opts.cfg, await listCards(opts.node, opts.cfg));
   return overlapAgainstCards(candidate, cards);
 }
 

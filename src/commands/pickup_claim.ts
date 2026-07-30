@@ -43,7 +43,7 @@ import {
 } from "../pickup_lanes.ts";
 import { type SituationPreflight } from "../situations.ts";
 import { ClaimConflictError, moveCmd } from "./move.ts";
-import { claimedRepo, overlapAgainstCards } from "./overlap.ts";
+import { claimedRepo, hydrateOverlapPeers, overlapAgainstCards } from "./overlap.ts";
 
 export type PickupClaimOptions = {
   cfg: Config;
@@ -440,7 +440,10 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
 
   // Working copy of board state so we can mark a CAS conflict as no longer todo
   // without re-listing (and so overlap sees concurrent skips consistently).
-  let liveCards = cardsForSelection.slice();
+  // The doing peers are hydrated once, up front: overlap is a claim gate, and a
+  // peer whose surfaces live only in an unread body would otherwise look like
+  // a card that declared nothing and let a colliding claim through.
+  let liveCards = await hydrateOverlapPeers(opts.node, opts.cfg, cardsForSelection.slice());
 
   for (const candidate of candidates) {
     const repo = claimedRepo(candidate);

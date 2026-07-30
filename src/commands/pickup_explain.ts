@@ -21,7 +21,7 @@ import {
   type PickupClassification,
 } from "../pickup.ts";
 import { laneOf, type LaneId } from "../pickup_lanes.ts";
-import { overlapAgainstCards, type OverlapResult } from "./overlap.ts";
+import { hydrateOverlapPeers, overlapAgainstCards, type OverlapResult } from "./overlap.ts";
 import {
   checkSituationFence,
   type SituationPreflight,
@@ -158,6 +158,10 @@ export async function pickupExplainResult(opts: {
   // kind of finding.
   const card = await requireCard(opts.node, opts.cfg, slug);
   cards = [...cards.filter((c) => c.slug !== slug), card];
+  // Overlap judges the doing peers' Repo/Surfaces claims, which may live only
+  // in a body the thin list never read — hydrate that small set too, or the
+  // surface-overlap gate reports OK about peers it could not evaluate.
+  cards = await hydrateOverlapPeers(opts.node, opts.cfg, cards);
 
   const terminalByBoard = new Map(
     boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]),
