@@ -26,10 +26,6 @@ import {
   removeBoardMilestone,
   upsertBoardMilestone,
 } from "./board-milestones.ts";
-import {
-  removeMilestoneCard,
-  upsertMilestoneCard,
-} from "./milestone-cards.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
@@ -3080,7 +3076,7 @@ export async function createCardRecord(
 }
 
 /**
- * State the keyed membership rows this card should have.
+ * State the keyed membership row this card should have.
  *
  * Multi-key coherence is the node's job, not ours: LastDB recognises BoardCards
  * and MilestoneCards as one product under two keys, binds their matching fields
@@ -3098,7 +3094,6 @@ async function writeCardMembership(
   writeOpts: { skipOrphanPurge?: boolean } = {},
 ): Promise<void> {
   await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
-  await upsertMilestoneCard(opts.node, opts.cfg, card, previous);
 }
 
 export async function updateCardRecord(
@@ -3113,7 +3108,7 @@ export async function updateCardRecord(
   await writeCardMembership(opts, card, previous ?? null);
 }
 
-/** Remove Card + dual indexes (BoardCards + CardListIndex + MilestoneCards). */
+/** Remove Card + indexes (CardListIndex + BoardCards; Mini folds sibling membership keys). */
 export async function deleteCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
@@ -3122,7 +3117,6 @@ export async function deleteCardRecord(
   await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
   await patchCardListIndex(opts.node, opts.cfg, card, "remove");
   await removeBoardCard(opts.node, opts.cfg, card);
-  await removeMilestoneCard(opts.node, opts.cfg, card);
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of
