@@ -236,6 +236,7 @@ DONE  (0)
 | `kanban milestone detail <slug>` | show the outcome, proof, warnings, and child cards grouped by fixed columns (`--json`) |
 | `kanban milestone groom` | report actionable driver, proof, frontier, lifecycle, and relationship warnings (`--board --json`) |
 | `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
+| `kanban ping` | liveness probe: one cheap node status read, no board read (`--json`) |
 | `kanban doctor` | health-check config + node + schemas + a query round-trip |
 | `kanban mcp` | start an MCP server over stdio |
 

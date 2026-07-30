@@ -1156,6 +1156,75 @@ export function isLoopbackNodeUrl(url: string): boolean {
   }
 }
 
+// The result of one `pingNode` liveness probe. `latency_ms` is wall time for
+// the single request, measured even on failure so a slow-then-failing node is
+// distinguishable from a fast connection refusal. `node_version` is surfaced
+// only when the status body carries one.
+export type PingReport = {
+  ok: boolean;
+  latency_ms: number;
+  socket_path?: string;
+  node_version?: string;
+  error?: string;
+};
+
+// One unauthenticated GET /api/status — a liveness probe, not a data-plane
+// call. Deliberately bypasses `newNodeClient`: no owner-session attestation,
+// no schema resolution, no board read, so the probe costs the node exactly one
+// status request. This exists so "is the node up" checks stop being board
+// scans (`kanban list`), which request-ops telemetry showed as a meaningful
+// slice of fleet kanban load. Errors are returned in the report, never thrown:
+// a ping's job is to answer "up or not", not to crash the caller.
+export async function pingNode(opts: {
+  nodeUrl: string;
+  socketPath?: string;
+  timeoutMs?: number;
+  verbose?: Verbose;
+}): Promise<PingReport> {
+  const verbose = opts.verbose ?? noopVerbose;
+  const socketPath = opts.socketPath;
+  const started = performance.now();
+  const latency = () => Math.round(performance.now() - started);
+  try {
+    const { res, readBody } = await verboseFetch({
+      baseUrl: stripTrailingSlash(opts.nodeUrl),
+      path: "/api/status",
+      method: "GET",
+      body: undefined,
+      verbose,
+      service: "node",
+      // Best-effort ops label only (matches nodeHeaders): keeps ping traffic
+      // attributable in Mini request telemetry without a user hash or session.
+      headers: { "X-LastDB-Client": "kanban" },
+      timeoutMs: opts.timeoutMs,
+      socketPath,
+    });
+    const text = await readBody({ asText: true });
+    if (!res.ok) {
+      return {
+        ok: false,
+        latency_ms: latency(),
+        socket_path: socketPath,
+        error: bodyError(parseJsonSafe(text)) ?? `node answered HTTP ${res.status}`,
+      };
+    }
+    const body = parseJsonSafe(text);
+    const version =
+      typeof body === "object" && body !== null && "version" in body &&
+      typeof (body as { version: unknown }).version === "string"
+        ? (body as { version: string }).version
+        : undefined;
+    return { ok: true, latency_ms: latency(), socket_path: socketPath, node_version: version };
+  } catch (err) {
+    return {
+      ok: false,
+      latency_ms: latency(),
+      socket_path: socketPath,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // The socket a given route must use under socket-only, computed regardless of
 // whether the selected file exists (a down node simply fails the connect, which
 // the catch maps to a node-not-running diagnostic instead of dialing :9001). A
