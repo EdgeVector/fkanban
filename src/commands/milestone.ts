@@ -11,6 +11,7 @@ import {
   cardExists,
   depStatus,
   findCard,
+  findCardSummaryForReconcile,
   findMilestone,
   isMilestoneState,
   listBoards,
@@ -32,7 +33,7 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
-import { listMilestoneCardsPartition } from "../milestone-cards.ts";
+import { listMilestoneCardsPartition, milestoneCardSk, removeMilestoneCard, upsertMilestoneCard } from "../milestone-cards.ts";
 
 export type MilestoneWarning = {
   code: string;
@@ -354,13 +355,91 @@ export async function milestoneStateCmd(opts: { cfg: Config; node: NodeClient; s
   return { slug: opts.slug, from: existing.state, to: updated.state, proof_status: updated.proof_status };
 }
 
+function arraysEqual(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+function milestoneCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
+  return (
+    summary.slug === truth.slug &&
+    summary.title === truth.title &&
+    (summary.board || "default") === (truth.board || "default") &&
+    summary.column === truth.column &&
+    String(summary.position) === String(truth.position) &&
+    summary.assignee === truth.assignee &&
+    arraysEqual(summary.tags, truth.tags) &&
+    arraysEqual(summary.deps, truth.deps) &&
+    arraysEqual(summary.surfaces, truth.surfaces) &&
+    summary.created_at === truth.created_at &&
+    (summary.created_by || "unknown") === (truth.created_by || "unknown") &&
+    summary.updated_at === truth.updated_at &&
+    summary.repo === truth.repo &&
+    summary.base === truth.base &&
+    summary.kind === truth.kind &&
+    summary.block_status === truth.block_status &&
+    summary.block_reason === truth.block_reason &&
+    summary.north_star === truth.north_star &&
+    (summary.milestone ?? "") === (truth.milestone ?? "") &&
+    summary.pr_url === truth.pr_url &&
+    summary.branch === truth.branch
+  );
+}
+
+function preferFresherMilestoneCard(a: Card, b: Card): Card {
+  const au = a.updated_at || "";
+  const bu = b.updated_at || "";
+  if (bu > au) return b;
+  if (au > bu) return a;
+  return a;
+}
+
+async function reconcileMilestoneCardChildren(
+  opts: { cfg: Config; node: NodeClient },
+  milestone: Milestone,
+  indexed: Card[],
+): Promise<Card[]> {
+  const rowsBySlug = new Map<string, Card[]>();
+  for (const row of indexed) {
+    const rows = rowsBySlug.get(row.slug) ?? [];
+    rows.push(row);
+    rowsBySlug.set(row.slug, rows);
+  }
+
+  const out: Card[] = [];
+  for (const [slug, rows] of rowsBySlug) {
+    const truth = await findCardSummaryForReconcile(opts.node, opts.cfg, slug);
+    if (!truth) {
+      out.push(rows.reduce(preferFresherMilestoneCard));
+      continue;
+    }
+
+    if ((truth.milestone ?? "") !== milestone.slug || (truth.board || "default") !== milestone.board) {
+      await Promise.all(rows.map((row) => removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined)));
+      continue;
+    }
+
+    const stale = rows.length !== 1 || rows.some((row) => !milestoneCardSummaryMatchesTruth(row, truth));
+    if (stale) {
+      await upsertMilestoneCard(opts.node, opts.cfg, truth, rows[0]).catch(() => undefined);
+    }
+    out.push(truth);
+  }
+
+  return out.sort((a, b) =>
+    milestoneCardSk(a.column, a.position, a.slug).localeCompare(milestoneCardSk(b.column, b.position, b.slug)),
+  );
+}
+
 export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<MilestoneReconcileResult & { text: string }> {
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
-  // Prefer MilestoneCards partition (exact membership); fall back to board filter.
+  // Prefer keyed partitions, but union MilestoneCards with current board
+  // membership so a lagging/missing milestone-keyed fold cannot hide a live
+  // Card whose board row already carries the milestone link.
   const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
+  const fromBoard = (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
   const children = fromIndex !== null
-    ? fromIndex
-    : (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
+    ? await reconcileMilestoneCardChildren(opts, milestone, [...fromIndex, ...fromBoard])
+    : fromBoard;
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
   const boards = await listBoards(opts.node, opts.cfg);
   const proofCard = milestone.proof_card ? await findCard(opts.node, opts.cfg, milestone.proof_card) : null;
