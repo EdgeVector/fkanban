@@ -225,10 +225,10 @@ export async function boardCardsHealResult(
     const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug);
     if (!part) continue;
     enumeratedBoards.add(b.slug);
-    const seenSk = new Set<string>();
+    const seenSlugs = new Set<string>();
     for (const c of part) {
       if (slugFilter && !slugFilter.has(c.slug)) continue;
-      seenSk.add(`${c.board || b.slug}\0${boardCardSk(c.column, c.position, c.slug)}`);
+      seenSlugs.add(c.slug);
       rawRows.push({
         board: c.board || b.slug,
         column: c.column,
@@ -255,7 +255,19 @@ export async function boardCardsHealResult(
     for (const s of spine) {
       if (slugFilter && !slugFilter.has(s.slug)) continue;
       const board = s.board || b.slug;
-      if (seenSk.has(`${board}\0${s.sk}`)) continue;
+      // Dedupe by SLUG, not by sort key. The obvious thing — recompute the wide
+      // row's sk from its column/position fields and compare — is wrong here:
+      // those copied fields drifting from the sk is precisely the corruption
+      // this heal repairs, so on exactly the damaged rows the recomputed key
+      // misses and the same physical row gets added twice. A phantom duplicate
+      // then reads as a stale sibling and gets "repaired" by deletion.
+      //
+      // Slug-level dedupe is narrower — a slug with one visible row and one
+      // sparse row keeps only the visible one this pass — but it cannot invent
+      // a row, and the sparse sibling is still reachable on a later pass once
+      // the visible one converges. Conservative is correct when the failure
+      // mode is deleting live membership.
+      if (seenSlugs.has(s.slug)) continue;
       rawRows.push({
         board,
         column: s.column,
