@@ -10,7 +10,7 @@ import {
 } from "../src/record.ts";
 import { listMilestoneCardsPartition } from "../src/milestone-cards.ts";
 import { listBoardMilestonesPartition } from "../src/board-milestones.ts";
-import { DEFAULT_COLUMNS } from "../src/schemas.ts";
+import { DEFAULT_COLUMNS, MILESTONE_CARDS_LAYOUT } from "../src/schemas.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -21,13 +21,18 @@ const cfg: Config = {
     card: "cardhash",
     board: "boardhash",
     milestone: "milestonehash",
+    board_cards: "boardcards-hash",
     board_milestones: "boardms-hash",
     milestone_cards: "mscards-hash",
   },
 };
 
-function fakeNode(): NodeClient {
+type FakeNode = NodeClient & { directMilestoneCardMutations: string[] };
+
+function fakeNode(): FakeNode {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
+  const directMilestoneCardMutations: string[] = [];
+  let foldingMembership = false;
   // HashRange: key = `${hash}\0${range}`
   const table = (hash: string) => {
     let value = store.get(hash);
@@ -65,8 +70,33 @@ function fakeNode(): NodeClient {
   const notImplemented = async (): Promise<never> => {
     throw new Error("not implemented");
   };
+  const foldBoardCardToMilestoneCard = async (
+    action: "upsert" | "delete",
+    fields: Record<string, unknown> | undefined,
+  ) => {
+    const milestoneHash = cfg.schemaHashes.milestone_cards;
+    if (!milestoneHash || !fields) return;
+    const milestone = typeof fields.milestone === "string" ? fields.milestone.trim() : "";
+    const sk = typeof fields.sk === "string" ? fields.sk : "";
+    if (!milestone || !sk) return;
+    foldingMembership = true;
+    try {
+      if (action === "delete") {
+        await node.deleteRecord({ schemaHash: milestoneHash, keyHash: milestone, rangeKey: sk });
+      } else {
+        await node.updateRecord({
+          schemaHash: milestoneHash,
+          keyHash: milestone,
+          rangeKey: sk,
+          fields: { ...fields, layout: MILESTONE_CARDS_LAYOUT },
+        });
+      }
+    } finally {
+      foldingMembership = false;
+    }
+  };
 
-  return {
+  const node: FakeNode = {
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
     autoIdentity: notImplemented,
@@ -75,12 +105,33 @@ function fakeNode(): NodeClient {
     listSchemas: notImplemented,
     async createRecord({ schemaHash, keyHash, fields, rangeKey }) {
       table(schemaHash).set(rowKey(keyHash, rangeKey), { ...fields });
+      if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
+        directMilestoneCardMutations.push("create");
+      }
+      if (schemaHash === cfg.schemaHashes.board_cards) {
+        await foldBoardCardToMilestoneCard("upsert", fields);
+      }
     },
     async updateRecord({ schemaHash, keyHash, fields, rangeKey }) {
+      const previous = table(schemaHash).get(rowKey(keyHash, rangeKey));
       table(schemaHash).set(rowKey(keyHash, rangeKey), { ...fields });
+      if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
+        directMilestoneCardMutations.push("update");
+      }
+      if (schemaHash === cfg.schemaHashes.board_cards) {
+        await foldBoardCardToMilestoneCard("delete", previous);
+        await foldBoardCardToMilestoneCard("upsert", fields);
+      }
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      const previous = table(schemaHash).get(rowKey(keyHash, rangeKey));
       table(schemaHash).delete(rowKey(keyHash, rangeKey));
+      if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
+        directMilestoneCardMutations.push("delete");
+      }
+      if (schemaHash === cfg.schemaHashes.board_cards) {
+        await foldBoardCardToMilestoneCard("delete", previous);
+      }
     },
     async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
       const results = rows(schemaHash, filter);
@@ -88,7 +139,9 @@ function fakeNode(): NodeClient {
     },
     rawCall: notImplemented,
     nodeTransport: () => ({ transport: "unavailable" as const }),
+    directMilestoneCardMutations,
   };
+  return node;
 }
 
 async function seedBoard(node: NodeClient): Promise<void> {
@@ -213,7 +266,7 @@ describe("milestone HashRange indexes", () => {
     expect(fullScanAttempts).toEqual([]);
   });
 
-  test("dual-write MilestoneCards on card add; reconcile uses partition", async () => {
+  test("folds MilestoneCards from the BoardCards write; reconcile uses partition", async () => {
     const node = fakeNode();
     await seedBoard(node);
     await milestoneAddCmd({
@@ -242,6 +295,7 @@ describe("milestone HashRange indexes", () => {
     const kids = await listMilestoneCardsPartition(node, cfg, "ms-b");
     expect(kids?.map((c) => c.slug)).toEqual(["pr-b"]);
     expect(kids?.[0]?.body).toBe(""); // thin index
+    expect(node.directMilestoneCardMutations).toEqual([]);
 
     const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-b" });
     expect(rec.children.map((c) => c.slug)).toContain("pr-b");

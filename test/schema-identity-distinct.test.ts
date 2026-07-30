@@ -81,4 +81,18 @@ describe("fkanban schema identity distinctness", () => {
   test("board_milestones keeps completed_at in its own field set", () => {
     expect(boardMilestonesSchema.schema.fields).toContain("completed_at");
   });
+
+  test("BoardCards and MilestoneCards share matching field descriptions except key-local layout", () => {
+    const boardDescriptions = boardCardsSchema.schema.field_descriptions;
+    const milestoneDescriptions = milestoneCardsSchema.schema.field_descriptions;
+
+    for (const field of ["board", "milestone", "sk", "assignee", "created_by"]) {
+      expect(
+        milestoneDescriptions[field],
+        `${field} should fold through the same field identity`,
+      ).toBe(boardDescriptions[field]);
+    }
+
+    expect(milestoneDescriptions.layout).not.toBe(boardDescriptions.layout);
+  });
 });
