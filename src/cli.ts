@@ -29,7 +29,7 @@ import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
-import { groomStaleBlockersCmd } from "./commands/groom.ts";
+import { groomStaleBlockersCmd, groomStructuredRoutingCmd } from "./commands/groom.ts";
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
 import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
@@ -84,6 +84,7 @@ Commands:
   pickup explain <slug> full readiness path for one card (write-guard+classify+lane+overlap)
   pickup claim         claim the next ready card into doing (lanes + priority + overlap + CAS)
   pickup lanes         show logical pickup lanes, starvation, and next claim order
+  groom structured-routing dry-run/apply backfill body Repo/Base into structured fields
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
   groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
@@ -570,6 +571,7 @@ Example:
   groom: withFooter(`fkanban groom — board hygiene reports and safe repairs
 
 Usage:
+  fkanban groom structured-routing [--apply] [--json]
   fkanban groom stale-blockers [--apply] [--json]
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
@@ -577,6 +579,10 @@ Usage:
   fkanban groom card-list-index-retire [--apply] [--json]
 
 Subcommands:
+  structured-routing  backfill empty structured repo/base fields from parseable
+                       body Repo:/Base: headers on active cards. Registry cards,
+                       absent/ambiguous headers, and already-set fields are left
+                       untouched.
   stale-blockers       detect stale generated pickup/blocker metadata, malformed
                        Repo header lines, stale area-overlap holds, and
                        human/parking candidates; --apply also parks unheld
@@ -610,6 +616,8 @@ Flags:
                        count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
 
 Examples:
+  fkanban groom structured-routing
+  fkanban groom structured-routing --apply
   fkanban groom stale-blockers
   fkanban groom stale-blockers --apply
   fkanban groom board-cards-heal
@@ -1894,6 +1902,7 @@ async function dispatch(
       const sub = positionals[1];
       if (
         sub !== "stale-blockers" &&
+        sub !== "structured-routing" &&
         sub !== "board-cards-heal" &&
         sub !== "board-cards-heal-scheduled" &&
         sub !== "board-list-heal" &&
@@ -1901,7 +1910,7 @@ async function dispatch(
         sub !== "card-list-index-retire"
       ) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
         );
         return 2;
       }
@@ -1921,6 +1930,17 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, 2, "groom stale-blockers");
         if (extra !== undefined) return extra;
         console.log(await groomStaleBlockersCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          apply: values.apply as boolean | undefined,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      if (sub === "structured-routing") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom structured-routing");
+        if (extra !== undefined) return extra;
+        console.log(await groomStructuredRoutingCmd({
           cfg: ctx.cfg,
           node: ctx.node,
           apply: values.apply as boolean | undefined,

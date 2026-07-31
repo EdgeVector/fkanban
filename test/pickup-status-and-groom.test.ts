@@ -13,7 +13,7 @@ import {
 } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { pickupStatusResult } from "../src/commands/pickup_status.ts";
-import { groomStaleBlockersResult } from "../src/commands/groom.ts";
+import { groomStaleBlockersResult, groomStructuredRoutingResult } from "../src/commands/groom.ts";
 import { moveCmd } from "../src/commands/move.ts";
 import { HUMAN_BOARD_COLUMNS, PICKUP_CATEGORIES } from "../src/pickup.ts";
 import type { SituationPreflight } from "../src/situations.ts";
@@ -522,5 +522,80 @@ describe("groom stale-blockers", () => {
     expect(heldReport?.issues.map((i) => i.kind)).not.toContain("non-pr-kind-in-todo");
     const held = await findCard(node, cfg, "held-tracker-stays");
     expect(held?.column).toBe("todo");
+  });
+});
+
+describe("groom structured-routing", () => {
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedBoard(node, board({ slug: "default", columns: [...DEFAULT_COLUMNS] }));
+  });
+
+  test("dry-run reports body-routed cards without writing", async () => {
+    await seedCard(node, card({
+      slug: "body-routed",
+      repo: "",
+      base: "",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nShip it.\n\n## END STATE\nDone.\n",
+    }));
+
+    const { report } = await groomStructuredRoutingResult({ cfg, node });
+
+    expect(report.dryRun).toBe(true);
+    expect(report.changed).toBe(1);
+    expect(report.cards[0]).toMatchObject({
+      slug: "body-routed",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+    });
+    const after = await findCard(node, cfg, "body-routed");
+    expect(after?.repo).toBe("");
+    expect(after?.base).toBe("");
+  });
+
+  test("apply backfills only empty repo/base fields and is idempotent", async () => {
+    await seedCard(node, card({
+      slug: "body-routed",
+      repo: "",
+      base: "",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nShip it.\n\n## END STATE\nDone.\n",
+    }));
+    await seedCard(node, card({
+      slug: "already-routed",
+      repo: "EdgeVector/existing",
+      base: "stable",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\nDo not overwrite.",
+    }));
+    await seedCard(node, card({
+      slug: "unrouted",
+      repo: "",
+      base: "",
+      body: "## GOAL\nNo routing header.\n",
+    }));
+    await seedCard(node, card({
+      slug: "registry",
+      repo: "",
+      base: "",
+      kind: "",
+      title: "fix dogfood recipe",
+      body: "Target: fbrain record\n\nRepo: EdgeVector/fkanban\nBase: main\n",
+    }));
+
+    const first = await groomStructuredRoutingResult({ cfg, node, apply: true });
+
+    expect(first.report.dryRun).toBe(false);
+    expect(first.report.changed).toBe(1);
+    expect((await findCard(node, cfg, "body-routed"))?.repo).toBe("EdgeVector/fkanban");
+    expect((await findCard(node, cfg, "body-routed"))?.base).toBe("main");
+    expect((await findCard(node, cfg, "already-routed"))?.repo).toBe("EdgeVector/existing");
+    expect((await findCard(node, cfg, "already-routed"))?.base).toBe("stable");
+    expect((await findCard(node, cfg, "unrouted"))?.repo).toBe("");
+    expect((await findCard(node, cfg, "registry"))?.repo).toBe("");
+
+    const second = await groomStructuredRoutingResult({ cfg, node, apply: true });
+    expect(second.report.changed).toBe(0);
+    expect(second.report.cards).toEqual([]);
   });
 });
