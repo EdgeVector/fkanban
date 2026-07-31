@@ -2233,6 +2233,21 @@ export async function listCards(
  * free-text search and for whole-board sweeps that JUDGE or REWRITE bodies
  * (`groom stale-blockers`, `rank`, `migrate area-tags`), which cannot use the
  * body-free list without deciding on a body they never read.
+ *
+ * DEDUPED BY SLUG, keeping the longest body — the scan returns MORE THAN ONE
+ * row for some slugs even though `Card` is a `Hash` schema keyed on `slug`.
+ * Measured on the live primary 2026-07-31: 468 rows for 421 distinct slugs, 47
+ * slugs duplicated, and in every duplicated pair one row carries the real body
+ * and the other is EMPTY. The keyed read is authoritative and unaffected —
+ * `HashKey(slug)` returns exactly ONE row, always the non-empty one (verified
+ * over 12 affected slugs) — so the ghost rows are a scan-only artifact and the
+ * scan, not the data, is what needs defending.
+ *
+ * Same keep-longest rule (and the same reasoning) as `listCardBodies`: an
+ * empty row carries no text any caller could want, so it must never displace
+ * one that does, and length is order-independent where last-write-wins is not.
+ * Without this, callers saw one card twice — `search --complete` listed it
+ * twice, and every body-judging sweep got a coin flip on which row it judged.
  */
 export async function listCardsWithBodies(
   node: NodeClient,
@@ -2256,7 +2271,20 @@ export async function listCardsWithBodies(
       allowFullScan: true,
     });
   }
-  return res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+  const bySlug = new Map<string, Card>();
+  const unkeyed: Card[] = [];
+  for (const card of res.results.map(rowToCard)) {
+    if (isHiddenCard(card)) continue;
+    // A row with no slug cannot be a duplicate OF anything (nothing addresses
+    // it by key), so it is passed through rather than collapsed with its peers.
+    if (card.slug.length === 0) {
+      unkeyed.push(card);
+      continue;
+    }
+    const seen = bySlug.get(card.slug);
+    if (seen === undefined || seen.body.length < card.body.length) bySlug.set(card.slug, card);
+  }
+  return [...bySlug.values(), ...unkeyed];
 }
 
 /**
@@ -2324,6 +2352,21 @@ export async function listCardBodies(
  *
  * A card the scan doesn't cover (BoardCards/Card drift) is point-read rather
  * than handed back as a false empty — the whole failure this guards against.
+ *
+ * ONLY A KEYED READ MAY ESTABLISH THAT A BODY IS EMPTY. The scan is allowed to
+ * SUPPLY a body and never to DENY one: an empty scan body is treated as "not
+ * covered", so the card keeps its `BODY_OMITTED` marker and `hydrateCardBodies`
+ * point-reads it. Presence in the scan is not the same as coverage, and the
+ * original `bodies.has(slug)` test conflated them — on the live primary that
+ * handed 33 of 352 board cards a body of `""` while their real briefs (513–4389
+ * chars) sat one keyed read away, because the duplicate EMPTY row landed last in
+ * a last-write-wins map. Those cards then read as hollow to the very sweeps this
+ * function exists to feed, and `hydrateCardBodies` could not rescue them: it
+ * correctly refuses to re-read a body someone already claimed to have read, so
+ * the false empty was laundered into a genuine one.
+ *
+ * The keyed read is authoritative here (see `listCardsWithBodies`), so this
+ * costs one point read per genuinely-empty card and buys back every real body.
  */
 export async function listBoardCardsWithBodies(
   node: NodeClient,
@@ -2334,10 +2377,19 @@ export async function listBoardCardsWithBodies(
   if (cards.length === 0) return cards;
   if (!cards.some(isBodyOmitted)) return cards;
 
-  const bodies = new Map((await listCardsWithBodies(node, cfg)).map((c) => [c.slug, c.body]));
-  const covered = cards.map((c) =>
-    isBodyOmitted(c) && bodies.has(c.slug) ? withLoadedBody(c, bodies.get(c.slug)!) : c,
-  );
+  // `listCardBodies`, not `listCardsWithBodies`: it projects two fields instead
+  // of the full card, so it is both cheaper and STRICTLY WIDER in coverage —
+  // LastDB returns a row only when every projected field has an atom, so the
+  // wide scan silently drops cards the narrow one returns (421 slugs vs 595 on
+  // the primary). This read wants bodies; asking for anything else only adds
+  // ways for a live card to go missing.
+  const bodies = await listCardBodies(node, cfg);
+  const covered = cards.map((c) => {
+    if (!isBodyOmitted(c)) return c;
+    const body = bodies.get(c.slug);
+    if (body === undefined || body.length === 0) return c;
+    return withLoadedBody(c, body);
+  });
   return hydrateCardBodies(node, cfg, covered);
 }
 
