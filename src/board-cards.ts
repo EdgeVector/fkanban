@@ -447,8 +447,10 @@ export type BoardCardWriteOptions = {
 };
 
 /**
- * Upsert thin BoardCards row. When board/column/position change, delete the
- * previous sk first (same-board move or board transfer). Also purges any
+ * Upsert thin BoardCards row. When board/column/position change, the previous
+ * sk is deleted (same-board move or board transfer) — but only once the
+ * destination row is durable, so a failed write can never leave the card with
+ * no membership row at all (see `retireSupersededRows` below). Also purges any
  * other rows for the same slug on the destination board so list cannot keep a
  * stale column membership after a successful card update — see
  * `BoardCardWriteOptions.skipOrphanPurge` for the bulk-reconciler opt-out.
@@ -493,24 +495,60 @@ export async function upsertBoardCard(
   const nextSk = String(nextFields.sk);
   const slug = String(nextFields.slug);
 
-  if (previous) {
-    const prevBoard = previous.board || "default";
-    const prevSk = boardCardSk(previous.column, previous.position, previous.slug);
-    if (prevBoard !== nextBoard || prevSk !== nextSk) {
-      // Targeted delete of the known previous sk only. A whole-partition
-      // orphan scan here (purgeOtherBoardCardRows) re-lists every BoardCards
-      // row on the board on every move/tag — multi-second under HashGroup
-      // thrash (papercut-fkanban-move-pays-whole-partition-orphan-scan).
-      // Multi-orphan drift is repaired by `groom board-cards-heal`, not the
-      // hot write path.
-      await deleteBoardCardSk(node, schemaHash, prevBoard, prevSk);
+  // Retire the rows this write supersedes — AFTER the destination row is
+  // durable, never before.
+  //
+  // ## Why the order is the whole point
+  //
+  // A move changes the sk (`column#position#slug`), so the destination is a
+  // DIFFERENT row from the source: the card has to be written to one key and
+  // removed from another, and LastDB gives us no transaction spanning the two.
+  // Something is therefore observable in between, and the only choice we get is
+  // WHICH something.
+  //
+  // Deleting first makes that in-between state "the card has no BoardCards row
+  // on any board". Every board read is BoardCards-backed — `list`, `pickup`,
+  // `overlap`, `rank`, `milestone portfolio`, dep seeding, the board footer —
+  // so for the duration of the destination write the card is simply off the
+  // board, and if that write fails (a deadline expiry on a busy node is the
+  // ordinary case, not an exotic one) it STAYS off until `groom
+  // board-cards-heal` next runs. A move is a wide 24-field write, measured at
+  // ~5.4s on the live primary: that is a multi-second hole per move, on the
+  // hot path, and the card's disappearance looks exactly like a card that was
+  // never there.
+  //
+  // Writing first makes the in-between state "the card has two rows" — and
+  // that state is one this codebase already handles on purpose:
+  // `listAllBoardCards` dedupes by slug through `preferFresherBoardCard`, and
+  // every mutation that reaches here bumps `updated_at`, so the winner is the
+  // row we just wrote, by construction. A failed destination write now leaves
+  // the card exactly where it was instead of nowhere; a failed cleanup leaves
+  // a duplicate that reads correctly and that heal reaps.
+  //
+  // Both failures are recoverable. Only one of them is invisible while it
+  // waits, so prefer the visible one.
+  const retireSupersededRows = async () => {
+    if (previous) {
+      const prevBoard = previous.board || "default";
+      const prevSk = boardCardSk(previous.column, previous.position, previous.slug);
+      if (prevBoard !== nextBoard || prevSk !== nextSk) {
+        // Targeted delete of the known previous sk only. A whole-partition
+        // orphan scan here (purgeOtherBoardCardRows) re-lists every BoardCards
+        // row on the board on every move/tag — multi-second under HashGroup
+        // thrash (papercut-fkanban-move-pays-whole-partition-orphan-scan).
+        // Multi-orphan drift is repaired by `groom board-cards-heal`, not the
+        // hot write path.
+        await deleteBoardCardSk(node, schemaHash, prevBoard, prevSk);
+      }
+      return;
     }
-  } else if (!opts.skipOrphanPurge) {
-    // No previous sk: callers that omit it (legacy/add/metadata) can leave
-    // orphan column#pos rows. Scan once and drop every sk except nextSk.
-    // Brand-new creates pass skipOrphanPurge (createCardRecord).
-    await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
-  }
+    if (!opts.skipOrphanPurge) {
+      // No previous sk: callers that omit it (legacy/add/metadata) can leave
+      // orphan column#pos rows. Scan once and drop every sk except nextSk.
+      // Brand-new creates pass skipOrphanPurge (createCardRecord).
+      await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
+    }
+  };
 
   const write = async (fields: Record<string, unknown>) => {
     try {
@@ -532,9 +570,14 @@ export async function upsertBoardCard(
     if (stored) {
       const changed = changedBoardCardFields(stored.fields, nextFields, stored.projected);
       // Nothing changed: the node would no-op this in ~140ms, but a round trip
-      // we can prove is pointless is a round trip not worth taking.
-      if (Object.keys(changed).length === 0) return;
+      // we can prove is pointless is a round trip not worth taking. The row is
+      // already correct and durable, so its superseded siblings can still go.
+      if (Object.keys(changed).length === 0) {
+        await retireSupersededRows();
+        return;
+      }
       await write(changed);
+      await retireSupersededRows();
       return;
     }
     // Row absent or missing an atom on some field. Fall through: the wide
@@ -550,6 +593,7 @@ export async function upsertBoardCard(
     delete legacyFields.created_by;
     await write(legacyFields);
   }
+  await retireSupersededRows();
 }
 
 export async function removeBoardCard(
