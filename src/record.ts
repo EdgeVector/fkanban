@@ -25,6 +25,7 @@ import {
   type BoardCardWriteOptions,
 } from "./board-cards.ts";
 import {
+  boardMilestonesHash,
   listAllBoardMilestones,
   listBoardMilestonesPartition,
   removeBoardMilestone,
@@ -3435,7 +3436,40 @@ export async function listMilestones(
   const fromIndex = await listAllBoardMilestones(node, cfg, boards);
   if (fromIndex !== null) return sortMilestones(fromIndex);
 
-  // Fallback: full-scan + sparse hydrate (pre-index / empty backfill).
+  // `null` above means one of two very different things, and substituting the
+  // product scan is only right for one of them — the same conflation that
+  // `listCardsWithFields` had to unpick (a failed read is not evidence that an
+  // index is missing).
+  //
+  // INDEX BOUND but unreadable => a partition threw. Do NOT fall through. On
+  // Cards the product scan is a safe substitute (measured: no rows lost at any
+  // projection width). On Milestone it is not, measured on the primary
+  // 2026-07-31:
+  //
+  //   product Milestone scan   62 slugs
+  //   BoardMilestones index    32 slugs, every one point-readable and real
+  //   in both                   8
+  //   index-only               24  <- live milestones the scan CANNOT see,
+  //                                   including active ones
+  //   scan-only                54  <- slug-only rows carrying no other atom,
+  //                                   unreachable by any keyed read
+  //
+  // So the scan is wrong in BOTH directions here: it would drop 24 real
+  // milestones and invent 54 phantoms that `milestone show` cannot open and
+  // `requireMilestone` throws on. Answering a transient shed with that is worse
+  // than saying we could not read — a caller can retry a failure; it cannot
+  // detect a plausible wrong list.
+  if (boardMilestonesHash(cfg)) {
+    throw new Error(
+      "BoardMilestones partition read failed — refusing to answer from the Milestone product scan, " +
+        "which on this data misses live milestones and surfaces unreachable slug-only rows. " +
+        "This is usually node backpressure (service_timeout / too many concurrent reads): retry. " +
+        "If the index is genuinely stale, run `kanban groom milestone-indexes-heal`.",
+    );
+  }
+
+  // Index UNBOUND (fresh node, pre-backfill) — the case this fallback was
+  // written for. Full-scan + sparse hydrate.
   const res = await node.queryAll({
     schemaHash: schemaHashFor("milestone", cfg),
     fields: fieldsFor("milestone"),
