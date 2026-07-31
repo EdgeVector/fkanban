@@ -8,7 +8,7 @@ import pkg from "../../package.json" with { type: "json" };
 import { FkanbanError, isLoopbackNodeUrl, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
-import { listBoards, listCards, findCard, probeSchemaWritable } from "../record.ts";
+import { listBoards, listCards, findCard, probeSchemaWritable, type Board, type Card } from "../record.ts";
 import {
   MEMBERSHIP_KEY_EXPECTATIONS,
   checkMembershipKeyLayout,
@@ -129,10 +129,32 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   check(Boolean(cfg.schemaHashes.board), "board schema hash in config", cfg.schemaHashes.board);
 
   let queryRoundTrip: { cards: number; boards: number } | null = null;
+  // The board + card sets from whichever round-trip branch ran, kept so the
+  // later checks don't re-read the whole board to re-derive what this already
+  // fetched. `null` means no round trip succeeded — those checks then fall back
+  // to reading for themselves rather than silently skipping.
+  //
+  // Note the `else` arm below reads like a non-socket/TCP fallback. It is not:
+  // the client is socket-only, so an absent socket fails `node reachable +
+  // provisioned` and doctor returns before reaching it. It is only reachable
+  // when the socket IS live but this first round trip threw — i.e. it is a
+  // RETRY, which is why it also records the sets.
+  //
+  // Reuse is safe here, and it is worth saying WHY rather than leaving the next
+  // reader to re-derive it: no check below depends on observing state AFTER the
+  // schema write-probes. The parity check re-reads each PARTITION itself (that
+  // comparison is the check); only the board LIST is reused. The multi-field
+  // smoke check just needs one live card slug, and taking it from the pre-probe
+  // set is strictly better — a set read after the probes could catch a
+  // throwaway probe row mid-delete.
+  let boardSet: Board[] | null = null;
+  let cardSet: Card[] | null = null;
   if (socketDataPlane) {
     try {
       const boards = await listBoards(node, cfg);
       const cards = await listCards(node, cfg, { boards });
+      boardSet = boards;
+      cardSet = cards;
       queryRoundTrip = { cards: cards.length, boards: boards.length };
       check(true, "node reachable via socket", `${transport.socketPath} — query round-trip: ${cards.length} cards, ${boards.length} boards`);
     } catch (err) {
@@ -244,6 +266,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     try {
       const boards = await listBoards(node, cfg);
       const cards = await listCards(node, cfg, { boards });
+      boardSet = boards;
+      cardSet = cards;
       check(true, "query round-trip", `${cards.length} cards, ${boards.length} boards`);
     } catch (err) {
       check(false, "query round-trip", formatDoctorError(err));
@@ -308,7 +332,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   //      board, and `board-cards-heal` reported missing_card: 0 because it was
   //      reading through the same lossy projection.
   try {
-    const boards = await listBoards(node, cfg);
+    const boards = boardSet ?? (await listBoards(node, cfg));
     for (const b of boards) {
       const spine = await listBoardCardsPartitionSpine(node, cfg, b.slug);
       if (spine === null) {
@@ -338,7 +362,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // Multi-field Card smoke: point-read one live card and require more than slug.
   // Slug-only projection was the 2026-07-24 Mini degradation signature.
   try {
-    const sample = (await listCards(node, cfg)).find((c) => c.slug);
+    // One live card slug is all this needs; re-listing the whole board to find
+    // one was the single largest avoidable read in doctor.
+    const sample = (cardSet ?? (await listCards(node, cfg))).find((c) => c.slug);
     if (!sample) {
       info("card multi-field smoke", "no cards to sample");
     } else {
