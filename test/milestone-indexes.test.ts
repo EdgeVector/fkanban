@@ -399,10 +399,22 @@ describe("milestone HashRange indexes", () => {
       },
     });
 
+    node.directMilestoneCardMutations.length = 0;
     const detail = await milestoneDetailResult({ cfg, node, slug: "ms-orphan" });
+
+    // The ANSWER drops the orphan: its Card primary is gone, so it is not a
+    // child however the index rows read.
     expect(detail.detail.children.map((card) => card.slug)).not.toContain("orphan-pr");
     expect(detail.detail.columns.done ?? []).toEqual([]);
-    expect(await listMilestoneCardsPartition(node, cfg, "ms-orphan")).toEqual([]);
+
+    // But `detail` does not REPAIR it. This assertion used to require the
+    // opposite — that detail had deleted the stale index row — which made a
+    // LOOK command issue writes to the shared primary, seconds per row. The
+    // orphan row survives, and detail reports it instead of silently fixing it.
+    expect(node.directMilestoneCardMutations).toEqual([]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-orphan"))?.map((card) => card.slug)).toEqual(["orphan-pr"]);
+    expect(detail.repairs).toMatchObject({ applied: false, removals: 1, issued: 0, deferred: 1 });
+    expect(detail.text).toContain("kanban milestone reconcile ms-orphan");
   });
 
   test("milestone detail includes current board membership when milestone partition lags", async () => {
@@ -593,6 +605,97 @@ describe("milestone HashRange indexes", () => {
     expect(rec.children.map((c) => c.slug)).toEqual(["live-pr"]);
     expect((await listMilestoneCardsPartition(node, cfg, "ms-orphan"))?.map((c) => c.slug)).toEqual(["live-pr"]);
     expect(node.directMilestoneCardMutations).toContain("delete");
+  });
+
+  test("reconcile --dry-run classifies the repair without issuing it", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-dry", ["dry-a", "dry-b"]);
+    await dropIndexRow(node, "ms-dry", "dry-a");
+
+    node.directMilestoneCardMutations.length = 0;
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-dry", apply: false });
+
+    expect(node.directMilestoneCardMutations).toEqual([]);
+    expect(rec.repairs).toMatchObject({ applied: false, upserts: 1, removals: 0, issued: 0, deferred: 1 });
+    // Left exactly as found — the drift is reported, not repaired.
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-dry"))?.map((c) => c.slug)).toEqual(["dry-b"]);
+    expect(rec.text).toContain("index drift");
+  });
+
+  // The justification for making `detail` read-only. If skipping the repair
+  // could change the answer, dry-run-by-default would be trading correctness
+  // for latency; it cannot, because children are built from freshly-read Card
+  // truth and never from the index rows the repair writes.
+  test("skipping the repair does not change the answer", async () => {
+    const drifted = async (slug: string) => {
+      const node = fakeNode();
+      await seedMilestoneWithCards(node, slug, ["same-a", "same-b"]);
+      await dropIndexRow(node, slug, "same-a");
+      return node;
+    };
+
+    const looked = await milestoneReconcileResult({ cfg, node: await drifted("ms-same"), slug: "ms-same", apply: false });
+    const repaired = await milestoneReconcileResult({ cfg, node: await drifted("ms-same"), slug: "ms-same" });
+
+    expect(looked.children).toEqual(repaired.children);
+    expect(looked.ready).toEqual(repaired.ready);
+    expect(looked.repairs.issued).toBe(0);
+    expect(repaired.repairs.issued).toBe(1);
+  });
+
+  test("--max-repairs bounds one run, and the next run continues from there", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-budget", ["bud-a", "bud-b", "bud-c"]);
+    for (const slug of ["bud-a", "bud-b", "bud-c"]) await dropIndexRow(node, "ms-budget", slug);
+    expect(await listMilestoneCardsPartition(node, cfg, "ms-budget")).toEqual([]);
+
+    const first = await milestoneReconcileResult({ cfg, node, slug: "ms-budget", maxRepairs: 2 });
+    expect(first.repairs).toMatchObject({ applied: true, upserts: 3, issued: 2, deferred: 1, budget: 2 });
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-budget"))?.length).toBe(2);
+    expect(first.text).toContain("1 deferred");
+    // The ANSWER is complete even though the repair was not: a capped run
+    // reports every child, it just leaves some index rows unwritten.
+    expect(first.children.map((c) => c.slug).sort()).toEqual(["bud-a", "bud-b", "bud-c"]);
+
+    // Convergent and idempotent, so a capped run makes strict progress —
+    // running again finishes the job rather than redoing it.
+    const second = await milestoneReconcileResult({ cfg, node, slug: "ms-budget", maxRepairs: 2 });
+    expect(second.repairs).toMatchObject({ upserts: 1, issued: 1, deferred: 0 });
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-budget"))?.map((c) => c.slug).sort())
+      .toEqual(["bud-a", "bud-b", "bud-c"]);
+
+    // And once converged there is nothing left to classify.
+    const third = await milestoneReconcileResult({ cfg, node, slug: "ms-budget", maxRepairs: 2 });
+    expect(third.repairs).toMatchObject({ upserts: 0, removals: 0, issued: 0, deferred: 0 });
+    expect(third.text).not.toContain("index");
+  });
+
+  test("--max-repairs unlimited lifts the cap", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-unbounded", ["unb-a", "unb-b", "unb-c"]);
+    for (const slug of ["unb-a", "unb-b", "unb-c"]) await dropIndexRow(node, "ms-unbounded", slug);
+
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-unbounded", maxRepairs: null });
+
+    expect(rec.repairs).toMatchObject({ upserts: 3, issued: 3, deferred: 0, budget: null });
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-unbounded"))?.length).toBe(3);
+  });
+
+  test("detail reports a missing index row without repairing it", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-look", ["look-a", "look-b"]);
+    await dropIndexRow(node, "ms-look", "look-a");
+
+    node.directMilestoneCardMutations.length = 0;
+    const detail = await milestoneDetailResult({ cfg, node, slug: "ms-look" });
+
+    // Reported from Card truth ...
+    expect(detail.detail.children.map((c) => c.slug).sort()).toEqual(["look-a", "look-b"]);
+    // ... and the index left exactly as found.
+    expect(node.directMilestoneCardMutations).toEqual([]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-look"))?.map((c) => c.slug)).toEqual(["look-b"]);
+    expect(detail.repairs).toMatchObject({ applied: false, upserts: 1, issued: 0, deferred: 1 });
+    expect(detail.text).toContain("kanban milestone reconcile ms-look");
   });
 
   test("gap-report sees north_star via BoardMilestones dual-write", async () => {

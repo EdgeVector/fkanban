@@ -47,7 +47,6 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_board_list",
   "fkanban_milestone_list",
   "fkanban_milestone_show",
-  "fkanban_milestone_reconcile",
   "fkanban_milestone_portfolio",
   "fkanban_milestone_detail",
   "fkanban_milestone_groom",
@@ -68,6 +67,11 @@ export const FKANBAN_WRITE_TOOLS = [
   "fkanban_board_rm",
   "fkanban_milestone_add",
   "fkanban_milestone_state",
+  // reconcile REPAIRS the MilestoneCards index as it reads — one write per
+  // drifted row, seconds each on the shared node. It sat in the read list
+  // (and annotated readOnlyHint:true, so hosts could auto-run it) purely
+  // because its OUTPUT is a report. Pass `dry_run` for the report alone.
+  "fkanban_milestone_reconcile",
 ] as const;
 export const FKANBAN_TOOL_COUNT =
   FKANBAN_READ_TOOLS.length + FKANBAN_WRITE_TOOLS.length;
@@ -263,6 +267,18 @@ const milestoneSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   completed_at: z.string(),
+});
+
+// What the MilestoneCards heal classified vs what it actually wrote. `upserts`
+// and `removals` are the drift; `issued`/`deferred` are what this call did
+// about it. A read command reports drift with issued 0 and applied false.
+const milestoneRepairsSchema = z.object({
+  applied: z.boolean(),
+  upserts: z.number(),
+  removals: z.number(),
+  issued: z.number(),
+  deferred: z.number(),
+  budget: z.number().nullable(),
 });
 
 // Required string args are declared `.optional()` (no Zod `.min(1)`) so an
@@ -691,23 +707,33 @@ export function createFkanbanMcpServer(
     "fkanban_milestone_reconcile",
     {
       title: "Reconcile milestone",
-      description: "Report a milestone's ready child-card frontier, proof state, and actionable lifecycle warnings.",
-      annotations: { title: "Reconcile milestone", readOnlyHint: true, openWorldHint: false },
-      inputSchema: { slug: z.string().optional() },
+      // Named as a repair verb, because it is one: reconcile REPAIRS the
+      // MilestoneCards index as it reads. It was annotated readOnlyHint: true,
+      // which tells a host it is safe to run without approval — while it issued
+      // seconds-per-row writes to the shared node. Use `dry_run` to ask what it
+      // would repair; use fkanban_milestone_detail to only look.
+      description: "Repair a milestone's card index, then report its ready child-card frontier, proof state, and lifecycle warnings. WRITES unless dry_run.",
+      annotations: { title: "Reconcile milestone", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        slug: z.string().optional(),
+        dry_run: z.boolean().optional().describe("Classify index drift and report it without writing."),
+        max_repairs: z.number().int().min(0).optional().describe("Cap repair writes for this run (default 25). Reconcile is convergent, so a capped run makes strict progress and reports the remainder."),
+      },
       outputSchema: {
         milestone: milestoneSchema,
         children: z.array(z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) })),
         ready: z.array(z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) })),
         proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(),
         warnings: z.array(z.object({ code: z.string(), message: z.string(), hint: z.string() })),
+        repairs: milestoneRepairsSchema,
       },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
-        const result = await milestoneReconcileResult({ cfg, node, slug });
-        return toolResult(result.text, { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings });
+        const result = await milestoneReconcileResult({ cfg, node, slug, apply: !args.dry_run, maxRepairs: args.max_repairs });
+        return toolResult(result.text, { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, repairs: result.repairs });
       } catch (err) {
         return errorResult(err);
       }
@@ -741,17 +767,17 @@ export function createFkanbanMcpServer(
     "fkanban_milestone_detail",
     {
       title: "Milestone detail",
-      description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns.",
+      description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns. Read-only: reports index drift, repairs none.",
       annotations: { title: "Milestone detail", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional() },
-      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), columns: z.record(z.string(), z.array(milestoneChildSchema)) },
+      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), columns: z.record(z.string(), z.array(milestoneChildSchema)), repairs: milestoneRepairsSchema },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const result = await milestoneDetailResult({ cfg, node, slug });
-        return toolResult(result.text, result.detail);
+        return toolResult(result.text, { ...result.detail, repairs: result.repairs });
       } catch (err) {
         return errorResult(err);
       }
