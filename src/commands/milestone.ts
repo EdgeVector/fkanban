@@ -386,14 +386,6 @@ function milestoneCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
   );
 }
 
-function preferFresherMilestoneCard(a: Card, b: Card): Card {
-  const au = a.updated_at || "";
-  const bu = b.updated_at || "";
-  if (bu > au) return b;
-  if (au > bu) return a;
-  return a;
-}
-
 async function reconcileMilestoneCardChildren(
   opts: { cfg: Config; node: NodeClient },
   milestone: Milestone,
@@ -410,7 +402,7 @@ async function reconcileMilestoneCardChildren(
   for (const [slug, rows] of rowsBySlug) {
     const truth = await findCardSummaryForReconcile(opts.node, opts.cfg, slug);
     if (!truth) {
-      out.push(rows.reduce(preferFresherMilestoneCard));
+      await Promise.all(rows.map((row) => removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined)));
       continue;
     }
 

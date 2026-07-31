@@ -354,6 +354,57 @@ describe("milestone HashRange indexes", () => {
     expect(detail.detail.columns.done?.map((card) => card.slug)).toEqual(["drift-pr"]);
   });
 
+  test("milestone detail drops membership rows whose Card primary is missing", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-orphan",
+      title: "Orphan outcome",
+      state: "active",
+      northStar: "ns-orphan",
+      driver: "driver",
+    });
+
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-orphan",
+      rangeKey: "done#00000001#orphan-pr",
+      fields: {
+        milestone: "ms-orphan",
+        sk: "done#00000001#orphan-pr",
+        slug: "orphan-pr",
+        title: "Deleted PR",
+        board: "default",
+        column: "done",
+        position: "1",
+        assignee: "",
+        tags: [],
+        deps: [],
+        surfaces: [],
+        created_at: "2026-01-01T00:00:00.000Z",
+        created_by: "test",
+        updated_at: "2026-01-02T00:00:00.000Z",
+        db: "",
+        repo: "EdgeVector/fkanban",
+        base: "main",
+        kind: "pr",
+        block_status: "",
+        block_reason: "",
+        north_star: "ns-orphan",
+        pr_url: "",
+        branch: "",
+        layout: MILESTONE_CARDS_LAYOUT,
+      },
+    });
+
+    const detail = await milestoneDetailResult({ cfg, node, slug: "ms-orphan" });
+    expect(detail.detail.children.map((card) => card.slug)).not.toContain("orphan-pr");
+    expect(detail.detail.columns.done ?? []).toEqual([]);
+    expect(await listMilestoneCardsPartition(node, cfg, "ms-orphan")).toEqual([]);
+  });
+
   test("milestone detail includes current board membership when milestone partition lags", async () => {
     const node = fakeNode();
     await seedBoard(node);
