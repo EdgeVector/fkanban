@@ -86,6 +86,25 @@ export const BOARD_CARDS_DEP_SEED_FIELDS = [
   "kind",
 ] as const;
 
+/**
+ * The membership SPINE plus `tags` — everything the `list` navigation footer
+ * consumes, and nothing else.
+ *
+ * The footer ("ℹ 2 other boards have cards: x (46)") is a per-board COUNT of
+ * live cards on boards you are not looking at. It reads `board` to group and
+ * `tags` to drop tombstones (`isHiddenCard`); it renders no card, so the other
+ * 18 BoardCards fields are fetched and thrown away.
+ *
+ * Narrowing here is also strictly *less* droppable than the wide read it
+ * replaces: LastDB returns a row only when every projected field has an atom,
+ * so asking for 6 fields loses fewer rows than asking for 24. The footer count
+ * can only get more accurate.
+ */
+export const BOARD_CARDS_FOOTER_FIELDS = [
+  ...BOARD_CARDS_SPINE_FIELDS,
+  "tags",
+] as const;
+
 /** Sort key: column#pos(8)#slug — ordered, column-prefix filterable. */
 export function boardCardSk(column: string, position: string | number, slug: string): string {
   const pos = String(position).padStart(8, "0");

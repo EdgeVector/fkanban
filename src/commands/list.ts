@@ -15,6 +15,7 @@ import {
   listCardsByColumn,
   listCardsForDisplay,
   listCardsOnBoard,
+  listOtherBoardCardsForFooter,
   listMilestones,
   requireBoard,
   sortCards,
@@ -170,7 +171,10 @@ export async function listResult(
   // show/move still call listDependencyStatusesForCards for authoritative checks.
   const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : fieldsFor("card");
   // Terminal map first — needed for dep seed column and blocked rendering.
-  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
+  // Keep the board list itself: the footer needs the other boards' slugs, and
+  // re-deriving them would be a second Board read for data already in hand.
+  const allBoards = await listBoards(opts.node, opts.cfg);
+  const boardTerminal = boardTerminalMap(allBoards);
   const terminalCol = boardTerminal.get(boardSlug) ?? "done";
 
   let boardCards: Card[];
@@ -250,13 +254,25 @@ export async function listResult(
   });
   // `jsonLimit` only reflects an explicit `--limit`; the CLI broad-JSON default
   // cap is applied in listCmd so MCP structuredContent keeps its own contract.
-  // Multi-board discoverability footer (column-text path only). Board-scoped
-  // main read no longer includes other boards' cards, so one thin cross-board
-  // list when rendering the default text board. Skip for --json / --wide /
-  // --column (wide never shows the footer; column is a focused view).
+  // Multi-board discoverability footer (column-text path only). Skip for
+  // --json / --wide / --column (wide never shows the footer; column is a
+  // focused view).
+  //
+  // Read only the boards the footer actually reports on. The cross-board read
+  // this replaced re-fetched the partition already on screen — 783 of the
+  // board's 829 rows, at the wide projection, discarded by the reducer's first
+  // line — and it did so on the hottest query fkanban makes. See
+  // listOtherBoardCardsForFooter. Falls back to the cross-board read if
+  // BoardCards cannot serve it, so a footer never silently disappears.
   let footer = "";
   if (!opts.column && !opts.json && !opts.wide) {
-    const cross = await listCardsForDisplay(opts.node, opts.cfg);
+    const others = await listOtherBoardCardsForFooter(
+      opts.node,
+      opts.cfg,
+      boardSlug,
+      allBoards,
+    );
+    const cross = others ?? (await listCardsForDisplay(opts.node, opts.cfg));
     footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation());
   }
   const milestones = opts.groupByMilestone ? (await listMilestones(opts.node, opts.cfg)).filter((milestone) => milestone.board === boardSlug) : undefined;
