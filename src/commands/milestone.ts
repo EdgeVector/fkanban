@@ -11,6 +11,7 @@ import {
   cardExists,
   depStatus,
   findCard,
+  findProofCard,
   findCardSummaryForReconcile,
   findMilestone,
   isMilestoneState,
@@ -435,7 +436,7 @@ export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeCl
     : fromBoard;
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
   const boards = await listBoards(opts.node, opts.cfg);
-  const proofCard = milestone.proof_card ? await findCard(opts.node, opts.cfg, milestone.proof_card) : null;
+  const proofCard = milestone.proof_card ? await findProofCard(opts.node, opts.cfg, milestone.proof_card) : null;
   // Only pay for the extra key-only read when the wide read came back empty —
   // that is the only case where "absent" and "sparse" are in question.
   const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
@@ -520,21 +521,61 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
     ? await listMilestonesOnBoard(opts.node, opts.cfg, opts.board)
     : await listMilestones(opts.node, opts.cfg);
   const boards = await listBoards(opts.node, opts.cfg);
-  // Prefer per-milestone partitions when bound; else one board-wide card list.
-  const childLists = await Promise.all(milestones.map(async (milestone) => {
-    const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
-    if (fromIndex !== null) return fromIndex;
-    return (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
-  }));
+  // Membership comes from the board, not from MilestoneCards.
+  //
+  // MilestoneCards is written by NOTHING in the card mutation path — not `add`,
+  // `move`, `tag`, `rm`, or `archive-done`. Only `groom milestone-indexes-heal`
+  // and `milestone reconcile`'s heal-on-read ever put a row there. Reading it as
+  // the preferred source of truth therefore reports the board as it looked at
+  // the last heal, and is wrong in BOTH directions. Measured on the live board
+  // 2026-07-31, across 31 milestones: only 5 agreed with board membership, 107
+  // index rows named cards that no longer exist at all (`ms-search-native-…`,
+  // `milestone-lastdb-resident-primary-v1`, …), and 87 live board-linked cards
+  // had no index row — `ms-sync-dataloss-teardown-p1` rendered as an EMPTY
+  // milestone while 13 live cards pointed at it.
+  //
+  // `milestone reconcile` already refuses to trust the index alone: it unions it
+  // with board membership and validates every slug against Card truth. The
+  // portfolio never got that fix, so the two commands disagreed about the same
+  // milestone. BoardCards is the index the write path does maintain, so one
+  // partition read per distinct board answers membership for every milestone on
+  // it — and agrees with `kanban list` and with reconcile by construction.
+  //
+  // Per-milestone partition reads are not merely wrong here, they were also the
+  // most expensive thing this command did: 31 keyed reads, ~7.4s of node time,
+  // replaced by one 0.8s board read. Index drift stays the business of
+  // `groom milestone-indexes-heal`, which is the command that can fix it.
+  // Dedupe the proof slugs BEFORE the fan-out. The previous
+  // `if (!proofs.has(slug)) proofs.set(slug, await findCard(...))` inside a
+  // `Promise.all` was a check-then-act race: the `has` guard runs before any
+  // `set` lands, so two milestones sharing one proof card both point-read it.
+  // Live on this board today — `search-as-app-ns-terminal-verification` is the
+  // proof card for two milestones, and cost 29 reads for 28 distinct slugs.
+  //
+  // Started before the board read is awaited: proof cards are keyed by slug off
+  // the milestone list alone, so they have no reason to queue behind board
+  // membership. Left sequential, the board read would simply be added to the
+  // command's critical path.
+  const proofSlugs = [...new Set(milestones.map((milestone) => milestone.proof_card).filter((slug) => slug))];
+  const proofsPending = Promise.all(proofSlugs.map(async (slug): Promise<[string, Card | null]> =>
+    [slug, await findProofCard(opts.node, opts.cfg, slug)]));
+
+  const boardSlugs = [...new Set(milestones.map((milestone) => milestone.board))];
+  const boardCards = new Map<string, Card[]>(
+    await Promise.all(boardSlugs.map(async (slug): Promise<[string, Card[]]> =>
+      [slug, await listCardsOnBoard(opts.node, opts.cfg, slug)])),
+  );
+  const childLists = milestones.map((milestone) =>
+    (boardCards.get(milestone.board) ?? []).filter((card) => card.milestone === milestone.slug));
   const cards = childLists.flat();
-  const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, cards);
-  const proofs = new Map<string, Card | null>();
+  // Every board card is already in hand, so a dep edge pointing at a same-board
+  // card costs no point read.
+  const knownCards = [...boardCards.values()].flat();
+  const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, cards, knownCards);
+  const proofs = new Map<string, Card | null>(await proofsPending);
   // Slugs whose wide read missed but whose key-only read found them: sparse, not
   // absent. The key-only read is only issued for the slugs actually in question.
   const sparseProofs = new Set<string>();
-  await Promise.all(milestones.map(async (milestone) => {
-    if (milestone.proof_card && !proofs.has(milestone.proof_card)) proofs.set(milestone.proof_card, await findCard(opts.node, opts.cfg, milestone.proof_card));
-  }));
   await Promise.all([...proofs.entries()].map(async ([slug, card]) => {
     if (!card && (await cardExists(opts.node, opts.cfg, slug))) sparseProofs.add(slug);
   }));
