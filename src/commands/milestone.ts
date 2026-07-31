@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
+import { POINT_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
 import { doneWhenPredicate } from "../pickup.ts";
 import {
   MILESTONE_PROOF_STATUSES,
@@ -387,36 +388,78 @@ function milestoneCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
   );
 }
 
+/**
+ * Verify every child of a milestone against Card truth and repair MilestoneCards.
+ *
+ * The two inputs play different roles and conflating them is how this function
+ * went wrong. `indexRows` are the actual MilestoneCards rows — the only rows
+ * this function may write, and the only evidence of drift. `boardRows` are
+ * board membership, unioned in purely to DISCOVER slugs the index missed; a
+ * board row is not a MilestoneCards row and its presence says nothing about
+ * whether the index is stale.
+ *
+ * Previously both arrived as one merged list and staleness was `rows.length !==
+ * 1`. The union guarantees two rows for every correctly-indexed card, so a
+ * fully converged milestone classified *every* child as stale and rewrote it —
+ * while a card present on the board but missing from the index had exactly one
+ * row, compared equal to truth, and was skipped. The command did the inverse of
+ * its job in both directions. Measured on `lastdb-0231-read-regression-fixes`
+ * (`scripts/probe-milestone-reconcile-shape.ts`): 47 needless upserts, 0 real
+ * drift, and 22 genuinely missing rows never written — at 2.4-8.3s per mutation
+ * that is the reported 10-minute timeout.
+ */
 async function reconcileMilestoneCardChildren(
   opts: { cfg: Config; node: NodeClient },
   milestone: Milestone,
-  indexed: Card[],
+  indexRows: Card[],
+  boardRows: Card[],
 ): Promise<Card[]> {
   const rowsBySlug = new Map<string, Card[]>();
-  for (const row of indexed) {
+  for (const row of indexRows) {
     const rows = rowsBySlug.get(row.slug) ?? [];
     rows.push(row);
     rowsBySlug.set(row.slug, rows);
   }
+  const slugs = [...new Set([...indexRows.map((row) => row.slug), ...boardRows.map((row) => row.slug)])];
 
+  // Reads first, fanned out: they have no ordering dependency on each other and
+  // a point read is ~190ms on the primary, so 69 of them serially is 13s.
+  const truths = await mapWithConcurrency(
+    slugs,
+    (slug) => findCardSummaryForReconcile(opts.node, opts.cfg, slug).catch(() => null),
+    POINT_READ_CONCURRENCY,
+  );
+
+  // Writes are collected, then issued serially. They must NOT fan out:
+  // LastDB's convergence wait is a global cross-writer barrier, so concurrent
+  // mutations inflate each other's latency rather than overlapping.
   const out: Card[] = [];
-  for (const [slug, rows] of rowsBySlug) {
-    const truth = await findCardSummaryForReconcile(opts.node, opts.cfg, slug);
-    if (!truth) {
-      await Promise.all(rows.map((row) => removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined)));
-      continue;
+  const removals: Card[] = [];
+  const upserts: Array<{ truth: Card; previous: Card | null }> = [];
+
+  slugs.forEach((slug, i) => {
+    const rows = rowsBySlug.get(slug) ?? [];
+    const truth = truths[i] ?? null;
+
+    // No such card, or it belongs to a different milestone/board now: retire
+    // the index rows. One removal per slug is enough — removeMilestoneCard
+    // purges every other row for that slug itself.
+    if (!truth || (truth.milestone ?? "") !== milestone.slug || (truth.board || "default") !== milestone.board) {
+      if (rows[0]) removals.push(rows[0]);
+      return;
     }
 
-    if ((truth.milestone ?? "") !== milestone.slug || (truth.board || "default") !== milestone.board) {
-      await Promise.all(rows.map((row) => removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined)));
-      continue;
-    }
-
-    const stale = rows.length !== 1 || rows.some((row) => !milestoneCardSummaryMatchesTruth(row, truth));
-    if (stale) {
-      await upsertMilestoneCard(opts.node, opts.cfg, truth, rows[0]).catch(() => undefined);
-    }
+    // rows.length === 0 is the missing-index-row case reconcile exists to fix.
+    const stale = rows.length !== 1 || !milestoneCardSummaryMatchesTruth(rows[0]!, truth);
+    if (stale) upserts.push({ truth, previous: rows[0] ?? null });
     out.push(truth);
+  });
+
+  for (const row of removals) {
+    await removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined);
+  }
+  for (const { truth, previous } of upserts) {
+    await upsertMilestoneCard(opts.node, opts.cfg, truth, previous).catch(() => undefined);
   }
 
   return out.sort((a, b) =>
@@ -432,7 +475,7 @@ export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeCl
   const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
   const fromBoard = (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
   const children = fromIndex !== null
-    ? await reconcileMilestoneCardChildren(opts, milestone, [...fromIndex, ...fromBoard])
+    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, fromBoard)
     : fromBoard;
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
   const boards = await listBoards(opts.node, opts.cfg);
