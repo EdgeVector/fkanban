@@ -30,6 +30,11 @@ import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomStaleBlockersCmd, groomStructuredRoutingCmd } from "./commands/groom.ts";
+import {
+  archiveDoneResult,
+  DEFAULT_ARCHIVE_CUTOFF_HOURS,
+  DEFAULT_ARCHIVE_MAX,
+} from "./commands/archive_done.ts";
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
 import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
@@ -91,6 +96,8 @@ Commands:
   groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
                        and missing boards (live board whose cards list can't see)
   groom card-list-index-retire dry-run/apply clear the superseded all_cards rollup
+  groom archive-done   dry-run/apply archive cards long finished in a terminal
+                       column, so board reads stop scaling with board history
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
@@ -577,6 +584,7 @@ Usage:
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
   fkanban groom board-list-heal [--apply] [--json]
   fkanban groom card-list-index-retire [--apply] [--json]
+  fkanban groom archive-done [--apply] [--json] [--board SLUG] [--cutoff-hours N] [--max N]
 
 Subcommands:
   structured-routing  backfill empty structured repo/base fields from parseable
@@ -605,6 +613,13 @@ Subcommands:
                        already holds the same body-free summary one row per card; the
                        rollup was one unbounded document rewritten in full per mutation.
                        --apply refuses while any card lacks a BoardCards row.
+  archive-done         archive cards that have sat in a board's TERMINAL column
+                       past --cutoff-hours. The terminal column shares the
+                       BoardCards partition with the working set, so every
+                       whole-partition read pays for it: measured 581 of 783 rows
+                       and 83% of a board read on the live default board. Cards a
+                       live non-terminal card still depends on are skipped, oldest
+                       cards go first, and a delete failure exits non-zero.
 
 Flags:
   --apply              rewrite only generated boilerplate and structured fields
@@ -614,6 +629,11 @@ Flags:
   --slug S             (board-cards-heal) limit to one or more card slugs
   --max-drift N        (board-cards-heal-scheduled) refuse to apply above this
                        count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
+  --cutoff-hours N     (archive-done) minimum age in a terminal column, default
+                       ${DEFAULT_ARCHIVE_CUTOFF_HOURS}
+  --max N              (archive-done) per-run delete ceiling, default
+                       ${DEFAULT_ARCHIVE_MAX}. Older cards are archived first, so
+                       a capped run drains the coldest end of the archive.
 
 Examples:
   fkanban groom structured-routing
@@ -626,7 +646,9 @@ Examples:
   fkanban groom board-list-heal
   fkanban groom board-list-heal --apply
   fkanban groom card-list-index-retire
-  fkanban groom card-list-index-retire --apply`),
+  fkanban groom card-list-index-retire --apply
+  fkanban groom archive-done
+  fkanban groom archive-done --apply --max 100`),
 
   hygiene: withFooter(`fkanban hygiene — local machine-hygiene helpers
 
@@ -974,7 +996,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift"]),
+  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "cutoff-hours", "max"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -1184,6 +1206,8 @@ async function main(argv: string[]): Promise<number> {
         "min-age-hours": { type: "string" },
         "pileup-threshold": { type: "string" },
         "max-drift": { type: "string" },
+        "cutoff-hours": { type: "string" },
+        max: { type: "string" },
         body: { type: "string" },
         columns: { type: "string" },
         from: { type: "string" },
@@ -1907,14 +1931,38 @@ async function dispatch(
         sub !== "board-cards-heal-scheduled" &&
         sub !== "board-list-heal" &&
         sub !== "milestone-indexes-heal" &&
+        sub !== "archive-done" &&
         sub !== "card-list-index-retire"
       ) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom card-list-index-retire`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom archive-done | groom card-list-index-retire`,
         );
         return 2;
       }
       const ctx = loadCtx({ verbose });
+      if (sub === "archive-done") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom archive-done");
+        if (extra !== undefined) return extra;
+        const report = await archiveDoneResult({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          apply: values.apply as boolean | undefined,
+          board: values.board as string | undefined,
+          cutoffHours:
+            values["cutoff-hours"] !== undefined
+              ? parseIntFlag(values["cutoff-hours"] as string, "cutoff-hours", "groom", { min: 1 })
+              : undefined,
+          max:
+            values.max !== undefined
+              ? parseIntFlag(values.max as string, "max", "groom", { min: 1 })
+              : undefined,
+        });
+        console.log(values.json ? JSON.stringify(report.report, null, 2) : report.text);
+        // A delete that failed is the one outcome a daily sweep must not report as
+        // success. The predecessor script swallowed every error and exit(0)'d, so
+        // launchd logged 8 days of green while the archive grew unbounded.
+        return report.report.failed > 0 ? 1 : 0;
+      }
       if (sub === "board-list-heal") {
         const extra = rejectExtraPositionals(positionals, 2, "groom board-list-heal");
         if (extra !== undefined) return extra;
