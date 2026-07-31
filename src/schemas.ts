@@ -356,6 +356,44 @@ export const BOARD_CARDS_FIELDS = [
   "layout",
 ] as const;
 
+/**
+ * Field descriptions shared by BoardCards and MilestoneCards for every field
+ * that is *not* the partition identity marker.
+ *
+ * LastDB protein bind uses field identity H(name, description, type, version).
+ * Shared payload fields must use **byte-identical** descriptions so the two
+ * multi-key layouts co-identity and Mini can fold a BoardCards write onto
+ * MilestoneCards tips (docs/app-developers-multi-key-proteins.md).
+ *
+ * `layout` is intentionally **not** shared — distinct partition markers must
+ * not fold (board vs milestone membership).
+ */
+export const CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS: Record<string, string> = {
+  board: "board slug",
+  sk: "sort key column#position(8)#slug",
+  slug: "card slug (matches Card hash key)",
+  title: "one-line card name",
+  column: DEFAULT_COLUMNS.join("|"),
+  position: "integer-as-string ordering within the column",
+  assignee: "who owns the card",
+  tags: "array of freeform labels",
+  deps: "array of dependency card slugs",
+  surfaces: "array of path globs / subsystem names",
+  created_at: "RFC 3339 timestamp",
+  created_by: "creator identity",
+  updated_at: "RFC 3339 timestamp",
+  db: "home LastDB locator",
+  repo: "owner/name of the code repo",
+  base: "PR base branch",
+  kind: "pr|registry|tracker|…",
+  block_status: "none|needs_human|design_first|deferred",
+  block_reason: "free-text when blocked",
+  north_star: "North Star slug",
+  milestone: "Milestone slug",
+  pr_url: "PR URL when in flight",
+  branch: "feature branch",
+};
+
 export const boardCardsSchema: AddSchemaRequest = {
   schema: {
     name: "BoardCards",
@@ -368,30 +406,10 @@ export const boardCardsSchema: AddSchemaRequest = {
     fields: [...BOARD_CARDS_FIELDS],
     field_types: defaultStringFieldTypes(BOARD_CARDS_FIELDS, ["tags", "deps", "surfaces"]),
     field_descriptions: {
-      board: "board slug",
-      sk: "sort key column#position(8)#slug",
-      slug: "card slug (matches Card hash key)",
-      title: "one-line card name",
-      column: DEFAULT_COLUMNS.join("|"),
-      position: "integer-as-string ordering within the column",
-      assignee: "who owns the card",
-      tags: "array of freeform labels",
-      deps: "array of dependency card slugs",
-      surfaces: "array of path globs / subsystem names",
-      created_at: "RFC 3339 timestamp",
-      created_by: "creator identity",
-      updated_at: "RFC 3339 timestamp",
-      db: "home LastDB locator",
-      repo: "owner/name of the code repo",
-      base: "PR base branch",
-      kind: "pr|registry|tracker|…",
-      block_status: "none|needs_human|design_first|deferred",
-      block_reason: "free-text when blocked",
-      north_star: "North Star slug",
-      milestone: "Milestone slug",
-      pr_url: "PR URL when in flight",
-      branch: "feature branch",
-      layout: "identity marker for HashRange layout (do not change without new schema)",
+      ...CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS,
+      // Distinct from MilestoneCards.layout so partition markers never co-identity.
+      layout:
+        "identity marker for HashRange board membership partition (do not change without new schema)",
     },
     field_classifications: { title: ["word"] },
     field_data_classifications: generalDataClassifications(BOARD_CARDS_FIELDS),
@@ -516,30 +534,11 @@ export const milestoneCardsSchema: AddSchemaRequest = {
     fields: [...MILESTONE_CARDS_FIELDS],
     field_types: defaultStringFieldTypes(MILESTONE_CARDS_FIELDS, ["tags", "deps", "surfaces"]),
     field_descriptions: {
-      milestone: "Milestone slug",
-      sk: "sort key column#position(8)#slug",
-      slug: "card slug (matches Card hash key)",
-      title: "one-line card name",
-      board: "board slug",
-      column: DEFAULT_COLUMNS.join("|"),
-      position: "integer-as-string ordering within the column",
-      assignee: "who owns the card",
-      tags: "array of freeform labels",
-      deps: "array of dependency card slugs",
-      surfaces: "array of path globs / subsystem names",
-      created_at: "RFC 3339 timestamp",
-      created_by: "creator identity",
-      updated_at: "RFC 3339 timestamp",
-      db: "home LastDB locator",
-      repo: "owner/name of the code repo",
-      base: "PR base branch",
-      kind: "pr|registry|tracker|…",
-      block_status: "none|needs_human|design_first|deferred",
-      block_reason: "free-text when blocked",
-      north_star: "North Star slug",
-      pr_url: "PR URL when in flight",
-      branch: "feature branch",
-      layout: "identity marker for HashRange layout",
+      // Shared payload/key fields MUST match BoardCards (protein field identity).
+      ...CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS,
+      // Distinct from BoardCards.layout so partition markers never co-identity.
+      layout:
+        "identity marker for HashRange milestone membership partition (do not change without new schema)",
     },
     field_classifications: { title: ["word"] },
     field_data_classifications: generalDataClassifications(MILESTONE_CARDS_FIELDS),

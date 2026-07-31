@@ -151,6 +151,20 @@ describe("fkanban does not reach into proteins", () => {
     expect(proteinPaths).toEqual([]);
   });
 
+  test("hot-path create does not dual-write MilestoneCards payload", async () => {
+    // Recording node stores by schema hash; protein-primary path writes board_cards
+    // only for payload. MilestoneCards create/update would appear as store rows.
+    const node = recordingNode();
+    const { createCardRecord } = await import("../src/record.ts");
+    await createCardRecord({ cfg, node }, card());
+    // queryAll on milestone_cards should be empty of payload creates.
+    const ms = await node.queryAll({
+      schemaHash: "milestone-cards-hash",
+      fields: ["slug"],
+    });
+    expect(ms.results).toEqual([]);
+  });
+
   test("no source file names a protein route", () => {
     const offenders = sourceFiles(join(import.meta.dir, "..", "src"))
       .filter((f) => readFileSync(f, "utf8").includes("/api/protein"))
