@@ -51,7 +51,7 @@ function fakeNode(): NodeClient {
     loadSchemas: notImplemented,
     listSchemas: notImplemented,
     async createRecord({ schemaHash, keyHash, fields }) { table(schemaHash).set(keyHash, fields); },
-    async updateRecord({ schemaHash, keyHash, fields }) { table(schemaHash).set(keyHash, fields); },
+    async updateRecord({ schemaHash, keyHash, fields }) { table(schemaHash).set(keyHash, { ...table(schemaHash).get(keyHash), ...fields }); },
     async deleteRecord({ schemaHash, keyHash }) { table(schemaHash).delete(keyHash); },
     async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
       const results = rows(schemaHash, filter);

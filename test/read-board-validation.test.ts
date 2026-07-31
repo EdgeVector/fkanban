@@ -71,7 +71,7 @@ function fakeNode(): NodeClient {
       tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
     },
     async updateRecord({ schemaHash, fields, keyHash, rangeKey }) {
-      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
+      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields: { ...tableFor(schemaHash).get(storeKey(keyHash, rangeKey))?.fields, ...fields } });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
       tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));

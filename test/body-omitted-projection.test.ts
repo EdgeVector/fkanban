@@ -134,10 +134,24 @@ function fakeNode(cards: Card[], boards: Board[] = [board()]) {
     throw new Error("not implemented in fake node");
   };
 
-  const write = (schemaHash: string, fields: Record<string, unknown>, hash: string, range: string | null) => {
+  /**
+   * `merge` distinguishes the two node verbs, which are NOT the same write:
+   * `createRecord` states the whole record, `updateRecord` states a subset and
+   * leaves every unsent field alone. A fake that replaces on update is
+   * strictly more destructive than LastDB — which sounds safe and isn't: it
+   * makes a correct narrow write look like data loss, and it means the suite
+   * cannot catch a genuine partial-write bug.
+   */
+  const write = (
+    schemaHash: string,
+    fields: Record<string, unknown>,
+    hash: string,
+    range: string | null,
+    merge = false,
+  ) => {
     const t = rowsOf(schemaHash);
     const idx = t.findIndex((r) => r.hash === hash && r.range === range);
-    if (idx >= 0) t[idx] = { fields, hash, range };
+    if (idx >= 0) t[idx] = { fields: merge ? { ...t[idx]!.fields, ...fields } : fields, hash, range };
     else t.push({ fields, hash, range });
   };
 
@@ -169,7 +183,7 @@ function fakeNode(cards: Card[], boards: Board[] = [board()]) {
       keyHash: string;
       rangeKey?: string;
     }) {
-      write(schemaHash, fields, keyHash, rangeKey ?? null);
+      write(schemaHash, fields, keyHash, rangeKey ?? null, true);
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }: {
       schemaHash: string;

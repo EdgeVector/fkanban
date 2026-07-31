@@ -48,7 +48,7 @@ function fakeNode(): NodeClient {
       table(schemaHash).set(keyHash, fields);
     },
     async updateRecord({ schemaHash, keyHash, fields }) {
-      table(schemaHash).set(keyHash, fields);
+      table(schemaHash).set(keyHash, { ...table(schemaHash).get(keyHash), ...fields });
     },
     async deleteRecord({ schemaHash, keyHash }) {
       table(schemaHash).delete(keyHash);
