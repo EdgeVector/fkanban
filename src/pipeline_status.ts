@@ -14,6 +14,14 @@
 // Schema identity: lastgit registers schemas under canonical *hashes*, not the
 // short names. Resolve via LASTGIT_SCHEMA_MAP (~/.lastgit/schema-map.json) first,
 // then fall back to listSchemas field/owner matching.
+//
+// Hot-path cost (Tom 2026-07-31 profile): client=kanban queries against
+// LastgitCiStatus_hashrange_v2 were the #1 wall-time bucket on the primary
+// (~3.3k calls / 40m, avg ~580ms). Root cause was not "list" — it was every
+// `kanban show` / MCP show always joining CI, projecting `log_excerpt` (a fat
+// atom show never renders), and re-hitting the node for the same status_key
+// when agents re-show the same card. Defaults below keep the join but drop
+// the unused excerpt and process-cache light snapshots briefly.
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -47,12 +55,32 @@ const schemaHashCache = new Map<string, string | null>();
  */
 const schemaLayoutCache = new Map<string, KeyLayout | null>();
 
+/**
+ * Process-local TTL cache of light CI snapshots keyed by status_key.
+ * Collapses agent/MCP re-`show` storms against the same oid+context without
+ * lying across process boundaries (each CLI/MCP process has its own map).
+ * Override with LASTGIT_CI_STATUS_CACHE_MS=0 to disable.
+ */
+const ciStatusLightCache = new Map<string, { at: number; snap: CiStatusSnapshot }>();
+
+/** Default TTL for {@link ciStatusLightCache}. */
+export const DEFAULT_CI_STATUS_CACHE_MS = 15_000;
+
 type KeyLayout = { hash_field: string; range_field: string | null };
 
-/** Test seam: clear schema hash resolution cache. */
+function ciStatusCacheTtlMs(): number {
+  const raw = process.env.LASTGIT_CI_STATUS_CACHE_MS?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_CI_STATUS_CACHE_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_CI_STATUS_CACHE_MS;
+  return n;
+}
+
+/** Test seam: clear schema hash resolution cache (+ CI light snapshot cache). */
 export function clearLastgitSchemaHashCache(): void {
   schemaHashCache.clear();
   schemaLayoutCache.clear();
+  ciStatusLightCache.clear();
 }
 
 /**
@@ -196,15 +224,26 @@ export type PipelineAttachResult = {
   unresolvedOid: boolean;
 };
 
-const CI_FIELDS = [
+/**
+ * Fields `show` / move-gates need. `log_excerpt` is deliberately omitted:
+ * `formatPipelineStatusLines` only prints state+context+repo@oid, and the
+ * excerpt atom is the expensive part of LastgitCiStatus (multi-KB, often the
+ * only cold load on an otherwise warm tip).
+ */
+const CI_FIELDS_LIGHT = [
   "status_key",
   "repo",
   "oid",
   "context",
   "state",
+  "updated_at",
+] as const;
+
+/** Full projection including log_excerpt — opt-in only. */
+const CI_FIELDS_WITH_EXCERPT = [
+  ...CI_FIELDS_LIGHT,
   "log_excerpt",
   "event_id",
-  "updated_at",
   "schema_version",
 ] as const;
 
@@ -500,6 +539,17 @@ export async function resolveCardOid(
   return { oid: "", via: "none" };
 }
 
+export type FetchCiStatusOptions = {
+  /**
+   * Project `log_excerpt` (and a couple of unused metadata fields). Default
+   * false: show never prints the excerpt, and pulling it was the dominant
+   * per-row cost on LastgitCiStatus under agent show storms.
+   */
+  includeLogExcerpt?: boolean;
+  /** Skip the process-local TTL cache (tests / force-refresh). */
+  bypassCache?: boolean;
+};
+
 /** Fetch one LastgitCiStatus row for repo+oid+context (best-effort). */
 export async function fetchCiStatus(
   node: NodeClient,
@@ -507,6 +557,7 @@ export async function fetchCiStatus(
   oid: string,
   context: string,
   resolved_via: OidResolution["via"] = "none",
+  opts: FetchCiStatusOptions = {},
 ): Promise<CiStatusSnapshot> {
   const empty = (state: CiState): CiStatusSnapshot => ({
     repo: repoSlug,
@@ -522,28 +573,54 @@ export async function fetchCiStatus(
   if (!repoSlug || !oid || !context) return empty("missing");
 
   const wantKey = `${repoSlug}:${oid}:${context}`;
-  const rows = await querySchema(node, CI_STATUS_SCHEMA, CI_FIELDS, {
+  const includeLogExcerpt = opts.includeLogExcerpt === true;
+  const ttlMs = ciStatusCacheTtlMs();
+  // Only light (no-excerpt) reads share the cache — an excerpt-bearing caller
+  // must not be served a blank log_excerpt from a prior light hit.
+  if (!includeLogExcerpt && !opts.bypassCache && ttlMs > 0) {
+    const hit = ciStatusLightCache.get(wantKey);
+    if (hit && Date.now() - hit.at <= ttlMs) {
+      return { ...hit.snap, resolved_via };
+    }
+  }
+
+  const fields = includeLogExcerpt ? CI_FIELDS_WITH_EXCERPT : CI_FIELDS_LIGHT;
+  const rows = await querySchema(node, CI_STATUS_SCHEMA, fields, {
     repo: repoSlug,
     range: wantKey,
   });
   if (rows.length === 0) {
     // Distinguish "query failed / schema absent" from "no row" is hard without
     // a separate probe; treat empty as missing (common for not-yet-watched oids).
-    return empty("missing");
+    const miss = empty("missing");
+    if (!includeLogExcerpt && !opts.bypassCache && ttlMs > 0) {
+      ciStatusLightCache.set(wantKey, { at: Date.now(), snap: miss });
+    }
+    return miss;
   }
 
   const match = rows.find((r) => {
-    const fields = r.fields;
-    if (strField(fields, "status_key") === wantKey) return true;
+    const f = r.fields;
+    if (strField(f, "status_key") === wantKey) return true;
     return (
-      strField(fields, "repo") === repoSlug &&
-      strField(fields, "oid").toLowerCase() === oid.toLowerCase() &&
-      strField(fields, "context") === context
+      strField(f, "repo") === repoSlug &&
+      strField(f, "oid").toLowerCase() === oid.toLowerCase() &&
+      strField(f, "context") === context
     );
   });
 
-  if (!match) return empty("missing");
-  return rowToCi(match.fields, resolved_via);
+  if (!match) {
+    const miss = empty("missing");
+    if (!includeLogExcerpt && !opts.bypassCache && ttlMs > 0) {
+      ciStatusLightCache.set(wantKey, { at: Date.now(), snap: miss });
+    }
+    return miss;
+  }
+  const snap = rowToCi(match.fields, resolved_via);
+  if (!includeLogExcerpt && !opts.bypassCache && ttlMs > 0) {
+    ciStatusLightCache.set(wantKey, { at: Date.now(), snap });
+  }
+  return snap;
 }
 
 /**
