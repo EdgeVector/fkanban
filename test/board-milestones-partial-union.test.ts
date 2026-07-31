@@ -141,11 +141,30 @@ describe("BoardMilestones union: a failed partition is not an empty one", () => 
     expect(got).toBeNull();
   });
 
-  test("listMilestones falls back to the full scan and still reports every milestone", async () => {
+  test("listMilestones refuses to answer a shed from the product scan", async () => {
     const node = await seededNode(["ms-alpha", "ms-beta", "ms-gamma"]);
     shedPartitionOnce(node, "default");
 
-    const got = await listMilestones(node, cfg, { boards: BOARDS });
+    // The index is BOUND, so null from the union means a partition threw. The
+    // Milestone product scan is not a safe substitute on real data — measured
+    // on the primary it misses 24 live milestones and surfaces 54 unreachable
+    // slug-only rows — so this must surface the failure, not a plausible wrong
+    // list. A caller can retry a throw; it cannot detect a wrong list.
+    await expect(listMilestones(node, cfg, { boards: BOARDS })).rejects.toThrow(
+      /BoardMilestones partition read failed/,
+    );
+  });
+
+  test("an UNBOUND index still falls back to the product scan — that is what it is for", async () => {
+    const node = await seededNode(["ms-alpha", "ms-beta", "ms-gamma"]);
+    const unbound: Config = {
+      ...cfg,
+      schemaHashes: { ...cfg.schemaHashes, board_milestones: "" },
+    };
+
+    // Fresh node / pre-backfill: there is no index to shed, and the scan is the
+    // only source there is. The refusal above must not swallow this case.
+    const got = await listMilestones(node, unbound, { boards: BOARDS });
 
     expect(got.map((m) => m.slug).sort()).toEqual(["ms-alpha", "ms-beta", "ms-gamma"]);
   });
