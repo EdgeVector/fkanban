@@ -10,8 +10,11 @@ import {
 } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import {
+  BOARD_CARDS_DISPLAY_FIELDS,
+  BOARD_CARDS_LIST_FIELDS,
   boardCardFieldsFromCard,
   boardCardSk,
+  boardCardsProjectionForCardFields,
   cardFromBoardCardFields,
   listAllBoardCards,
   parseBoardCardSk,
@@ -176,6 +179,48 @@ describe("board-cards projection", () => {
     expect(c.column).toBe("todo");
     expect(c.kind).toBe("pr");
     expect(c.repo).toBe("EdgeVector/fkanban");
+  });
+
+  test("boardCardsProjectionForCardFields always includes spine, never body/layout", () => {
+    const proj = boardCardsProjectionForCardFields([
+      "slug",
+      "title",
+      "body",
+      "tags",
+      "deps",
+    ]);
+    expect(proj).toContain("board");
+    expect(proj).toContain("sk");
+    expect(proj).toContain("column");
+    expect(proj).toContain("position");
+    expect(proj).toContain("title");
+    expect(proj).toContain("tags");
+    expect(proj).not.toContain("body");
+    expect(proj).not.toContain("layout");
+    // Display-sized: well under the full write shape.
+    expect(proj.length).toBeLessThan(BOARD_CARDS_LIST_FIELDS.length);
+    expect(BOARD_CARDS_DISPLAY_FIELDS.length).toBeLessThan(BOARD_CARDS_LIST_FIELDS.length);
+  });
+
+  test("listAllBoardCards defaults to product list projection (not full write shape)", async () => {
+    const node = fakeNode();
+    await upsertBoardCard(node, cfgWithBoardCards, card({ slug: "a" }), null, {
+      skipOrphanPurge: true,
+    });
+    // Spy: queryAll fields
+    const fieldsLog: string[][] = [];
+    const orig = node.queryAll.bind(node);
+    node.queryAll = async (opts) => {
+      fieldsLog.push([...opts.fields]);
+      return orig(opts);
+    };
+    await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
+    expect(fieldsLog.length).toBeGreaterThan(0);
+    const proj = fieldsLog[0]!;
+    expect(proj).not.toContain("layout");
+    expect(proj).not.toContain("body");
+    expect(proj).toContain("slug");
+    expect(proj).toContain("block_status");
   });
 });
 

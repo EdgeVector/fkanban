@@ -469,7 +469,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(parsed[0]!.bodyTruncated).toBe(false);
   });
 
-  test("--wide queries full fields so repo/base/pr/updated are available", async () => {
+  test("--wide queries product list fields so repo/base/pr/updated are available", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -487,7 +487,8 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(out).toContain("EdgeVector/fkanban");
     expect(out).toContain("https://github.com/EdgeVector/fkanban/pull/1");
     const scan = node.cardScanFields.at(-1)!;
-    expect(scan).toContain("body");
+    // Wide is body-free (BoardCards); product list fields only — never body.
+    expect(scan).not.toContain("body");
     expect(scan).toContain("repo");
     expect(scan).toContain("base");
     expect(scan).toContain("pr_url");

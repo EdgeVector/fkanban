@@ -15,6 +15,8 @@ import {
 } from "./card-list-index.ts";
 import {
   BOARD_CARDS_FOOTER_FIELDS,
+  BOARD_CARDS_LIST_FIELDS,
+  boardCardsProjectionForCardFields,
   listAllBoardCards,
   listBoardCardsPartition,
   preferFresherBoardCard,
@@ -1967,7 +1969,14 @@ export function milestoneQueryFieldsLookSparse(fields: Record<string, unknown> |
 // paths MARK, hydration paths CLEAR, and policy/write paths ASSERT.
 
 function markBodyOmitted(cards: Card[]): Card[] {
-  for (const card of cards) card[BODY_OMITTED] = true;
+  for (const card of cards) {
+    card[BODY_OMITTED] = true;
+    // Drop any body atom that leaked through a partial projection or a
+    // test double that ignores `fields`. BODY_OMITTED means "unread" —
+    // a non-empty body would skip hydrate (body.length > 0) and make
+    // isRegistryCard(isBodyOmitted ? "" : body) see a lie.
+    card.body = "";
+  }
   return cards;
 }
 
@@ -2017,7 +2026,14 @@ async function listCardsWithFields(
     // BoardCards first: one partition query per board, thin projection.
     try {
       const boards = await listBoards(node, cfg);
-      const partitioned = await listAllBoardCards(node, cfg, boards);
+      const cardFields = fields.includes("body")
+        ? fields.filter((f) => f !== "body")
+        : fields;
+      const projection =
+        cardFields.length > 0
+          ? boardCardsProjectionForCardFields(cardFields)
+          : [...BOARD_CARDS_LIST_FIELDS];
+      const partitioned = await listAllBoardCards(node, cfg, boards, { fields: projection });
       if (partitioned !== null && partitioned.length > 0) {
         // BoardCards rows are already body-free; promote any structured fields.
         return markBodyOmitted(
@@ -2153,10 +2169,37 @@ async function listCardsClientFiltered(
   return cards.filter(matches);
 }
 
+/** Body-free structured fields for list/pickup/MCP — never includes `body`. */
+export const CARD_LIST_FIELDS: string[] = [
+  "slug",
+  "title",
+  "board",
+  "column",
+  "position",
+  "tags",
+  "deps",
+  "surfaces",
+  "assignee",
+  "kind",
+  "created_at",
+  "created_by",
+  "updated_at",
+  "repo",
+  "base",
+  "block_status",
+  "block_reason",
+  "north_star",
+  "milestone",
+  "pr_url",
+  "branch",
+];
+
 export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
   // Thin board list — no bodies (BoardCards / index). Use findCard for one body,
   // or listCardsWithBodies for complete-body search (one admin scan).
-  return listCardsWithFields(node, cfg, fieldsFor("card"));
+  // Prefer CARD_LIST_FIELDS over fieldsFor("card") so BoardCards never projects
+  // for body (not stored) and drops write-only / rare list fields.
+  return listCardsWithFields(node, cfg, CARD_LIST_FIELDS);
 }
 
 /**
@@ -2328,7 +2371,7 @@ export async function listCardsByColumn(
   }
   const part = await listBoardCardsPartition(node, cfg, board, {
     column,
-    ...(opts?.projection ? { fields: opts.projection } : {}),
+    fields: opts?.projection ?? boardCardsProjectionForCardFields(fields),
   });
   if (part === null) {
     throw new FkanbanError({
@@ -2428,10 +2471,12 @@ export async function listCardsOnBoard(
   node: NodeClient,
   cfg: Config,
   board: string,
-  fields: string[] = fieldsFor("card"),
+  fields: string[] = CARD_LIST_FIELDS,
 ): Promise<Card[]> {
   try {
-    const part = await listBoardCardsPartition(node, cfg, board);
+    const part = await listBoardCardsPartition(node, cfg, board, {
+      fields: boardCardsProjectionForCardFields(fields),
+    });
     if (part !== null && part.length > 0) {
       const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
       return reconciled
@@ -2643,7 +2688,21 @@ export async function listDependencyStatusesForCards(
 // no longer drags every card's full spec over the wire (the first thing to time
 // out when the node is busy). `--json`/`--wide`/`search`/MCP still use the
 // full-body `listCards` because they genuinely surface structured/body fields.
-export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "position", "tags", "deps", "surfaces", "assignee", "kind", "created_at", "created_by"];
+export const CARD_DISPLAY_FIELDS = [
+  "slug",
+  "title",
+  "board",
+  "column",
+  "position",
+  "tags",
+  "deps",
+  "surfaces",
+  "assignee",
+  "kind",
+  "created_at",
+  "created_by",
+  "milestone",
+];
 
 // Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields
 // (notably `body`) come back as "" on the Card. Enough for the text board render,

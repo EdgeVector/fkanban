@@ -25,6 +25,7 @@ import {
 import {
   buildPickupStatusReportWithSituations,
   doneWhenPredicate,
+  hydrateForPickupClassification,
   isSupportedDoneWhenPredicate,
   PICKUP_CATEGORIES,
   selfHealPickupTodoBlocker,
@@ -429,7 +430,16 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     opts.situationPreflight,
     { cfg: opts.cfg, node: opts.node },
   );
-  const diagnostics = claimDiagnostics(report, cardsForSelection, board);
+  // claimDiagnostics reads DONE-WHEN on validation cards; use the same
+  // hydrate set classification used so body-free list does not inflate
+  // todo_blockers for supported proof cards.
+  const cardsForDiagnostics = await hydrateForPickupClassification(
+    opts.node,
+    opts.cfg,
+    cardsForSelection,
+    boards,
+  );
+  const diagnostics = claimDiagnostics(report, cardsForDiagnostics, board);
   const claimDiagnosticsIfActionable = diagnostics.todo_blockers > 0 ? diagnostics : undefined;
 
   const readyClassifications = report.cards.filter(
