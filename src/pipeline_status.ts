@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { FkanbanError, type NodeClient, type QueryRow } from "./client.ts";
+import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import {
   parseBodyHeader,
   parseBodyListHeader,
@@ -40,9 +40,19 @@ export type LastgitLogicalSchema =
 /** Process-local cache of logical name → resolved schema hash for queryAll. */
 const schemaHashCache = new Map<string, string | null>();
 
+/**
+ * Process-local cache of schema hash → key layout. `null` means "the node did
+ * not report one" — NOT a zero value — so an older node's silence can never be
+ * mistaken for a usable layout (mirrors `readKeyLayout` in client.ts).
+ */
+const schemaLayoutCache = new Map<string, KeyLayout | null>();
+
+type KeyLayout = { hash_field: string; range_field: string | null };
+
 /** Test seam: clear schema hash resolution cache. */
 export function clearLastgitSchemaHashCache(): void {
   schemaHashCache.clear();
+  schemaLayoutCache.clear();
 }
 
 /**
@@ -332,25 +342,112 @@ function rowToCi(fields: Record<string, unknown>, resolved_via: OidResolution["v
   };
 }
 
+/** An empty `hash_field` means the node reported no layout — not a layout of "". */
+function usableLayout(key: KeyLayout | null | undefined): KeyLayout | null {
+  if (!key || typeof key.hash_field !== "string" || key.hash_field.length === 0) return null;
+  return { hash_field: key.hash_field, range_field: key.range_field || null };
+}
+
+/**
+ * Key layout for a resolved lastgit schema hash.
+ *
+ * Prefers `GET /api/schema/{hash}` — one schema — over `GET /api/schemas`,
+ * which returns EVERY loaded schema and is ~2 MB on this node. Resolving three
+ * lastgit logs through the list endpoint cost ~3.5s of the first `show`, which
+ * would have eaten most of what the keyed reads save. When only the list
+ * endpoint is available, one call fills the cache for every schema in it, so
+ * the remaining logs never pay for it again.
+ *
+ * `null` means the node reported no layout (older node) — callers must then
+ * fall back to a partition read rather than read the silence as "not HashRange".
+ */
+async function resolveSchemaKeyLayout(
+  node: NodeClient,
+  schemaHash: string,
+): Promise<KeyLayout | null> {
+  if (schemaLayoutCache.has(schemaHash)) return schemaLayoutCache.get(schemaHash) ?? null;
+
+  if (node.getSchema) {
+    try {
+      const layout = usableLayout((await node.getSchema(schemaHash)).key);
+      schemaLayoutCache.set(schemaHash, layout);
+      return layout;
+    } catch {
+      // Fall through to the list endpoint.
+    }
+  }
+
+  if (!node.listSchemas) {
+    schemaLayoutCache.set(schemaHash, null);
+    return null;
+  }
+  try {
+    const loaded = await node.listSchemas();
+    for (const s of loaded) schemaLayoutCache.set(s.name, usableLayout(s.key));
+    if (!schemaLayoutCache.has(schemaHash)) schemaLayoutCache.set(schemaHash, null);
+    return schemaLayoutCache.get(schemaHash) ?? null;
+  } catch {
+    schemaLayoutCache.set(schemaHash, null);
+    return null;
+  }
+}
+
+/**
+ * Read lastgit's logs the way lastgit itself reads them: by key.
+ *
+ * Every join this module performs already HOLDS the range component of the
+ * row it wants — `status_key` for CI, `cr_id` for a change request, the full
+ * ref name for a ref — and all three of those schemas are HashRange keyed on
+ * `repo`. Asking for the partition and then running `rows.find()` in the
+ * client is the scan-shaped read `concepts-lastdb-agent-access-model` exists
+ * to forbid, and it was measurably the most expensive thing kanban did to the
+ * node: 778 rows / 3.93 MB / ~450ms per lookup, 2-4 lookups per `show`,
+ * against 1 row / 14 KB / ~16-115ms for the keyed read.
+ *
+ * The keyed path is taken only when the node reports a HashRange layout hashed
+ * on `repo`. That is the same rule lastgit's own `getCiStatus` applies, and it
+ * deliberately does NOT require `range_field` to NAME the field we key on:
+ * the shared CI/CrEvent schema declares `event_id` while its rows are keyed by
+ * `status_key`, and lastgit — the writer — reads it by `status_key` anyway.
+ * Verified against the live node on all three schemas, each with a negative
+ * control (an absurd range returns 0 rows, so the predicate is really applied
+ * and not silently ignored).
+ *
+ * A keyed read returning no rows is a genuine ABSENCE and is reported as such.
+ * There is no fall back to a partition scan on empty: most cards have no CI
+ * row at all, so a miss is the common case, and re-reading the partition on
+ * every miss would cost strictly more than the scan it replaced.
+ */
 async function querySchema(
   node: NodeClient,
   logical: LastgitLogicalSchema,
   fields: readonly string[],
-  filter?: { HashKey: string },
+  lookup?: { repo: string; range?: string },
 ): Promise<QueryRow[]> {
   const schemaHash = await resolveLastgitSchemaHash(node, logical);
   if (!schemaHash) return [];
+
+  let filter: Record<string, unknown> | undefined;
+  if (lookup) {
+    const layout = lookup.range ? await resolveSchemaKeyLayout(node, schemaHash) : null;
+    filter =
+      layout && layout.range_field !== null && layout.hash_field === "repo"
+        ? { HashRangeKey: { hash: lookup.repo, range: lookup.range } }
+        : { HashKey: lookup.repo };
+  }
+
   try {
     const res = await node.queryAll({
       schemaHash,
       fields: [...fields],
-      ...(filter ? { filter } : {}),
+      ...(filter ? { filter: filter as QueryFilter } : {}),
     });
     return res.results ?? [];
   } catch {
     // Schema missing / permission / busy — treat as unavailable for best-effort paths.
     // Drop a bad cache entry so a later attempt can re-resolve via listSchemas.
     schemaHashCache.delete(logical);
+    schemaLayoutCache.delete(schemaHash);
     return [];
   }
 }
@@ -370,18 +467,31 @@ export async function resolveCardOid(
 
   const crId = parseCrId(opts.prUrl, opts.body);
   if (crId) {
-    const rows = await querySchema(node, CR_SCHEMA, CR_FIELDS, { HashKey: opts.repoSlug });
-    const match = rows.find((r) => {
-      const id = strField(r.fields, "cr_id");
-      return id === crId || id === `cr-${crId}` || `cr-${id}` === crId;
-    });
-    const head = match ? strField(match.fields, "head_oid") : "";
-    if (isPlausibleOid(head)) return { oid: head.toLowerCase(), via: "change-request" };
+    // A card may cite the CR either with or without the `cr-` prefix, and the
+    // keyed read can only ask for one range at a time — so ask for the spelling
+    // the card used, then for the other one. Both are point reads; the second
+    // only runs when the first genuinely has no row.
+    const candidates = crId.startsWith("cr-") ? [crId, crId.slice(3)] : [crId, `cr-${crId}`];
+    for (const candidate of candidates) {
+      const rows = await querySchema(node, CR_SCHEMA, CR_FIELDS, {
+        repo: opts.repoSlug,
+        range: candidate,
+      });
+      const match = rows.find((r) => {
+        const id = strField(r.fields, "cr_id");
+        return id === crId || id === `cr-${crId}` || `cr-${id}` === crId;
+      });
+      const head = match ? strField(match.fields, "head_oid") : "";
+      if (isPlausibleOid(head)) return { oid: head.toLowerCase(), via: "change-request" };
+    }
   }
 
   const refName = fullRefName(opts.branch || parseBodyHeader(opts.body, "Branch"));
   if (refName) {
-    const rows = await querySchema(node, REF_SCHEMA, REF_FIELDS, { HashKey: opts.repoSlug });
+    const rows = await querySchema(node, REF_SCHEMA, REF_FIELDS, {
+      repo: opts.repoSlug,
+      range: refName,
+    });
     const match = rows.find((r) => strField(r.fields, "name") === refName);
     const oid = match ? strField(match.fields, "oid") : "";
     if (isPlausibleOid(oid)) return { oid: oid.toLowerCase(), via: "ref" };
@@ -411,14 +521,17 @@ export async function fetchCiStatus(
 
   if (!repoSlug || !oid || !context) return empty("missing");
 
-  const rows = await querySchema(node, CI_STATUS_SCHEMA, CI_FIELDS, { HashKey: repoSlug });
+  const wantKey = `${repoSlug}:${oid}:${context}`;
+  const rows = await querySchema(node, CI_STATUS_SCHEMA, CI_FIELDS, {
+    repo: repoSlug,
+    range: wantKey,
+  });
   if (rows.length === 0) {
     // Distinguish "query failed / schema absent" from "no row" is hard without
     // a separate probe; treat empty as missing (common for not-yet-watched oids).
     return empty("missing");
   }
 
-  const wantKey = `${repoSlug}:${oid}:${context}`;
   const match = rows.find((r) => {
     const fields = r.fields;
     if (strField(fields, "status_key") === wantKey) return true;

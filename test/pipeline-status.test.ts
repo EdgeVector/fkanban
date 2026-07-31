@@ -108,12 +108,37 @@ function emptyCard(over: Partial<Card> = {}): Card {
 
 type Store = Map<string, Map<string, Record<string, unknown>>>;
 
+/**
+ * The range component lastgit actually keys each log row by — and `""` for a
+ * row that is not addressable by key at all.
+ *
+ * This distinction is the whole point. A repo partition holds the MATERIALIZED
+ * row (the one carrying `rkey` / `cr_key` / `status_key`) alongside every
+ * historical version of it: on the live node, `fkanban`'s ref partition has 144
+ * rows whose `name` is `refs/heads/main` and exactly ONE of them is the tip.
+ * A partition read plus `rows.find()` returns whichever came first.
+ */
+function naturalRange(schemaHash: string, fields: Record<string, unknown>): string {
+  if (schemaHash === CI_STATUS_SCHEMA) return String(fields.status_key ?? "");
+  if (schemaHash === REF_SCHEMA) return fields.rkey ? String(fields.name ?? "") : "";
+  if (schemaHash === CR_SCHEMA) return fields.cr_key ? String(fields.cr_id ?? "") : "";
+  return "";
+}
+
 function fakeNode(seed?: {
   ci?: Record<string, unknown>[];
   refs?: Record<string, unknown>[];
   crs?: Record<string, unknown>[];
   cards?: Card[];
   boards?: { slug: string; columns: string[] }[];
+  /**
+   * Report HashRange key layouts for the lastgit logs, like a live node does.
+   * Omit to model an older node that reports no layout — the partition-read
+   * fallback path.
+   */
+  hashRangeLayouts?: boolean;
+  /** Every filter this node was queried with, in order (request-shape assertions). */
+  filterLog?: Array<{ schemaHash: string; filter?: Record<string, unknown> }>;
 }): NodeClient {
   const store: Store = new Map();
   const tableFor = (schemaHash: string) => {
@@ -130,13 +155,14 @@ function fakeNode(seed?: {
     const key = String(row.status_key ?? `${row.repo}:${row.oid}:${row.context}`);
     tableFor(CI_STATUS_SCHEMA).set(key, row);
   }
-  for (const row of seed?.refs ?? []) {
-    const key = String(row.rkey ?? `${row.repo}:${row.name}`);
-    tableFor(REF_SCHEMA).set(key, row);
+  // Superseded versions (no rkey/cr_key) get distinct storage keys so they sit
+  // in the partition ALONGSIDE the materialized row, exactly as on the node —
+  // collapsing them onto one key would hide the bug these tests exist to catch.
+  for (const [i, row] of (seed?.refs ?? []).entries()) {
+    tableFor(REF_SCHEMA).set(String(row.rkey ?? `${row.repo}:${row.name}#v${i}`), row);
   }
-  for (const row of seed?.crs ?? []) {
-    const key = String(row.cr_key ?? `${row.repo}:${row.cr_id}`);
-    tableFor(CR_SCHEMA).set(key, row);
+  for (const [i, row] of (seed?.crs ?? []).entries()) {
+    tableFor(CR_SCHEMA).set(String(row.cr_key ?? `${row.repo}:${row.cr_id}#v${i}`), row);
   }
   for (const c of seed?.cards ?? []) {
     tableFor(cfg.schemaHashes.card!).set(c.slug, cardToFields(c));
@@ -158,6 +184,20 @@ function fakeNode(seed?: {
 
   const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const t = tableFor(schemaHash);
+    // Lastgit tables: a HashRangeKey filter is a point read on (repo, range),
+    // where `range` is the field lastgit keys that log by.
+    const rangeKey = (filter as Record<string, unknown> | undefined)?.HashRangeKey as
+      | { hash: string; range: string }
+      | undefined;
+    if (rangeKey) {
+      return [...t.entries()]
+        .filter(
+          ([, fields]) =>
+            String(fields.repo) === rangeKey.hash &&
+            naturalRange(schemaHash, fields) === rangeKey.range,
+        )
+        .map(([hash, fields]) => ({ fields, key: { hash: String(fields.repo ?? hash), range: hash } }));
+    }
     // Lastgit tables: HashKey filters on repo field (hash partition).
     if (filter?.HashKey && (schemaHash === CI_STATUS_SCHEMA || schemaHash === REF_SCHEMA || schemaHash === CR_SCHEMA)) {
       return [...t.entries()]
@@ -182,7 +222,16 @@ function fakeNode(seed?: {
     autoIdentity: notImpl("autoIdentity"),
     bootstrap: notImpl("bootstrap"),
     loadSchemas: notImpl("loadSchemas"),
-    listSchemas: notImpl("listSchemas"),
+    listSchemas: seed?.hashRangeLayouts
+      ? async () =>
+          [CI_STATUS_SCHEMA, REF_SCHEMA, CR_SCHEMA].map((name) => ({
+            name,
+            descriptive_name: name,
+            owner_app_id: "lastgit",
+            fields: [],
+            key: { hash_field: "repo", range_field: "sk" },
+          }))
+      : notImpl("listSchemas"),
     async createRecord({ schemaHash, fields, keyHash }) {
       tableFor(schemaHash).set(keyHash, fields);
     },
@@ -193,6 +242,7 @@ function fakeNode(seed?: {
       tableFor(schemaHash).delete(keyHash);
     },
     async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
+      seed?.filterLog?.push({ schemaHash, filter });
       const results = rowsFor(schemaHash, filter);
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
@@ -368,6 +418,163 @@ describe("resolveCardOid + fetchCiStatus", () => {
     const node = fakeNode({ ci: [] });
     const snap = await fetchCiStatus(node, "fkanban", oid, "ci-required");
     expect(snap.state).toBe("missing");
+  });
+});
+
+// These joins hold the exact range component of the row they want. Reading the
+// whole repo partition and running `rows.find()` in the client was measurably
+// the most expensive thing kanban did to the node — 778 rows / 3.93 MB / ~450ms
+// per lookup against 1 row / 14 KB for the keyed read, 2-4 lookups per `show`.
+describe("lastgit log joins are keyed point reads, not partition scans", () => {
+  const oid = "a9196fd3ef03ded916c1fe22e02425cb424c5557";
+
+  test("fetchCiStatus asks for (repo, status_key) — never the whole partition", async () => {
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown> }> = [];
+    const node = fakeNode({
+      hashRangeLayouts: true,
+      filterLog,
+      ci: [
+        {
+          status_key: `fkanban:${oid}:ci-required`,
+          repo: "fkanban",
+          oid,
+          context: "ci-required",
+          state: "success",
+          log_excerpt: "ok",
+          updated_at: "2026-07-17T00:00:00.000Z",
+        },
+        // A second row in the same partition: a partition read would return it
+        // too, so its absence from the request proves the read was keyed.
+        {
+          status_key: "fkanban:1111111111111111111111111111111111111111:ci-required",
+          repo: "fkanban",
+          oid: "1111111111111111111111111111111111111111",
+          context: "ci-required",
+          state: "failure",
+        },
+      ],
+    });
+
+    const snap = await fetchCiStatus(node, "fkanban", oid, "ci-required");
+    expect(snap.state).toBe("success");
+
+    const ciReads = filterLog.filter((f) => f.schemaHash === CI_STATUS_SCHEMA);
+    expect(ciReads).toHaveLength(1);
+    expect(ciReads[0]!.filter).toEqual({
+      HashRangeKey: { hash: "fkanban", range: `fkanban:${oid}:ci-required` },
+    });
+    expect(ciReads[0]!.filter?.HashKey).toBeUndefined();
+  });
+
+  test("a keyed miss reports missing WITHOUT falling back to a partition scan", async () => {
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown> }> = [];
+    const node = fakeNode({
+      hashRangeLayouts: true,
+      filterLog,
+      ci: [
+        {
+          status_key: "fkanban:2222222222222222222222222222222222222222:ci-required",
+          repo: "fkanban",
+          oid: "2222222222222222222222222222222222222222",
+          context: "ci-required",
+          state: "success",
+        },
+      ],
+    });
+
+    const snap = await fetchCiStatus(node, "fkanban", oid, "ci-required");
+    expect(snap.state).toBe("missing");
+
+    // Most cards have no CI row, so a miss is the COMMON case: re-reading the
+    // partition on empty would cost strictly more than the scan it replaced.
+    const ciReads = filterLog.filter((f) => f.schemaHash === CI_STATUS_SCHEMA);
+    expect(ciReads).toHaveLength(1);
+    expect(ciReads.every((r) => r.filter?.HashRangeKey !== undefined)).toBe(true);
+  });
+
+  // The bug this replaces was not slowness, it was a WRONG ANSWER. On the live
+  // node `fkanban`'s ref partition carries 144 rows named `refs/heads/main` —
+  // every tip main has ever had — and `rows.find()` returned the FIRST, which
+  // is not the tip. `show` then reported CI for an ancient commit, and a
+  // Requires-Status card would have been gated on that commit's result.
+  test("ref resolution returns the TIP, not the first historical row with that name", async () => {
+    const tip = "15aca21309bdff11bb626238c939e9a38cf9eaca";
+    const history = Array.from({ length: 20 }, (_, i) => ({
+      repo: "fkanban",
+      name: "refs/heads/main",
+      oid: String(i).padStart(40, "a"),
+      rkey: null, // a superseded version: present in the partition, not keyed
+    }));
+    const node = fakeNode({
+      hashRangeLayouts: true,
+      refs: [...history, { repo: "fkanban", name: "refs/heads/main", oid: tip, rkey: "fkanban:refs/heads/main" }],
+    });
+
+    const res = await resolveCardOid(node, { repoSlug: "fkanban", body: "", branch: "main", prUrl: "" });
+    expect(res).toEqual({ oid: tip, via: "ref" });
+  });
+
+  test("resolveCardOid keys the ref read by full ref name", async () => {
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown> }> = [];
+    const node = fakeNode({
+      hashRangeLayouts: true,
+      filterLog,
+      refs: [
+        { repo: "fkanban", name: "refs/heads/kanban/x", oid, rkey: "fkanban:refs/heads/kanban/x" },
+        { repo: "fkanban", name: "refs/heads/main", oid: "3333333333333333333333333333333333333333", rkey: "fkanban:refs/heads/main" },
+      ],
+    });
+
+    const res = await resolveCardOid(node, { repoSlug: "fkanban", body: "", branch: "kanban/x", prUrl: "" });
+    expect(res).toEqual({ oid, via: "ref" });
+
+    const refReads = filterLog.filter((f) => f.schemaHash === REF_SCHEMA);
+    expect(refReads).toHaveLength(1);
+    expect(refReads[0]!.filter).toEqual({
+      HashRangeKey: { hash: "fkanban", range: "refs/heads/kanban/x" },
+    });
+  });
+
+  test("resolveCardOid keys the CR read by cr_id, trying both spellings", async () => {
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown> }> = [];
+    const node = fakeNode({
+      hashRangeLayouts: true,
+      filterLog,
+      crs: [{ repo: "fkanban", cr_id: "cr-test-1", cr_key: "fkanban:cr-test-1", head_oid: oid, head_ref: "refs/heads/f", state: "open" }],
+    });
+
+    // The card cites the CR without the `cr-` prefix; the row carries it.
+    const res = await resolveCardOid(node, { repoSlug: "fkanban", body: "", branch: "", prUrl: "cr-test-1" });
+    expect(res).toEqual({ oid, via: "change-request" });
+
+    const crReads = filterLog.filter((f) => f.schemaHash === CR_SCHEMA);
+    expect(crReads.length).toBeGreaterThan(0);
+    expect(crReads.every((r) => r.filter?.HashRangeKey !== undefined)).toBe(true);
+  });
+
+  test("a node that reports no key layout still resolves, via the partition read", async () => {
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown> }> = [];
+    const node = fakeNode({
+      // hashRangeLayouts omitted: listSchemas throws, like an older node.
+      filterLog,
+      ci: [
+        {
+          status_key: `fkanban:${oid}:ci-required`,
+          repo: "fkanban",
+          oid,
+          context: "ci-required",
+          state: "success",
+          log_excerpt: "ok",
+        },
+      ],
+    });
+
+    const snap = await fetchCiStatus(node, "fkanban", oid, "ci-required");
+    expect(snap.state).toBe("success");
+
+    const ciReads = filterLog.filter((f) => f.schemaHash === CI_STATUS_SCHEMA);
+    expect(ciReads).toHaveLength(1);
+    expect(ciReads[0]!.filter).toEqual({ HashKey: "fkanban" });
   });
 });
 
