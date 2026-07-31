@@ -24,6 +24,7 @@ import {
 import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
+import { mapWithConcurrency } from "../concurrency.ts";
 import { querySearchPlane } from "../search-plane.ts";
 
 export type SearchOptions = {
@@ -185,7 +186,11 @@ async function indexedSearchCards(
     if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
   }
 
-  const hydrated = await Promise.all((native?.slugs ?? []).map((slug) => findCard(opts.node, opts.cfg, slug)));
+  // Bounded: one full-body Card point-read per native-index hit, and `k` is up
+  // to 50 — wide enough to trip Mini's "too many concurrent reads".
+  const hydrated = await mapWithConcurrency(native?.slugs ?? [], (slug) =>
+    findCard(opts.node, opts.cfg, slug),
+  );
   for (const card of hydrated) {
     if (!card) continue;
     if (opts.board && card.board !== opts.board) continue;

@@ -65,6 +65,27 @@ export type BoardCardSpineRow = {
   position: string;
 };
 
+/**
+ * The membership SPINE plus the two fields a *dependency verdict* reads.
+ *
+ * `list --column <x>` seeds finished dependencies by reading the board's
+ * terminal column, and everything downstream of that read consumes exactly
+ * seven fields: `depStatus` reads slug/board/column/kind, `isHiddenCard` reads
+ * tags, and `sk`/`position` are the row's own address. Nothing renders a
+ * terminal card, so the other 17 fields are fetched and dropped.
+ *
+ * That is not a rounding error. Measured on the live board (567 `done` rows,
+ * same HashRangePrefix, interleaved reps): 1299ms at the 24-field projection
+ * against 416ms here, because LastDB resolves a projected field per row. And
+ * `done` is an append-only archive — the wide read makes the cost of listing an
+ * ACTIVE column scale with everything the board has ever finished.
+ */
+export const BOARD_CARDS_DEP_SEED_FIELDS = [
+  ...BOARD_CARDS_SPINE_FIELDS,
+  "tags",
+  "kind",
+] as const;
+
 /** Sort key: column#pos(8)#slug — ordered, column-prefix filterable. */
 export function boardCardSk(column: string, position: string | number, slug: string): string {
   const pos = String(position).padStart(8, "0");
@@ -302,16 +323,23 @@ export async function removeBoardCard(
  * No HashKey + client-filter fallback when the prefix path fails. A broken
  * HashRangePrefix must surface as an error (or empty fields → empty list),
  * not silently degrade to a full partition scan that papers over the bug.
+ *
+ * `opts.fields` narrows the projection for a caller that does not render the
+ * rows (see {@link BOARD_CARDS_DEP_SEED_FIELDS}). Narrowing is safe in both
+ * directions here: fewer projected fields is strictly cheaper AND strictly
+ * less droppable, because a row is returned only when every projected field
+ * has an atom on it.
  */
 export async function listBoardCardsPartition(
   node: NodeClient,
   cfg: Config,
   board: string,
-  opts?: { column?: string },
+  opts?: { column?: string; fields?: readonly string[] },
 ): Promise<Card[] | null> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return null;
   const column = opts?.column?.trim();
+  const projection = opts?.fields;
   // HashRangePrefix is a fold HashRangeFilter object; QueryFilter's TS type
   // is string-map only — cast at the edge (runtime accepts the object).
   const filter = (
@@ -321,11 +349,21 @@ export async function listBoardCardsPartition(
   ) as QueryFilter;
   let res;
   try {
-    res = await node.queryAll({ schemaHash, fields: [...BOARD_CARDS_FIELDS], filter });
+    res = await node.queryAll({
+      schemaHash,
+      fields: [...(projection ?? BOARD_CARDS_FIELDS)],
+      filter,
+    });
   } catch (err) {
     // Schema drift only (created_by optional) — not a list-path fallback.
     if (!isCreatedByFieldMiss(err)) throw err;
-    res = await node.queryAll({ schemaHash, fields: [...LEGACY_BOARD_CARDS_FIELDS], filter });
+    res = await node.queryAll({
+      schemaHash,
+      fields: [...(projection ?? LEGACY_BOARD_CARDS_FIELDS)].filter(
+        (field) => field !== "created_by",
+      ),
+      filter,
+    });
   }
   return res.results
     .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))

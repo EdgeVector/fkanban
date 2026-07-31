@@ -2308,6 +2308,15 @@ export async function listCardsByColumn(
   column: string,
   fields: string[],
   board?: string,
+  /**
+   * `opts.projection` narrows what BoardCards is asked for. Use it only when the
+   * rows are consumed by a *predicate* rather than rendered — the dependency
+   * seed in `list --column` is the one such caller today
+   * ({@link BOARD_CARDS_DEP_SEED_FIELDS}). `fields` is unrelated: it is the
+   * Card-side projection, and only `reconcileBoardCardSummaries({verify:true})`
+   * reads it.
+   */
+  opts?: { projection?: readonly string[] },
 ): Promise<Card[]> {
   if (!board) {
     throw new FkanbanError({
@@ -2316,7 +2325,10 @@ export async function listCardsByColumn(
       hint: "Pass the board id (e.g. default). Client-side multi-board column scan is removed.",
     });
   }
-  const part = await listBoardCardsPartition(node, cfg, board, { column });
+  const part = await listBoardCardsPartition(node, cfg, board, {
+    column,
+    ...(opts?.projection ? { fields: opts.projection } : {}),
+  });
   if (part === null) {
     throw new FkanbanError({
       code: "schema_not_configured",
@@ -2611,8 +2623,11 @@ export async function listDependencyStatusesForCards(
   const depSlugs = [...new Set(cards.flatMap((c) => c.deps))].filter((slug) => !bySlug.has(slug));
   if (depSlugs.length === 0) return [...bySlug.values()];
 
-  const deps = await Promise.all(
-    depSlugs.map((slug) => findCardWithFields(node, cfg, slug, CARD_STATUS_FIELDS)),
+  // Bounded: `depSlugs` is every dep edge that points OFF the input set, so it
+  // scales with the board, not with a caller-chosen page. `pickup status` passes
+  // the whole active board through here.
+  const deps = await mapWithConcurrency(depSlugs, (slug) =>
+    findCardWithFields(node, cfg, slug, CARD_STATUS_FIELDS),
   );
   for (const dep of deps) {
     if (dep) bySlug.set(dep.slug, dep);
@@ -3014,18 +3029,16 @@ export async function listMilestones(node: NodeClient, cfg: Config): Promise<Mil
   if (!sparse) {
     milestones = res.results.map(rowToMilestone);
   } else {
-    milestones = await Promise.all(
-      res.results.map(async (row) => {
-        const mapped = rowToMilestone(row);
-        if (!milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>)) {
-          return mapped;
-        }
-        const slug = mapped.slug || stringField((row.fields ?? {}) as Record<string, unknown>, "slug");
-        if (!slug) return mapped;
-        const full = await findMilestone(node, cfg, slug);
-        return full ?? mapped;
-      }),
-    );
+    milestones = await mapWithConcurrency(res.results, async (row) => {
+      const mapped = rowToMilestone(row);
+      if (!milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>)) {
+        return mapped;
+      }
+      const slug = mapped.slug || stringField((row.fields ?? {}) as Record<string, unknown>, "slug");
+      if (!slug) return mapped;
+      const full = await findMilestone(node, cfg, slug);
+      return full ?? mapped;
+    });
   }
   return sortMilestones(milestones);
 }
