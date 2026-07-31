@@ -275,3 +275,81 @@ describe("proof cards are read narrowly and deduped before the fan-out", () => {
     );
   });
 });
+
+describe("the board card read does not sit on the critical path", () => {
+  /** A second board, so "every board" and "only the milestone's board" differ. */
+  function seedSecondBoard(node: FakeNode): void {
+    node.seed({
+      schemaHash: BOARD,
+      keyHash: "scratch",
+      fields: {
+        slug: "scratch", title: "Scratch", body: "",
+        columns: ["backlog", "todo", "doing", "done"],
+        created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    seedBoardCard(node, { slug: "scratch-card", board: "scratch", milestone: "" });
+  }
+
+  test("card partitions are requested BEFORE the milestone list is read", async () => {
+    const node = seedFixture();
+    seedSecondBoard(node);
+    seedBoardCard(node, { slug: "live-card", milestone: "m1" });
+
+    await milestonePortfolioResult({ cfg, node });
+
+    // This ordering IS the fix. Deriving the board slugs from the milestone list
+    // chained boards -> milestones -> cards, which put the single most expensive
+    // read in the command (789ms measured on the live primary) on the critical
+    // path — this command got 15-20% slower in wall clock even as its node time
+    // fell 32-40%. `listBoards` already names every board, so the fetch is
+    // knowable before the milestone list returns; the milestone list only
+    // decides which rows to KEEP.
+    const firstCards = node.reads.findIndex((r) => r.schemaHash === BOARD_CARDS);
+    const firstMilestones = node.reads.findIndex((r) => r.schemaHash === BOARD_MILESTONES);
+    expect(firstCards).toBeGreaterThanOrEqual(0);
+    expect(firstMilestones).toBeGreaterThanOrEqual(0);
+    expect(firstCards).toBeLessThan(firstMilestones);
+  });
+
+  test("without a board filter, every board's partition is read exactly once", async () => {
+    const node = seedFixture();
+    seedSecondBoard(node);
+    seedBoardCard(node, { slug: "live-card", milestone: "m1" });
+
+    await milestonePortfolioResult({ cfg, node });
+
+    // The acknowledged cost of fetching before the milestone list is known: a
+    // board no milestone lives on is still read. One keyed partition read each,
+    // against the 31 this path used to issue — but it must not be more than one.
+    const boardsRead = node.reads
+      .filter((r) => r.schemaHash === BOARD_CARDS)
+      .map((r) => (r.filter as { HashKey?: string })?.HashKey);
+    expect([...boardsRead].sort()).toEqual(["default", "scratch"]);
+  });
+
+  test("with a board filter there is no speculation — only that board is read", async () => {
+    const node = seedFixture();
+    seedSecondBoard(node);
+    seedBoardCard(node, { slug: "live-card", milestone: "m1" });
+
+    await milestonePortfolioResult({ cfg, node, board: "default" });
+
+    const boardsRead = node.reads
+      .filter((r) => r.schemaHash === BOARD_CARDS)
+      .map((r) => (r.filter as { HashKey?: string })?.HashKey);
+    expect(boardsRead).toEqual(["default"]);
+  });
+
+  test("a milestone's children still come only from its own board", async () => {
+    const node = seedFixture();
+    seedSecondBoard(node);
+    seedBoardCard(node, { slug: "live-card", milestone: "m1" });
+    // Same milestone slug, different board: reading every board's cards must not
+    // let another board's rows leak into this milestone's children.
+    seedBoardCard(node, { slug: "impostor", board: "scratch", milestone: "m1" });
+
+    const portfolio = await milestonePortfolioResult({ cfg, node });
+    expect(portfolio.entries.find((e) => e.slug === "m1")?.ready).toEqual(["live-card"]);
+  });
+});
