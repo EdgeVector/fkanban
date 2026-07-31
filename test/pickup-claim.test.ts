@@ -359,6 +359,63 @@ describe("pickup claim", () => {
     expect(result.claimed).toBe(true);
     expect(result.card?.slug).toBe("other-repo");
     expect(result.skipped.some((s) => s.slug === "overlap-todo" && s.reason === "surface-overlap")).toBe(true);
+    // The gate adjudicated here — both sides declared surfaces, so a claim that
+    // survives it really did clear a collision check.
+    expect(result.overlap_unadjudicated).toBeUndefined();
+  });
+
+  test("records that the overlap gate could not adjudicate when the candidate declares no surfaces", async () => {
+    // The live board's normal state: `surfaces` empty on every card. The gate
+    // runs, finds nothing to compare, and returns no conflicts — which must not
+    // be reported as a clean collision check.
+    await seedCard(node, card({
+      slug: "inflight-peer",
+      column: "doing",
+      repo: "EdgeVector/fold",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nIn flight, no surfaces.",
+    }));
+    await seedCard(node, card({
+      slug: "undeclared-candidate",
+      repo: "EdgeVector/fold",
+      tags: ["p0"],
+      body: "Repo: EdgeVector/fold\nBase: main\nPriority: P0\n\n## GOAL\nwork\n\n## END STATE\ndone\n",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("undeclared-candidate");
+    expect(result.overlap_unadjudicated?.length).toBeGreaterThan(0);
+    expect(result.overlap_unadjudicated?.join("\n")).toContain("overlap unknown");
+
+    // And it is visible to a human reading the claim, not only in --json.
+    const rendered = formatPickupClaim(result);
+    expect(rendered).toContain("surface-overlap gate did not adjudicate");
+    expect(rendered).toContain("declare Surfaces:");
+  });
+
+  test("a peer with no declared surfaces is reported unadjudicated, not cleared", async () => {
+    // Candidate declares surfaces; the in-flight peer in the same repo does not.
+    // There is no way to know whether they collide, so the claim must say so.
+    await seedCard(node, card({
+      slug: "silent-peer",
+      column: "doing",
+      repo: "EdgeVector/fold",
+      body: "Repo: EdgeVector/fold\nBase: main\n\nNo surfaces declared.",
+    }));
+    await seedCard(node, card({
+      slug: "declared-candidate",
+      repo: "EdgeVector/fold",
+      surfaces: ["src/engine/**"],
+      tags: ["p0"],
+      body: "Repo: EdgeVector/fold\nBase: main\nPriority: P0\nSurfaces: src/engine/**\n\nDeclared.",
+    }));
+
+    const result = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("declared-candidate");
+    expect(result.overlap_unadjudicated?.join("\n")).toContain("silent-peer");
   });
 
   test("ignores stale doing overlap rows when point-read truth is done", async () => {
