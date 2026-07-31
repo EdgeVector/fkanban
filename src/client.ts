@@ -153,7 +153,74 @@ const BUSY_RETRY_AFTER_CAP_MS = 5_000;
 const SOCKET_CONNECT_RETRY_MAX = 3;
 const SOCKET_CONNECT_BACKOFF_MS = [100, 250, 500];
 
+// The client's OWN deadline expiring is backpressure too — one notch worse than
+// the 503 above, because the node was too busy to get any reply out at all.
+// Retrying the polite "I'm busy" 503 while treating silence as fatal means the
+// client tolerates overload LESS the worse the overload gets, which is
+// backwards; the workspace operating rule already says "node did not respond
+// within Nms" means BUSY, not down.
+//
+// Bounded at ONE re-send, deliberately. Every attempt costs a full deadline
+// (30s by default), so this trades a command's worst case from 1x to 2x the
+// deadline. It buys back the case it can actually win — a single unlucky
+// request behind a momentary queue, which today fails an entire multi-read
+// command — and does NOT pretend to ride out a sustained load storm, which no
+// sub-second backoff can. Re-sending once is still strictly cheaper than the
+// operator re-running the whole command, which repeats every other read too.
+const TIMEOUT_RETRY_MAX = 1;
+const TIMEOUT_BACKOFF_MS = 500;
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function isServiceTimeout(err: unknown): boolean {
+  return err instanceof FkanbanError && err.code === "service_timeout";
+}
+
+/**
+ * True when a request is provably side-effect-free, i.e. safe to re-send after
+ * the deadline expired with no reply.
+ *
+ * This is the line a timeout retry MUST respect, and it is why timeouts cannot
+ * simply reuse the 503 policy. A busy-503 is proof the node REJECTED the
+ * request, so it provably never applied — safe to re-send for reads and writes
+ * alike. A deadline expiry proves nothing at all: the request may still be in
+ * flight and may still land. Re-sending a mutation on that evidence is how a
+ * retry turns into a double-apply.
+ *
+ * So writes (`/api/mutation`) surface their timeout unretried and the error's
+ * hint points the operator at re-running the command — which re-reads state
+ * first — rather than the client silently re-sending behind their back.
+ */
+function isSideEffectFreeRequest(method: string, path: string): boolean {
+  if (method === "GET") return true;
+  return path === "/api/query" || path === "/api/app/search";
+}
+
+/**
+ * Run `doFetch`, re-sending it once if the client's deadline expires and the
+ * request is side-effect-free. Any other error, and any write, propagates
+ * unchanged on the first attempt.
+ */
+async function withTimeoutRetry<T>(
+  doFetch: () => Promise<T>,
+  retryable: boolean,
+  verbose: Verbose,
+  label: string,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await doFetch();
+    } catch (err) {
+      if (!retryable || attempt >= TIMEOUT_RETRY_MAX || !isServiceTimeout(err)) throw err;
+      const wait = TIMEOUT_BACKOFF_MS + Math.floor(Math.random() * 100);
+      verbose(
+        `node: no reply within the deadline on ${label} — ` +
+          `retry ${attempt + 1}/${TIMEOUT_RETRY_MAX} after ${wait}ms`,
+      );
+      await sleep(wait);
+    }
+  }
+}
 
 // True when a node response is transient backpressure we should retry: a 503
 // whose error/message clearly signals overload ("busy", "too many concurrent",
@@ -545,7 +612,7 @@ export function newNodeClient(opts: {
       options: { headers?: Record<string, string>; body?: unknown } = {},
     ): Promise<{ status: number; body: unknown }> {
       await ensureAttested();
-      const doFetch = async () => {
+      const sendOnce = async () => {
         const { res, readBody } = await verboseFetch({
           baseUrl: url,
           path,
@@ -560,6 +627,15 @@ export function newNodeClient(opts: {
         const parsed = await readBody();
         return { status: res.status, body: parsed };
       };
+      // A deadline expiry on a read is backpressure, not a verdict — re-send it
+      // once. Writes are excluded: a timed-out mutation may still land.
+      const doFetch = () =>
+        withTimeoutRetry(
+          sendOnce,
+          isSideEffectFreeRequest(method, path),
+          verbose,
+          `${method} ${path}`,
+        );
       let result = await doFetch();
       if (isNotAttested(result.status, result.body) && socketPath) {
         verbose("node: transport_not_attested — re-pairing owner session and retrying");
@@ -725,7 +801,7 @@ export function newNodeClient(opts: {
     body?: unknown,
   ): Promise<{ status: number; body: unknown }> => {
     await ensureAttested();
-    const doFetch = async () => {
+    const sendOnce = async () => {
       const { res, readBody } = await verboseFetch({
         baseUrl: url,
         path,
@@ -740,6 +816,16 @@ export function newNodeClient(opts: {
       const parsed = await readBody();
       return { status: res.status, body: parsed };
     };
+    // Same policy as the SDK transport: re-send a timed-out READ once. The
+    // control plane is mostly GETs (status, auto-identity, schema list), which
+    // this classifies as retryable; `/api/setup/bootstrap` is a POST and is not.
+    const doFetch = () =>
+      withTimeoutRetry(
+        sendOnce,
+        isSideEffectFreeRequest(method, path),
+        verbose,
+        `${method} ${path}`,
+      );
     let result = await doFetch();
     if (isNotAttested(result.status, result.body) && socketPath) {
       // Stale in-memory session (node restarted) — re-pair once and retry.
