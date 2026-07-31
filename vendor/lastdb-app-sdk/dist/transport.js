@@ -8,11 +8,23 @@
  * option, so one implementation covers both — the only difference is whether
  * we pass `host`/`port` or `socketPath`.
  */
+import { randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { TransportError } from './errors.js';
+/**
+ * The per-request correlation-ID header the node's request-ops telemetry
+ * reads (sanitized to ≤96 chars server-side and rendered as `req=<id>` in
+ * `lastdb ops` "Slowest recent"). The transport mints a fresh UUID per
+ * request when neither the per-call headers nor the transport's
+ * `defaultHeaders` already carry one — per-request by design: a static
+ * default header would stamp every call with the same ID and defeat
+ * correlation. A caller-supplied value (either seam) is never clobbered.
+ */
+export const REQUEST_ID_HEADER = 'x-lastdb-request-id';
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 /**
  * Build a {@link Transport} for a TCP base URL (e.g.
  * `http://127.0.0.1:9101`). Throws on a non-http(s) URL. `defaultHeaders` are
@@ -21,7 +33,7 @@ import { TransportError } from './errors.js';
  * such as `X-User-Hash` that the production `fold_db_node` reads to resolve the
  * caller (its HTTP server is stateless: identity comes from the header).
  */
-export function httpTransport(baseUrl, defaultHeaders = {}) {
+export function httpTransport(baseUrl, defaultHeaders = {}, options = {}) {
     const url = new URL(baseUrl);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
         throw new TransportError(`baseUrl must be http:// or https://, got '${url.protocol}'`);
@@ -32,14 +44,14 @@ export function httpTransport(baseUrl, defaultHeaders = {}) {
         port: url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80,
         protocol: url.protocol,
     };
-    return new NodeHttpTransport(target, baseUrl, defaultHeaders);
+    return new NodeHttpTransport(target, baseUrl, defaultHeaders, options);
 }
 /**
  * Build a {@link Transport} that speaks HTTP over a Unix-domain socket. See
  * {@link httpTransport} for the `defaultHeaders` contract.
  */
-export function udsTransport(socketPath, defaultHeaders = {}) {
-    return new NodeHttpTransport({ kind: 'uds', socketPath }, `unix:${socketPath}`, defaultHeaders);
+export function udsTransport(socketPath, defaultHeaders = {}, options = {}) {
+    return new NodeHttpTransport({ kind: 'uds', socketPath }, `unix:${socketPath}`, defaultHeaders, options);
 }
 /** The fixed file name the node binds its data-plane socket under. */
 const SOCKET_FILE_NAME = 'folddb.sock';
@@ -165,25 +177,30 @@ function resolveSocketPath(env) {
  * TCP transport (matching the Rust `#[cfg(not(unix))]` discovery).
  */
 export function discoverTransport(options) {
-    const { fallbackBaseUrl, defaultHeaders = {} } = options;
+    const { fallbackBaseUrl, defaultHeaders = {}, timeoutMs } = options;
     const env = options.env ?? process.env;
     if (process.platform !== 'win32') {
         const resolved = resolveSocketPath(env);
         if (resolved !== null && existsSync(resolved)) {
-            return udsTransport(resolved, defaultHeaders);
+            return udsTransport(resolved, defaultHeaders, { timeoutMs });
         }
     }
-    return httpTransport(fallbackBaseUrl, defaultHeaders);
+    return httpTransport(fallbackBaseUrl, defaultHeaders, { timeoutMs });
 }
 /** Node `http`-backed transport shared by the TCP and UDS variants. */
 class NodeHttpTransport {
     t;
     target;
     defaultHeaders;
-    constructor(t, target, defaultHeaders = {}) {
+    timeoutMs;
+    constructor(t, target, defaultHeaders = {}, options = {}) {
         this.t = t;
         this.target = target;
         this.defaultHeaders = defaultHeaders;
+        this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+        if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
+            throw new TransportError(`transport timeoutMs must be a positive finite number, got ${String(options.timeoutMs)}`);
+        }
     }
     send(method, path, options = {}) {
         const payload = options.body === undefined ? undefined : JSON.stringify(options.body);
@@ -192,6 +209,12 @@ class NodeHttpTransport {
             ...this.defaultHeaders,
             ...(options.headers ?? {}),
         };
+        // Correlation ID: one fresh UUID per request unless the caller supplied
+        // one (per-call or via defaultHeaders — checked case-insensitively so a
+        // caller's `X-LastDB-Request-Id` spelling is honored, not duplicated).
+        if (!Object.keys(headers).some((k) => k.toLowerCase() === REQUEST_ID_HEADER)) {
+            headers[REQUEST_ID_HEADER] = randomUUID();
+        }
         if (payload !== undefined) {
             headers['content-type'] = 'application/json';
             headers['content-length'] = String(Buffer.byteLength(payload));
@@ -204,8 +227,15 @@ class NodeHttpTransport {
                 method,
                 path,
                 headers,
+                timeout: this.timeoutMs,
             }
-            : { socketPath: this.t.socketPath, method, path, headers };
+            : {
+                socketPath: this.t.socketPath,
+                method,
+                path,
+                headers,
+                timeout: this.timeoutMs,
+            };
         return new Promise((resolve, reject) => {
             const req = httpRequest(requestOptions, (res) => {
                 const chunks = [];
@@ -228,7 +258,16 @@ class NodeHttpTransport {
                     resolve({ status, body });
                 });
             });
-            req.on('error', (err) => reject(new TransportError(`request to ${this.target}${path} failed: ${err.message}`)));
+            req.on('timeout', () => {
+                req.destroy(new TransportError(`request to ${this.target}${path} timed out after ${this.timeoutMs}ms`));
+            });
+            req.on('error', (err) => {
+                if (err instanceof TransportError) {
+                    reject(err);
+                    return;
+                }
+                reject(new TransportError(`request to ${this.target}${path} failed: ${err.message}`));
+            });
             if (payload !== undefined) {
                 req.write(payload);
             }
