@@ -2803,6 +2803,31 @@ export async function findCard(node: NodeClient, cfg: Config, slug: string): Pro
 }
 
 /**
+ * Fields a milestone proof-card verdict actually reads: `body` for the
+ * `PROOF: PASS` / `DONE-WHEN` evidence, `column`+`board` for terminality,
+ * `milestone` for the link-mismatch warning, and `slug`+`tags` because
+ * `isHiddenCard` needs them (drop `tags` and a tombstoned card reads as a live
+ * proof card).
+ *
+ * Deliberately narrow, and not only to save bytes: LastDB returns a row only
+ * when EVERY projected field has an atom on it, so a 23-field projection makes
+ * a card that is merely missing one field read as ABSENT — the exact false
+ * negative `cardExists` exists to undo. Six fields is six chances to miss
+ * instead of twenty-three. Measured on the live primary 2026-07-31: the wide
+ * proof read cost ~236ms, a 6-field read ~120ms.
+ */
+export const PROOF_CARD_FIELDS = ["slug", "board", "column", "milestone", "tags", "body"];
+
+/** Point-read a milestone's proof card with just the fields the verdict uses. */
+export async function findProofCard(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+): Promise<Card | null> {
+  return findCardWithFields(node, cfg, slug, PROOF_CARD_FIELDS);
+}
+
+/**
  * Does a Card record exist for `slug`? Projects `slug` and nothing else.
  *
  * Every other card read projects ~20 fields, and LastDB returns a row only if

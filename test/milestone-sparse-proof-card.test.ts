@@ -235,14 +235,34 @@ describe("a sparse proof card is not a missing proof card", () => {
   });
 
   test("reconcile warns 'unreadable', not 'missing', for a sparse proof card", async () => {
+    // Sparse in `body` — a field the proof VERDICT genuinely needs (it carries
+    // the `PROOF: PASS` evidence), so the hydrating read still misses and the
+    // sparse-vs-absent distinction still has to be drawn.
     const node = projectionFaithfulNode({
-      cards: [sparse(cardRecord(), "north_star")],
+      cards: [sparse(cardRecord(), "body")],
       milestones: [milestoneRecord({ proof_card: "proof" })],
     });
     const res = await milestoneReconcileResult({ cfg, node, slug: "m1" });
     const codes = res.warnings.map((w) => w.code);
     expect(codes).toContain("unreadable-proof-card");
     expect(codes).not.toContain("missing-proof-card");
+  });
+
+  test("sparsity in a field the proof verdict never reads no longer makes it unreadable", async () => {
+    // The other half of the same rule, and the reason the proof read projects
+    // six fields instead of twenty-three: every extra projected field is another
+    // way for a live card to read as gone. `north_star` is not part of the proof
+    // verdict, so its absence must not cost the operator a warning telling them
+    // to go repair a card that reads perfectly well.
+    const node = projectionFaithfulNode({
+      cards: [sparse(cardRecord(), "north_star")],
+      milestones: [milestoneRecord({ proof_card: "proof" })],
+    });
+    const res = await milestoneReconcileResult({ cfg, node, slug: "m1" });
+    const codes = res.warnings.map((w) => w.code);
+    expect(codes).not.toContain("unreadable-proof-card");
+    expect(codes).not.toContain("missing-proof-card");
+    expect(res.proof?.slug).toBe("proof");
   });
 
   test("reconcile still warns 'missing' when the proof card is genuinely absent", async () => {
