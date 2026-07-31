@@ -364,11 +364,35 @@ export function buildPickupStatusReport(
   };
 }
 
+/**
+ * Resolve off-set dependency targets — for the cards that actually get a verdict.
+ *
+ * This is the same argument `hydrateForPickupClassification` makes for BODIES,
+ * carried to the dep fan-out: a card only has a dep verdict if it is CLASSIFIED,
+ * and `buildPickupStatusReport` classifies `activeCards` — nothing in a board's
+ * terminal column. A dep edge that ONLY a terminal card declares therefore
+ * produces a `depStatus` no code path can observe.
+ *
+ * Passing the whole board bought nothing and paid a Card HashKey point-read per
+ * unresolvable slug, on every request, forever. `cards` still goes in as
+ * `knownCards`, so same-board deps stay free — only the ACTIVE set's off-set
+ * edges are point-read.
+ *
+ * Measured on the live board: four such reads (`dep-x`, `dep-skep1`, `dep-panel`,
+ * `dep-v4` — stress-harness residue held by nine finished `protein-*` cards),
+ * ~620ms per `pickup status`. Draining the `done` archive made it WORSE, not
+ * better: archiving a finished card whose dependents are also finished turns
+ * every one of those edges into a dangling target, and the count went 4 -> 14
+ * mid-sweep. The cost scales with archive churn, which is exactly backwards.
+ */
 async function withDependencyStatuses(
   opts: { cfg: Config; node: NodeClient } | undefined,
   cards: Card[],
+  boards: Board[],
 ): Promise<Card[]> {
-  return opts ? listDependencyStatusesForCards(opts.node, opts.cfg, cards) : cards;
+  return opts
+    ? listDependencyStatusesForCards(opts.node, opts.cfg, activeCards(cards, boards), cards)
+    : cards;
 }
 
 export async function buildPickupStatusReportWithSituations(
@@ -377,7 +401,7 @@ export async function buildPickupStatusReportWithSituations(
   preflight?: SituationPreflight,
   depsContext?: { cfg: Config; node: NodeClient },
 ): Promise<PickupStatusReport> {
-  const withDeps = await withDependencyStatuses(depsContext, cards);
+  const withDeps = await withDependencyStatuses(depsContext, cards, boards);
   // Board lists are body-free by design. Fetch the handful of bodies the
   // verdict actually depends on before classifying, so `malformed-routing`
   // means "the card is malformed", not "we never looked".
