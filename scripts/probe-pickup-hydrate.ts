@@ -31,7 +31,7 @@ for (const c of needy) byColumn[`${c.board}/${c.column}`] = (byColumn[`${c.board
 console.log(byColumn);
 
 const t1 = performance.now();
-const hydrated = await hydrateForPickupClassification(node, cfg, withDeps);
+const hydrated = await hydrateForPickupClassification(node, cfg, withDeps, boards);
 const hMs = performance.now() - t1;
 const bodies = hydrated.filter((c) => needy.some((n) => n.slug === c.slug));
 const bytes = bodies.reduce((n, c) => n + (c.body?.length ?? 0), 0);

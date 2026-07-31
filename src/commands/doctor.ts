@@ -131,8 +131,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   let queryRoundTrip: { cards: number; boards: number } | null = null;
   if (socketDataPlane) {
     try {
-      const cards = await listCards(node, cfg);
       const boards = await listBoards(node, cfg);
+      const cards = await listCards(node, cfg, { boards });
       queryRoundTrip = { cards: cards.length, boards: boards.length };
       check(true, "node reachable via socket", `${transport.socketPath} — query round-trip: ${cards.length} cards, ${boards.length} boards`);
     } catch (err) {
@@ -242,8 +242,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     check(true, "query round-trip", `${queryRoundTrip.cards} cards, ${queryRoundTrip.boards} boards`);
   } else {
     try {
-      const cards = await listCards(node, cfg);
       const boards = await listBoards(node, cfg);
+      const cards = await listCards(node, cfg, { boards });
       check(true, "query round-trip", `${cards.length} cards, ${boards.length} boards`);
     } catch (err) {
       check(false, "query round-trip", formatDoctorError(err));

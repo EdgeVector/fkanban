@@ -202,10 +202,8 @@ async function remainingLiveOwnerCards(opts: {
   completedCard: Card;
   ownerSlug: string;
 }): Promise<string[]> {
-  const [cards, boards] = await Promise.all([
-    listCards(opts.node, opts.cfg),
-    listBoards(opts.node, opts.cfg),
-  ]);
+  const boards = await listBoards(opts.node, opts.cfg);
+  const cards = await listCards(opts.node, opts.cfg, { boards });
   const terminals = boardTerminalMap(boards);
   return cards
     .filter((card) => card.slug !== opts.completedCard.slug)

@@ -31,10 +31,8 @@ export async function pickupLanesResult(opts: {
   situationPreflight?: SituationPreflight;
 }): Promise<PickupLanesResult> {
   const board = opts.board ?? "default";
-  const [cards, boards] = await Promise.all([
-    listCards(opts.node, opts.cfg),
-    listBoards(opts.node, opts.cfg),
-  ]);
+  const boards = await listBoards(opts.node, opts.cfg);
+  const cards = await listCards(opts.node, opts.cfg, { boards });
   const boardRec = boards.find((b) => b.slug === board);
   const state = parsePickupLaneState(boardRec?.body ?? "");
 
