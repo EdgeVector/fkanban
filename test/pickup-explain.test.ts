@@ -56,7 +56,13 @@ describe("pickup explain render", () => {
       missingDeps: [],
       lane: "program:north-star-host-track",
       write_guard: { ok: true },
-      surface_overlap: { conflicts: [], warnings: [], would_skip: false },
+      surface_overlap: {
+        conflicts: [],
+        warnings: [],
+        would_skip: false,
+        verdict: "clear",
+        unevaluated_peers: [],
+      },
       situation: { allowed: true, reason: "no Situation preflight action inferred" },
       eligible_for_claim: true,
       gates: [
