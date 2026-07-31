@@ -32,7 +32,7 @@ import {
 } from "../src/record.ts";
 import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import { classifyPickupCard, pickupClassificationNeedsBody } from "../src/pickup.ts";
-import { groomStaleBlockersResult } from "../src/commands/groom.ts";
+import { groomStaleBlockersResult, groomStructuredRoutingResult } from "../src/commands/groom.ts";
 import { rankCmd } from "../src/commands/rank.ts";
 import { moveCmd } from "../src/commands/move.ts";
 import { overlapAgainstCards, overlapCmd } from "../src/commands/overlap.ts";
@@ -269,6 +269,27 @@ describe("groom stale-blockers", () => {
 
     const kinds = report.cards.flatMap((c) => c.issues.map((i) => i.kind));
     expect(kinds).toContain("hollow-pr-in-todo");
+  });
+});
+
+describe("groom structured-routing", () => {
+  test("backfills structured routing without blanking the stored brief", async () => {
+    const node = fakeNode([
+      card({
+        slug: "body-routed",
+        repo: "",
+        base: "",
+        body: BRIEF,
+      }),
+    ]);
+
+    const { report } = await groomStructuredRoutingResult({ cfg, node, apply: true });
+
+    expect(report.changed).toBe(1);
+    const stored = node.stored("body-routed")!;
+    expect(stored.repo).toBe("EdgeVector/kanban");
+    expect(stored.base).toBe("main");
+    expect(stored.body).toBe(BRIEF);
   });
 });
 

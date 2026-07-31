@@ -1,6 +1,14 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { listBoards, listBoardCardsWithBodies, sortCards } from "../record.ts";
+import {
+  deriveStructuredFields,
+  listBoards,
+  listBoardCardsWithBodies,
+  nowIso,
+  sortCards,
+  updateCardRecord,
+  type Card,
+} from "../record.ts";
 import {
   groomCard,
   writeGroomedCard,
@@ -12,6 +20,29 @@ export type GroomStaleBlockersOptions = {
   node: NodeClient;
   apply?: boolean;
   json?: boolean;
+};
+
+export type GroomStructuredRoutingOptions = {
+  cfg: Config;
+  node: NodeClient;
+  apply?: boolean;
+  json?: boolean;
+};
+
+export type StructuredRoutingRepair = {
+  slug: string;
+  board: string;
+  column: string;
+  repo?: string;
+  base?: string;
+};
+
+export type StructuredRoutingReport = {
+  scanned: number;
+  candidates: number;
+  changed: number;
+  dryRun: boolean;
+  cards: StructuredRoutingRepair[];
 };
 
 function renderGroomReport(report: GroomReport): string {
@@ -33,6 +64,80 @@ function renderGroomReport(report: GroomReport): string {
   if (lines.length) parts.push(lines.join("\n"));
   if (doneWhenFixes.length) parts.push(`missing DONE-WHEN fix list:\n${doneWhenFixes.join("\n")}`);
   return parts.join("\n");
+}
+
+function structuredRoutingRepair(card: Card): { next: Card; repair: StructuredRoutingRepair } | null {
+  const headerDerived = deriveStructuredFields({ ...card, tags: [] });
+  const repair: StructuredRoutingRepair = {
+    slug: card.slug,
+    board: card.board,
+    column: card.column,
+  };
+  const next: Card = { ...card };
+  if (!card.repo && headerDerived.repo) {
+    next.repo = headerDerived.repo;
+    repair.repo = headerDerived.repo;
+  }
+  if (!card.base && headerDerived.base) {
+    next.base = headerDerived.base;
+    repair.base = headerDerived.base;
+  }
+  return repair.repo || repair.base ? { next, repair } : null;
+}
+
+function renderStructuredRoutingReport(report: StructuredRoutingReport): string {
+  const head =
+    `structured-routing groomer: ${report.candidates} candidate cards of ${report.scanned} scanned; ` +
+    `${report.changed} changed${report.dryRun ? " — DRY RUN, no writes" : ""}`;
+  const lines = report.cards.map((card) => {
+    const fields = [
+      card.repo ? `repo=${card.repo}` : "",
+      card.base ? `base=${card.base}` : "",
+    ].filter(Boolean).join(" ");
+    return `  ${card.slug} [${card.board}/${card.column}] ${fields}`;
+  });
+  return lines.length ? `${head}\n${lines.join("\n")}` : head;
+}
+
+export async function groomStructuredRoutingResult(opts: GroomStructuredRoutingOptions): Promise<{
+  text: string;
+  report: StructuredRoutingReport;
+}> {
+  const [cards, boards] = await Promise.all([
+    listBoardCardsWithBodies(opts.node, opts.cfg),
+    listBoards(opts.node, opts.cfg),
+  ]);
+  const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
+  const active = sortCards(cards.filter((c) => c.column !== (terminalByBoard.get(c.board) ?? "done")));
+
+  const repairs: StructuredRoutingRepair[] = [];
+  for (const card of active) {
+    const repair = structuredRoutingRepair(card);
+    if (!repair) continue;
+    repairs.push(repair.repair);
+    if (opts.apply) {
+      await updateCardRecord(
+        opts,
+        { ...repair.next, updated_at: nowIso() },
+        undefined,
+        card,
+      );
+    }
+  }
+
+  const report: StructuredRoutingReport = {
+    scanned: active.length,
+    candidates: repairs.length,
+    changed: repairs.length,
+    dryRun: !opts.apply,
+    cards: repairs,
+  };
+  return { text: renderStructuredRoutingReport(report), report };
+}
+
+export async function groomStructuredRoutingCmd(opts: GroomStructuredRoutingOptions): Promise<string> {
+  const { text, report } = await groomStructuredRoutingResult(opts);
+  return opts.json ? JSON.stringify(report, null, 2) : text;
 }
 
 export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions): Promise<{
