@@ -197,11 +197,17 @@ export async function boardCardsHealResult(
   // not cut over — and a cutover node whose index is not yet cleared — keeps the
   // old discovery too. Its tombstones (entries whose Card is gone) cost one
   // point-read each and then fall out as "no rows, no card".
-  const indexedBySlug = new Map<string, CardSummary>();
+  // SLUGS ONLY. Discovery names candidates; it never says anything about where
+  // they live. This used to keep the whole scan row and read `.board` off it to
+  // pick a partition — but the scan does not establish `board` (blank on 99 of
+  // 410 winning rows on the live primary, 2026-07-31), and the 47 slugs the
+  // scan returns twice resolve last-write-wins, so which of the two rows won
+  // was arbitrary. Truth decides the board, below, after a keyed read.
+  const candidateSlugs = new Set<string>();
   if (cardListIndexIsSuperseded(opts.cfg)) {
     try {
       for (const c of await scanCardSummariesForReconcile(opts.node, opts.cfg)) {
-        if (c.slug) indexedBySlug.set(c.slug, c as CardSummary);
+        if (c.slug) candidateSlugs.add(c.slug);
       }
     } catch {
       // Scan unavailable (older node / scan refused): fall back to the rollup.
@@ -209,7 +215,7 @@ export async function boardCardsHealResult(
   }
   const indexed = (await readCardListIndex(opts.node, opts.cfg)) ?? [];
   for (const c of indexed) {
-    if (c.slug && !indexedBySlug.has(c.slug)) indexedBySlug.set(c.slug, c);
+    if (c.slug) candidateSlugs.add(c.slug);
   }
 
   // Raw BoardCards partitions (may include multi-row orphans per slug).
@@ -312,14 +318,52 @@ export async function boardCardsHealResult(
   }
 
   // Truth slugs with no BoardCards row yet (missing membership).
-  for (const [slug, t] of indexedBySlug) {
+  //
+  // "No row yet" is decided against the partitions heal actually read, not
+  // against a board the scan guessed. Two things follow, and both used to be
+  // wrong when the guess was wrong:
+  //
+  //  - A slug that HAS a row somewhere is not missing membership. Keying the
+  //    candidate under a guessed board could mint a second key for a card whose
+  //    row was already correct on another board, and an entry with no rows
+  //    reads three branches down as "missing BoardCards membership" — a
+  //    spurious repair, and a redundant wide write under `--apply`.
+  //  - `--board X` must not drop a card because the scan failed to say `X`. A
+  //    blank board is "unknown", and unknown may not deny a card its place in
+  //    the candidate set. The filter moves to the truth-bearing loop below,
+  //    where `truthBoard` can answer it.
+  //
+  // The board is left EMPTY in the synthetic key on purpose: nothing may read a
+  // board off a key that no partition row backs. Every branch that consumes
+  // `boardFromKey` requires `rows.length > 0`; the repair itself is authored by
+  // `truthBoard`.
+  //
+  // COST. Deferring the `--board` filter to truth means a candidate cannot be
+  // excluded before its point read — and on a small board that turned every
+  // discovered slug into one: `--board agent-dogfood-scratch` measured 16 point
+  // reads before, 411 after. So "does this slug have membership at all" is
+  // answered the cheap way instead, with one SPINE read per board heal did not
+  // already enumerate. The spine is the narrow projection that cannot drop rows
+  // (see the sparse-row note above), which is exactly what a membership census
+  // needs, and it costs one keyed partition read to skip several hundred point
+  // reads: the same run measures 81 after this, against 16 before.
+  //
+  // A slug membered on ANOTHER board is deliberately not a candidate here: a
+  // row on the wrong board is stale membership, which is the unfiltered run's
+  // business (or `--board <that board>`), not a missing row on this one.
+  // `--board X` means "only scan this board partition".
+  const memberedAnywhere = new Set(rawRows.map((r) => r.slug));
+  const enumeratedSlugSources = new Set(targetBoards.map((b) => b.slug));
+  for (const b of boards) {
+    if (enumeratedSlugSources.has(b.slug)) continue;
+    const spine = await listBoardCardsPartitionSpine(opts.node, opts.cfg, b.slug);
+    for (const s of spine ?? []) if (s.slug) memberedAnywhere.add(s.slug);
+  }
+
+  for (const slug of candidateSlugs) {
     if (slugFilter && !slugFilter.has(slug)) continue;
-    const board = t.board || "default";
-    if (boardFilter && board !== boardFilter) continue;
-    const k = `${board}\0${slug}`;
-    if (!byKey.has(k)) {
-      byKey.set(k, []);
-    }
+    if (memberedAnywhere.has(slug)) continue;
+    byKey.set(`\0${slug}`, []);
   }
 
   const actions: BoardCardsHealAction[] = [];
@@ -417,6 +461,13 @@ export async function boardCardsHealResult(
 
     const truth = thinCard({ ...point, body: "" });
     const truthBoard = truth.board || "default";
+
+    // `--board X` for a candidate with no membership row anywhere. Which board
+    // it belongs to is truth's to say — the discovery scan does not establish
+    // `board`, so this cannot be answered before the point read above. Rows
+    // that DO exist were already narrowed by partition (`targetBoards`).
+    if (rows.length === 0 && boardFilter && truthBoard !== boardFilter) continue;
+
     const truthSk = boardCardSk(truth.column, truth.position, truth.slug);
     const matching = rows.filter(
       (r) =>

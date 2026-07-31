@@ -219,7 +219,15 @@ export async function migrateLegacyColumnsCmd(
   const slugFilter = opts.slugs?.length ? new Set(opts.slugs) : null;
 
   const candidates = (await scanCardSummariesForReconcile(opts.node, opts.cfg)).filter(
-    (c) => (!slugFilter || slugFilter.has(c.slug)) && !valid.has(c.column),
+    (c) =>
+      (!slugFilter || slugFilter.has(c.slug)) &&
+      // `undefined` = the scan did not establish a column, which is NOT evidence
+      // of a valid one. Unknown stays a candidate and the point-read below
+      // decides; only a column the scan actually produced may exclude a card.
+      // (Same behaviour as before — a blank column was never in `valid` — but
+      // it was true by accident of `""` not being a column name, and the type
+      // now makes it a decision.)
+      (c.column === undefined || !valid.has(c.column)),
   );
 
   const result: MigrateLegacyColumnsResult = {
