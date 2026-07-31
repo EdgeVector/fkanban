@@ -2544,14 +2544,20 @@ export async function listCardsByColumn(
  *
  * Every caller must therefore point-read Card truth at HashKey(slug) before
  * acting on a row, and must read a blank field as "unknown", never as a value.
- * `board_cards_heal` and `migrate legacy-columns` both do; they are correct
- * today only because neither believes the scan. A caller that treats
- * `row.column` as authoritative will silently mis-handle ~73% of the board.
+ * A caller that treats `row.column` as authoritative will silently mis-handle
+ * ~73% of the board.
+ *
+ * That rule used to live only in this comment, and the return type said the
+ * opposite: a `Card[]`, every field a populated `string`. `board_cards_heal`
+ * duly read `row.board` to decide which board a card belonged to. So the type
+ * now carries the contract instead — see `ScannedCardRow`, where a field the
+ * scan did not establish is `undefined` rather than `""` and cannot be
+ * confused for a value.
  */
 export async function scanCardSummariesForReconcile(
   node: NodeClient,
   cfg: Config,
-): Promise<Card[]> {
+): Promise<ScannedCardRow[]> {
   const hash = schemaHashFor("card", cfg);
   const projection = cardListProjectionFields(fieldsFor("card"));
   let res;
@@ -2570,7 +2576,38 @@ export async function scanCardSummariesForReconcile(
   return res.results
     .map(rowToCard)
     .filter((c) => c.slug.length > 0 && !isHiddenCard(c))
-    .map((c) => ({ ...c, body: "" }));
+    .map((c) => scannedCardRow(c));
+}
+
+/**
+ * One row of the Card full scan, typed so it cannot be mistaken for truth.
+ *
+ * `slug` is the only field a scan establishes. Every other field is optional,
+ * and `undefined` means THE SCAN DID NOT ESTABLISH THIS — it does not mean
+ * "empty". The distinction is the whole point: a blank scan field is
+ * indistinguishable from a real empty value in the wire rows (measured
+ * 2026-07-28: 843 of 1054 rows carried `board: ""`, `column: ""`, `title: ""`
+ * on records that point-read fine), so collapsing blank to `undefined` here is
+ * what forces a caller to write down which one it meant.
+ *
+ * Only the fields a reconciler has an actual use for are carried. Adding one
+ * back is a decision, not a convenience: whatever you add, a caller can then
+ * read, and the scan cannot vouch for any of it.
+ */
+export type ScannedCardRow = {
+  slug: string;
+  /** `undefined` = not established by the scan. Never "the card has no board". */
+  board?: string;
+  /** `undefined` = not established by the scan. Never "the card has no column". */
+  column?: string;
+};
+
+/** Project a scan row, collapsing "the scan said nothing" to `undefined`. */
+function scannedCardRow(c: Card): ScannedCardRow {
+  const row: ScannedCardRow = { slug: c.slug };
+  if (c.board) row.board = c.board;
+  if (c.column) row.column = c.column;
+  return row;
 }
 
 /**
