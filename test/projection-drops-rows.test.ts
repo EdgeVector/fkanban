@@ -27,13 +27,8 @@
  * it. A fake that ignores `fields` cannot reproduce either bug.
  */
 import { describe, expect, test } from "bun:test";
-import type {
-  NodeClient,
-  QueryFilter,
-  QueryResponse,
-  QueryRow,
-} from "../src/client.ts";
 import type { Config } from "../src/config.ts";
+import { fakeNode, type FakeNode } from "./fake-node.ts";
 import {
   boardCardSk,
   listBoardCardsPartition,
@@ -59,112 +54,39 @@ const cfg: Config = {
   },
 };
 
-type StoredRecord = {
-  keyHash: string;
-  rangeKey: string | null;
-  fields: Record<string, unknown>;
-};
-
 /**
  * A node that drops rows the way LastDB does.
  *
- * The ONE rule that matters: a row is returned only if every requested field is
- * present on it. Absent is absent — not empty string, not null.
+ * The ONE rule that matters — a row is returned only if every requested field
+ * is present on it; absent is absent, not empty string, not null — now lives
+ * in the shared fake (`test/fake-node.ts`) and is the default for every test
+ * in the suite. This is a thin seeding wrapper over it, kept because these
+ * tests are written in terms of "cards and boardCards as stored".
  */
 function projectionFaithfulNode(seed: {
   cards: Array<Record<string, unknown>>;
   boardCards: Array<Record<string, unknown>>;
-}): NodeClient & { rowsOf: (schemaHash: string) => StoredRecord[] } {
-  const store = new Map<string, Map<string, StoredRecord>>();
-  const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
-  const tableFor = (schemaHash: string) => {
-    let t = store.get(schemaHash);
-    if (!t) {
-      t = new Map();
-      store.set(schemaHash, t);
-    }
-    return t;
-  };
+}): FakeNode {
+  const node = fakeNode({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash });
 
   for (const c of seed.cards) {
-    tableFor(CARD_HASH).set(storeKey(String(c.slug), null), {
-      keyHash: String(c.slug),
-      rangeKey: null,
-      fields: { ...c },
-    });
+    node.seed({ schemaHash: CARD_HASH, keyHash: String(c.slug), fields: c });
   }
   for (const r of seed.boardCards) {
-    tableFor(BOARD_CARDS_HASH).set(storeKey(String(r.board), String(r.sk)), {
+    node.seed({
+      schemaHash: BOARD_CARDS_HASH,
       keyHash: String(r.board),
       rangeKey: String(r.sk),
-      fields: { ...r },
+      fields: r,
     });
   }
-  tableFor(BOARD_HASH).set(storeKey("default", null), {
+  node.seed({
+    schemaHash: BOARD_HASH,
     keyHash: "default",
-    rangeKey: null,
     fields: { slug: "default", title: "Default", body: "", columns: [], created_at: "", updated_at: "" },
   });
 
-  const matchesFilter = (rec: StoredRecord, filter?: QueryFilter): boolean => {
-    if (!filter) return true;
-    const f = filter as Record<string, unknown>;
-    if (typeof f.HashKey === "string") return rec.keyHash === f.HashKey;
-    const prefix = f.HashRangePrefix as { hash: string; prefix: string } | undefined;
-    if (prefix) {
-      return rec.keyHash === prefix.hash && (rec.rangeKey ?? "").startsWith(prefix.prefix);
-    }
-    return true;
-  };
-
-  const notImpl = (m: string) => async (): Promise<never> => {
-    throw new Error(`fakeNode.${m} not implemented`);
-  };
-
-  return {
-    baseUrl: cfg.nodeUrl,
-    userHash: cfg.userHash,
-    autoIdentity: notImpl("autoIdentity"),
-    bootstrap: notImpl("bootstrap"),
-    loadSchemas: notImpl("loadSchemas"),
-    listSchemas: notImpl("listSchemas"),
-    async createRecord({ schemaHash, fields, keyHash, rangeKey }) {
-      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), {
-        keyHash,
-        rangeKey: rangeKey ?? null,
-        fields: { ...fields },
-      });
-    },
-    async updateRecord({ schemaHash, fields, keyHash, rangeKey }) {
-      const key = storeKey(keyHash, rangeKey);
-      tableFor(schemaHash).set(key, {
-        keyHash,
-        rangeKey: rangeKey ?? null,
-        // MERGE, not replace — see no-protein-reach.test.ts.
-        fields: { ...tableFor(schemaHash).get(key)?.fields, ...fields },
-      });
-    },
-    async deleteRecord({ schemaHash, keyHash, rangeKey }) {
-      tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
-    },
-    async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
-      const results: QueryRow[] = [];
-      for (const rec of tableFor(schemaHash).values()) {
-        if (!matchesFilter(rec, filter)) continue;
-        // THE RULE: any projected field with no atom on this row drops the row.
-        if (fields.some((name) => !(name in rec.fields))) continue;
-        const projected: Record<string, unknown> = {};
-        for (const name of fields) projected[name] = rec.fields[name];
-        results.push({ fields: projected, key: { hash: rec.keyHash, range: rec.rangeKey } });
-      }
-      return { ok: true, results, returned_count: results.length, total_count: results.length };
-    },
-    rawCall: notImpl("rawCall") as NodeClient["rawCall"],
-    nodeTransport: () => ({ transport: "unavailable" as const }),
-    rowsOf(schemaHash: string) {
-      return [...tableFor(schemaHash).values()];
-    },
-  };
+  return node;
 }
 
 function fullCard(partial: Partial<Card> = {}): Card {

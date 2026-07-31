@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
+import type { NodeClient } from "../src/client.ts";
+import { fakeNode } from "./fake-node.ts";
 import type { Config } from "../src/config.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
@@ -27,52 +28,6 @@ const cfg: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
 
-function fakeNode(): NodeClient {
-  const store = new Map<string, Map<string, Record<string, unknown>>>();
-  const tableFor = (schemaHash: string) => {
-    let t = store.get(schemaHash);
-    if (!t) {
-      t = new Map();
-      store.set(schemaHash, t);
-    }
-    return t;
-  };
-  const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
-    const t = tableFor(schemaHash);
-    const entries = filter?.HashKey
-      ? (t.has(filter.HashKey) ? [[filter.HashKey, t.get(filter.HashKey)!] as const] : [])
-      : [...t.entries()].filter(([, fields]) =>
-          !filter || Object.entries(filter).every(([field, value]) => fields[field] === value)
-        );
-    return entries.map(([hash, fields]) => ({ fields, key: { hash, range: null } }));
-  };
-  const notImpl = (m: string) => async (): Promise<never> => {
-    throw new Error(`fakeNode.${m} not implemented`);
-  };
-  return {
-    baseUrl: cfg.nodeUrl,
-    userHash: cfg.userHash,
-    autoIdentity: notImpl("autoIdentity"),
-    bootstrap: notImpl("bootstrap"),
-    loadSchemas: notImpl("loadSchemas"),
-    listSchemas: notImpl("listSchemas"),
-    async createRecord({ schemaHash, fields, keyHash }) {
-      tableFor(schemaHash).set(keyHash, fields);
-    },
-    async updateRecord({ schemaHash, fields, keyHash }) {
-      tableFor(schemaHash).set(keyHash, { ...tableFor(schemaHash).get(keyHash), ...fields });
-    },
-    async deleteRecord({ schemaHash, keyHash }) {
-      tableFor(schemaHash).delete(keyHash);
-    },
-    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
-      const results = rowsFor(schemaHash, filter);
-      return { ok: true, results, returned_count: results.length, total_count: results.length };
-    },
-    rawCall: notImpl("rawCall") as NodeClient["rawCall"],
-    nodeTransport: () => ({ transport: "unavailable" as const }),
-  };
-}
 
 function seedBoard(node: NodeClient, slug = "default", columns: string[] = [...DEFAULT_COLUMNS]) {
   const now = nowIso();
