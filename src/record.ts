@@ -2260,6 +2260,57 @@ export async function listCardsWithBodies(
 }
 
 /**
+ * slug → body for every Card the node will return, in ONE narrow scan.
+ *
+ * `search`'s default path matches against a body-free display read, so on its
+ * own it can only match body text for cards some *other* index happened to
+ * surface. This is the cheapest read that can answer "whose body contains the
+ * query" for the whole board, and it replaces a per-candidate point-read
+ * fan-out. Measured on the live primary: slug+body over 647 rows is **413ms**,
+ * against ~5.5s for the 50 wide point reads it replaces (~110ms each — on this
+ * node a point read costs orders more per row than a scan amortizes).
+ *
+ * Projected narrow for CORRECTNESS as much as cost: LastDB returns a row only
+ * when EVERY projected field has an atom on it, so each extra projected field
+ * is another way for a live card to vanish from search results. Two fields is
+ * the floor this match needs.
+ *
+ * Pairs with the `BODY_OMITTED` contract — callers hydrate a body-free card
+ * through `withLoadedBody`, which is the marker-clearing path.
+ */
+export async function listCardBodies(
+  node: NodeClient,
+  cfg: Config,
+): Promise<Map<string, string>> {
+  const res = await node.queryAll({
+    schemaHash: schemaHashFor("card", cfg),
+    fields: ["slug", "body"],
+    allowFullScan: true,
+  });
+  const bodies = new Map<string, string>();
+  for (const row of res.results) {
+    const f = (row.fields ?? {}) as Record<string, unknown>;
+    const slug = stringField(f, "slug");
+    if (slug.length === 0) continue;
+    const body = stringField(f, "body");
+    // A scan of Card returns MORE THAN ONE row for some slugs on the live
+    // primary — measured 47 of 593 distinct slugs, of which 44 disagree about
+    // the body and 33 carry the EMPTY one last. A plain last-write-wins
+    // `set(slug, body)` therefore silently discards the real brief for those
+    // cards and they stop matching on body text.
+    //
+    // Keep the longest, which is order-independent: an empty row carries no
+    // text a substring search could match, so it must never displace one that
+    // does. (Ordering by `updated_at` instead would mean projecting a third
+    // field, and any card missing that atom would drop out of the read
+    // entirely — a worse failure than picking the richer of two bodies.)
+    const seen = bodies.get(slug);
+    if (seen === undefined || seen.length < body.length) bodies.set(slug, body);
+  }
+  return bodies;
+}
+
+/**
  * The BOARD's cards with their bodies filled in — for whole-board sweeps that
  * judge or rewrite bodies (`groom stale-blockers`, `rank`, `migrate
  * area-tags`).

@@ -170,7 +170,12 @@ describe("--field projection", () => {
     expect(out).not.toContain("match");
   });
 
-  test("default search does not full-scan Card when display indexes are absent", async () => {
+  // The DEGRADED configuration: no display indexes AND a node that refuses the
+  // Card scan outright (this stub throws for any non-point-read Card query,
+  // even the approved allowFullScan one). Search still has to answer, so the
+  // semantic-index candidate path is retained as the fallback for exactly this
+  // case — it is the only way to reach a body match here.
+  test("search still answers via native candidates when the Card scan is refused", async () => {
     const probe = card({ slug: "probe", title: "Probe", body: "needle body", position: "10" });
     const calls: Array<{ schemaHash: string; filter?: unknown; allowFullScan?: boolean }> = [];
     const noIndexCfg: Config = {
@@ -218,7 +223,12 @@ describe("--field projection", () => {
 
     const out = JSON.parse(await searchCmd({ cfg: noIndexCfg, node: noScanNode, query: "needle", json: true })) as Array<{ slug: string }>;
     expect(out.map((c) => c.slug)).toEqual(["probe"]);
-    expect(calls.filter((c) => c.schemaHash === "cardhash" && c.filter === undefined && c.allowFullScan === true)).toEqual([]);
+    // The body match came from the point-read candidate, NOT from a scan: this
+    // node refused every scan it was offered. Asserting the result rather than
+    // the absence of an attempt — a refused attempt costs one round trip and
+    // degrades correctly, whereas never attempting would cost every healthy
+    // node the recall that scan buys.
+    expect(calls.some((c) => c.schemaHash === "cardhash" && c.filter !== undefined)).toBe(true);
   });
 
   test("projection allowlist is seeded from the card schema fields", () => {

@@ -10,6 +10,7 @@ import {
   CARD_DISPLAY_FIELDS,
   ensureColumn,
   findCard,
+  listCardBodies,
   listDependencyStatusesForCards,
   listBoards,
   listCardsByFilter,
@@ -19,6 +20,7 @@ import {
   cardMatchesQuery,
   searchCards,
   sortCards,
+  withLoadedBody,
   type Card,
 } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
@@ -26,6 +28,8 @@ import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_p
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { querySearchPlane } from "../search-plane.ts";
+
+const NATIVE_INDEX_RESULT_CAP = 50;
 
 export type SearchOptions = {
   cfg: Config;
@@ -39,16 +43,16 @@ export type SearchOptions = {
   // `all` removes the cap. Mirrors `list`'s `--limit`/`--all` contract.
   limit?: number;
   all?: boolean;
-  // Complete mode preserves the historical exhaustive substring search. The
-  // default text command may use indexed/native candidates and body-free scans
-  // so an interactive search does not download every full card body.
+  // Complete mode preserves the historical exhaustive substring search: one
+  // admin scan over every Card, INCLUDING cards that are not on any board. The
+  // default path is scoped to board membership, so it is the narrower — and for
+  // a board search, the more accurate — surface. Both match body text.
   complete?: boolean;
   // CLI compatibility escape hatch: `--full-body` asks for the historical
   // unpreviewed JSON surface. MCP has its own `full_body` option.
   fullBody?: boolean;
 };
 
-const NATIVE_INDEX_RESULT_CAP = 50;
 
 type SearchPlan = "complete-scan" | "indexed-candidates";
 
@@ -56,7 +60,6 @@ function debugSearchPlan(plan: SearchPlan, detail: Record<string, unknown>): voi
   if (!process.env.FKANBAN_DEBUG_QUERY_PLAN) return;
   console.error(`fkanban: query-plan search ${plan} ${JSON.stringify(detail)}`);
 }
-
 function appSearchCardSlugs(results: AppSearchHit[], cardSchemaHash: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -159,6 +162,44 @@ async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: 
   };
 }
 
+
+/**
+ * The default search path: the board's cards, scoped, matched against their
+ * REAL bodies.
+ *
+ * This used to match a body-free display read and then hydrate up to 50
+ * candidate slugs from the semantic index with one wide point-read each. That
+ * was worse on both axes it was supposed to trade between, measured on the live
+ * primary against the board's 367 live cards:
+ *
+ *   - RECALL. Body text could only match for cards the semantic index happened
+ *     to return, so the command silently missed 35-65% of live matching cards
+ *     ("board": 27 matches where the exhaustive scan found 77, 50 of the misses
+ *     live board cards). It never invented a match — it was a strict subset.
+ *   - COST. 62 queries / 7.3s of node time, against 2 queries / 1.1s for the
+ *     `--complete` scan it existed to avoid. Point reads cost ~110ms each here;
+ *     a scan amortizes to ~1.7ms/row.
+ *   - BODIES. 127 of 153 matches came back with `body: ""`, because the
+ *     display-matched cards were returned exactly as read — while the
+ *     `fkanban_search` MCP contract promises every match carries its full body.
+ *
+ * One narrow slug+body scan (413ms) answers the body question for the whole
+ * board, so every match is found and every match is whole.
+ *
+ * The semantic-index candidate path is KEPT, demoted to the fallback for a node
+ * that refuses the scan (no `allowFullScan` capability, or no display indexes
+ * provisioned). On such a node it is the only way to reach a body match at all,
+ * so removing it would cost a real capability in exactly the degraded
+ * configuration that can least afford it. When the scan is available the
+ * fallback does not run — which is every healthy deployment.
+ *
+ * Worth recording why it cannot be the PRIMARY path: every hit it returns must
+ * still pass `cardMatchesQuery`, a literal substring test, so a
+ * semantically-similar card that does not contain the terms is discarded
+ * anyway. It never contributed recall beyond substring matching — it just cost
+ * 50 point reads to not contribute it. Semantic RANKING is a real feature, but
+ * it needs a path that can actually return semantic matches.
+ */
 async function indexedSearchCards(
   opts: SearchOptions,
 ): Promise<{ cards: Card[]; allCards: Card[]; fallbackReason?: string }> {
@@ -166,49 +207,67 @@ async function indexedSearchCards(
   if (opts.board) filter.board = opts.board;
   if (opts.column) filter.column = opts.column;
 
-  const displayRead = await listCardsByFilter(opts.node, opts.cfg, filter, CARD_DISPLAY_FIELDS, {
-    allowFullScanFallback: false,
-  });
+  // Independent reads — the body scan must not sit behind the display read on
+  // the critical path (the mistake run (j) made with the portfolio board read).
+  const [displayRead, bodies] = await Promise.all([
+    listCardsByFilter(opts.node, opts.cfg, filter, CARD_DISPLAY_FIELDS, {
+      allowFullScanFallback: false,
+    }),
+    listCardBodies(opts.node, opts.cfg).catch(() => null),
+  ]);
 
-  let native: { slugs: string[]; saturated: boolean } | null = null;
-  try {
-    native = await nativeIndexCandidateSlugs(opts);
-  } catch {
-    native = null;
-  }
-
-  const scopedDisplay = displayRead.cards.filter(
-    (c) => (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column),
-  );
+  const inScope = (c: Card): boolean =>
+    (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column);
+  const scopedDisplay = displayRead.cards.filter(inScope);
   const statusCards = await listDependencyStatusesForCards(opts.node, opts.cfg, scopedDisplay);
+
   const bySlug = new Map<string, Card>();
   for (const card of scopedDisplay) {
-    if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
+    // `withLoadedBody` is the marker-clearing half of the BODY_OMITTED
+    // contract: a card whose body we genuinely read is no longer "unread".
+    const body = bodies?.get(card.slug);
+    const whole = body === undefined ? card : withLoadedBody(card, body);
+    if (cardMatchesQuery(whole, opts.query)) bySlug.set(whole.slug, whole);
   }
 
-  // Bounded: one full-body Card point-read per native-index hit, and `k` is up
-  // to 50 — wide enough to trip Mini's "too many concurrent reads".
-  const hydrated = await mapWithConcurrency(native?.slugs ?? [], (slug) =>
-    findCard(opts.node, opts.cfg, slug),
-  );
-  for (const card of hydrated) {
-    if (!card) continue;
-    if (opts.board && card.board !== opts.board) continue;
-    if (opts.column && card.column !== opts.column) continue;
-    if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
+  // Fallback only, on either half of the degraded case:
+  //   - the scan was refused, so no card has a body to match against; or
+  //   - the display read could not ENUMERATE the board (no display indexes
+  //     provisioned), so there is no card list for the bodies to attach to —
+  //     slug+body alone cannot render a result.
+  // With both halves healthy the scan has already matched every card this could
+  // reach, so spending up to 50 point reads to re-derive a subset is pure cost.
+  // That is what the pre-fix default path did on EVERY search.
+  let native: { slugs: string[]; saturated: boolean } | null = null;
+  if (bodies === null || scopedDisplay.length === 0) {
+    try {
+      native = await nativeIndexCandidateSlugs(opts);
+    } catch {
+      native = null;
+    }
+    const hydrated = await mapWithConcurrency(native?.slugs ?? [], (slug) =>
+      findCard(opts.node, opts.cfg, slug),
+    );
+    for (const card of hydrated) {
+      if (!card || !inScope(card)) continue;
+      if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
+    }
   }
 
   debugSearchPlan("indexed-candidates", {
     displayCards: scopedDisplay.length,
     displayIndexed: displayRead.indexed,
+    bodiesRead: bodies?.size ?? 0,
+    bodyScanUnavailable: bodies === null,
     nativeCandidates: native?.slugs.length ?? 0,
-    hydratedCandidates: hydrated.filter(Boolean).length,
-    saturated: native?.saturated ?? false,
     fullBodyScan: false,
   });
   return {
     cards: sortCards([...bySlug.values()]),
     allCards: statusCards,
+    // Only the degraded path can be incomplete now: with bodies AND a board
+    // enumeration the scan matches every board card, so a saturated native cap
+    // is no longer a partial answer to report.
     fallbackReason: native?.saturated ? "native-index returned its cap" : undefined,
   };
 }
