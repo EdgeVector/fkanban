@@ -128,9 +128,16 @@ export async function purgeOtherMilestoneCardRows(
 }
 
 /**
- * Upsert thin MilestoneCards row. Empty milestone removes any previous row.
+ * Retire obsolete MilestoneCards tips after a BoardCards write.
+ *
+ * Hot-path membership is **protein-primary**: BoardCards carries the payload;
+ * Mini folds shared field tips onto MilestoneCards under (milestone, sk). The
+ * app only deletes superseded MilestoneCards keys — it must not dual-write the
+ * full payload on every card mutation (see writeCardMembership).
+ *
+ * Heal / `upsertMilestoneCard` still dual-writes when repairing drift.
  */
-export async function upsertMilestoneCard(
+export async function retireMilestoneCardMembership(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
@@ -163,6 +170,40 @@ export async function upsertMilestoneCard(
     if (prevMs !== nextMs) {
       await purgeOtherMilestoneCardRows(node, cfg, prevMs, slug, null);
     }
+    // Do not purge the destination partition here: Mini may have just folded
+    // the new tip onto nextSk; a scan-purge would race that write.
+  }
+  // Brand-new milestone membership: no prior tip to delete. Fold from the
+  // BoardCards write creates the MilestoneCards tip when proteins are bound.
+}
+
+/**
+ * Upsert thin MilestoneCards row (full dual-write). Prefer
+ * {@link retireMilestoneCardMembership} on the hot path; use this for heal /
+ * one-shot backfill when protein fold cannot be assumed.
+ */
+export async function upsertMilestoneCard(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+  previous?: Card | CardSummary | null,
+): Promise<void> {
+  const schemaHash = milestoneCardsHash(cfg);
+  if (!schemaHash) return;
+
+  const nextFields = milestoneCardFieldsFromCard(card);
+  const prevMs = (previous?.milestone ?? "").trim();
+  const nextMs = nextFields ? String(nextFields.milestone) : "";
+  const nextSk = nextFields ? String(nextFields.sk) : "";
+  const slug = card.slug;
+
+  // Lifecycle first (shared with protein-primary path).
+  await retireMilestoneCardMembership(node, cfg, card, previous);
+
+  if (!nextFields) return;
+
+  if (previous && prevMs) {
+    const prevSk = milestoneCardSk(previous.column, previous.position, previous.slug);
     if (prevSk !== nextSk || prevMs !== nextMs) {
       await purgeOtherMilestoneCardRows(node, cfg, nextMs, slug, nextSk);
     }

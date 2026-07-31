@@ -30,6 +30,10 @@ import {
   removeBoardMilestone,
   upsertBoardMilestone,
 } from "./board-milestones.ts";
+import {
+  removeMilestoneCard,
+  retireMilestoneCardMembership,
+} from "./milestone-cards.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
@@ -3492,16 +3496,19 @@ export async function createCardRecord(
 }
 
 /**
- * State the keyed membership row this card should have.
+ * State the keyed membership rows this card should have.
  *
- * Multi-key coherence is the node's job, not ours: LastDB recognises BoardCards
- * and MilestoneCards as one product under two keys, binds their matching fields
- * into proteins on schema load, and folds a write on one key onto the other's
- * tip. fkanban used to drive that itself through the node's protein routes —
- * creating proteins, binding members, ordering folds, and verifying partitions
- * agreed afterwards — which put a storage-layer invariant in application code
- * and made every app that wanted a second key reimplement it. Those routes are
- * gone, and test/no-protein-reach.test.ts keeps them gone.
+ * **Protein-primary multi-key path** (docs/app-developers-multi-key-proteins.md):
+ *
+ * 1. Write **BoardCards** with the full thin payload, including `milestone` and
+ *    `sk`, so Mini can fold shared field tips onto MilestoneCards.
+ * 2. **Retire** obsolete MilestoneCards tips (milestone cleared or sk moved) —
+ *    delete only; do not dual-write the full MilestoneCards payload here.
+ * 3. Never call protein control routes — bind/fold/backfill are the node's job.
+ *
+ * Heal commands may still call `upsertMilestoneCard` to rebuild drift.
+ * test/no-protein-reach.test.ts and test/protein-primary-membership.test.ts
+ * pin this arrangement.
  */
 async function writeCardMembership(
   opts: { cfg: Config; node: NodeClient },
@@ -3510,6 +3517,7 @@ async function writeCardMembership(
   writeOpts: BoardCardWriteOptions = {},
 ): Promise<void> {
   await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
+  await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
 }
 
 export async function updateCardRecord(
@@ -3524,7 +3532,7 @@ export async function updateCardRecord(
   await writeCardMembership(opts, card, previous ?? null);
 }
 
-/** Remove Card + indexes (CardListIndex + BoardCards; Mini folds sibling membership keys). */
+/** Remove Card + BoardCards + MilestoneCards membership (payload indexes only). */
 export async function deleteCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
@@ -3533,6 +3541,7 @@ export async function deleteCardRecord(
   await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
   await patchCardListIndex(opts.node, opts.cfg, card, "remove");
   await removeBoardCard(opts.node, opts.cfg, card);
+  await removeMilestoneCard(opts.node, opts.cfg, card);
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of

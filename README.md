@@ -10,13 +10,33 @@ Development source of truth is LastGit `lastdb:///fkanban`; GitHub
 `EdgeVector/fkanban` is a public read-only mirror for clone/browse. See
 `.lastgit/README.md` before opening review artifacts.
 
-Two schemas, registered under the `fkanban/*` app namespace (so they never
-collide with `fbrain/*` or any other app on a shared daemon):
+Schemas, registered under the `fkanban/*` app namespace (so they never collide
+with `fbrain/*` or any other app on a shared daemon):
 
-- **`fkanban/Card`** — `slug, title, body, board, column, position, assignee, tags, deps, surfaces, created_at, created_by, updated_at, repo, base, kind, block_status, block_reason, north_star, pr_url, branch`
-- **`fkanban/Board`** — `slug, title, body, columns, created_at, updated_at`
+- **`fkanban/Card`** — primary record by `slug` (includes body)
+- **`fkanban/Board`** — board metadata by `slug`
+- **`fkanban/BoardCards`** — thin membership by `board` + `sk` (list/pickup)
+- **`fkanban/MilestoneCards`** — thin reverse membership by `milestone` + `sk`
 
 Default columns: `backlog → todo → doing → done`.
+
+### Multi-key proteins (BoardCards ↔ MilestoneCards)
+
+Hot-path card create/update **writes BoardCards only** for the thin payload
+(including `milestone` and `sk`). LastDB Mini binds BoardCards and MilestoneCards
+as multi-key siblings and **folds** shared field tips onto the milestone
+partition — the app does **not** dual-write MilestoneCards payload on every
+mutation, and does **not** call protein APIs.
+
+On move / milestone clear / delete, the app **retires** obsolete MilestoneCards
+keys (deletes). Heal (`milestone-indexes-heal`) may still full dual-write to
+repair drift.
+
+Shared field descriptions match between the two layouts so field identity can
+align; `layout` stays distinct so partition markers never co-identity.
+
+See fold `docs/app-developers-multi-key-proteins.md` and tests
+`test/protein-primary-membership.test.ts` / `test/no-protein-reach.test.ts`.
 
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/test/run/dogfood + PR workflow and the non-obvious gotchas.
