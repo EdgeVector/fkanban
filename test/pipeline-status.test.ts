@@ -138,7 +138,7 @@ function fakeNode(seed?: {
    */
   hashRangeLayouts?: boolean;
   /** Every filter this node was queried with, in order (request-shape assertions). */
-  filterLog?: Array<{ schemaHash: string; filter?: Record<string, unknown> }>;
+  filterLog?: Array<{ schemaHash: string; filter?: Record<string, unknown>; fields?: string[] }>;
 }): NodeClient {
   const store: Store = new Map();
   const tableFor = (schemaHash: string) => {
@@ -241,8 +241,8 @@ function fakeNode(seed?: {
     async deleteRecord({ schemaHash, keyHash }) {
       tableFor(schemaHash).delete(keyHash);
     },
-    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
-      seed?.filterLog?.push({ schemaHash, filter });
+    async queryAll({ schemaHash, filter, fields }): Promise<QueryResponse> {
+      seed?.filterLog?.push({ schemaHash, filter, fields: fields ? [...fields] : undefined });
       const results = rowsFor(schemaHash, filter);
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
@@ -429,7 +429,7 @@ describe("lastgit log joins are keyed point reads, not partition scans", () => {
   const oid = "a9196fd3ef03ded916c1fe22e02425cb424c5557";
 
   test("fetchCiStatus asks for (repo, status_key) — never the whole partition", async () => {
-    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown> }> = [];
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown>; fields?: string[] }> = [];
     const node = fakeNode({
       hashRangeLayouts: true,
       filterLog,
@@ -464,6 +464,75 @@ describe("lastgit log joins are keyed point reads, not partition scans", () => {
       HashRangeKey: { hash: "fkanban", range: `fkanban:${oid}:ci-required` },
     });
     expect(ciReads[0]!.filter?.HashKey).toBeUndefined();
+    // Light projection: show never renders log_excerpt; do not pull that atom.
+    expect(ciReads[0]!.fields).toEqual([
+      "status_key",
+      "repo",
+      "oid",
+      "context",
+      "state",
+      "updated_at",
+    ]);
+    expect(ciReads[0]!.fields).not.toContain("log_excerpt");
+  });
+
+  test("fetchCiStatus light path caches by status_key within TTL", async () => {
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown> }> = [];
+    const node = fakeNode({
+      hashRangeLayouts: true,
+      filterLog,
+      ci: [
+        {
+          status_key: `fkanban:${oid}:ci-required`,
+          repo: "fkanban",
+          oid,
+          context: "ci-required",
+          state: "success",
+          updated_at: "2026-07-17T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const a = await fetchCiStatus(node, "fkanban", oid, "ci-required");
+    const b = await fetchCiStatus(node, "fkanban", oid, "ci-required");
+    expect(a.state).toBe("success");
+    expect(b.state).toBe("success");
+    const ciReads = filterLog.filter((f) => f.schemaHash === CI_STATUS_SCHEMA);
+    expect(ciReads).toHaveLength(1);
+
+    // Excerpt opt-in must hit the node even when a light cache entry exists.
+    const c = await fetchCiStatus(node, "fkanban", oid, "ci-required", "none", {
+      includeLogExcerpt: true,
+    });
+    expect(c.state).toBe("success");
+    expect(filterLog.filter((f) => f.schemaHash === CI_STATUS_SCHEMA)).toHaveLength(2);
+  });
+
+  test("fetchCiStatus includeLogExcerpt projects log_excerpt", async () => {
+    const filterLog: Array<{ schemaHash: string; filter?: Record<string, unknown>; fields?: string[] }> = [];
+    const node = fakeNode({
+      hashRangeLayouts: true,
+      filterLog,
+      ci: [
+        {
+          status_key: `fkanban:${oid}:ci-required`,
+          repo: "fkanban",
+          oid,
+          context: "ci-required",
+          state: "failure",
+          log_excerpt: "boom",
+          updated_at: "2026-07-17T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const snap = await fetchCiStatus(node, "fkanban", oid, "ci-required", "none", {
+      includeLogExcerpt: true,
+      bypassCache: true,
+    });
+    expect(snap.log_excerpt).toBe("boom");
+    const ciReads = filterLog.filter((f) => f.schemaHash === CI_STATUS_SCHEMA);
+    expect(ciReads[0]!.fields).toContain("log_excerpt");
   });
 
   test("a keyed miss reports missing WITHOUT falling back to a partition scan", async () => {
