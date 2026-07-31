@@ -84,9 +84,19 @@ function fakeNode(opts: {
   rejectUnallowedCardScan?: boolean;
   rejectColumnFilter?: boolean;
   nativeSearchSlugs?: string[];
+  // Extra rows the Card SCAN returns beyond the modelled cards — the live
+  // primary returns more than one row for some slugs, and they disagree.
+  // Appended after the real rows so a last-write-wins reader picks these.
+  extraCardScanRows?: Array<Record<string, unknown>>;
 }): NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[] } {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
-  const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
+  const cardRows = [
+    ...opts.cards.map((c) => ({ fields: cardToFields(c) as Record<string, unknown>, key: { hash: c.slug, range: null } })),
+    ...(opts.extraCardScanRows ?? []).map((fields) => ({
+      fields,
+      key: { hash: String(fields.slug ?? ""), range: null },
+    })),
+  ];
   const boardCardRows = opts.cards.map((c) => ({
     fields: boardCardFieldsFromCard(c),
     key: { hash: c.board, range: null },
@@ -272,8 +282,20 @@ describe("board list — per-board live-card counts", () => {
   });
 });
 
-describe("search — default text path uses indexed/native candidates", () => {
-  test("searchResult defaults to indexed candidates, not the deprecated full Card scan", async () => {
+// The default search path matches against REAL bodies, read in ONE narrow
+// slug+body scan over the approved admin path (`allowFullScan: true`) — the
+// same path `--complete` uses and the sibling test below calls "approved".
+//
+// It used to match a body-free display read and hydrate up to 50 semantic-index
+// candidates with a wide point-read each. Measured on the live primary, that
+// was worse on every axis it traded between: 35-65% of live matching cards
+// silently missed, 62 queries / 7.3s of node time against 2 queries / 1.1s for
+// the scan it avoided, and 127 of 153 matches returned with `body: ""`.
+//
+// So these assert the shape that costs less AND answers correctly: one scan, no
+// per-candidate point reads, and never the DEPRECATED unallowed scan.
+describe("search — default text path matches real bodies via one narrow scan", () => {
+  test("default search uses the approved admin scan, never a deprecated unallowed one", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -290,7 +312,81 @@ describe("search — default text path uses indexed/native candidates", () => {
     const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "feature-ship" });
 
     expect(cards.map((c) => c.slug)).toEqual(["feature-ready"]);
-    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    // `rejectUnallowedCardScan` throws on any unfiltered Card query that did NOT
+    // ask for allowFullScan. Reaching this line at all proves the body scan took
+    // the approved path; assert it explicitly so a future unallowed scan fails
+    // loudly rather than by exception.
+    const unfiltered = node.cardQueries.filter((q) => q.filter === undefined);
+    expect(unfiltered.length).toBeGreaterThan(0);
+    expect(unfiltered.every((q) => q.allowFullScan === true)).toBe(true);
+  });
+
+  test("a body-only match is found — the recall the candidate path silently lost", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "body-only", title: "Unrelated title", body: "the needle is only in this body" }),
+        card({ slug: "other", title: "Other", body: "nothing here" }),
+      ],
+      // No nativeSearchSlugs: the semantic index does NOT surface this card.
+      // Pre-fix, that made it unfindable — body text could only match for cards
+      // some other index happened to return.
+      nativeSearchSlugs: [],
+    });
+
+    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "needle" });
+
+    expect(cards.map((c) => c.slug)).toEqual(["body-only"]);
+  });
+
+  test("a match found on display fields still carries its real body", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [card({ slug: "tagged", title: "Tagged", tags: ["feature-ship"], body: "the real body text" })],
+      nativeSearchSlugs: [],
+    });
+
+    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "feature-ship" });
+
+    // Pre-fix this matched on the body-free display read and was returned
+    // as-is, so it reached the caller with body: "" — 127 of 153 live matches
+    // did — while the `fkanban_search` MCP contract promises a full body.
+    expect(cards.map((c) => c.slug)).toEqual(["tagged"]);
+    expect(cards[0]!.body).toBe("the real body text");
+  });
+
+  test("one body scan replaces the per-candidate point reads, even when the index has hits", async () => {
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: Array.from({ length: 10 }, (_, i) =>
+        card({ slug: `hit-${i}`, title: `Hit ${i}`, body: "needle", position: String(i + 1) }),
+      ),
+      // The semantic index offers candidates; the scan has already answered, so
+      // spending a wide point read per candidate is pure cost.
+      nativeSearchSlugs: Array.from({ length: 10 }, (_, i) => `hit-${i}`),
+    });
+
+    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "needle" });
+
+    expect(cards).toHaveLength(10);
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
+    expect(node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"))).toHaveLength(1);
+  });
+
+  test("a duplicate empty Card row does not erase the body it matches on", async () => {
+    // The live primary returns MORE THAN ONE Card row for some slugs — measured
+    // 47 of 593, of which 33 carry the empty body LAST. Last-write-wins over the
+    // scan therefore threw away the real brief and the card stopped matching.
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [card({ slug: "dupe", title: "Dupe", body: "the needle lives in this body" })],
+      extraCardScanRows: [{ slug: "dupe", body: "" }],
+    });
+
+    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "needle" });
+
+    expect(cards.map((c) => c.slug)).toEqual(["dupe"]);
+    expect(cards[0]!.body).toBe("the needle lives in this body");
   });
 
   test("does not fetch every full card body for a native-index body hit", async () => {
@@ -311,11 +407,18 @@ describe("search — default text path uses indexed/native candidates", () => {
       nativeSearchSlugs: ["body-hit"],
     });
 
-    const out = await searchCmd({ cfg, node, query: "needle" });
+    // Indexed config: the shape every real deployment runs (run (k) confirmed
+    // BoardCards is the index the write path maintains). The no-index config is
+    // the DEGRADED path and has its own test.
+    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle" });
     expect(out).toContain("body-hit");
-    expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"))).toBe(true);
-    const fullScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
-    expect(fullScans).toHaveLength(0);
+    // The body now arrives from one narrow scan rather than a point read per
+    // candidate — cheaper here (~1.7ms/row vs ~110ms/read on the live primary)
+    // and, unlike the candidate path, it cannot miss a card the index skipped.
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey === "body-hit")).toHaveLength(0);
+    const bodyScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
+    expect(bodyScans).toHaveLength(1);
+    expect(bodyScans[0]!.fields).toEqual(["slug", "body"]);
   });
 
   test("--json uses indexed/native candidates by default while returning capped body previews", async () => {
@@ -332,14 +435,16 @@ describe("search — default text path uses indexed/native candidates", () => {
       nativeSearchSlugs: Array.from({ length: 25 }, (_, i) => `body-hit-${i}`),
     });
 
-    const out = await searchCmd({ cfg, node, query: "needle", json: true });
+    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle", json: true });
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(20);
     expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
     expect(parsed[0]!.bodyTruncated).toBe(true);
-    const fullScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
-    expect(fullScans).toHaveLength(0);
-    expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit-0" && q.fields.includes("body"))).toBe(true);
+    // Body previews are a RENDER cap, independent of how bodies were read: one
+    // narrow scan now, not 25 wide point reads.
+    const bodyScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
+    expect(bodyScans).toHaveLength(1);
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
   });
 
   test("--json stays on indexed card reads when the node rejects unallowed Card scans", async () => {
@@ -366,7 +471,11 @@ describe("search — default text path uses indexed/native candidates", () => {
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
 
     expect(parsed.map((c) => c.slug)).toEqual(["feature-ready"]);
-    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    // The DEPRECATED unallowed scan stays forbidden; the approved admin scan
+    // (allowFullScan: true) is how bodies are read.
+    expect(
+      node.cardQueries.filter((q) => q.filter === undefined && q.allowFullScan !== true),
+    ).toHaveLength(0);
   });
 
   test("complete search explicitly opts into the approved admin full-scan path", async () => {
@@ -411,8 +520,15 @@ describe("search — default text path uses indexed/native candidates", () => {
     const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(25);
     expect(parsed[0]!.bodyTruncated).toBe(true);
-    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
-    expect(node.cardQueries.filter((q) => q.allowFullScan)).toHaveLength(0);
+    // The DEPRECATED unallowed scan stays forbidden; the approved admin scan
+    // (allowFullScan: true) is how bodies are read.
+    expect(
+      node.cardQueries.filter((q) => q.filter === undefined && q.allowFullScan !== true),
+    ).toHaveLength(0);
+    // `--all` lifts the ROW cap; it does not change how bodies are read. Still
+    // exactly one narrow scan, still no per-candidate point reads.
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(1);
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
   });
 
   test("search --full-body restores the complete-body JSON surface", async () => {
