@@ -277,10 +277,10 @@ export async function listResult(
       boardSlug,
       allBoards,
     );
-    const cross = others ?? (await listCardsForDisplay(opts.node, opts.cfg));
+    const cross = others ?? (await listCardsForDisplay(opts.node, opts.cfg, { boards: allBoards }));
     footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation());
   }
-  const milestones = opts.groupByMilestone ? (await listMilestones(opts.node, opts.cfg)).filter((milestone) => milestone.board === boardSlug) : undefined;
+  const milestones = opts.groupByMilestone ? (await listMilestones(opts.node, opts.cfg, { boards: allBoards })).filter((milestone) => milestone.board === boardSlug) : undefined;
   const rendered = milestones
     ? renderBoardGroupedByMilestone(resolvedBoard, buildMilestoneCardGroups(cards, milestones), renderOpts)
     : renderBoard(resolvedBoard, cards, renderOpts);

@@ -386,10 +386,8 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   const excludeRepo = new Set(normalizeRepoList(opts.excludeRepo).map((r) => r.toLowerCase()));
   const skipped: PickupClaimSkip[] = [];
 
-  const [cards, boards] = await Promise.all([
-    listCards(opts.node, opts.cfg),
-    listBoards(opts.node, opts.cfg),
-  ]);
+  const boards = await listBoards(opts.node, opts.cfg);
+  const cards = await listCards(opts.node, opts.cfg, { boards });
   const cardsForSelection = await selfHealTargetTodoBlockers({
     cfg: opts.cfg,
     node: opts.node,

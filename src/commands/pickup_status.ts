@@ -19,10 +19,11 @@ export async function pickupStatusResult(opts: PickupStatusOptions): Promise<{
   text: string;
   report: PickupStatusReport;
 }> {
-  const [cards, boards] = await Promise.all([
-    listCards(opts.node, opts.cfg),
-    listBoards(opts.node, opts.cfg),
-  ]);
+  // Boards first, then hand them to listCards — listCards needs the board set
+  // to know which BoardCards partitions to query, so fetching both in parallel
+  // read card_list_index twice for the same answer.
+  const boards = await listBoards(opts.node, opts.cfg);
+  const cards = await listCards(opts.node, opts.cfg, { boards });
   const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight, {
     cfg: opts.cfg,
     node: opts.node,

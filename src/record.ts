@@ -2008,6 +2008,21 @@ export function assertBodyLoaded(card: Card, operation: string): void {
   });
 }
 
+/**
+ * `boards` lets a caller that ALREADY read the board list hand it down instead
+ * of paying `card_list_index HashKey(all_boards)` a second time. Every card list
+ * needs the board set to know which BoardCards partitions to query, so a command
+ * that fetches boards for itself and then calls a list helper reads it twice —
+ * measured at 212ms of pure duplication per read on the live board, on `pickup`,
+ * the fleet's hottest routine.
+ *
+ * Thread it EXPLICITLY; do not replace this with a process-level memo. `kanban
+ * mcp` is a long-lived process, so a cached board list would go stale there and
+ * a newly created board would stay invisible until restart — trading a 212ms
+ * read for a correctness bug.
+ */
+type BoardListOpt = { boards?: Board[] };
+
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
 // Native deletes are hidden by the node before this point.
@@ -2016,7 +2031,7 @@ async function listCardsWithFields(
   cfg: Config,
   fields: string[],
   filter?: QueryFilter,
-  opts: { allowFullScanFallback?: boolean } = {},
+  opts: { allowFullScanFallback?: boolean } & BoardListOpt = {},
 ): Promise<Card[]> {
   // Prefer BoardCards HashRange partitions (hash=board) — Dynamo-style list.
   // Never hydrate body for board-wide lists (that was the N+1 storm). Callers
@@ -2025,7 +2040,7 @@ async function listCardsWithFields(
   if (filter === undefined) {
     // BoardCards first: one partition query per board, thin projection.
     try {
-      const boards = await listBoards(node, cfg);
+      const boards = opts.boards ?? (await listBoards(node, cfg));
       const cardFields = fields.includes("body")
         ? fields.filter((f) => f !== "body")
         : fields;
@@ -2194,12 +2209,16 @@ export const CARD_LIST_FIELDS: string[] = [
   "branch",
 ];
 
-export async function listCards(node: NodeClient, cfg: Config): Promise<Card[]> {
+export async function listCards(
+  node: NodeClient,
+  cfg: Config,
+  opts: BoardListOpt = {},
+): Promise<Card[]> {
   // Thin board list — no bodies (BoardCards / index). Use findCard for one body,
   // or listCardsWithBodies for complete-body search (one admin scan).
   // Prefer CARD_LIST_FIELDS over fieldsFor("card") so BoardCards never projects
   // for body (not stored) and drops write-only / rare list fields.
-  return listCardsWithFields(node, cfg, CARD_LIST_FIELDS);
+  return listCardsWithFields(node, cfg, CARD_LIST_FIELDS, undefined, opts);
 }
 
 /**
@@ -2249,8 +2268,12 @@ export async function listCardsWithBodies(
  * A card the scan doesn't cover (BoardCards/Card drift) is point-read rather
  * than handed back as a false empty — the whole failure this guards against.
  */
-export async function listBoardCardsWithBodies(node: NodeClient, cfg: Config): Promise<Card[]> {
-  const cards = await listCards(node, cfg);
+export async function listBoardCardsWithBodies(
+  node: NodeClient,
+  cfg: Config,
+  opts: BoardListOpt = {},
+): Promise<Card[]> {
+  const cards = await listCards(node, cfg, opts);
   if (cards.length === 0) return cards;
   if (!cards.some(isBodyOmitted)) return cards;
 
@@ -2708,8 +2731,12 @@ export const CARD_DISPLAY_FIELDS = [
 // (notably `body`) come back as "" on the Card. Enough for the text board render,
 // the board/column/tag/assignee filters, and the dep/blocked fan-out — but NOT
 // for any path that must show a card's body. Mirrors listCardStatuses.
-export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promise<Card[]> {
-  return listCardsWithFields(node, cfg, CARD_DISPLAY_FIELDS);
+export async function listCardsForDisplay(
+  node: NodeClient,
+  cfg: Config,
+  opts: BoardListOpt = {},
+): Promise<Card[]> {
+  return listCardsWithFields(node, cfg, CARD_DISPLAY_FIELDS, undefined, opts);
 }
 
 /**
@@ -3126,8 +3153,12 @@ export async function listMilestonesOnBoard(node: NodeClient, cfg: Config, board
  * one HashRange partition per board. Falls back to Milestone full-scan (+ sparse
  * HashKey hydrate) only when the index is unbound or every partition query fails.
  */
-export async function listMilestones(node: NodeClient, cfg: Config): Promise<Milestone[]> {
-  const boards = await listBoards(node, cfg);
+export async function listMilestones(
+  node: NodeClient,
+  cfg: Config,
+  opts: BoardListOpt = {},
+): Promise<Milestone[]> {
+  const boards = opts.boards ?? (await listBoards(node, cfg));
   const fromIndex = await listAllBoardMilestones(node, cfg, boards);
   if (fromIndex !== null) return sortMilestones(fromIndex);
 

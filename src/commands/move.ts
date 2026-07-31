@@ -77,10 +77,8 @@ async function promoteUnblockedBacklogDependents(opts: {
   dependency: Card;
 }): Promise<string[]> {
   const dependencySlug = opts.dependency.slug;
-  const [cards, boards] = await Promise.all([
-    listCards(opts.node, opts.cfg),
-    listBoards(opts.node, opts.cfg),
-  ]);
+  const boards = await listBoards(opts.node, opts.cfg);
+  const cards = await listCards(opts.node, opts.cfg, { boards });
   const boardTerminal = boardTerminalMap(boards);
   const cardsWithMovedDependency = cards.map((c) => c.slug === dependencySlug ? opts.dependency : c);
   const candidates = cardsWithMovedDependency.filter((c) =>

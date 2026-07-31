@@ -92,7 +92,7 @@ export async function boardListResult(opts: {
   // count-less board list (cardCount=null) rather than failing the command.
   let countByBoard: Map<string, number> | null = null;
   try {
-    const allCards = await listCardsForDisplay(opts.node, opts.cfg);
+    const allCards = await listCardsForDisplay(opts.node, opts.cfg, { boards: boardList });
     countByBoard = new Map<string, number>();
     for (const c of allCards) {
       countByBoard.set(c.board, (countByBoard.get(c.board) ?? 0) + 1);

@@ -145,8 +145,8 @@ export async function pickupExplainResult(opts: {
     });
   }
 
-  let cards = await listCards(opts.node, opts.cfg);
   const boards = await listBoards(opts.node, opts.cfg);
+  let cards = await listCards(opts.node, opts.cfg, { boards });
   cards = await listDependencyStatusesForCards(opts.node, opts.cfg, cards);
 
   // The peer set stays thin — dep status, overlap and lane all read real
