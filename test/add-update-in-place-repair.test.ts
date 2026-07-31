@@ -6,7 +6,8 @@
 // See incident-kanban-card-briefs-lost-20260730.
 
 import { describe, expect, test } from "bun:test";
-import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
+import type { NodeClient } from "../src/client.ts";
+import { fakeNode } from "./fake-node.ts";
 import type { Config } from "../src/config.ts";
 import { boardToFields, findCard, nowIso } from "../src/record.ts";
 import { addCmd } from "../src/commands/add.ts";
@@ -26,50 +27,6 @@ const cfg: Config = {
 const BRIEF = "## GOAL\nship the thing\n## END STATE\nthe thing is shipped\n";
 const RESTORED = "## GOAL\nrestored from backup\n## END STATE\nbrief is back on the card\n";
 
-function fakeNode(): NodeClient {
-  const store = new Map<string, Map<string, Record<string, unknown>>>();
-  const table = (hash: string) => {
-    let value = store.get(hash);
-    if (!value) {
-      value = new Map();
-      store.set(hash, value);
-    }
-    return value;
-  };
-  const rows = (hash: string, filter?: QueryFilter): QueryRow[] => {
-    const source = table(hash);
-    const entries = filter?.HashKey
-      ? (source.has(filter.HashKey) ? [[filter.HashKey, source.get(filter.HashKey)!] as const] : [])
-      : [...source.entries()];
-    return entries.map(([key, fields]) => ({ fields, key: { hash: key, range: null } }));
-  };
-  const notImplemented = async (): Promise<never> => {
-    throw new Error("not implemented");
-  };
-  return {
-    baseUrl: cfg.nodeUrl,
-    userHash: cfg.userHash,
-    autoIdentity: notImplemented,
-    bootstrap: notImplemented,
-    loadSchemas: notImplemented,
-    listSchemas: notImplemented,
-    async createRecord({ schemaHash, keyHash, fields }) {
-      table(schemaHash).set(keyHash, fields);
-    },
-    async updateRecord({ schemaHash, keyHash, fields }) {
-      table(schemaHash).set(keyHash, { ...table(schemaHash).get(keyHash), ...fields });
-    },
-    async deleteRecord({ schemaHash, keyHash }) {
-      table(schemaHash).delete(keyHash);
-    },
-    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
-      const results = rows(schemaHash, filter);
-      return { ok: true, results, returned_count: results.length, total_count: results.length };
-    },
-    rawCall: notImplemented,
-    nodeTransport: () => ({ transport: "unavailable" as const }),
-  };
-}
 
 async function seedBoard(node: NodeClient): Promise<void> {
   const now = nowIso();
