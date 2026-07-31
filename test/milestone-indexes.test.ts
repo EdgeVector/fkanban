@@ -447,6 +447,154 @@ describe("milestone HashRange indexes", () => {
     expect(detail.detail.ready.map((card) => card.slug)).toEqual(["board-only-pr"]);
   });
 
+  // `milestone reconcile` unions the MilestoneCards partition with board
+  // membership so a lagging index cannot hide a live child. That union is a
+  // DISCOVERY mechanism, and for a while it was also being read as evidence of
+  // drift: staleness was `rows.length !== 1` over the merged list, so every
+  // correctly-indexed card (present in both) looked stale and was rewritten,
+  // while every card missing from the index (present in one) looked clean and
+  // was skipped. Measured on the live primary via
+  // scripts/probe-milestone-reconcile-shape.ts: 47 needless writes, 0 real
+  // drift, 22 missing rows never repaired.
+  async function seedMilestoneWithCards(node: FakeNode, milestone: string, slugs: string[]): Promise<void> {
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: milestone,
+      title: `Outcome ${milestone}`,
+      state: "active",
+      northStar: `ns-${milestone}`,
+      driver: "driver",
+    });
+    for (const slug of slugs) {
+      await addCmd({
+        cfg,
+        node,
+        slug,
+        title: `PR ${slug}`,
+        milestone,
+        northStar: `ns-${milestone}`,
+        repo: "EdgeVector/fkanban",
+        base: "main",
+        kind: "pr",
+        column: "todo",
+        body: `Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork ${slug}.\n\n## END STATE\nDone.\n`,
+      });
+    }
+  }
+
+  async function dropIndexRow(node: FakeNode, milestone: string, slug: string): Promise<void> {
+    const card = await findCard(node, cfg, slug);
+    const fields = milestoneCardFieldsFromCard(card!);
+    await node.deleteRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: milestone,
+      rangeKey: String(fields!.sk),
+    });
+  }
+
+  test("reconcile on a converged milestone writes nothing", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-converged", ["conv-a", "conv-b", "conv-c"]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-converged"))?.map((c) => c.slug).sort())
+      .toEqual(["conv-a", "conv-b", "conv-c"]);
+
+    node.directMilestoneCardMutations.length = 0;
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-converged" });
+
+    expect(rec.children.map((c) => c.slug).sort()).toEqual(["conv-a", "conv-b", "conv-c"]);
+    // The load-bearing assertion: every child is indexed and matches truth, so
+    // there is nothing to repair. Before the fix this was three updates.
+    expect(node.directMilestoneCardMutations).toEqual([]);
+  });
+
+  test("reconcile writes back a child that is missing from the index", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-missing", ["miss-a", "miss-b"]);
+    await dropIndexRow(node, "ms-missing", "miss-a");
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-missing"))?.map((c) => c.slug)).toEqual(["miss-b"]);
+
+    node.directMilestoneCardMutations.length = 0;
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-missing" });
+
+    expect(rec.children.map((c) => c.slug).sort()).toEqual(["miss-a", "miss-b"]);
+    // Repaired, not merely reported. Before the fix the board-only row read as
+    // a single clean row and reconcile left the index short.
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-missing"))?.map((c) => c.slug).sort())
+      .toEqual(["miss-a", "miss-b"]);
+    expect(node.directMilestoneCardMutations).toContain("update");
+  });
+
+  test("reconcile repairs only the missing child, not its converged sibling", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-mixed", ["mix-indexed", "mix-missing"]);
+    await dropIndexRow(node, "ms-mixed", "mix-missing");
+
+    node.directMilestoneCardMutations.length = 0;
+    await milestoneReconcileResult({ cfg, node, slug: "ms-mixed" });
+
+    // Exactly one row was written, and it was the missing one. The converged
+    // sibling is present in BOTH the index and board membership; that
+    // duplication is the union working, not drift, and it must not cost a
+    // write. Asserting the write COUNT alone is not enough — the pre-fix code
+    // also issued exactly one upsert here, just for the wrong card.
+    expect(node.directMilestoneCardMutations.filter((m) => m !== "delete")).toEqual(["update"]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-mixed"))?.map((c) => c.slug).sort())
+      .toEqual(["mix-indexed", "mix-missing"]);
+  });
+
+  test("reconcile still rewrites an index row that disagrees with Card truth", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-stale", ["stale-pr"]);
+    const card = await findCard(node, cfg, "stale-pr");
+    const fields = milestoneCardFieldsFromCard(card!);
+    await node.updateRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-stale",
+      rangeKey: String(fields!.sk),
+      fields: { ...fields, title: "Stale title from an older write" },
+    });
+
+    node.directMilestoneCardMutations.length = 0;
+    await milestoneReconcileResult({ cfg, node, slug: "ms-stale" });
+
+    const rows = await listMilestoneCardsPartition(node, cfg, "ms-stale");
+    expect(rows?.map((c) => c.title)).toEqual(["PR stale-pr"]);
+    expect(node.directMilestoneCardMutations).toContain("update");
+  });
+
+  test("reconcile retires an index row whose card no longer exists", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-orphan", ["orphan-pr", "live-pr"]);
+    // Remove the Card primary and the board row, then put the index row back:
+    // deleting the board row folds the index row away too, and the state under
+    // test is an index row that OUTLIVED its card.
+    const orphan = await findCard(node, cfg, "orphan-pr");
+    const orphanFields = milestoneCardFieldsFromCard(orphan!);
+    await node.deleteRecord({ schemaHash: cfg.schemaHashes.card!, keyHash: "orphan-pr" });
+    await node.deleteRecord({
+      schemaHash: cfg.schemaHashes.board_cards!,
+      keyHash: "default",
+      rangeKey: String(orphanFields!.sk),
+    });
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-orphan",
+      rangeKey: String(orphanFields!.sk),
+      fields: orphanFields!,
+    });
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-orphan"))?.map((c) => c.slug).sort())
+      .toEqual(["live-pr", "orphan-pr"]);
+
+    node.directMilestoneCardMutations.length = 0;
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-orphan" });
+
+    expect(rec.children.map((c) => c.slug)).toEqual(["live-pr"]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-orphan"))?.map((c) => c.slug)).toEqual(["live-pr"]);
+    expect(node.directMilestoneCardMutations).toContain("delete");
+  });
+
   test("gap-report sees north_star via BoardMilestones dual-write", async () => {
     const node = fakeNode();
     await seedBoard(node);
