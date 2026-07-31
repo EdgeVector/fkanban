@@ -517,10 +517,35 @@ function renderMilestoneReconcile(result: MilestoneReconcileResult): string {
 }
 
 async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ milestones: Milestone[]; cards: Card[]; reconciled: MilestoneReconcileResult[] }> {
+  // ONE board list, then the milestone list and the card partitions run
+  // CONCURRENTLY.
+  //
+  // `listBoards` used to run twice — once inside `listMilestones`, once here —
+  // and the card read then waited on the milestone list purely to learn which
+  // boards to ask for. That serialised boards → milestones → cards, and the
+  // card partition is the single most expensive read in the command (789ms
+  // measured), so it landed squarely on the critical path: this command got
+  // 15-20% SLOWER in wall clock when it started reading the board, even as its
+  // node time fell 32-40%.
+  //
+  // `listBoards` already names every board, so which partitions to FETCH is
+  // knowable before the milestone list comes back — the milestone list only
+  // decides which rows to KEEP. Fetching them in parallel with it takes the
+  // 789ms off the critical path entirely.
+  //
+  // The cost is honest and bounded: without a `--board` filter this reads the
+  // card partition of every board, including boards no milestone lives on. That
+  // is one keyed partition read each (on this fleet: `default` 318 cards,
+  // `agent-dogfood-scratch` 53), against the 31 keyed reads this path used to
+  // issue. With `--board` there is no speculation at all.
+  const boards = await listBoards(opts.node, opts.cfg);
+  const boardSlugs = opts.board ? [opts.board] : boards.map((board) => board.slug);
+  const boardCardsPending = Promise.all(boardSlugs.map(async (slug): Promise<[string, Card[]]> =>
+    [slug, await listCardsOnBoard(opts.node, opts.cfg, slug)]));
+
   const milestones = opts.board
     ? await listMilestonesOnBoard(opts.node, opts.cfg, opts.board)
-    : await listMilestones(opts.node, opts.cfg);
-  const boards = await listBoards(opts.node, opts.cfg);
+    : await listMilestones(opts.node, opts.cfg, { boards });
   // Membership comes from the board, not from MilestoneCards.
   //
   // MilestoneCards is written by NOTHING in the card mutation path — not `add`,
@@ -560,11 +585,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   const proofsPending = Promise.all(proofSlugs.map(async (slug): Promise<[string, Card | null]> =>
     [slug, await findProofCard(opts.node, opts.cfg, slug)]));
 
-  const boardSlugs = [...new Set(milestones.map((milestone) => milestone.board))];
-  const boardCards = new Map<string, Card[]>(
-    await Promise.all(boardSlugs.map(async (slug): Promise<[string, Card[]]> =>
-      [slug, await listCardsOnBoard(opts.node, opts.cfg, slug)])),
-  );
+  const boardCards = new Map<string, Card[]>(await boardCardsPending);
   const childLists = milestones.map((milestone) =>
     (boardCards.get(milestone.board) ?? []).filter((card) => card.milestone === milestone.slug));
   const cards = childLists.flat();
