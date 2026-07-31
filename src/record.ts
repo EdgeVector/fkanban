@@ -2029,6 +2029,102 @@ export function assertBodyLoaded(card: Card, operation: string): void {
  */
 type BoardListOpt = { boards?: Board[] };
 
+/**
+ * Fan-out width for the membership seed.
+ *
+ * Narrower than {@link POINT_READ_CONCURRENCY} because each item is a
+ * read-then-WRITE, not a point read: this runs only when the index is missing,
+ * and a repair that saturates the node is how a cold start becomes an outage.
+ */
+const BOARD_CARDS_SEED_CONCURRENCY = 3;
+
+/**
+ * Rebuild BoardCards membership from Card truth, after the scan fallback in
+ * {@link listCardsWithFields} found no usable index.
+ *
+ * ## Why this is guarded on `boardCardsThrew`
+ *
+ * The caller reaches its scan fallback for two very different reasons, and the
+ * `catch` that used to sit around the BoardCards query erased the difference:
+ *
+ *   - the index is genuinely ABSENT (fresh node, pre-backfill) — seeding is the
+ *     whole point, or
+ *   - the partition read THREW.
+ *
+ * On this node the ordinary cause of the second is `service_timeout` / "too
+ * many concurrent reads" — the node saying it is already shedding load. Reading
+ * that as "the index must be missing, rebuild it" made a plain `kanban list`
+ * answer backpressure with hundreds more operations, which is precisely
+ * backwards. A failed read is not evidence of an empty index — the same rule
+ * the body and board scans already follow: **only a read that SUCCEEDED may
+ * establish that something is absent.**
+ *
+ * ## Why it is not a serial loop any more
+ *
+ * As written (`for (const c of cards) await upsertBoardCard(node, cfg, c)`)
+ * every card paid two full round trips — the wide keyed probe, and, because no
+ * `previous` was passed, a whole-partition orphan scan. Measured on the live
+ * primary 2026-07-31 (`scripts/probe-seed-storm-cost.ts`): 654ms + 657ms per
+ * card over 331 live cards = **~7.2 minutes and ~1000 operations**, serial,
+ * inside a command the user typed as `list`, silent the entire time.
+ *
+ * `skipOrphanPurge` is correct here for the same reason `board-cards-heal`
+ * passes it: this writes every card's current truth, so a per-card partition
+ * rescan can only rediscover drift that the same loop is already overwriting.
+ * Residual multi-orphan drift is `groom board-cards-heal`'s job — reads stay
+ * correct meanwhile because `listAllBoardCards` dedupes by slug through
+ * `preferFresherBoardCard`.
+ *
+ * ## Why the try/catch moved inside
+ *
+ * It was outside the loop, so the FIRST card that failed to write abandoned the
+ * seed for every card after it — under exactly the conditions that trigger the
+ * seed. It paid the storm and did not finish the repair, silently. Per-item now.
+ *
+ * Deduped by slug, keeping the richest row: the Card scan returns more than one
+ * row for some slugs (see {@link listCardsWithBodies}), and the extra row
+ * carries only `slug` — no column, no position. Seeding from it would write a
+ * junk membership sk for a card that already has a real one, i.e. the repair
+ * would corrupt the index it exists to rebuild.
+ */
+async function seedBoardCards(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+  boardCardsThrew: boolean,
+): Promise<void> {
+  if (boardCardsThrew) return;
+  const bySlug = new Map<string, Card>();
+  for (const card of cards) {
+    if (!card.slug) continue;
+    const seen = bySlug.get(card.slug);
+    if (seen === undefined || cardFieldWeight(seen) < cardFieldWeight(card)) {
+      bySlug.set(card.slug, card);
+    }
+  }
+  await mapWithConcurrency(
+    [...bySlug.values()],
+    async (card) => {
+      try {
+        await upsertBoardCard(node, cfg, card, null, { skipOrphanPurge: true });
+      } catch {
+        // Best-effort PER CARD. One card that will not seed must not abandon
+        // the rest of the repair.
+      }
+    },
+    BOARD_CARDS_SEED_CONCURRENCY,
+  );
+}
+
+/**
+ * How much membership truth a scanned row actually carries, for picking between
+ * duplicate rows of one slug. A row with no `column` cannot state where the
+ * card lives, so it must never displace one that can.
+ */
+function cardFieldWeight(card: Card): number {
+  return (card.column ? 2 : 0) + (card.position ? 1 : 0) + (card.board ? 1 : 0);
+}
+
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
 // Native deletes are hidden by the node before this point.
@@ -2044,6 +2140,9 @@ async function listCardsWithFields(
   // that need body must findCard/show by slug.
   // HashKey filters still go to the Card schema (point reads).
   if (filter === undefined) {
+    // Did the BoardCards read FAIL, or was the index genuinely absent? The
+    // seed below is only allowed to run for the second — see `seedBoardCards`.
+    let boardCardsThrew = false;
     // BoardCards first: one partition query per board, thin projection.
     try {
       const boards = opts.boards ?? (await listBoards(node, cfg));
@@ -2074,7 +2173,10 @@ async function listCardsWithFields(
         // indexed has data but BoardCards empty → legacy path below
       }
     } catch {
-      // fall through
+      // The partition read failed. `list` still has to answer, so we fall
+      // through to the scan — but the failure is recorded, because it is NOT
+      // evidence that the index needs rebuilding.
+      boardCardsThrew = true;
     }
 
     const indexed = await readCardListIndex(node, cfg);
@@ -2117,11 +2219,7 @@ async function listCardsWithFields(
     } catch {
       // best-effort seed; list still returns
     }
-    try {
-      for (const c of cards) await upsertBoardCard(node, cfg, c);
-    } catch {
-      // best-effort BoardCards seed
-    }
+    await seedBoardCards(node, cfg, cards, boardCardsThrew);
     return cards;
   }
 
