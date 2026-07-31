@@ -5,10 +5,11 @@ import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, miles
 import { addCmd } from "../src/commands/add.ts";
 import {
   boardToFields,
+  findCard,
   listMilestones,
   nowIso,
 } from "../src/record.ts";
-import { listMilestoneCardsPartition } from "../src/milestone-cards.ts";
+import { listMilestoneCardsPartition, milestoneCardFieldsFromCard } from "../src/milestone-cards.ts";
 import { listBoardMilestonesPartition } from "../src/board-milestones.ts";
 import { DEFAULT_COLUMNS, MILESTONE_CARDS_LAYOUT } from "../src/schemas.ts";
 
@@ -300,6 +301,99 @@ describe("milestone HashRange indexes", () => {
     const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-b" });
     expect(rec.children.map((c) => c.slug)).toContain("pr-b");
     expect(rec.ready.map((c) => c.slug)).toContain("pr-b");
+  });
+
+  test("milestone detail dedupes stale membership rows against Card truth", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-drift",
+      title: "Drift outcome",
+      state: "active",
+      northStar: "ns-drift",
+      driver: "driver",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "drift-pr",
+      title: "Current PR title",
+      milestone: "ms-drift",
+      northStar: "ns-drift",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nCurrent child.\n\n## END STATE\nDone.\n",
+    });
+
+    const current = await findCard(node, cfg, "drift-pr");
+    expect(current).not.toBeNull();
+    const staleFields = milestoneCardFieldsFromCard({
+      ...current!,
+      title: "Stale PR title",
+      column: "doing",
+      position: "1",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    expect(staleFields).not.toBeNull();
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-drift",
+      rangeKey: String(staleFields!.sk),
+      fields: staleFields!,
+    });
+
+    const detail = await milestoneDetailResult({ cfg, node, slug: "ms-drift" });
+    expect(detail.detail.children).toEqual([
+      { slug: "drift-pr", title: "Current PR title", column: "done", blocked: false, blockedBy: [] },
+    ]);
+    expect(detail.detail.columns.doing ?? []).toEqual([]);
+    expect(detail.detail.columns.done?.map((card) => card.slug)).toEqual(["drift-pr"]);
+  });
+
+  test("milestone detail includes current board membership when milestone partition lags", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-board-only",
+      title: "Board-only outcome",
+      state: "active",
+      northStar: "ns-board-only",
+      driver: "driver",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "board-only-pr",
+      title: "Board-only PR",
+      milestone: "ms-board-only",
+      northStar: "ns-board-only",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nBoard child.\n\n## END STATE\nDone.\n",
+    });
+
+    const current = await findCard(node, cfg, "board-only-pr");
+    expect(current).not.toBeNull();
+    const fields = milestoneCardFieldsFromCard(current!);
+    expect(fields).not.toBeNull();
+    await node.deleteRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-board-only",
+      rangeKey: String(fields!.sk),
+    });
+
+    expect(await listMilestoneCardsPartition(node, cfg, "ms-board-only")).toEqual([]);
+    const detail = await milestoneDetailResult({ cfg, node, slug: "ms-board-only" });
+    expect(detail.detail.children.map((card) => card.slug)).toEqual(["board-only-pr"]);
+    expect(detail.detail.ready.map((card) => card.slug)).toEqual(["board-only-pr"]);
   });
 
   test("gap-report sees north_star via BoardMilestones dual-write", async () => {
