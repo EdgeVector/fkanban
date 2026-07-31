@@ -60,6 +60,45 @@ export type MilestoneReconcileResult = {
   warnings: MilestoneWarning[];
 };
 
+/**
+ * What the MilestoneCards heal-on-read classified, and how much of it was
+ * actually written.
+ *
+ * `upserts`/`removals` are the CLASSIFICATION — what drift exists — and are
+ * reported whether or not anything was issued. `issued` and `deferred` describe
+ * what this invocation did about it. That split is the point: it lets a caller
+ * ask "what would you repair?" without repairing it.
+ */
+export type MilestoneRepairPlan = {
+  /** Whether repair writes were issued at all (false under dry-run). */
+  applied: boolean;
+  /** Index rows needing a write, classified. */
+  upserts: number;
+  /** Index rows needing retirement, classified. */
+  removals: number;
+  /** Repairs actually issued this run. */
+  issued: number;
+  /** Classified but not issued — dry-run, or the budget ran out. */
+  deferred: number;
+  /** Repair budget in force; null when unlimited. */
+  budget: number | null;
+};
+
+/**
+ * Default cap on repair writes issued by one `milestone reconcile`.
+ *
+ * A MilestoneCards mutation costs 2.4-8.3s idle on the primary and ~17s under
+ * load, so an unbounded repair loop makes the command's worst case unbounded in
+ * the drift — a 22-row gap measured 6m28s. Reconcile is convergent and
+ * idempotent, so stopping early is safe and every run makes strict progress;
+ * capping it trades "one command converges anything" for "no command runs for
+ * an unbounded time", and reports the remainder either way.
+ *
+ * 25 is set just above the largest real drift observed on this fleet (22 rows),
+ * so the ordinary case still converges in a single invocation.
+ */
+export const DEFAULT_MILESTONE_REPAIR_BUDGET = 25;
+
 export type MilestonePortfolioEntry = {
   slug: string;
   title: string;
@@ -413,7 +452,8 @@ async function reconcileMilestoneCardChildren(
   milestone: Milestone,
   indexRows: Card[],
   boardRows: Card[],
-): Promise<Card[]> {
+  repair: { apply: boolean; budget: number | null },
+): Promise<{ children: Card[]; repairs: MilestoneRepairPlan }> {
   const rowsBySlug = new Map<string, Card[]>();
   for (const row of indexRows) {
     const rows = rowsBySlug.get(row.slug) ?? [];
@@ -455,28 +495,75 @@ async function reconcileMilestoneCardChildren(
     out.push(truth);
   });
 
-  for (const row of removals) {
-    await removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined);
-  }
-  for (const { truth, previous } of upserts) {
-    await upsertMilestoneCard(opts.node, opts.cfg, truth, previous).catch(() => undefined);
+  //
+  // Both are bounded by ONE shared budget: they are the same scarce thing (a
+  // write on the shared primary), so spending it on removals first and then
+  // reporting the upserts as deferred is the honest accounting.
+  let issued = 0;
+  const exhausted = () => repair.budget !== null && issued >= repair.budget;
+  if (repair.apply) {
+    for (const row of removals) {
+      if (exhausted()) break;
+      await removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined);
+      issued++;
+    }
+    for (const { truth, previous } of upserts) {
+      if (exhausted()) break;
+      await upsertMilestoneCard(opts.node, opts.cfg, truth, previous).catch(() => undefined);
+      issued++;
+    }
   }
 
-  return out.sort((a, b) =>
-    milestoneCardSk(a.column, a.position, a.slug).localeCompare(milestoneCardSk(b.column, b.position, b.slug)),
-  );
+  // `children` is built from `truth` — the freshly-read Card records — never
+  // from the index rows, so it is byte-identical whether or not the repairs
+  // above were issued. That is what makes dry-run safe for a read command:
+  // skipping the writes changes what FUTURE reads cost, not this answer.
+  return {
+    children: out.sort((a, b) =>
+      milestoneCardSk(a.column, a.position, a.slug).localeCompare(milestoneCardSk(b.column, b.position, b.slug)),
+    ),
+    repairs: {
+      applied: repair.apply,
+      upserts: upserts.length,
+      removals: removals.length,
+      issued,
+      deferred: removals.length + upserts.length - issued,
+      budget: repair.budget,
+    },
+  };
 }
 
-export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<MilestoneReconcileResult & { text: string }> {
+export async function milestoneReconcileResult(opts: {
+  cfg: Config;
+  node: NodeClient;
+  slug: string;
+  /**
+   * Issue the repair writes. Defaults TRUE — `reconcile` is a repair verb and
+   * heal-on-read is its job. Read commands (`detail`) pass false so that
+   * asking to LOOK at a milestone cannot write to the shared primary.
+   */
+  apply?: boolean;
+  /** Cap on repair writes; null = unlimited. Defaults to the budget above. */
+  maxRepairs?: number | null;
+}): Promise<MilestoneReconcileResult & { text: string; repairs: MilestoneRepairPlan }> {
+  const apply = opts.apply ?? true;
+  const budget = opts.maxRepairs === undefined ? DEFAULT_MILESTONE_REPAIR_BUDGET : opts.maxRepairs;
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
   // Prefer keyed partitions, but union MilestoneCards with current board
   // membership so a lagging/missing milestone-keyed fold cannot hide a live
   // Card whose board row already carries the milestone link.
   const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
   const fromBoard = (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
-  const children = fromIndex !== null
-    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, fromBoard)
-    : fromBoard;
+  const reconciled = fromIndex !== null
+    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, fromBoard, { apply, budget })
+    : {
+      // No MilestoneCards partition to reconcile against: membership came
+      // straight from the board, so nothing was classified and nothing is
+      // deferred — not "0 repairs because we chose to skip them".
+      children: fromBoard,
+      repairs: { applied: apply, upserts: 0, removals: 0, issued: 0, deferred: 0, budget } satisfies MilestoneRepairPlan,
+    };
+  const children = reconciled.children;
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
   const boards = await listBoards(opts.node, opts.cfg);
   const proofCard = milestone.proof_card ? await findProofCard(opts.node, opts.cfg, milestone.proof_card) : null;
@@ -485,7 +572,7 @@ export async function milestoneReconcileResult(opts: { cfg: Config; node: NodeCl
   const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
     && (await cardExists(opts.node, opts.cfg, milestone.proof_card!));
   const result = milestoneReconcileFromSnapshot(milestone, children, statuses, boards, proofCard, proofCardSparse);
-  return { ...result, text: renderMilestoneReconcile(result) };
+  return { ...result, repairs: reconciled.repairs, text: renderMilestoneReconcile(result, reconciled.repairs) };
 }
 
 export function milestoneReconcileFromSnapshot(
@@ -550,11 +637,34 @@ export function milestoneReconcileFromSnapshot(
   return { milestone, children: childStatuses, ready, proof, warnings };
 }
 
-function renderMilestoneReconcile(result: MilestoneReconcileResult): string {
+/**
+ * Render the index-repair line, or nothing at all when the index is converged.
+ *
+ * Silence is the common case and the useful default — a converged milestone
+ * classifies zero repairs, and a line saying so on every reconcile would train
+ * the reader to skip the line that matters. Deferred work always names the
+ * command that finishes it, because a report of drift the reader cannot act on
+ * is just noise.
+ */
+function renderRepairPlan(slug: string, repairs: MilestoneRepairPlan): string[] {
+  const classified = repairs.upserts + repairs.removals;
+  if (classified === 0) return [];
+  const shape = `${repairs.upserts} to write, ${repairs.removals} to retire`;
+  if (!repairs.applied) {
+    return [`index drift: ${classified} row(s) need repair (${shape}) — run \`kanban milestone reconcile ${slug}\` to fix`];
+  }
+  if (repairs.deferred > 0) {
+    return [`index repair: ${repairs.issued} of ${classified} row(s) written (${shape}); ${repairs.deferred} deferred by --max-repairs ${repairs.budget} — run \`kanban milestone reconcile ${slug}\` again to continue`];
+  }
+  return [`index repair: ${repairs.issued} row(s) written (${shape})`];
+}
+
+function renderMilestoneReconcile(result: MilestoneReconcileResult, repairs?: MilestoneRepairPlan): string {
   return [
     `${result.milestone.title} (${result.milestone.slug}) — ${result.milestone.state}`,
     `ready frontier: ${result.ready.length ? result.ready.map((card) => card.slug).join(", ") : "—"}`,
     `proof: ${result.proof ? `${result.proof.slug} · ${result.proof.terminal ? "terminal" : "not terminal"} · ${result.proof.passingEvidence ? "PASS" : "no PASS"}` : "—"}`,
+    ...(repairs ? renderRepairPlan(result.milestone.slug, repairs) : []),
     ...(result.warnings.length ? ["warnings:", ...result.warnings.map((warning) => `- ${warning.code}: ${warning.message} ${warning.hint}`)] : ["warnings: none"]),
   ].join("\n");
 }
@@ -679,12 +789,26 @@ export async function milestonePortfolioResult(opts: { cfg: Config; node: NodeCl
   return { entries, text };
 }
 
-export async function milestoneDetailResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{ detail: MilestoneReconcileResult & { columns: Record<string, MilestoneChildStatus[]> }; text: string }> {
-  const result = await milestoneReconcileResult(opts);
+/**
+ * `detail` LOOKS at a milestone; it does not write to one.
+ *
+ * It shares reconcile's snapshot path, which repairs MilestoneCards as a side
+ * effect — so `detail` on a drifted milestone used to issue one write per
+ * missing row on the shared primary, ~17s each under load. A 22-row gap made a
+ * `detail` take six minutes, and `fkanban_milestone_detail` advertises
+ * `readOnlyHint: true` to every MCP host while doing it.
+ *
+ * `apply: false` costs the answer nothing: `children` is built from freshly-read
+ * Card truth, not from the index rows, so the repair writes cannot change a
+ * single byte of this output. Drift is reported instead, naming the command
+ * that fixes it.
+ */
+export async function milestoneDetailResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{ detail: MilestoneReconcileResult & { columns: Record<string, MilestoneChildStatus[]> }; repairs: MilestoneRepairPlan; text: string }> {
+  const result = await milestoneReconcileResult({ ...opts, apply: false });
   const columns: Record<string, MilestoneChildStatus[]> = Object.fromEntries((await listBoards(opts.node, opts.cfg)).find((board) => board.slug === result.milestone.board)?.columns.map((column) => [column, result.children.filter((card) => card.column === column)]) ?? []);
   const detail = { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, columns };
   const columnText = Object.entries(columns).map(([column, cards]) => `${column.toUpperCase()} (${cards.length})\n${cards.length ? cards.map((card) => `  • ${card.blocked ? "🔒 " : ""}${card.title}  ${card.slug}`).join("\n") : "  —"}`).join("\n\n");
-  return { detail, text: `${renderMilestone(result.milestone)}\n\n${columnText}\n\n${renderMilestoneReconcile(result)}` };
+  return { detail, repairs: result.repairs, text: `${renderMilestone(result.milestone)}\n\n${columnText}\n\n${renderMilestoneReconcile(result, result.repairs)}` };
 }
 
 export async function milestoneGroomResult(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ issues: MilestoneGroomIssue[]; text: string }> {

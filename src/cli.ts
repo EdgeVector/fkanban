@@ -113,9 +113,9 @@ Commands:
   milestone list       list milestone portfolio (--board --state --json)
   milestone show <slug> show one milestone (--json)
   milestone state <slug> <state> transition milestone lifecycle state (--proof-status)
-  milestone reconcile <slug> report ready frontier, proof, and lifecycle warnings
+  milestone reconcile <slug> report ready frontier + repair the card index (--dry-run)
   milestone portfolio  show milestone health and ready frontiers
-  milestone detail <slug> show outcome, cards by column, proof, and warnings
+  milestone detail <slug> show outcome, cards by column, proof, and warnings (read-only)
   milestone groom      report actionable milestone health warnings
   milestone gap-report deterministic gap map (in-flight / promote / empty)
   migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
@@ -236,7 +236,7 @@ Usage:
   fkanban milestone list [--board <slug>] [--state <state>] [--json]
   fkanban milestone show <slug> [--json]
   fkanban milestone state <slug> <state> [--proof-status <status>] [--json]
-  fkanban milestone reconcile <slug> [--json]
+  fkanban milestone reconcile <slug> [--dry-run] [--max-repairs N|unlimited] [--json]
   fkanban milestone portfolio [--board <slug>] [--json]
   fkanban milestone detail <slug> [--json]
   fkanban milestone groom [--board <slug>] [--json]
@@ -255,6 +255,17 @@ Add options:
   --proof-card <slug>   terminal validation card
   --proof-status <s>    pending|passing|failing|not_required
   --block-reason <text> why the milestone is blocked
+
+Reconcile options:
+  --dry-run             classify index drift and report it, writing nothing
+  --max-repairs <N>     cap repair writes for one run (default 25; "unlimited"
+                        to lift the cap, 0 to classify only). Reconcile is
+                        convergent, so a capped run makes strict progress and
+                        reports the remainder.
+
+reconcile repairs the MilestoneCards index as it reads; detail and portfolio
+never write. A repair costs seconds per row on the shared node, so a drifted
+milestone is reported by the read commands and fixed by this one.
 
 Milestones are supervisory records, never pickup cards.
 New milestones default to driver last-stack-milestone-driver. Superseded
@@ -980,7 +991,9 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
   ]),
-  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason"]),
+  // reconcile repairs MilestoneCards as it reads; --dry-run classifies without
+  // writing and --max-repairs bounds how much it writes in one invocation.
+  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["from", "expect", "position", "force"]),
@@ -1206,6 +1219,7 @@ async function main(argv: string[]): Promise<number> {
         "min-age-hours": { type: "string" },
         "pileup-threshold": { type: "string" },
         "max-drift": { type: "string" },
+        "max-repairs": { type: "string" },
         "cutoff-hours": { type: "string" },
         max: { type: "string" },
         body: { type: "string" },
@@ -1406,8 +1420,23 @@ async function dispatch(
         const slug = requirePositional(positionals[2], "milestone reconcile <slug>");
         const extra = rejectExtraPositionals(positionals, 3, "milestone reconcile <slug>");
         if (extra !== undefined) return extra;
-        const result = await milestoneReconcileResult({ cfg: ctx.cfg, node: ctx.node, slug });
-        console.log(values.json ? JSON.stringify({ milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings }, null, 2) : result.text);
+        // `unlimited` opts out of the budget explicitly, the same word
+        // `lastgit --max-concurrency` uses. `--max-repairs 0` classifies
+        // without writing, which is `--dry-run` reached from the other side.
+        const rawMax = values["max-repairs"] as string | undefined;
+        const maxRepairs = rawMax === undefined
+          ? undefined
+          : rawMax.trim() === "unlimited"
+            ? null
+            : parseIntFlag(rawMax, "max-repairs", "milestone", { min: 0 });
+        const result = await milestoneReconcileResult({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug,
+          apply: !values["dry-run"],
+          maxRepairs,
+        });
+        console.log(values.json ? JSON.stringify({ milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, repairs: result.repairs }, null, 2) : result.text);
         return 0;
       }
       if (action === "portfolio") {
@@ -1422,7 +1451,7 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, 3, "milestone detail <slug>");
         if (extra !== undefined) return extra;
         const result = await milestoneDetailResult({ cfg: ctx.cfg, node: ctx.node, slug });
-        console.log(values.json ? JSON.stringify(result.detail, null, 2) : result.text);
+        console.log(values.json ? JSON.stringify({ ...result.detail, repairs: result.repairs }, null, 2) : result.text);
         return 0;
       }
       if (action === "groom") {
