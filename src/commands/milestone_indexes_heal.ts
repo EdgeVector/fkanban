@@ -22,8 +22,12 @@ export type MilestoneIndexesHealResult = {
 
 /**
  * Rebuild reverse indexes from current fat records.
- * Uses listMilestones (may still full-scan if index empty) then point-read
- * each slug for truth, then upserts BoardMilestones + MilestoneCards.
+ *
+ * Deliberately does NOT use `listMilestones`: this is the command that repairs
+ * BoardMilestones, so reading through that index to decide what to repair would
+ * let a degraded index shrink its own repair set. It full-scans `Milestone`
+ * directly, then point-reads each slug for truth, then upserts BoardMilestones
+ * + MilestoneCards.
  */
 export async function milestoneIndexesHealResult(opts: {
   cfg: Config;

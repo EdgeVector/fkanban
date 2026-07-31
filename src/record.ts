@@ -3420,7 +3420,11 @@ export async function listMilestonesOnBoard(node: NodeClient, cfg: Config, board
 /**
  * List milestones without product full-scan when BoardMilestones is bound:
  * one HashRange partition per board. Falls back to Milestone full-scan (+ sparse
- * HashKey hydrate) only when the index is unbound or every partition query fails.
+ * HashKey hydrate) when the index is unbound or ANY partition query fails.
+ *
+ * "any", not "every": a board whose partition could not be read has an unknown
+ * milestone set, and no other board's success can supply it. See
+ * {@link listAllBoardMilestones}.
  */
 export async function listMilestones(
   node: NodeClient,
