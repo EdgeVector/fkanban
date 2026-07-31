@@ -14,6 +14,7 @@ import {
   type BoardSummary,
 } from "./card-list-index.ts";
 import {
+  BOARD_CARDS_FOOTER_FIELDS,
   listAllBoardCards,
   listBoardCardsPartition,
   preferFresherBoardCard,
@@ -2650,6 +2651,61 @@ export const CARD_DISPLAY_FIELDS = ["slug", "title", "board", "column", "positio
 // for any path that must show a card's body. Mirrors listCardStatuses.
 export async function listCardsForDisplay(node: NodeClient, cfg: Config): Promise<Card[]> {
   return listCardsWithFields(node, cfg, CARD_DISPLAY_FIELDS);
+}
+
+/**
+ * Live cards on every board EXCEPT `viewedBoard` — the `list` footer's read.
+ *
+ * The footer used to be fed by `listCardsForDisplay`, a cross-board read that
+ * fans out over EVERY board partition including the one already on screen, at
+ * the wide 24-field BoardCards projection. `otherBoardsFooter` then dropped all
+ * of those rows on its first line (`if (c.board === viewedBoard) continue`).
+ *
+ * On the live board that is not a small waste: `default` holds 783 of the 829
+ * rows, and re-reading it is the single most expensive query fkanban makes
+ * (measured 2026-07-30: BoardCards `HashKey(default)` is the #1 consumer of
+ * node wall time system-wide, avg 615ms/call). Bare `kanban list` issued THREE
+ * partition reads where `list --json` — same board, same cards, no footer —
+ * issued one. Two of the three existed to render a one-line navigation hint,
+ * and the more expensive of those two was a verbatim re-read of the partition
+ * the command had already fetched.
+ *
+ * So: skip the viewed board at the QUERY, not in the reducer, and project only
+ * {@link BOARD_CARDS_FOOTER_FIELDS}. Returns `null` when BoardCards cannot
+ * serve the read (unconfigured schema / query failure), so the caller can fall
+ * back to the cross-board path rather than silently print no footer — an absent
+ * footer is indistinguishable from "no other board has cards".
+ */
+export async function listOtherBoardCardsForFooter(
+  node: NodeClient,
+  cfg: Config,
+  viewedBoard: string,
+  boards: Array<{ slug: string }>,
+): Promise<Card[] | null> {
+  // An EMPTY board list is "I don't know", not "there are no other boards".
+  // The legacy shape (no `board_cards` hash, Board index unserved) discovers
+  // other boards from the Card rows themselves, so returning [] here would
+  // silently delete the footer for exactly those installs. Fall back instead.
+  if (boards.length === 0) return null;
+  const others = boards.filter((b) => b.slug !== viewedBoard);
+  // A genuine single-board install has nothing to advertise, and the footer
+  // renders "" for an empty set. Costs zero reads.
+  if (others.length === 0) return [];
+  const out: Card[] = [];
+  for (const b of others) {
+    const part = await listBoardCardsPartition(node, cfg, b.slug, {
+      fields: BOARD_CARDS_FOOTER_FIELDS,
+    });
+    if (part === null) return null; // caller falls back to the cross-board read
+    for (const c of part) {
+      if (isHiddenCard(c)) continue;
+      // `board` is the partition key, so it is authoritative here even though
+      // the narrow projection carries no title/assignee for these rows. The
+      // footer counts by board and renders nothing else.
+      out.push(c.board ? c : { ...c, board: b.slug });
+    }
+  }
+  return out;
 }
 
 // Point read by slug — the node resolves a HashKey filter as an indexed key

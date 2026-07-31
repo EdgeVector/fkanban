@@ -16,7 +16,7 @@ import { describe, expect, test } from "bun:test";
 
 import { listCmd } from "../src/commands/list.ts";
 import type { NodeClient, QueryFilter, QueryResponse } from "../src/client.ts";
-import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
+import { TOMBSTONE_TAG, boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
 import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import type { Config } from "../src/config.ts";
 
@@ -58,7 +58,7 @@ function card(partial: Partial<Card>): Card {
   };
 }
 
-type QueryLog = { schemaHash: string; filter?: QueryFilter };
+type QueryLog = { schemaHash: string; filter?: QueryFilter; fields: string[] };
 
 /**
  * Fake node that serves Card, Board and BoardCards, and logs every query so a
@@ -104,7 +104,7 @@ function fakeNode(cards: Card[], boards: Board[] = [board()]): NodeClient & {
       state.writes += 1;
     }) as never,
     async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
-      queries.push({ schemaHash: q.schemaHash, filter: q.filter });
+      queries.push({ schemaHash: q.schemaHash, filter: q.filter, fields: q.fields });
       if (q.schemaHash === "boardcardshash") {
         const prefix = (q.filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
           ?.HashRangePrefix;
@@ -212,6 +212,86 @@ describe("list read amplification — cost must not scale with card count", () =
     expect(out).toHaveLength(5);
     const bodyReads = cardQueries(node).filter((q) => q.filter?.HashKey !== undefined);
     expect(bodyReads).toHaveLength(5);
+  });
+
+  // The text board prints a navigation footer ("ℹ 1 other board has cards:
+  // scratch (2)"). It used to be fed by a cross-board read that fanned out over
+  // EVERY board partition — including the one already on screen, at the wide
+  // 24-field projection — and `otherBoardsFooter` then discarded those rows on
+  // its first line. On the live board that meant bare `kanban list` issued
+  // THREE BoardCards reads where `list --json` issued one, and the extra
+  // expensive one was a verbatim re-read of the partition just fetched, against
+  // the single hottest query fkanban makes.
+  //
+  // These pin the shape, not the timing: the viewed partition is read ONCE, and
+  // the footer's own read is narrow.
+  describe("the multi-board footer", () => {
+    const twoBoards = [board(), board({ slug: "scratch", title: "Scratch" })];
+    const acrossBoards = () => [
+      ...todoCards(10),
+      card({ slug: "s-1", title: "S1", board: "scratch", column: "todo", position: "1" }),
+      card({ slug: "s-2", title: "S2", board: "scratch", column: "todo", position: "2" }),
+    ];
+
+    test("never re-reads the partition it is already rendering", async () => {
+      const node = fakeNode(acrossBoards(), twoBoards);
+      await listCmd({ cfg: cfgWithIndexes, node });
+
+      const viewed = boardCardQueries(node).filter((q) => q.filter?.HashKey === "default");
+      expect(viewed).toHaveLength(1);
+    });
+
+    test("reads only the boards it reports on, at a narrow projection", async () => {
+      const node = fakeNode(acrossBoards(), twoBoards);
+      await listCmd({ cfg: cfgWithIndexes, node });
+
+      const footerRead = boardCardQueries(node).find((q) => q.filter?.HashKey === "scratch");
+      expect(footerRead).toBeDefined();
+      // Spine + tags. The wide read this replaced asked for all 24.
+      expect(footerRead!.fields.slice().sort()).toEqual(
+        ["board", "column", "position", "sk", "slug", "tags"],
+      );
+      // Card is never touched to render a count.
+      expect(cardQueries(node)).toHaveLength(0);
+    });
+
+    test("a single-board install pays nothing for a footer it will not print", async () => {
+      const node = fakeNode(todoCards(10));
+      const out = await listCmd({ cfg: cfgWithIndexes, node });
+
+      expect(boardCardQueries(node)).toHaveLength(1);
+      expect(out).not.toContain("other board");
+    });
+
+    // Invariants — these must pass both before and after the narrowing.
+    test("still names each other board and its live card count", async () => {
+      const node = fakeNode(acrossBoards(), twoBoards);
+      const out = await listCmd({ cfg: cfgWithIndexes, node });
+
+      expect(out).toContain("1 other board has cards");
+      expect(out).toContain("scratch (2)");
+    });
+
+    test("counts exclude tombstoned cards on the other board", async () => {
+      const node = fakeNode(
+        [
+          ...todoCards(3),
+          card({ slug: "s-live", board: "scratch", column: "todo", position: "1" }),
+          card({ slug: "s-dead", board: "scratch", column: "todo", position: "2", tags: [TOMBSTONE_TAG] }),
+        ],
+        twoBoards,
+      );
+      const out = await listCmd({ cfg: cfgWithIndexes, node });
+
+      expect(out).toContain("scratch (1)");
+    });
+
+    test("--json renders no footer and issues no footer read", async () => {
+      const node = fakeNode(acrossBoards(), twoBoards);
+      await listCmd({ cfg: cfgWithIndexes, node, json: true });
+
+      expect(boardCardQueries(node).filter((q) => q.filter?.HashKey === "scratch")).toHaveLength(0);
+    });
   });
 
   test("duplicate sks for one slug collapse to the fresher row", async () => {
