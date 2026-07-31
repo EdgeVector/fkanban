@@ -250,10 +250,14 @@ describe("pickup-status", () => {
   });
 
   test("reports stale generated blocker metadata separately from real human gates", async () => {
+    // Stale-generated hold is detected from structured block_reason (body-free
+    // BoardCards list deliberately does not hydrate for BLOCKED prose scans).
     await seedCard(node, card({
       slug: "stale",
       repo: "EdgeVector/fkanban",
       base: "main",
+      block_status: "none",
+      block_reason: "fkanban-pickup cannot resolve Repo header.",
       body: "Repo: EdgeVector/fkanban\nBase: main\n\nBLOCKED: fkanban-pickup cannot resolve Repo header.",
     }));
     await seedCard(node, card({
@@ -326,6 +330,8 @@ describe("pickup-status", () => {
       slug: "node-removal",
       repo: "EdgeVector/fold",
       base: "main",
+      // Tag is on the thin BoardCards projection; body alone is not (list is body-free).
+      tags: ["fold_db_node"],
       body: "Repo: EdgeVector/fold\nBase: main\n\nTouch fold_db_node cleanup.",
     }));
 

@@ -5,6 +5,7 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   CARD_DISPLAY_FIELDS,
+  CARD_LIST_FIELDS,
   blockedSlugSet,
   boardTerminalMap,
   depStatus,
@@ -35,7 +36,7 @@ import {
 } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
-import { DEFAULT_COLUMNS, fieldsFor } from "../schemas.ts";
+import { DEFAULT_COLUMNS } from "../schemas.ts";
 import { type CardDetail } from "./show.ts";
 
 // Cards shown per column before the rest collapse to a "… N more" line.
@@ -169,7 +170,11 @@ export async function listResult(
   //     clear 🔒 without loading the whole partition or hitting Card.
   //   - Without --column: one full board partition (all columns already present).
   // show/move still call listDependencyStatusesForCards for authoritative checks.
-  const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : fieldsFor("card");
+  // Text → CARD_DISPLAY_FIELDS (~half the BoardCards atoms). JSON / structured
+  // → CARD_LIST_FIELDS (body-free product fields). Never fieldsFor("card") —
+  // that includes body, which BoardCards does not store and which forced the
+  // wide 24-field partition projection by accident.
+  const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : CARD_LIST_FIELDS;
   // Terminal map first — needed for dep seed column and blocked rendering.
   // Keep the board list itself: the footer needs the other boards' slugs, and
   // re-deriving them would be a second Board read for data already in hand.

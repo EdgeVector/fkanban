@@ -7,6 +7,12 @@
 //
 // Invariant: at most one BoardCards row per (board, slug). Upserts purge other
 // sks for the same slug so column list previews cannot diverge from show.
+//
+// Hot-path cost (Tom 2026-07-31 profile): BoardCards HashKey(default) was the
+// #2 wall-time bucket under client=kanban (avg ~820ms, 500–780 rows, loads=0).
+// Cost scales with projected field count (measured: 24-field done-column seed
+// 1299ms vs 7-field DEP_SEED 416ms). List paths must project only what the
+// caller needs — never default the full 24-field write shape.
 
 import type { Config } from "./config.ts";
 import { FkanbanError, type NodeClient, type QueryFilter } from "./client.ts";
@@ -104,6 +110,75 @@ export const BOARD_CARDS_FOOTER_FIELDS = [
   ...BOARD_CARDS_SPINE_FIELDS,
   "tags",
 ] as const;
+
+/**
+ * Text-board render projection: fields `renderBoard` / dep 🔒 status need, plus
+ * `milestone` for `--group-by-milestone`. About half of BOARD_CARDS_FIELDS —
+ * the measured cost driver on HashKey(default).
+ */
+export const BOARD_CARDS_DISPLAY_FIELDS = [
+  ...BOARD_CARDS_SPINE_FIELDS,
+  "title",
+  "assignee",
+  "tags",
+  "deps",
+  "surfaces",
+  "kind",
+  "created_at",
+  "created_by",
+  "milestone",
+] as const;
+
+/**
+ * Product list / pickup / JSON MCP projection: every dual-written BoardCards
+ * field a body-free list consumer reads, minus write-only `layout` and the
+ * rarely listed `db` locator (show still point-reads Card for db).
+ */
+export const BOARD_CARDS_LIST_FIELDS = [
+  ...BOARD_CARDS_DISPLAY_FIELDS,
+  "updated_at",
+  "repo",
+  "base",
+  "block_status",
+  "block_reason",
+  "north_star",
+  "pr_url",
+  "branch",
+] as const;
+
+const BOARD_CARDS_FIELD_SET = new Set<string>(BOARD_CARDS_FIELDS);
+
+/**
+ * Map a Card-side field want-list to a BoardCards projection.
+ *
+ * Always includes the membership spine (`board`/`sk`/column/position/slug) so
+ * rows stay addressable. Drops `body` (never stored on BoardCards) and
+ * `layout` (write marker). Unknown fields are ignored.
+ */
+export function boardCardsProjectionForCardFields(
+  cardFields: readonly string[],
+): string[] {
+  const want = new Set(cardFields);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (f: string) => {
+    if (seen.has(f) || !BOARD_CARDS_FIELD_SET.has(f)) return;
+    if (f === "layout") return;
+    seen.add(f);
+    out.push(f);
+  };
+  for (const f of BOARD_CARDS_SPINE_FIELDS) push(f);
+  for (const f of cardFields) {
+    if (f === "body") continue;
+    push(f);
+  }
+  // Multi-board merge dedupe (preferFresherBoardCard) needs updated_at when
+  // the caller asked for a broad product list (anything beyond pure display).
+  if (want.has("updated_at") || want.has("block_status") || want.has("repo")) {
+    push("updated_at");
+  }
+  return out;
+}
 
 /** Sort key: column#pos(8)#slug — ordered, column-prefix filterable. */
 export function boardCardSk(column: string, position: string | number, slug: string): string {
@@ -227,7 +302,11 @@ export async function purgeOtherBoardCardRows(
 ): Promise<number> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash || !slug) return 0;
-  const part = await listBoardCardsPartition(node, cfg, board);
+  // Orphan purge only needs spine identity (slug + sk components) — not the
+  // 24-field wide projection that list pays for display.
+  const part = await listBoardCardsPartition(node, cfg, board, {
+    fields: BOARD_CARDS_SPINE_FIELDS,
+  });
   if (!part) return 0;
   let n = 0;
   for (const row of part) {
@@ -455,18 +534,23 @@ export function preferFresherBoardCard(a: Card, b: Card): Card {
 /**
  * List every live board's partition and concatenate.
  * Query count = number of boards (typically 1–few), never O(cards) body gets.
+ *
+ * Default projection is {@link BOARD_CARDS_LIST_FIELDS} (product list), not the
+ * full write shape — callers that need every atom (heal) pass `fields` explicitly.
  */
 export async function listAllBoardCards(
   node: NodeClient,
   cfg: Config,
   boards: Array<{ slug: string }>,
+  opts?: { fields?: readonly string[] },
 ): Promise<Card[] | null> {
   if (!boardCardsHash(cfg)) return null;
   if (boards.length === 0) return [];
+  const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
   const out: Card[] = [];
   const bySlug = new Map<string, Card>();
   for (const b of boards) {
-    const part = await listBoardCardsPartition(node, cfg, b.slug);
+    const part = await listBoardCardsPartition(node, cfg, b.slug, { fields: projection });
     if (part === null) return null; // schema missing or query failed → caller falls back
     for (const c of part) {
       const prev = bySlug.get(c.slug);

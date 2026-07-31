@@ -110,7 +110,11 @@ export function pickupClassificationNeedsBody(card: Card): boolean {
   if (card.board === HUMAN_BOARD_SLUG) return false;
   const blockStatus = normalizeBlockStatus(card.block_status);
   if (blockStatus !== "none") return false;
-  if (normalizeKind(card.kind) !== "pr") return false;
+  const kind = normalizeKind(card.kind);
+  // claimDiagnostics.isSupportedValidationProofCard reads DONE-WHEN from body;
+  // without hydrate, every validation card looks unsupported (false todo_blocker).
+  if (DONE_WHEN_REQUIRED_KINDS.has(kind)) return true;
+  if (kind !== "pr") return false;
   return (
     card.repo.trim().length === 0 ||
     card.base.trim().length === 0 ||
