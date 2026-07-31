@@ -21,7 +21,13 @@ import {
   type PickupClassification,
 } from "../pickup.ts";
 import { laneOf, type LaneId } from "../pickup_lanes.ts";
-import { hydrateOverlapPeers, overlapAgainstCards, type OverlapResult } from "./overlap.ts";
+import {
+  hydrateOverlapPeers,
+  overlapAgainstCards,
+  overlapVerdict,
+  type OverlapResult,
+  type OverlapVerdict,
+} from "./overlap.ts";
 import {
   checkSituationFence,
   type SituationPreflight,
@@ -55,10 +61,20 @@ export type PickupExplainReport = {
     conflicts: { slug: string; surfaces: string[] }[];
     warnings: string[];
     would_skip: boolean;
+    /** What the gate established — see {@link OverlapVerdict}. */
+    verdict: OverlapVerdict;
+    /** Peers in `doing` reached but not comparable (undeclared / unread). */
+    unevaluated_peers: string[];
   };
   situation: { allowed: boolean; reason?: string; details?: string[] };
   eligible_for_claim: boolean;
-  gates: { name: string; ok: boolean; note: string }[];
+  /**
+   * `ok` stays the binary "did this gate pass" every existing consumer reads.
+   * `status: "unknown"` is additive and means the gate could not evaluate —
+   * neither a pass nor a failure. Rendering those as FAIL would be as wrong as
+   * the OK it replaced, in the other direction.
+   */
+  gates: { name: string; ok: boolean; note: string; status?: "unknown" }[];
 };
 
 function writeGuardFor(
@@ -94,6 +110,37 @@ function writeGuardFor(
   }
 }
 
+/**
+ * Render the surface-overlap gate as what it actually established.
+ *
+ * `unknown` and `partial` are NOT failures — they report absent input, and
+ * failing them would strand nearly every card on a board where surfaces are
+ * near-universally undeclared. They are surfaced as not-passing so that an
+ * agent reading the gate list cannot mistake "nothing was declared" for
+ * "checked, clear", which is the whole defect.
+ */
+function surfaceOverlapGate(
+  overlap: OverlapResult,
+): { name: string; ok: boolean; note: string; status?: "unknown" } {
+  const verdict = overlapVerdict(overlap);
+  const peers = overlap.unevaluatedPeers;
+  const notes: Record<OverlapVerdict, string> = {
+    conflict: `conflicts: ${overlap.conflicts.map((c) => c.slug).join(", ")}`,
+    clear: "no conflicts with doing",
+    unknown: overlap.repo
+      ? `not evaluated — ${overlap.slug} declares no surfaces; nothing was compared`
+      : `not evaluated — ${overlap.slug} declares no repo; nothing was compared`,
+    partial: `no conflicts among comparable peers, but ${peers.length} in doing could not be judged: ${peers.join(", ")}`,
+  };
+  const gate: { name: string; ok: boolean; note: string; status?: "unknown" } = {
+    name: "surface-overlap",
+    ok: verdict === "clear",
+    note: notes[verdict],
+  };
+  if (verdict === "unknown" || verdict === "partial") gate.status = "unknown";
+  return gate;
+}
+
 function gatesFrom(
   classification: PickupClassification,
   writeGuard: WriteGuardStep,
@@ -114,14 +161,11 @@ function gatesFrom(
       ok: classification.ready,
       note: `${classification.category}: ${classification.reason}`,
     },
-    {
-      name: "surface-overlap",
-      ok: overlap.conflicts.length === 0,
-      note:
-        overlap.conflicts.length === 0
-          ? "no conflicts with doing"
-          : `conflicts: ${overlap.conflicts.map((c) => c.slug).join(", ")}`,
-    },
+    // `ok` here means "this gate checked and passed", not merely "conflicts is
+    // empty" — those are different claims, and on the live board (100 of 104
+    // todo cards declare no surfaces) the second one was almost never the
+    // first. Advisory only: `would_skip` below still keys off `conflicts`.
+    surfaceOverlapGate(overlap),
     {
       name: "situation-fence",
       ok: situationAllowed,
@@ -235,6 +279,8 @@ export async function pickupExplainResult(opts: {
       })),
       warnings: overlap.warnings,
       would_skip: wouldSkipOverlap,
+      verdict: overlapVerdict(overlap),
+      unevaluated_peers: overlap.unevaluatedPeers,
     },
     situation: {
       allowed: fence.allowed,
@@ -262,7 +308,8 @@ export function renderPickupExplain(report: PickupExplainReport): string {
   lines.push(`  eligible_for_claim: ${report.eligible_for_claim ? "YES" : "NO"}`);
   lines.push("  gates:");
   for (const g of report.gates) {
-    lines.push(`    ${g.ok ? "OK  " : "FAIL"} ${g.name} — ${g.note}`);
+    const label = g.status === "unknown" ? "UNK " : g.ok ? "OK  " : "FAIL";
+    lines.push(`    ${label} ${g.name} — ${g.note}`);
   }
   if (!report.write_guard.ok && report.write_guard.hint) {
     lines.push(`  write-guard hint: ${report.write_guard.hint}`);

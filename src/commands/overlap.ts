@@ -28,7 +28,46 @@ export type OverlapResult = {
   surfaces: string[];
   conflicts: SurfaceConflict[];
   warnings: string[];
+  /**
+   * In-flight peers that were REACHED but could not be compared — no repo, no
+   * surfaces, or a body that was never read. Empty conflicts plus a non-empty
+   * list here is not a pass; it is a pass over the peers that could be judged.
+   */
+  unevaluatedPeers: string[];
+  /**
+   * The candidate itself declared nothing to compare (no repo, or no surfaces),
+   * so no comparison ran at all. This is the common case on the live board.
+   */
+  candidateUndeclared: boolean;
 };
+
+/**
+ * What the gate is entitled to SAY, as opposed to what it found.
+ *
+ * `conflicts.length === 0` conflates three different states, and the gate line
+ * used to render all three as "no conflicts with doing":
+ *
+ * - `conflict` — real overlaps were found.
+ * - `clear`    — the candidate declared surfaces AND every in-flight peer was
+ *                comparable. This is the only state that earns a pass.
+ * - `unknown`  — the candidate declared nothing, so nothing was compared. The
+ *                gate has no input and no opinion.
+ * - `partial`  — comparisons ran, but at least one in-flight peer could not be
+ *                judged, so a conflict may exist behind an undeclared peer.
+ *
+ * Deliberately advisory: this changes what the gate REPORTS, not what it
+ * BLOCKS. `pickup claim` still skips on `conflicts` alone, so an
+ * unknown/partial verdict cannot strand a card on a board where — as measured
+ * — essentially nothing declares surfaces.
+ */
+export type OverlapVerdict = "conflict" | "clear" | "unknown" | "partial";
+
+export function overlapVerdict(result: OverlapResult): OverlapVerdict {
+  if (result.conflicts.length > 0) return "conflict";
+  if (result.candidateUndeclared) return "unknown";
+  if (result.unevaluatedPeers.length > 0) return "partial";
+  return "clear";
+}
 
 export function claimedRepo(card: Card): string {
   return (card.repo || parseBodyHeader(card.body, "Repo")).trim();
@@ -128,6 +167,7 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
   const surfaces = claimedSurfaces(candidate);
   const warnings: string[] = [];
   const conflicts: SurfaceConflict[] = [];
+  const unevaluatedPeers: string[] = [];
 
   if (!repo) {
     warnings.push(
@@ -144,7 +184,17 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
     );
   }
   if (!repo || surfaces.length === 0) {
-    return { slug: candidate.slug, repo, surfaces, conflicts, warnings };
+    // Nothing was compared — the peer loop below never runs. Say so, rather
+    // than letting an empty `conflicts` read as a clean bill of health.
+    return {
+      slug: candidate.slug,
+      repo,
+      surfaces,
+      conflicts,
+      warnings,
+      unevaluatedPeers,
+      candidateUndeclared: true,
+    };
   }
 
   // A peer whose repo lives only in an unread body cannot be ruled out of the
@@ -159,6 +209,7 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
   for (const card of inFlight) {
     if (repoUnread(card)) {
       warnings.push(`${card.slug} is in ${card.column} with no repo field and its body was not read; overlap unknown`);
+      unevaluatedPeers.push(card.slug);
       continue;
     }
     const otherSurfaces = claimedSurfaces(card);
@@ -168,6 +219,7 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
           ? `${card.slug} is in ${card.column} for ${repo} with no surfaces field and its body was not read; overlap unknown`
           : `${card.slug} is in ${card.column} for ${repo} with no surfaces; overlap unknown`,
       );
+      unevaluatedPeers.push(card.slug);
       continue;
     }
     const matches = matchedPairs(surfaces, otherSurfaces);
@@ -182,7 +234,15 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
     }
   }
 
-  return { slug: candidate.slug, repo, surfaces, conflicts, warnings };
+  return {
+    slug: candidate.slug,
+    repo,
+    surfaces,
+    conflicts,
+    warnings,
+    unevaluatedPeers,
+    candidateUndeclared: false,
+  };
 }
 
 export async function overlapResult(opts: {
