@@ -118,13 +118,33 @@ export function pickupClassificationNeedsBody(card: Card): boolean {
   );
 }
 
-/** Hydrate only the cards whose pickup verdict would otherwise be a guess. */
+/**
+ * Hydrate only the cards whose pickup verdict would otherwise be a guess.
+ *
+ * "Whose verdict" is the operative word: a card only has a verdict if it is
+ * CLASSIFIED, and `buildPickupStatusReport` classifies `activeCards` — nothing
+ * in a board's terminal column. Every other consumer of the full set reads
+ * structured fields only (`depStatus` reads board/column/kind,
+ * `activePickupOverlapStillExists` reads column/block_status), so no code path
+ * can observe the body of a card that is not itself a pickup candidate.
+ *
+ * Passing the whole board here therefore bought nothing and cost the archive.
+ * Measured on the live board: 133 cards matched `pickupClassificationNeedsBody`
+ * and **110 of them were in a terminal `done` column** — 269 KiB of finished
+ * card bodies point-read one per request, 4389ms of a 7s `pickup status`, to
+ * refine a routing verdict for cards that can never be picked up. The `done`
+ * column only grows, so that cost had no ceiling.
+ */
 export async function hydrateForPickupClassification(
   node: NodeClient,
   cfg: Config,
   cards: Card[],
+  boards: Board[],
 ): Promise<Card[]> {
-  const needsBody = cards.filter(pickupClassificationNeedsBody);
+  const classified = new Set(activeCards(cards, boards).map((card) => card.slug));
+  const needsBody = cards.filter(
+    (card) => classified.has(card.slug) && pickupClassificationNeedsBody(card),
+  );
   if (needsBody.length === 0) return cards;
   const hydrated = new Map(
     (await hydrateCardBodies(node, cfg, needsBody)).map((card) => [card.slug, card]),
@@ -358,7 +378,7 @@ export async function buildPickupStatusReportWithSituations(
   // verdict actually depends on before classifying, so `malformed-routing`
   // means "the card is malformed", not "we never looked".
   const cardsWithDeps = depsContext
-    ? await hydrateForPickupClassification(depsContext.node, depsContext.cfg, withDeps)
+    ? await hydrateForPickupClassification(depsContext.node, depsContext.cfg, withDeps, boards)
     : withDeps;
   const classifyOpts: ClassifyPickupCardOpts | undefined = depsContext
     ? { requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true }

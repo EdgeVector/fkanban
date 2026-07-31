@@ -21,6 +21,7 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
+import { BOARD_CARDS_DEP_SEED_FIELDS } from "../board-cards.ts";
 import {
   capPerColumn,
   previewCardBodies,
@@ -191,12 +192,19 @@ export async function listResult(
     );
     if (cards.some((c) => (c.deps?.length ?? 0) > 0) && opts.column !== terminalCol) {
       // Seed finished-dep columns without a full-board HashKey scan.
+      //
+      // These rows are never rendered — they exist only so `depStatus` can see
+      // that a dependency has finished. So ask for the seven fields that verdict
+      // reads, not all 24: the terminal column is an append-only archive, and at
+      // the wide projection listing an ACTIVE column cost 1299ms of archive read
+      // against 416ms here (live board, 567 `done` rows).
       const terminalCards = await listCardsByColumn(
         opts.node,
         opts.cfg,
         terminalCol,
         visibleFields,
         boardSlug,
+        { projection: BOARD_CARDS_DEP_SEED_FIELDS },
       );
       const bySlug = new Map<string, Card>();
       for (const c of columnOnly) bySlug.set(c.slug, c);
