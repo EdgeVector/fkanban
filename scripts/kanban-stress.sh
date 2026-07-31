@@ -75,12 +75,72 @@ ensure_board() {
   return 0
 }
 
+# Resolve the socket the CLI will actually dial. Mirrors resolveSocketPath() in
+# src/config.ts: FOLDDB_SOCKET_PATH, then LASTDB_HOME/FOLDDB_HOME, then the
+# config field, then a probe of the default homes (~/.lastdb first). Kept in
+# lockstep with that function -- if the precedence there changes, change it here.
+resolve_socket_path() {
+  local cfg_file cfg_sock
+  [ -n "${FOLDDB_SOCKET_PATH:-}" ] && { printf '%s' "$FOLDDB_SOCKET_PATH"; return 0; }
+  local home_override="${LASTDB_HOME:-${FOLDDB_HOME:-}}"
+  [ -n "$home_override" ] && { printf '%s/data/folddb.sock' "$home_override"; return 0; }
+  cfg_file="${KANBAN_CONFIG:-${FKANBAN_CONFIG:-$HOME/.fkanban/config.json}}"
+  if [ -r "$cfg_file" ]; then
+    cfg_sock=$(jq -r '.nodeSocketPath // empty' "$cfg_file" 2>/dev/null)
+    [ -n "$cfg_sock" ] && { printf '%s' "$cfg_sock"; return 0; }
+  fi
+  [ -S "$HOME/.lastdb/data/folddb.sock" ] && { printf '%s' "$HOME/.lastdb/data/folddb.sock"; return 0; }
+  [ -S "$HOME/.folddb/data/folddb.sock" ] && { printf '%s' "$HOME/.folddb/data/folddb.sock"; return 0; }
+  printf '%s' "$HOME/.lastdb/data/folddb.sock"
+}
+
+# Compare by realpath: ~/.folddb is a compat path that may symlink to ~/.lastdb,
+# so a string compare would miss the primary reached via the legacy name.
+canonical_path() {
+  local p="$1"
+  if command -v realpath >/dev/null 2>&1; then realpath "$p" 2>/dev/null || printf '%s' "$p"
+  else printf '%s' "$p"; fi
+}
+
+is_primary_socket() {
+  local sock target
+  sock=$(canonical_path "$1")
+  for target in "$HOME/.lastdb/data/folddb.sock" "$HOME/.folddb/data/folddb.sock"; do
+    [ "$sock" = "$(canonical_path "$target")" ] && return 0
+  done
+  return 1
+}
+
 # Preflight
 if ! command -v jq >/dev/null 2>&1; then
   echo "ERROR: jq not found - cannot assert JSON read-backs"
   echo "SUMMARY: findings=0 errors=1 board=$BOARD run=$RUN"
   exit 0
 fi
+
+# Refuse the shared primary unless explicitly forced.
+#
+# This harness isolates the BOARD but not the NODE, and that gap is not
+# cosmetic. It drives KSTRESS_BURST concurrent writers, and `index_wait` on the
+# node is a GLOBAL cross-writer barrier (brain
+# lastdb-mutation-convergence-wait-was-a-global-barrier, fold #984). So a burst
+# against the primary does two bad things at once: it makes every other agent's
+# card move take tens of seconds, and it inflates this harness's own latency
+# numbers with contention it created itself. Measured 2026-07-31: an orphaned
+# copy at BURST=10 drove live kanban writes to a 26.4s average (p95 72.8s) while
+# lastgit issued zero mutations -- kanban barriering against itself.
+#
+# Point KSTRESS at an isolated node instead (LASTDB_HOME=/tmp/... or
+# FOLDDB_SOCKET_PATH=...), the way sop-lastdb-safe-upgrade boots a probe node.
+# KSTRESS_ALLOW_PRIMARY=1 forces the old behaviour for a deliberate, supervised
+# run. Exit 0 preserves the never-cancel-the-queue contract.
+SOCKET_PATH=$(resolve_socket_path)
+if [ "${KSTRESS_ALLOW_PRIMARY:-0}" != "1" ] && is_primary_socket "$SOCKET_PATH"; then
+  echo "ERROR: refusing to stress the shared primary node at $SOCKET_PATH - a burst here degrades every other agent's writes and contaminates this run's own numbers; point LASTDB_HOME or FOLDDB_SOCKET_PATH at an isolated node, or set KSTRESS_ALLOW_PRIMARY=1 to override"
+  echo "SUMMARY: findings=0 errors=1 board=$BOARD run=$RUN"
+  exit 0
+fi
+
 if ! "$FK" board list --json >/dev/null 2>&1; then
   echo "ERROR: node/board unreachable - skipping stress run (retries next schedule)"
   echo "SUMMARY: findings=0 errors=1 board=$BOARD run=$RUN"

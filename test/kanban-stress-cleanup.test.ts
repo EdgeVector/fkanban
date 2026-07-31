@@ -86,6 +86,12 @@ function runHarness(killOn?: string): { log: string[]; boards: string[]; stdout:
       ...(killOn ? { KSTUB_KILL_ON: killOn } : {}),
       KSTRESS_N: "0",
       KSTRESS_BURST: "0",
+      // Declare an isolated socket. These tests drive a STUB cli and never dial
+      // a node, but the harness now refuses to run against the primary socket,
+      // and without this it would resolve the developer's own
+      // ~/.fkanban/config.json and bail before the legs under test. Setting it
+      // also makes the run hermetic rather than machine-dependent.
+      FOLDDB_SOCKET_PATH: join(dir, "isolated.sock"),
     },
   });
 
