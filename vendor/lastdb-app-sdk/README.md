@@ -60,6 +60,149 @@ for (const row of rows) {
 }
 ```
 
+## Choosing a socket: your own apps vs published apps
+
+Before the transport question (`baseUrl` vs `socketPath`, below) there is a
+prior one: **which access posture your app runs under.** A LastDB node exposes
+two connection surfaces, and which one your app talks decides whether it runs as
+the node owner or as an attributed third-party app. Pick by *who runs the app*,
+not by how it connects.
+
+| | **Owner socket** | **App socket** |
+|---|---|---|
+| For | apps **you develop and trust** (your own tooling) | apps **you publish** for other people to run |
+| Runs as | **NodeOwner** — full device trust | an **attributed app** on the consumer's node |
+| Reads | anything | anything (after one-time consent) |
+| Writes | anything | **only its own `owner_app_id` namespace** |
+| Consent | none (peer-cred / device trust) | one-time grant, then a stored capability |
+| SDK entry | **`ownerClient(...)`** | **`connect(...)`** |
+
+This is the developer-facing view of the design decisions
+[`decision-2026-07-10-apps-read-all-write-own-namespace`][d1] (the 2026-07-11
+socket-selection addendum) and [`decision-local-security-loose-stance`][d2] —
+read those for the full rationale.
+
+**"App isolation" is not a security wall.** A same-user process can reach the
+owner socket regardless, so the app socket's write-own rule is an
+**attribution + accident-prevention** boundary — it keeps two honest apps on the
+same node from clobbering each other's data (single-writer-per-molecule, so
+cross-app reads stay trustworthy), not an adversary defense. That is exactly why
+self-authored code just uses the owner socket: you already trust it.
+
+### Owner socket — your own apps (`ownerClient`)
+
+An app you write yourself connects to your node's **owner socket** and runs as
+**NodeOwner**: full read/write, no namespace restriction, no consent flow. This
+is how LastDB's own tools (fbrain, fkanban, fsituations, lastsecrets) run —
+same user, owner socket. `ownerClient` is synchronous and keychain-free (it
+never mints, stores, or replays a capability); it authenticates by the OS user
+(the socket's kernel peer credentials over UDS, or an `X-User-Hash` header on a
+loopback TCP fallback).
+
+```ts
+import { ownerClient } from '@lastdb/app-sdk';
+
+// Owner socket: NodeOwner, no consent, no namespace jail.
+// FOLDDB_SOCKET_PATH is the node's control socket (LASTDB_SOCKET_PATH is the
+// brand-forward alias); over UDS peer credentials authenticate you, so no
+// X-User-Hash header is needed.
+const db = ownerClient({
+  appId: 'fbrain',
+  socketPath: process.env.FOLDDB_SOCKET_PATH,
+  // baseUrl: 'http://127.0.0.1:9001',  // loopback TCP fallback; then pass
+  // defaultHeaders: { 'X-User-Hash': userHash }  // (from autoIdentity())
+});
+
+// Full read/write across any schema — device trust, no write-own restriction.
+const rows = await db.queryAll('fbrain/Concept', { fields: ['id', 'title'] });
+await db.mutate('fbrain/Concept', {
+  mutationType: 'create',
+  fields: { id: 'c1', title: 'hello' },
+  key: { hash: null, range: 'c1' },
+});
+```
+
+### App socket — apps you publish (`connect`)
+
+An app you **publish for other people** runs through *their* node. When a
+consumer runs it, their node launches it into its app-attribution ("app
+isolation") system — the **app socket** — where it gets a one-time consent
+grant and then **reads any schema but writes only its own `owner_app_id`
+namespace**. This is the boundary that makes running someone else's published
+app safe-by-default on your data. Use `connect` (async; drives the
+request-consent → await-grant flow and stores the resulting capability):
+
+```ts
+import { connect } from '@lastdb/app-sdk';
+
+// App socket: attributed app on the consumer's node. See "Transports" below for
+// baseUrl (production TCP) vs socketPath (a dev node's UDS).
+const db = await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'my-app' });
+
+if (!db.hasCapability) {                                  // first run: no capability yet
+  const { requestId } = await db.requestConsent('wildcard');
+  console.log('Run: folddb consent grant my-app');       // the consumer grants in their terminal
+  await db.awaitConsent(requestId, { timeoutMs: 120_000 });
+}
+
+// Reads: any schema the consumer consented to — including other apps' data.
+await db.query('some-other-app/PublicNote', { fields: ['id', 'text'] });
+// Writes: confined to your own namespace. A write to another app's namespace is
+// rejected by the node (the mutation-chokepoint ownership check), not the SDK.
+await db.mutate('my-app/Note', {
+  mutationType: 'create',
+  fields: { id: 'n1', text: 'hi' },
+  key: { hash: null, range: 'n1' },
+});
+```
+
+The write-own confinement is enforced by the **node** at its mutation chokepoint
+(keyed off the attributed app identity), not by this SDK — a cross-namespace
+write surfaces as a `403` `PermissionDeniedError` / `CapabilityDeniedError` (see
+[Typed errors](#typed-errors)). The owner-socket path has no such restriction.
+
+### Schema resolution and edge adapters
+
+Apps should resolve their app-facing schema names through Schema Service before
+using the data path. The SDK accepts a `schemaResolver` that returns
+`ResolveResult { identity, schema, adapter, outcome }`: `identity` is the
+global schema identity, `schema` is the runtime node schema when it differs,
+and `adapter.appToCatalog` rewrites local field names to catalog names before
+`query`/`mutate` reaches storage. Reads are mapped back through
+`adapter.catalogToApp` or the reverse one-to-one map.
+
+```ts
+const db = await connect({
+  baseUrl: 'http://127.0.0.1:9001',
+  appId: 'my-app',
+  schemaResolver: async (schemaName) => {
+    if (schemaName !== 'LocalNote') return undefined;
+    return {
+      identity: 'global-schema-identity-hash',
+      schema: 'catalog/Note',
+      outcome: 'adapted',
+      adapter: {
+        appToCatalog: { title: 'name', body: 'body_text' },
+      },
+    };
+  },
+});
+
+await db.mutate('LocalNote', {
+  mutationType: 'create',
+  fields: { title: 'hello', body: 'catalog-shaped at the edge' },
+  key: { hash: null, range: 'n1' },
+});
+```
+
+This keeps storage global and catalog-shaped. A resolver returning
+`undefined`/`null` is an explicit pass-through for already-catalog-shaped
+callers; creating a new shared-surface language remains a separate publisher
+flow, not a runtime fallback.
+
+[d1]: fbrain `decision-2026-07-10-apps-read-all-write-own-namespace`
+[d2]: fbrain `decision-local-security-loose-stance`
+
 ## Transports
 
 Pass exactly one of `baseUrl` (HTTP) or `socketPath` (the node's Unix-domain
@@ -111,10 +254,10 @@ await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain', discoverSocke
 await connect({ socketPath: '/path/to/<session>.sock', appId: 'fbrain' });
 ```
 
-`discoverTransport({ fallbackBaseUrl, defaultHeaders?, env? })` is also exported
-directly for callers that build their own transport (it returns a `Transport`
-pointed at the discovered socket or the TCP fallback). On non-Unix platforms
-there is no UDS transport, so discovery always yields TCP.
+`discoverTransport({ fallbackBaseUrl, defaultHeaders?, timeoutMs?, env? })` is
+also exported directly for callers that build their own transport (it returns a
+`Transport` pointed at the discovered socket or the TCP fallback). On non-Unix
+platforms there is no UDS transport, so discovery always yields TCP.
 
 ## Default headers (production-node identity)
 
@@ -136,6 +279,15 @@ node's TCP HTTP surface**. A `fold_db_node::dev_mode`'s app data surface is the
 **UDS control socket** (a TCP `/api/*` caller is refused — see
 [below](#what-the-dev-node-supports-vs-production)) and ignores
 `X-User-Hash`, so setting it is always safe.
+
+## Request timeout
+
+Every transport request has a 30s timeout by default, so a hung or wedged node
+cannot leave SDK calls pending forever. Override it per client when needed:
+
+```ts
+await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain', timeoutMs: 5000 });
+```
 
 ## Capability storage
 
@@ -279,6 +431,76 @@ A header-less (capability-less) call is refused by the node with
 `403 capability_required` rather than handing back the owner's whole-index
 search — the SDK surfaces that as `PermissionDeniedError`.
 
+## Durable change feed
+
+`changes()` reads thin, ordered mutation metadata from `POST /api/app/changes`.
+The feed is persisted in a bounded, node-local LastDB namespace; it is not a
+sidecar file and is not cloud-synced product data. Consumers must point-read
+the authoritative row after each event.
+
+```ts
+let cursor: string | undefined;
+const page = await fold.changes({ since: cursor, limit: 100 });
+if (page.gap) {
+  // Cursor fell behind retention: rescan the app's declared product keys.
+}
+for (const change of page.changes) {
+  console.log(change.schemaName, change.key, change.operation);
+}
+cursor = page.nextCursor; // persist this in an app-owned LastDB record
+```
+
+The node derives visible schemas from the verified caller. `target` is a
+single optional narrowing filter and cannot widen scope. Cursors are opaque;
+`gap` is explicit so a long-offline worker cannot silently treat an incomplete
+event history as complete.
+
+## Compare-and-set writes (`expected`)
+
+A `mutate` can carry an optional `expected` **CAS precondition** on a single
+field — the write is applied only if the field still holds the value you expect,
+so contended writers (ref updates, state-machine transitions, first-writer-wins
+rows) don't clobber each other:
+
+```ts
+// "update main from oldoid → newoid, but only if it's still at oldoid"
+await fold.mutate('myapp/Ref', {
+  mutationType: 'update',
+  fields: { oid: 'newoid' },
+  key: { hash: null, range: 'main' },
+  expected: { type: 'value', field: 'oid', value: 'oldoid' },
+});
+
+// "create-if-absent": succeed only if `oid` has no current value
+await fold.mutate('myapp/Ref', {
+  mutationType: 'create',
+  fields: { oid: 'firstoid' },
+  key: { hash: null, range: 'main' },
+  expected: { type: 'absent', field: 'oid' },
+});
+```
+
+When the precondition fails, the node returns `409 {error:"cas_conflict", …}`
+and the SDK throws a typed **`CasConflictError`** carrying `.schema`, `.field`,
+`.key`, `.expected`, and `.actual` — so you can re-read the current value and
+retry without parsing free text:
+
+```ts
+try {
+  await fold.mutate('myapp/Ref', { mutationType: 'update', fields, key, expected });
+} catch (e) {
+  if (e instanceof CasConflictError) {
+    // e.field / e.expected / e.actual tell you what moved — re-read and retry.
+  } else {
+    throw e;
+  }
+}
+```
+
+> Requires a node that implements the `/api/mutation` `expected` primitive.
+> Omitting `expected` is an unconditional write (the prior behavior); an older
+> node that doesn't understand `expected` ignores it.
+
 ## Typed errors
 
 Every node failure maps to a specific error class — there is no catch-all.
@@ -297,6 +519,7 @@ Every node failure maps to a specific error class — there is no catch-all.
 | `CapabilityDeniedError` | a 403 whose body carries a discriminated `reason` (the app_identity v3.1 capability-verifier contract, plus search's `capability_required`) — subclasses `PermissionDeniedError`; carries `.reason` verbatim + `.detail` |
 | `CapabilityVerificationError` | a granted/inline capability failed client-side verification under `verifyCapability` — `.problem` ∈ `malformed` / `audience_mismatch` / `integrity_mismatch` |
 | `RequestRejectedError` | query/mutation/search 400 — carries the node's `kind`, its message (`error` or `message`), and the raw parsed `.body` verbatim |
+| `CasConflictError` | mutation 409 `{error:"cas_conflict"}` — a `MutationOp.expected` precondition did not hold; carries `.schema` / `.field` / `.key` / `.expected` / `.actual` (+ verbatim `.body`) so an app can re-read and retry |
 | `TransportError` / `UnexpectedResponseError` | network failure / unmodeled status |
 
 ## Public API
@@ -305,8 +528,6 @@ Every node failure maps to a specific error class — there is no catch-all.
 connect(options: ConnectOptions): Promise<LastDbClient>
 capabilityStoreKey(appId: string, nodeTarget: string): string
 
-// `FoldDbClient` is exported as a `@deprecated` alias of `LastDbClient`
-// (removed at the adoption capstone) so mid-port consumers keep compiling.
 class LastDbClient {
   readonly appId: string
   get target(): string
@@ -324,6 +545,10 @@ class LastDbClient {
            opts?: QueryAllOptions): Promise<QueryResult>  // auto-paginates past the node's page cap
   mutate(schemaName: string, op: MutationOp): Promise<MutationResult>
   search(query: string, opts?: SearchOptions): Promise<SearchResult>  // scope is node-authoritative
+
+  autoIdentity(): Promise<AutoIdentityResult>                 // owner/host helper, not capability-scoped
+  listSchemas(): Promise<LoadedSchema[]>                      // owner/host helper over GET /api/schemas
+  resolveSchema(descriptor: SchemaDescriptor): Promise<LoadedSchema | null>
 }
 
 interface QueryFilter {
@@ -356,6 +581,43 @@ interface SearchHit extends QueryRow { // the full row envelope, plus:
   score: number | null                 // relevance (cosine), or null
   schemaName: string                   // which (in-scope) schema the hit came from
   schemaDisplayName: string | null
+}
+
+interface MutationOp {
+  mutationType: 'create' | 'update' | 'delete'
+  fields: Record<string, JsonValue>
+  key: KeyValue                        // { hash, range } — pass a QueryRow.keyValue back verbatim
+  expected?: CasExpectation            // optional CAS precondition; a failure → CasConflictError
+}
+type CasExpectation =
+  | { type: 'absent'; field: string }               // succeed only if `field` has no current value
+  | { type: 'value'; field: string; value: JsonValue } // succeed only if `field` == value
+interface MutationResult { written: number; mutationIds: string[]; firingsObserved: number }
+
+// CAS precondition failure — mutation 409 {error:"cas_conflict"}
+class CasConflictError extends FoldDbError {
+  readonly schema: string | null      // the schema the write targeted
+  readonly field: string | null       // the field the precondition checked
+  readonly key: string | null         // the row key (rendered)
+  readonly expected: string | null    // the value the write expected
+  readonly actual: string | null      // the value the node observed (null when the field was absent)
+  readonly body: unknown              // the verbatim parsed 409 body
+}
+
+type AutoIdentityResult =
+  | { provisioned: true; userHash: string; publicKey: string | null; userId: string | null }
+  | { provisioned: false; reason: string; next: string | null }
+interface LoadedSchema {
+  name: string                         // canonical runtime name
+  identityHash: string | null          // explicit identity_hash, or name on current nodes
+  descriptiveName: string | null
+  ownerAppId: string | null
+  fields: string[]
+}
+interface SchemaDescriptor {
+  ownerAppId: string
+  descriptiveName: string
+  fields?: readonly string[]           // exact field set, order-insensitive
 }
 
 // Gap #4 — capability 403 contract + client-side verification
@@ -420,6 +682,23 @@ Connect with `socketPath`, not `baseUrl`. So:
   the caller's verified posture against the active namespace ACL — the app never
   names its own scope). `e2e/search.mjs` drives the SDK against an ephemeral dev
   node end-to-end.
+
+## Owner / Host Helpers
+
+`autoIdentity()`, `listSchemas()`, and `resolveSchema()` are deliberately
+owner/host-context helpers. They cover the two node endpoints LastDB owner apps
+kept hand-rolling while using the SDK for the app data plane:
+
+- `GET /api/system/auto-identity` returns the local owner identity used for
+  `X-User-Hash`; the node's canonical 503 becomes
+  `{ provisioned: false, reason, next }`.
+- `GET /api/schemas` lists loaded schemas; `resolveSchema({ ownerAppId,
+  descriptiveName, fields })` resolves the app's own descriptor to the
+  loaded canonical `identityHash`/`name` without each app re-parsing raw JSON.
+
+These helpers do not attach `X-App-Capability` and do not represent an app's
+capability-scoped access set `S(A)`. They are for owner-side setup, diagnostics,
+and host-context tools such as fbrain and fsituations.
 
 ## Capability 403 contract + client-side verification (gap #4)
 

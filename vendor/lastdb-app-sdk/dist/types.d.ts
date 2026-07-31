@@ -28,14 +28,8 @@ export interface KeyValue {
     hash: string | null;
     range: string | null;
 }
-export type CasExpectation = {
-    type: 'absent';
-    field: string;
-} | {
-    type: 'value';
-    field: string;
-    value: JsonValue;
-};
+/** Mutation convergence mode for `POST /api/mutation`. */
+export type MutationConvergence = 'sync' | 'async';
 /**
  * The full per-row envelope the node returns for `/api/query`. The node's
  * `results` array carries one object per result key shaped
@@ -117,6 +111,19 @@ export interface ConnectOptions {
      */
     defaultHeaders?: Record<string, string>;
     /**
+     * Best-effort ops label for Mini request telemetry (`X-LastDB-Client`).
+     * Not a security boundary — any process can claim any string. Defaults to
+     * {@link ConnectOptions.appId} when unset. Pass explicitly to override
+     * (e.g. CLI vs library package name).
+     */
+    clientId?: string;
+    /**
+     * Per-request transport timeout in milliseconds for consent and data-plane
+     * HTTP calls. Defaults to 30_000 so a wedged node cannot leave app requests
+     * pending forever.
+     */
+    timeoutMs?: number;
+    /**
      * Capability store used by `storeCapability` / `loadCapability` and by an
      * auto-load on `connect`. Defaults to an OS-keychain store with a file
      * fallback (see `capabilityStore.ts`). Entries are keyed by (appId, node),
@@ -156,6 +163,16 @@ export interface ConnectOptions {
      * string). Recommended `true` against a production node.
      */
     verifyCapability?: boolean;
+    /**
+     * Optional app-facing schema resolver for the data path. When present,
+     * `query` / `queryAll` / `mutate` call it with the app's schema name before
+     * hitting the node. Prefer returning `ResolveResult { identity, schema,
+     * adapter, outcome }` from Schema Service resolution: writes are rewritten
+     * through `adapter.appToCatalog` before storage, and reads are mapped back
+     * through `adapter.catalogToApp` (or the reverse one-to-one map). Omitted
+     * schemas and fields pass through unchanged.
+     */
+    schemaResolver?: SchemaResolver;
 }
 /**
  * Consent scope. `"wildcard"` requests `{appId}/*` (one prompt covers the
@@ -221,7 +238,117 @@ export interface QueryFilter {
      * that key instead of using offset arithmetic.
      */
     cursor?: KeyValue;
+    /**
+     * Two-pass field predicates, forwarded as the request's top-level `where`
+     * (`fold_db` `Query.field_predicates`). Multiple predicates are AND'd.
+     *
+     * The node loads ONLY the predicate fields first, then loads the requested
+     * projection for the keys that matched — so a predicate that rejects most of
+     * a partition keeps the fat projection off the wire entirely. This is the
+     * difference between filtering server-side and draining a partition to
+     * `Array.prototype.filter` it in the app.
+     *
+     * Predicate `field` names are app-facing and are mapped to node-side names
+     * exactly like {@link QueryFilter.fields}.
+     *
+     * A `where` is a filter, NOT an index: the node still walks the candidate
+     * keys the `filter` selects. Keep the key filter as narrow as possible and
+     * use `where` to trim within it.
+     */
+    where?: QueryFieldPredicate[];
 }
+/**
+ * One two-pass field predicate (`fold_db` `FieldPredicate`). Externally tagged:
+ * exactly one variant key per object, e.g.
+ * `{ eq: { field: 'state', value: 'available' } }`.
+ */
+export type QueryFieldPredicate =
+/** field value == value */
+{
+    eq: {
+        field: string;
+        value: JsonValue;
+    };
+}
+/** field value is one of values */
+ | {
+    in: {
+        field: string;
+        values: JsonValue[];
+    };
+}
+/** field timestamp >= instant (RFC3339 string, or Unix seconds/millis) */
+ | {
+    after: {
+        field: string;
+        instant: JsonValue;
+    };
+}
+/** field timestamp <= instant (RFC3339 string, or Unix seconds/millis) */
+ | {
+    before: {
+        field: string;
+        instant: JsonValue;
+    };
+}
+/** field exists and is not null */
+ | {
+    present: {
+        field: string;
+    };
+}
+/** field is missing or null */
+ | {
+    absent: {
+        field: string;
+    };
+};
+/** Mapping for one app-facing schema name on the query/mutate data path. */
+export interface SchemaMapping {
+    /**
+     * Schema id/name the node expects. Omit to use the app-facing name
+     * unchanged (the name==id case).
+     */
+    nodeSchemaName?: string;
+    /**
+     * App field name -> node field name. Missing fields pass through unchanged.
+     * The map must be one-to-one if the caller wants read rows and metadata to
+     * reverse cleanly back to app field names.
+     */
+    fields?: Record<string, string>;
+}
+/**
+ * Edge adapter for one app-facing schema. `appToCatalog` rewrites caller field
+ * names into the catalog/global names stored by the node; `catalogToApp`
+ * optionally rewrites rows back for caller convenience. When `catalogToApp` is
+ * omitted, the SDK derives it from the one-to-one `appToCatalog` map.
+ */
+export interface SchemaAdapter {
+    appToCatalog?: Record<string, string>;
+    catalogToApp?: Record<string, string>;
+}
+/**
+ * Schema Service-style resolver result for the data path. `identity` is the
+ * global schema identity the app resolved to; `schema` is the node-facing
+ * runtime schema name/id when it differs from `identity`. The SDK never stores
+ * app-local dialect fields: query and mutation requests are rewritten through
+ * `adapter.appToCatalog` before they reach the node.
+ */
+export interface ResolveResult {
+    identity: string;
+    schema?: string;
+    adapter?: SchemaAdapter;
+    outcome?: string;
+}
+/**
+ * Resolve an app-facing schema name to the node-facing data-path contract.
+ * Returning `undefined` / `null` means pass-through; returning a string is a
+ * shorthand for `{ nodeSchemaName: string }`. New callers should prefer
+ * `ResolveResult { identity, schema, adapter, outcome }`, which makes the
+ * global identity and edge adapter explicit.
+ */
+export type SchemaResolverResult = string | SchemaMapping | ResolveResult | null | undefined;
+export type SchemaResolver = (appSchemaName: string) => SchemaResolverResult | Promise<SchemaResolverResult>;
 /**
  * Pagination metadata the node's `/api/query` returns alongside its
  * `results`/`rows` page, surfaced verbatim (snake_case → camelCase). Both
@@ -282,6 +409,17 @@ export interface QueryAllOptions {
      * loops unbounded against a pathological node.
      */
     maxRows?: number;
+    /**
+     * Required opt-in to drain an **unfiltered** schema (no `filter.filter`
+     * key/range restriction) — a full "scan" in LastDB's DynamoDB-style access
+     * model (`brain design-lastdb-scan-deprecation-path`). Unfiltered scans are
+     * deprecated for product apps: they are the dominant cause of node load
+     * under `lastdb ops`. Point reads (`filter: { HashKey: id }`) and partition
+     * reads (HashRange) never require this flag. Defaults to `false`; a
+     * `queryAll` call with no `filter.filter` and `allowFullScan` unset throws
+     * {@link FullScanNotAllowedError} instead of draining the whole schema.
+     */
+    allowFullScan?: boolean;
 }
 /**
  * Options for {@link LastDbClient.search} — the node-authoritative scoped
@@ -345,8 +483,76 @@ export interface SearchResult {
     hits: SearchHit[];
 }
 /**
+ * One schema entry from `GET /api/schemas`, normalized from the node's
+ * flattened `SchemaWithState` JSON. This endpoint is owner/host context: it is
+ * intentionally not capability-scoped to an app's access set.
+ */
+export interface LoadedSchema {
+    /** Canonical runtime schema name. On current nodes this is the identity hash. */
+    name: string;
+    /** Explicit identity hash when the node reports one; falls back to `name`. */
+    identityHash: string | null;
+    /** Human-readable schema name (`descriptive_name` on the wire). */
+    descriptiveName: string | null;
+    /** Owning app namespace (`owner_app_id`), when this is an app-owned schema. */
+    ownerAppId: string | null;
+    /** Declared data field names. */
+    fields: string[];
+}
+/** Descriptor used to resolve an app-owned loaded schema from `/api/schemas`. */
+export interface SchemaDescriptor {
+    /** Owning app namespace, e.g. `fbrain` or `fsituations`. */
+    ownerAppId: string;
+    /** The schema's declarative `descriptive_name`, e.g. `Situation`. */
+    descriptiveName: string;
+    /**
+     * Optional exact field-set guard. When supplied, matching ignores order and
+     * requires the loaded schema to carry exactly the same declared fields.
+     */
+    fields?: readonly string[];
+}
+/** `GET /api/system/auto-identity` parsed result. */
+export type AutoIdentityResult = {
+    provisioned: true;
+    userHash: string;
+    publicKey: string | null;
+    userId: string | null;
+} | {
+    provisioned: false;
+    reason: string;
+    next: string | null;
+};
+/**
+ * A compare-and-set precondition on a single field of the row being written,
+ * mirroring the node's `/api/mutation` `expected` key. The write is applied
+ * only if the precondition holds; otherwise the node rejects it with
+ * `409 {error:"cas_conflict", ...}` and the SDK raises a
+ * {@link import('./errors.js').CasConflictError}.
+ *
+ * - `{ type: "absent", field }` — the write succeeds only if `field` has no
+ *   current value (the CAS form of "create if not present"; pair with
+ *   `mutationType: "create"`).
+ * - `{ type: "value", field, value }` — the write succeeds only if `field`'s
+ *   current value equals `value` (the CAS form of "update from a known
+ *   value"; pair with `mutationType: "update"`).
+ *
+ * Forwarded verbatim under the node's `expected` key; the SDK never invents a
+ * dialect the node would reject. Requires a node that implements the
+ * `/api/mutation` `expected` primitive (`fold-node-cas-mutation-primitive`);
+ * an older node ignores it and applies the write unconditionally.
+ */
+export type CasExpectation = {
+    type: 'absent';
+    field: string;
+} | {
+    type: 'value';
+    field: string;
+    value: JsonValue;
+};
+/**
  * A mutation operation. Mirrors the node's `Operation::Mutation` envelope
- * (`{type:"mutation", schema, fields_and_values, key_value, mutation_type}`).
+ * (`{type:"mutation", schema, fields_and_values, key_value, mutation_type}`),
+ * plus optional CAS and convergence controls.
  * The SDK fills `type` and `schema`; the caller supplies the rest.
  */
 export interface MutationOp {
@@ -361,12 +567,57 @@ export interface MutationOp {
      * be passed back verbatim to address that exact row.
      */
     key: KeyValue;
+    /**
+     * Optional compare-and-set precondition on a single field. When set, it is
+     * forwarded verbatim under the node's `expected` key, and the node applies
+     * the write only if the precondition holds — otherwise it returns
+     * `409 {error:"cas_conflict"}`, which the SDK maps to
+     * {@link import('./errors.js').CasConflictError}. Omit it for an
+     * unconditional write (the prior SDK behavior). See {@link CasExpectation}.
+     */
     expected?: CasExpectation;
+    /**
+     * Optional post-write convergence mode. Omit for the node default (`async`):
+     * the mutation returns after the write commits without waiting on background
+     * tasks, and the response may set `convergencePending: true`. Pass `sync`
+     * only when the caller needs background work drained before the response.
+     */
+    convergence?: MutationConvergence;
 }
 /** `POST /api/mutation` success body. */
 export interface MutationResult {
     written: number;
     mutationIds: string[];
     firingsObserved: number;
+    backgroundTasksDrained?: boolean;
+    convergencePending?: boolean;
+}
+/** Options for the durable, node-scoped app change feed. */
+export interface ChangesOptions {
+    /** Opaque cursor returned by a prior call. Omit to begin at retained start. */
+    since?: string;
+    /** Maximum raw feed rows examined by the node (1..500). */
+    limit?: number;
+    /** Optional single schema target; the node intersects it with caller scope. */
+    target?: string;
+}
+/** Thin changed-row metadata. Consumers point-read the authoritative row. */
+export interface ChangeEvent {
+    cursor: string;
+    mutationId: string;
+    schemaName: string;
+    key: KeyValue;
+    operation: string;
+    committedAtMs: number;
+    backgroundTasksDrained: boolean;
+    convergencePending: boolean;
+}
+/** One cursor page from `POST /api/app/changes`. */
+export interface ChangesResult {
+    changes: ChangeEvent[];
+    nextCursor: string;
+    hasMore: boolean;
+    /** Cursor fell behind bounded feed retention; rescan declared product keys. */
+    gap: boolean;
 }
 //# sourceMappingURL=types.d.ts.map
