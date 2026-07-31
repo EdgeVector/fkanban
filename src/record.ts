@@ -22,6 +22,7 @@ import {
   preferFresherBoardCard,
   removeBoardCard,
   upsertBoardCard,
+  type BoardCardWriteOptions,
 } from "./board-cards.ts";
 import {
   listAllBoardMilestones,
@@ -3304,7 +3305,10 @@ export async function createCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  await writeCardMembership(opts, card, null, { skipOrphanPurge: true });
+  // wideWrite: this sk was just minted for a card that did not exist, so there
+  // is nothing to diff against and the pre-write probe read would only cost a
+  // round trip to learn "absent".
+  await writeCardMembership(opts, card, null, { skipOrphanPurge: true, wideWrite: true });
 }
 
 /**
@@ -3323,7 +3327,7 @@ async function writeCardMembership(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   previous: Card | null,
-  writeOpts: { skipOrphanPurge?: boolean } = {},
+  writeOpts: BoardCardWriteOptions = {},
 ): Promise<void> {
   await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
 }
