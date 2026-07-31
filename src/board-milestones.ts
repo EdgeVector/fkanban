@@ -223,7 +223,22 @@ export async function listBoardMilestonesPartition(
 
 /**
  * List milestones via BoardMilestones partitions (one query per board).
- * Returns null if the index is unbound or every partition query fails.
+ * Returns null if the index is unbound or ANY partition query fails.
+ *
+ * All-or-nothing, matching {@link listAllBoardCards} — and for the same
+ * reason. The union used to skip a failed partition and return whatever the
+ * others produced, going null only if EVERY board failed. That makes a
+ * successful read of one board vouch for a board nobody managed to read, and
+ * the live topology turns it into the worst possible answer: all 32 milestones
+ * sit on `default`, `agent-dogfood-scratch` has none. The empty scratch
+ * partition is the cheap one and effectively always succeeds; `default` is the
+ * one that sheds under backpressure. So a single `service_timeout` on
+ * `default` returned `[]` — non-null, therefore authoritative — and
+ * `listMilestones` reported ZERO milestones instead of falling back to the
+ * Milestone full-scan that exists for exactly this case.
+ *
+ * A partition that could not be read is not an empty partition. Only a read
+ * that SUCCEEDED may establish that a board has no milestones.
  */
 export async function listAllBoardMilestones(
   node: NodeClient,
@@ -233,14 +248,13 @@ export async function listAllBoardMilestones(
   if (!boardMilestonesHash(cfg)) return null;
   if (boards.length === 0) return [];
   const out: Milestone[] = [];
-  let anyOk = false;
   for (const b of boards) {
     const part = await listBoardMilestonesPartition(node, cfg, b.slug);
-    if (part === null) continue;
-    anyOk = true;
+    // The unbound-index case is already handled above, so null here means the
+    // query threw. Fail closed and let the caller fall back.
+    if (part === null) return null;
     out.push(...part);
   }
-  if (!anyOk) return null;
   // Dedupe by slug (prefer fresher updated_at)
   const bySlug = new Map<string, Milestone>();
   for (const m of out) {
