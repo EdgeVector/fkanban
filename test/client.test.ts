@@ -21,6 +21,13 @@ const seen: SeenRequest[] = [];
 // NON-transient node_not_provisioned 503 (must NOT be retried).
 const busyHits = { twice: 0, always: 0, notProvisioned: 0 };
 
+// Per-suite hit counters for the client-side DEADLINE retry routes. These stall
+// past the caller's deadline rather than answering 503 — the shape a node under
+// real load actually produces once it is too busy to reply at all.
+// `/timeout-twice` stalls on its first two hits then answers 200;
+// `/timeout-mutation` always stalls (a WRITE must never be auto-retried).
+const timeoutHits = { query: 0, mutation: 0 };
+
 // Paging fixtures: a 5-row result set served two rows per page.
 const PAGE_ROWS = [0, 1, 2, 3, 4].map((i) => ({
   fields: { slug: `r${i}` },
@@ -66,6 +73,21 @@ const server = Bun.serve({
       return new Response(stream, {
         headers: { "Content-Type": "application/json" },
       });
+    }
+    // A node too busy to answer AT ALL: stalls past the caller's deadline on
+    // the first two hits, then answers normally. This is the same backpressure
+    // as a busy-503, one notch worse — the node never got a reply out.
+    if (url.pathname === "/timeout-twice/api/query") {
+      timeoutHits.query += 1;
+      if (timeoutHits.query <= 1) await new Promise((r) => setTimeout(r, 5_000));
+      return Response.json({ ok: true, results: [] });
+    }
+    // A WRITE that always stalls. A timed-out mutation may still be in flight
+    // and may still land, so it must surface — never silently re-send.
+    if (url.pathname === "/timeout-mutation/api/mutation") {
+      timeoutHits.mutation += 1;
+      await new Promise((r) => setTimeout(r, 5_000));
+      return Response.json({ ok: true });
     }
     // Transient backpressure that clears: busy-503 (with the node's own
     // "retry after Ns" directive) on the first two hits, then a normal 200.
@@ -814,6 +836,53 @@ describe("request deadline", () => {
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("service_timeout");
     expect((err as FkanbanError).hint).toContain("re-running the command is safe");
+  });
+});
+
+describe("client-side deadline is backpressure too", () => {
+  test("a READ that stalls past the deadline is retried and rides through", async () => {
+    timeoutHits.query = 0;
+    const node = newNodeClient({
+      baseUrl: `${baseUrl}/timeout-twice`,
+      userHash: "test-user",
+      timeoutMs: 150,
+    });
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+    expect(res.results).toEqual([]);
+    // One deadline expiry + one success = two hits. A node too busy to reply
+    // must not be treated more harshly than one that manages to say "I'm busy".
+    expect(timeoutHits.query).toBe(2);
+  });
+
+  test("a read that never answers retries exactly once, then surfaces", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/slow`, userHash: "test-user", timeoutMs: 100 });
+    const before = seen.filter((r) => r.path === "/slow/api/query").length;
+    const err = await node
+      .queryAll({ schemaHash: "cardhash", fields: ["slug"] })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as FkanbanError).code).toBe("service_timeout");
+    // Bounded: 1 initial + TIMEOUT_RETRY_MAX(1) = 2. A permanently hung node
+    // must not multiply the caller's deadline without limit.
+    expect(seen.filter((r) => r.path === "/slow/api/query").length - before).toBe(2);
+  });
+
+  test("a WRITE that stalls past the deadline is NOT retried — it may have landed", async () => {
+    timeoutHits.mutation = 0;
+    const node = newNodeClient({
+      baseUrl: `${baseUrl}/timeout-mutation`,
+      userHash: "test-user",
+      timeoutMs: 150,
+    });
+    const err = await node
+      .updateRecord({ schemaHash: "cardhash", keyHash: "c1", fields: { title: "x" } })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("service_timeout");
+    // Exactly one attempt. Unlike a 503 (which the node REJECTED, so it
+    // provably never applied), a timed-out mutation may still be in flight.
+    expect(timeoutHits.mutation).toBe(1);
   });
 });
 
