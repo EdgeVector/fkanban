@@ -27,11 +27,13 @@ import {
   cardToFields,
   emptyStructuredFields,
   BODY_OMITTED,
+  CARD_LIST_FIELDS,
   type Board,
   type Card,
 } from "../src/record.ts";
 import {
   BOARD_CARDS_DEP_SEED_FIELDS,
+  boardCardsProjectionForCardFields,
   boardCardFieldsFromCard,
   boardCardSk,
 } from "../src/board-cards.ts";
@@ -162,13 +164,17 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
     expect(seed[0]!.fields.length).toBeLessThan(BOARD_CARDS_FIELDS.length);
   });
 
-  test("the column being LISTED keeps its full projection — those rows render", async () => {
+  test("the column being LISTED keeps the product list projection — those rows render", async () => {
     const node = fakeNode(cards);
     await listCmd({ cfg, node, column: "todo", json: true });
 
     const listed = prefixReads(node, "todo");
     expect(listed).toHaveLength(1);
-    expect(listed[0]!.fields).toEqual([...BOARD_CARDS_FIELDS]);
+    // Product list (CARD_LIST_FIELDS → BoardCards), not the full write shape:
+    // layout/db are write-only / rare; body is never on BoardCards.
+    expect(listed[0]!.fields).toEqual(boardCardsProjectionForCardFields(CARD_LIST_FIELDS));
+    expect(listed[0]!.fields).not.toContain("layout");
+    expect(listed[0]!.fields.length).toBeLessThan(BOARD_CARDS_FIELDS.length);
   });
 
   test("narrowing does not change the verdict: a finished dep still clears the block", async () => {

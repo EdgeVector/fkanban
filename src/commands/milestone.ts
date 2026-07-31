@@ -19,6 +19,7 @@ import {
   listMilestones,
   listMilestonesOnBoard,
   hasPrWorkBrief,
+  isBodyOmitted,
   isSubstantiveCardBody,
   normalizeBlockStatus,
   normalizeDeps,
@@ -635,8 +636,12 @@ export function classifyMilestoneGap(
     else if (col === "backlog") {
       pr_backlog += 1;
       const hold = normalizeBlockStatus(card.block_status) !== "none";
-      const hollow = !isSubstantiveCardBody(card.body) || !hasPrWorkBrief(card.body);
-      const stopped = BODY_STOP_RE.test(card.body ?? "");
+      // Body-free BoardCards projections must not be treated as hollow/stopped —
+      // we have not read the brief, so "empty body" is unread, not empty.
+      const hollow = isBodyOmitted(card)
+        ? false
+        : !isSubstantiveCardBody(card.body) || !hasPrWorkBrief(card.body);
+      const stopped = isBodyOmitted(card) ? false : BODY_STOP_RE.test(card.body ?? "");
       const noRepo = !(card.repo && String(card.repo).trim());
       if (!child.blocked && !hold && !hollow && !stopped && !noRepo) promoteable.push(child.slug);
       else blocked_backlog.push(child.slug);
