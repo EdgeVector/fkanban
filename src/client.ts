@@ -608,10 +608,39 @@ export function newNodeClient(opts: {
     }
   };
 
-  const queryAllWithFullScanHeader = async (opts: {
+  /**
+   * Page a `/api/query` read to completion.
+   *
+   * Offset and cursor are BOTH supported, and the cursor is never trusted
+   * blindly. On this node `/api/query` stamps a `next_cursor` onto reads that
+   * cannot honor one: `can_push_down` requires `filter.is_none()`, so every
+   * key-restricted read (`HashKey` / `HashRangeKey` / `HashRangePrefix` — i.e.
+   * every product read fkanban makes) lands on the offset-paged fallback and
+   * still comes back advertising a cursor. Handing that cursor back re-serves
+   * the SAME page with the SAME cursor, forever. Verified against the live
+   * primary on `LastgitCiStatus` `HashKey(last-stack)` (1251 rows): page 1
+   * returns 1000 rows + cursor C; sending C returns byte-identical rows and
+   * cursor C again. A cursor-preferring loop therefore never terminates — it
+   * runs to whatever row cap it has, ~1000 requests per logical read.
+   *
+   * So: if the node hands back the cursor it was just given while still
+   * claiming `has_more`, treat the cursor as unhonored, discard that duplicate
+   * page, and finish the drain by offset — which is correct on this node
+   * (offset=1000 on that same partition returns the remaining 251 rows).
+   *
+   * This is deliberately a FALLBACK, not a refusal. lastdb-app-sdk 0.3.0 turns
+   * the same condition into a thrown `QueryPaginationError`, which would take a
+   * board that is merely slow and make it unreadable; and it is version-neutral
+   * — a node that honors cursors advances them, so the guard never fires and
+   * genuine cursor paging (the unfiltered full-scan push-down) is untouched.
+   * The node-side fix is fold #1028, which is merged but not yet on the running
+   * primary; this guard is what makes fkanban correct either way.
+   */
+  const queryAllPaged = async (opts: {
     schemaHash: string;
     fields: string[];
     filter?: QueryFilter;
+    allowFullScan?: boolean;
   }): Promise<QueryResponse> => {
     const rows: SdkQueryResult["rows"] = [];
     let schema = "";
@@ -619,9 +648,14 @@ export function newNodeClient(opts: {
     let page: SdkQueryResult["page"] = null;
     let offset = 0;
     let cursor: KeyValue | null = null;
+    let cursorUnhonored = false;
+
+    const sameCursor = (a: KeyValue | null, b: KeyValue | null): boolean =>
+      a !== null && b !== null && JSON.stringify(a) === JSON.stringify(b);
 
     try {
       for (;;) {
+        const sentCursor = cursor;
         const body: Record<string, unknown> = {
           schema_name: opts.schemaHash,
           fields: opts.fields,
@@ -630,26 +664,46 @@ export function newNodeClient(opts: {
           ...(cursor === null ? { offset } : { cursor }),
         };
         const res = await sdkTransport.send("POST", "/api/query", {
-          headers: { "X-LastDB-Allow-Full-Scan": "1" },
+          ...(opts.allowFullScan === true
+            ? { headers: { "X-LastDB-Allow-Full-Scan": "1" } }
+            : {}),
           body,
         });
         if (res.status !== 200) {
           throw mapNodeError(res.status, res.body, "/api/query");
         }
         const parsed = parseQueryResponse(res.body);
+
+        const pageHasMore = parsed.page !== null
+          ? parsed.page.hasMore
+          : parsed.rows.length >= QUERY_PAGE_SIZE;
+        const nextCursor = parsed.page?.nextCursor ?? null;
+
+        // The node returned the cursor it was just handed and still claims more
+        // rows: the cursor is advertised but not honored. Drop this duplicate
+        // page (it repeats what `rows` already holds) and resume by offset.
+        if (pageHasMore && sameCursor(nextCursor, sentCursor)) {
+          verbose(
+            "node: /api/query returned an unadvancing next_cursor — " +
+              "falling back to offset paging for this read",
+          );
+          cursorUnhonored = true;
+          cursor = null;
+          offset = rows.length;
+          continue;
+        }
+
         schema = parsed.schema || schema;
         rowCount = parsed.page?.totalCount ?? parsed.rowCount ?? rowCount;
         page = parsed.page;
         rows.push(...parsed.rows);
 
-        const hasMore = parsed.page !== null
-          ? parsed.page.hasMore
-          : parsed.rows.length >= QUERY_PAGE_SIZE;
-        if (!hasMore) break;
+        if (!pageHasMore) break;
         if (rows.length >= QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT) break;
-        cursor = parsed.page?.nextCursor ?? null;
-        if (cursor === null) offset += parsed.rows.length;
         if (parsed.rows.length === 0) break;
+
+        cursor = cursorUnhonored ? null : nextCursor;
+        if (cursor === null) offset = rows.length;
       }
     } catch (err) {
       throw mapSdkDataError(err, url, "POST", "/api/query", socketPath);
@@ -860,24 +914,14 @@ export function newNodeClient(opts: {
         }),
       );
     },
+    // Both branches page through `queryAllPaged`. The vendored SDK's own
+    // `queryAll` (0.2.0) prefers a returned cursor over the offset and has no
+    // no-progress guard, so on this node it loops ~1000 requests on any
+    // partition past one page — and the partition closest to that cliff is
+    // BoardCards `HashKey(default)`, the board-wide list every surface uses.
+    // The guard lives in one place rather than being re-derived per caller.
     async queryAll({ schemaHash, fields, filter, allowFullScan }) {
-      if (allowFullScan === true) {
-        return queryAllWithFullScanHeader({ schemaHash, fields, filter });
-      }
-      const result = await sdkDataPath("/api/query", (client) =>
-        client.queryAll(
-          schemaHash,
-          {
-            fields,
-            ...(filter !== undefined ? { filter: filter as JsonValue } : {}),
-          },
-          {
-            pageSize: QUERY_PAGE_SIZE,
-            maxRows: QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT,
-          },
-        ),
-      );
-      return queryResponseFromSdk(result);
+      return queryAllPaged({ schemaHash, fields, filter, allowFullScan });
     },
     search: appSearch,
     async rawCall(method, path, body) {

@@ -21,6 +21,25 @@ const seen: SeenRequest[] = [];
 // NON-transient node_not_provisioned 503 (must NOT be retried).
 const busyHits = { twice: 0, always: 0, notProvisioned: 0 };
 
+// Paging fixtures: a 5-row result set served two rows per page.
+const PAGE_ROWS = [0, 1, 2, 3, 4].map((i) => ({
+  fields: { slug: `r${i}` },
+  key: { hash: `r${i}`, range: null },
+}));
+// The cursor the unhonored-cursor stub keeps handing back unchanged.
+const STUCK_CURSOR = { hash: "last-stack", range: "stuck" };
+const pagingHits = { unhonored: 0, full: 0 };
+
+// Production-shaped fixture: full 1000-row pages, 1251 rows total — the exact
+// size of the LastgitCiStatus HashKey(last-stack) partition this was found on.
+// Page size matters: a client that stops when a page is short never reaches the
+// loop, so only a full-width page reproduces what the live node actually does.
+const FULL_PAGE = 1000;
+const FULL_ROWS = Array.from({ length: 1251 }, (_, i) => ({
+  fields: { slug: `f${i}` },
+  key: { hash: `f${i}`, range: null },
+}));
+
 // Stub node: records every request; /api/query echoes one card row when a
 // HashKey filter matches, an empty page otherwise; /slow never answers in time.
 const server = Bun.serve({
@@ -104,6 +123,85 @@ const server = Bun.serve({
         resolution: "reuse",
       });
     }
+    // Paging stubs. PAGE_ROWS is the whole logical result set; each stub serves
+    // it two rows at a time so the drain has to page.
+    if (url.pathname.startsWith("/paging-")) {
+      const b = body as Record<string, unknown>;
+      const page = (from: number, nextCursor: unknown) =>
+        Response.json({
+          ok: true,
+          results: PAGE_ROWS.slice(from, from + 2),
+          returned_count: Math.min(2, Math.max(0, PAGE_ROWS.length - from)),
+          total_count: PAGE_ROWS.length,
+          offset: from,
+          limit: b.limit,
+          has_more: from + 2 < PAGE_ROWS.length,
+          next_cursor: from + 2 < PAGE_ROWS.length ? nextCursor : null,
+        });
+
+      // Reproduces the live primary: `/api/query` stamps a next_cursor onto a
+      // key-restricted read it cannot honor, and handing that cursor back
+      // re-serves page 1 verbatim with the same cursor. Verified on
+      // LastgitCiStatus HashKey(last-stack), 1251 rows.
+      if (url.pathname === "/paging-unhonored-cursor/api/query") {
+        pagingHits.unhonored += 1;
+        // Backstop so a cursor-preferring (pre-fix) client fails fast and
+        // deterministically instead of looping to its million-row cap.
+        if (pagingHits.unhonored > 12) {
+          return Response.json({
+            ok: true,
+            results: [],
+            returned_count: 0,
+            total_count: PAGE_ROWS.length,
+            has_more: false,
+            next_cursor: null,
+          });
+        }
+        const from = b.cursor !== undefined ? 0 : Number(b.offset ?? 0);
+        return page(from, STUCK_CURSOR);
+      }
+
+      // A node that genuinely honors cursors: the cursor carries the next row
+      // index and advances. The guard must NOT fire here.
+      if (url.pathname === "/paging-advancing-cursor/api/query") {
+        const cur = b.cursor as { hash: string; range: string } | undefined;
+        const from = cur !== undefined ? Number(cur.range) : Number(b.offset ?? 0);
+        return page(from, { hash: "h", range: String(from + 2) });
+      }
+
+      // A node that never advertises a cursor at all — pure offset paging.
+      if (url.pathname === "/paging-offset-only/api/query") {
+        return page(Number(b.offset ?? 0), null);
+      }
+
+      // Same unhonored-cursor behaviour, at the real node's page width.
+      if (url.pathname === "/paging-unhonored-cursor-full/api/query") {
+        pagingHits.full += 1;
+        if (pagingHits.full > 12) {
+          return Response.json({
+            ok: true,
+            results: [],
+            returned_count: 0,
+            total_count: FULL_ROWS.length,
+            has_more: false,
+            next_cursor: null,
+          });
+        }
+        const from = b.cursor !== undefined ? 0 : Number(b.offset ?? 0);
+        const slice = FULL_ROWS.slice(from, from + FULL_PAGE);
+        const more = from + FULL_PAGE < FULL_ROWS.length;
+        return Response.json({
+          ok: true,
+          results: slice,
+          returned_count: slice.length,
+          total_count: FULL_ROWS.length,
+          offset: from,
+          limit: b.limit,
+          has_more: more,
+          next_cursor: more ? STUCK_CURSOR : null,
+        });
+      }
+    }
     if (url.pathname === "/api/query") {
       const filter = (body as Record<string, unknown>).filter as { HashKey?: string } | undefined;
       const results =
@@ -159,6 +257,76 @@ const cfg: Config = {
   userHash: "test-user",
   schemaHashes: { card: "cardhash", board: "boardhash" },
 };
+
+describe("queryAll paging", () => {
+  const slugs = (res: { results: { fields: Record<string, unknown> }[] }) =>
+    res.results.map((r) => r.fields.slug);
+
+  test("an unhonored next_cursor falls back to offset instead of looping", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/paging-unhonored-cursor`, userHash: "test-user" });
+    const before = seen.length;
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+
+    // Every row exactly once, in order — no duplicated page, nothing dropped.
+    expect(slugs(res)).toEqual(["r0", "r1", "r2", "r3", "r4"]);
+
+    // And it got there in a handful of requests, not a ~1000-request loop.
+    const reqs = seen.slice(before).filter((r) => r.path.endsWith("/api/query"));
+    expect(reqs.length).toBeLessThanOrEqual(5);
+
+    // The stall is detected once; every later page is requested by offset.
+    const afterStall = reqs.slice(2);
+    expect(afterStall.length).toBeGreaterThan(0);
+    for (const r of afterStall) {
+      expect((r.body as Record<string, unknown>).cursor).toBeUndefined();
+      expect((r.body as Record<string, unknown>).offset).toBeDefined();
+    }
+  });
+
+  test("full-width pages: the drain terminates with every row, exactly once", async () => {
+    const node = newNodeClient({
+      baseUrl: `${baseUrl}/paging-unhonored-cursor-full`,
+      userHash: "test-user",
+    });
+    const before = seen.length;
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+
+    // 1251 rows, no duplicates — the shape a cursor-preferring client cannot
+    // reach: it re-serves page 1 forever and blows past the row cap instead.
+    expect(res.results).toHaveLength(FULL_ROWS.length);
+    expect(new Set(res.results.map((r) => r.fields.slug)).size).toBe(FULL_ROWS.length);
+    expect(res.results[0]!.fields.slug).toBe("f0");
+    expect(res.results.at(-1)!.fields.slug).toBe("f1250");
+
+    const reqs = seen.slice(before).filter((r) => r.path.endsWith("/api/query"));
+    expect(reqs.length).toBeLessThanOrEqual(4);
+  });
+
+  test("a cursor that advances is still used as a cursor", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/paging-advancing-cursor`, userHash: "test-user" });
+    const before = seen.length;
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+
+    expect(slugs(res)).toEqual(["r0", "r1", "r2", "r3", "r4"]);
+
+    // Version-neutrality: on a node that honors cursors the guard must not
+    // fire, so pages after the first go out as cursors, not offsets.
+    const reqs = seen.slice(before).filter((r) => r.path.endsWith("/api/query"));
+    expect(reqs.length).toBe(3);
+    expect((reqs[1]!.body as Record<string, unknown>).cursor).toEqual({ hash: "h", range: "2" });
+    expect((reqs[2]!.body as Record<string, unknown>).cursor).toEqual({ hash: "h", range: "4" });
+  });
+
+  test("a node that never advertises a cursor pages by offset", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/paging-offset-only`, userHash: "test-user" });
+    const before = seen.length;
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+
+    expect(slugs(res)).toEqual(["r0", "r1", "r2", "r3", "r4"]);
+    const reqs = seen.slice(before).filter((r) => r.path.endsWith("/api/query"));
+    expect(reqs.map((r) => (r.body as Record<string, unknown>).offset)).toEqual([0, 2, 4]);
+  });
+});
 
 describe("queryAll filter", () => {
   test("passes a HashKey filter through to the /api/query body", async () => {
