@@ -178,7 +178,7 @@ function fakeNode(): NodeClient {
       tableFor(schemaHash).set(keyHash, fields);
     },
     async updateRecord({ schemaHash, fields, keyHash }) {
-      tableFor(schemaHash).set(keyHash, fields);
+      tableFor(schemaHash).set(keyHash, { ...tableFor(schemaHash).get(keyHash), ...fields });
     },
     async deleteRecord({ schemaHash, keyHash }) {
       tableFor(schemaHash).delete(keyHash);

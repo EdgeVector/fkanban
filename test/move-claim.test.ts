@@ -104,7 +104,7 @@ function fakeNode(opts: { prefixBlind?: boolean } = {}): NodeClient {
       const table = tableFor(schemaHash);
       const key = storeKey(keyHash, rangeKey);
       checkExpected(table.get(key)?.fields ?? {}, expected);
-      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields });
+      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...table.get(key)?.fields, ...fields } });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
       tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));

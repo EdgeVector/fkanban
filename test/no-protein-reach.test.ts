@@ -98,10 +98,14 @@ function recordingNode(): NodeClient & { paths: string[] } {
       });
     },
     async updateRecord({ schemaHash, fields, keyHash, rangeKey }) {
-      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), {
+      const key = storeKey(keyHash, rangeKey);
+      tableFor(schemaHash).set(key, {
         keyHash,
         rangeKey: rangeKey ?? null,
-        fields: { ...fields },
+        // MERGE, not replace — LastDB's updateRecord leaves unsent fields
+        // alone. A fake that replaces makes a correct narrow write look like
+        // data loss and cannot catch a real partial-write bug.
+        fields: { ...tableFor(schemaHash).get(key)?.fields, ...fields },
       });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {

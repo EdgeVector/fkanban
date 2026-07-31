@@ -103,7 +103,7 @@ function fakeStoreNode(): NodeClient & {
       const table = tableFor(schemaHash);
       const key = storeKey(keyHash, rangeKey);
       // Upsert semantics for test convenience.
-      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...fields } });
+      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...table.get(key)?.fields, ...fields } });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
       tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));

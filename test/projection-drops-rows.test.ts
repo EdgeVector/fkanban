@@ -136,10 +136,12 @@ function projectionFaithfulNode(seed: {
       });
     },
     async updateRecord({ schemaHash, fields, keyHash, rangeKey }) {
-      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), {
+      const key = storeKey(keyHash, rangeKey);
+      tableFor(schemaHash).set(key, {
         keyHash,
         rangeKey: rangeKey ?? null,
-        fields: { ...fields },
+        // MERGE, not replace — see no-protein-reach.test.ts.
+        fields: { ...tableFor(schemaHash).get(key)?.fields, ...fields },
       });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {

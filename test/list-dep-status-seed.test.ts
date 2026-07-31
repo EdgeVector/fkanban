@@ -62,7 +62,7 @@ function fakeNode(opts?: { onCardHashKey?: (slug: string) => void }): NodeClient
       store.set(keyHash, fields);
     },
     async updateRecord({ fields, keyHash }) {
-      store.set(keyHash, fields);
+      store.set(keyHash, { ...store.get(keyHash), ...fields });
     },
     async deleteRecord({ keyHash }) {
       store.delete(keyHash);

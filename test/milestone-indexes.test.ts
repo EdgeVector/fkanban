@@ -115,7 +115,7 @@ function fakeNode(): FakeNode {
     },
     async updateRecord({ schemaHash, keyHash, fields, rangeKey }) {
       const previous = table(schemaHash).get(rowKey(keyHash, rangeKey));
-      table(schemaHash).set(rowKey(keyHash, rangeKey), { ...fields });
+      table(schemaHash).set(rowKey(keyHash, rangeKey), { ...table(schemaHash).get(rowKey(keyHash, rangeKey)), ...fields });
       if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
         directMilestoneCardMutations.push("update");
       }

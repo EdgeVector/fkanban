@@ -77,7 +77,7 @@ function fakeNode(): NodeClient {
     async updateRecord({ schemaHash, fields, keyHash, expected }) {
       const table = tableFor(schemaHash);
       checkExpected(table.get(keyHash) ?? {}, expected);
-      table.set(keyHash, fields);
+      table.set(keyHash, { ...table.get(keyHash), ...fields });
     },
     async deleteRecord({ schemaHash, keyHash }) {
       tableFor(schemaHash).delete(keyHash);

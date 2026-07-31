@@ -34,6 +34,7 @@ import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./confi
 import {
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
+  CARD_FIELDS,
   CARD_OPTIONAL_SCHEMA_FIELDS,
   fieldsFor,
   fixedColumns,
@@ -3260,6 +3261,143 @@ function isOptionalFieldWriteMiss(err: unknown): boolean {
 
 type CardWriteOp = "createRecord" | "updateRecord";
 
+/** The projection a legacy schema (one without the optional fields) can answer. */
+const CARD_LEGACY_FIELDS: readonly string[] = CARD_FIELDS.filter(
+  (f) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(f),
+);
+
+/**
+ * Read the one Card row for `slug` at the WIDE projection — and treat
+ * "not returned" as "not writable narrowly".
+ *
+ * Same safety gate, and the same reasoning, as
+ * {@link readWholeBoardCardRow}: LastDB returns a row only when EVERY
+ * projected field has an atom on it, so one wide read answers both questions a
+ * narrow write must have answered — does the row exist (a narrow
+ * `updateRecord` against a MISSING row does not fail; it silently stores just
+ * the subset it was handed, leaving a row every wide reader then drops), and
+ * is it whole (a hole must be repaired by a wide write, not patched around).
+ *
+ * `null` conflates the two deliberately: the caller's answer to both is
+ * "write wide", which heals either.
+ *
+ * This does NOT reuse the `previous` card the callers already have. `previous`
+ * is a Card object with no record of the projection it was read through —
+ * `BODY_OMITTED` tracks that question for exactly one field, and the other 21
+ * have no such marker. Inferring wholeness from an object that cannot state
+ * its own provenance is how a thin read becomes silent data loss, so this pays
+ * a fresh 214ms read (measured, `scripts/probe-card-write-cost.ts`) to buy an
+ * answer it can actually justify.
+ */
+async function readWholeCardRow(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+  projected: readonly string[],
+): Promise<{ fields: Record<string, unknown>; projected: readonly string[] } | null> {
+  const schemaHash = schemaHashFor("card", cfg);
+  if (!schemaHash) return null;
+  const res = await node.queryAll({
+    schemaHash,
+    fields: [...projected],
+    filter: { HashKey: slug },
+  });
+  for (const r of res.results) {
+    const fields = r.fields as Record<string, unknown>;
+    if (fields.slug !== slug) continue;
+    // Re-check wholeness rather than inferring it from the row having been
+    // returned. The node's projection drop is what makes an incomplete row
+    // invisible, but resting this contract on a behaviour nothing local
+    // asserts means a node that started returning partial rows would silently
+    // turn every narrow write into a hole-preserving patch.
+    if (projected.some((f) => fields[f] === undefined || fields[f] === null)) return null;
+    return { fields, projected };
+  }
+  return null;
+}
+
+function sameCardValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const xs = Array.isArray(a) ? a : [];
+    const ys = Array.isArray(b) ? b : [];
+    return xs.length === ys.length && xs.every((x, i) => x === ys[i]);
+  }
+  return a === b;
+}
+
+/**
+ * The subset of `next` that differs from what is stored.
+ *
+ * `slug` is not re-sent: it addresses the row (it travels as keyHash) and
+ * cannot differ here — a slug change is a different record, not an update.
+ */
+function changedCardFields(
+  stored: Record<string, unknown>,
+  next: Record<string, unknown>,
+  projected: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of projected) {
+    if (field === "slug") continue;
+    if (!(field in next)) continue;
+    if (sameCardValue(stored[field], next[field])) continue;
+    out[field] = next[field];
+  }
+  return out;
+}
+
+/**
+ * Try to satisfy an update by sending only the fields that changed.
+ * Returns `true` when the write is done, `false` to fall through to the wide
+ * path (which heals a missing or incomplete row).
+ *
+ * ## Why this reads before it writes
+ *
+ * Write cost scales with the number of fields SENT, and `Card` has 22.
+ * Measured on the live primary, one uncontended row
+ * (`scripts/probe-card-write-cost.ts`):
+ *
+ * | update | ms |
+ * |---|---|
+ * | 22 fields, every value changed | 3677 |
+ * | 22 fields sent, 2 actually changed (what every card mutation cost) | 3269 |
+ * | 3 fields sent (key + 2 changed) | 989 |
+ * | 22 fields, every value byte-identical | 148 |
+ *
+ * The dedupe in that last row is whole-record, not per-molecule
+ * (`lastdb-unchanged-value-skip-is-whole-record-not-per-molecule`), so
+ * re-sending 20 unchanged fields buys nothing and costs ~200ms each.
+ *
+ * The `body` is one atom like any other, not a byte cost: the same 2-field
+ * update with a 40x larger body (32KB vs 1.3KB) measured 3578ms against
+ * 3269ms. So the win here is field COUNT, and it is available to every card
+ * mutation — including a move, whose key (`slug`) does not change.
+ */
+async function writeChangedCardFieldsOnly(
+  opts: { cfg: Config; node: NodeClient },
+  card: Card,
+  schemaHash: string,
+  next: Record<string, unknown>,
+  projected: readonly string[],
+): Promise<boolean> {
+  let stored: { fields: Record<string, unknown>; projected: readonly string[] } | null;
+  try {
+    stored = await readWholeCardRow(opts.node, opts.cfg, card.slug, projected);
+  } catch {
+    // The probe is an optimization; its failure must never be the reason a
+    // write fails. Fall through to the wide path, which either succeeds or
+    // surfaces the same fault with its own well-worn fallback machinery.
+    return false;
+  }
+  if (!stored) return false;
+  const changed = changedCardFields(stored.fields, next, stored.projected);
+  // Nothing changed: the node would no-op this in ~148ms, but a round trip we
+  // can prove is pointless is a round trip not worth taking.
+  if (Object.keys(changed).length === 0) return true;
+  await opts.node.updateRecord({ schemaHash, fields: changed, keyHash: card.slug });
+  return true;
+}
+
 async function writeCardRecordWithOptionalFieldFallback(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
@@ -3277,7 +3415,24 @@ async function writeCardRecordWithOptionalFieldFallback(
   // A hash already proven to reject the optional fields writes the legacy
   // shape directly — the full-shape attempt would fail the same way it did
   // when the memo was recorded (same hash ⇒ same field set).
-  if (opts.cfg.cardLegacyWriteHash === hash) {
+  const legacyShape = opts.cfg.cardLegacyWriteHash === hash;
+  // Narrow path: send only what changed. Skipped for a create (the row does
+  // not exist, so there is nothing to diff and the probe could only ever
+  // return "absent") and whenever a CAS expectation is in play — the node
+  // checks CAS against stored state rather than the payload, but no caller
+  // passes `expected` today, so narrowing it would ship a behaviour nothing
+  // exercises. Give it back its wide write until something needs otherwise.
+  if (op === "updateRecord" && !expected) {
+    const done = await writeChangedCardFieldsOnly(
+      opts,
+      card,
+      hash,
+      legacyShape ? cardToLegacyOptionalFields(card) : cardToFields(card),
+      legacyShape ? CARD_LEGACY_FIELDS : CARD_FIELDS,
+    );
+    if (done) return;
+  }
+  if (legacyShape) {
     await opts.node[op]({ schemaHash: hash, fields: cardToLegacyOptionalFields(card), keyHash: card.slug, expected });
     return;
   }
