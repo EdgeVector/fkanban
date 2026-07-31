@@ -93,7 +93,15 @@ function fakeNode(): NodeClient {
       tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
     },
     async updateRecord({ schemaHash, fields, keyHash, rangeKey }) {
-      tableFor(schemaHash).set(storeKey(keyHash, rangeKey), { keyHash, rangeKey: rangeKey ?? null, fields });
+      // MERGE, not replace — a real LastDB update leaves unsent fields intact
+      // (see the same note in test/board-cards.test.ts).
+      const key = storeKey(keyHash, rangeKey);
+      const prior = tableFor(schemaHash).get(key)?.fields ?? {};
+      tableFor(schemaHash).set(key, {
+        keyHash,
+        rangeKey: rangeKey ?? null,
+        fields: { ...prior, ...fields },
+      });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
       tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));

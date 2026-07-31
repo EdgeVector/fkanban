@@ -319,7 +319,117 @@ export async function purgeOtherBoardCardRows(
   return n;
 }
 
+/**
+ * Read exactly one BoardCards row, keyed by its full sk, at the WIDE
+ * projection — and treat "not returned" as "not writable narrowly".
+ *
+ * This is the safety gate for the narrow write path, and it works because of
+ * a LastDB projection rule that is normally a hazard: a query returns a row
+ * only when EVERY projected field has an atom on it (see
+ * {@link BOARD_CARDS_SPINE_FIELDS}). So asking for all 24 fields answers both
+ * questions a narrow write must have answered, in one round trip:
+ *
+ *   - does the row exist?  (a narrow `updateRecord` against a MISSING row does
+ *     not fail — measured 2026-07-31, `scripts/probe-narrow-write-shape.ts`:
+ *     it silently succeeds and stores just the subset it was handed, creating
+ *     a row that every wide reader then drops)
+ *   - is it whole?  (an incomplete row must be repaired by a wide write, not
+ *     patched by a narrow one that leaves the hole in place)
+ *
+ * A `null` return means "one of those is false" without distinguishing them —
+ * deliberately, because the caller's response to both is the same: write wide.
+ *
+ * Measured cost on the live `default` board: 207ms median at 24 fields
+ * (`scripts/probe-boardcard-point-read.ts`). Projection width barely moves a
+ * single-row read — the 5-field spine measured 189ms — so there is no cheaper
+ * variant of this check worth having.
+ */
+async function readWholeBoardCardRow(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  sk: string,
+): Promise<{ fields: Record<string, unknown>; projected: readonly string[] } | null> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash) return null;
+  // HashRangePrefix is a fold HashRangeFilter object; QueryFilter's TS type is
+  // string-map only — cast at the edge (runtime accepts the object), same as
+  // listBoardCardsPartition.
+  const filter = { HashRangePrefix: { hash: board, prefix: sk } } as unknown as QueryFilter;
+  const read = async (projected: readonly string[]) => {
+    const res = await node.queryAll({ schemaHash, fields: [...projected], filter });
+    for (const r of res.results) {
+      const fields = r.fields as Record<string, unknown>;
+      // HashRangePrefix is a PREFIX: one sk can prefix a longer one when a
+      // slug is a prefix of another slug. Match the exact row.
+      if (fields.sk !== sk) continue;
+      // Re-check wholeness here rather than inferring it from the row having
+      // been returned at all. The node's projection drop is what makes an
+      // incomplete row invisible, but relying on that alone makes this
+      // function's contract depend on a behaviour nothing local asserts —
+      // and a node that started returning partial rows would silently turn
+      // every narrow write into a hole-preserving patch.
+      if (projected.some((f) => fields[f] === undefined || fields[f] === null)) return null;
+      return { fields, projected };
+    }
+    return null;
+  };
+  try {
+    return await read(BOARD_CARDS_FIELDS);
+  } catch (err) {
+    if (!isCreatedByFieldMiss(err)) throw err;
+    return await read(LEGACY_BOARD_CARDS_FIELDS);
+  }
+}
+
+function sameBoardCardValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const xs = Array.isArray(a) ? a : [];
+    const ys = Array.isArray(b) ? b : [];
+    return xs.length === ys.length && xs.every((x, i) => x === ys[i]);
+  }
+  return a === b;
+}
+
+/**
+ * The subset of `next` that differs from what is stored.
+ *
+ * Key fields are NOT re-sent: `board`/`sk` address the row (they travel as
+ * keyHash/rangeKey) and cannot differ here — this path only runs when the sk
+ * is unchanged. Measured, a narrow update with the key fields omitted is
+ * accepted and leaves them intact.
+ */
+function changedBoardCardFields(
+  stored: Record<string, unknown>,
+  next: Record<string, unknown>,
+  projected: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of projected) {
+    if (field === "board" || field === "sk") continue;
+    if (!(field in next)) continue;
+    if (sameBoardCardValue(stored[field], next[field])) continue;
+    out[field] = next[field];
+  }
+  return out;
+}
+
 export type BoardCardWriteOptions = {
+  /**
+   * Skip the pre-write probe read and write the full 24-field shape.
+   *
+   * Two callers can justify this, for opposite reasons:
+   *
+   * - `createCardRecord` — the sk was just minted, so there is nothing to diff
+   *   against and the probe could only ever return "absent".
+   * - `board-cards-heal` — restoring the whole row IS the job, and it has
+   *   already enumerated the partition. A probe read here would reintroduce
+   *   the per-card re-read that `board-cards heal read cost` exists to forbid.
+   *
+   * Anything else should let the probe decide: it is one 207ms read that turns
+   * a ~4.7s write into a ~0.6s one and rules out writing a hole into the row.
+   */
+  wideWrite?: boolean;
   /**
    * Skip the defensive orphan-purge rescan for this slug.
    *
@@ -342,6 +452,31 @@ export type BoardCardWriteOptions = {
  * other rows for the same slug on the destination board so list cannot keep a
  * stale column membership after a successful card update — see
  * `BoardCardWriteOptions.skipOrphanPurge` for the bulk-reconciler opt-out.
+ *
+ * ## Why this reads before it writes
+ *
+ * Write cost scales with the number of fields SENT, not the number that
+ * changed, and BoardCards has 24 of them. Measured on the live primary,
+ * one uncontended row (`scripts/probe-partial-write-cost.ts`):
+ *
+ * | update | ms |
+ * |---|---|
+ * | 24 fields, every value changed | 5376 |
+ * | 24 fields sent, 2 actually changed (what a `tag` used to cost) | 4695 |
+ * | 4 fields sent, 2 changed | 1197 |
+ * | 24 fields, every value byte-identical | 140 |
+ *
+ * The last row is the surprise, and it is what makes the rest actionable:
+ * LastDB *does* skip a write whose values all match — but that skip is
+ * whole-record, not per-molecule. Change one field of twenty-four and the
+ * node pays for all twenty-four. So the only lever an app has is to stop
+ * sending fields it is not changing.
+ *
+ * A metadata write (tag / claim / pr_url / block_status) changes two or three
+ * fields. Reading the row first costs 207ms and turns a ~4.7s wide upsert into
+ * a ~0.6s narrow one — and, because the read doubles as an existence-and-
+ * wholeness check, the narrow path is also strictly safer than writing blind
+ * (see {@link readWholeBoardCardRow}).
  */
 export async function upsertBoardCard(
   node: NodeClient,
@@ -385,6 +520,27 @@ export async function upsertBoardCard(
       await node.createRecord({ schemaHash, fields, keyHash: nextBoard, rangeKey: nextSk });
     }
   };
+
+  // Narrow path: send only what changed. Skipped for a row we know is new
+  // (nothing to diff against) and for a move, whose destination sk is a row
+  // that does not exist yet and must therefore be written whole.
+  const movedHere = Boolean(previous) &&
+    (String(previous?.board || "default") !== nextBoard ||
+      boardCardSk(previous!.column, previous!.position, previous!.slug) !== nextSk);
+  if (!opts.wideWrite && !movedHere) {
+    const stored = await readWholeBoardCardRow(node, cfg, nextBoard, nextSk);
+    if (stored) {
+      const changed = changedBoardCardFields(stored.fields, nextFields, stored.projected);
+      // Nothing changed: the node would no-op this in ~140ms, but a round trip
+      // we can prove is pointless is a round trip not worth taking.
+      if (Object.keys(changed).length === 0) return;
+      await write(changed);
+      return;
+    }
+    // Row absent or missing an atom on some field. Fall through: the wide
+    // write below both creates it and heals the hole. Narrowing here would
+    // leave an incomplete row that every wide reader silently drops.
+  }
 
   try {
     await write(nextFields);

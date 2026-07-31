@@ -122,7 +122,14 @@ function fakeNode(): NodeClient {
       const key = storeKey(keyHash, rangeKey);
       if (!table.has(key)) throw new Error("missing for update");
       checkExpected(table.get(key)?.fields ?? {}, expected);
-      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...fields } });
+      // MERGE, not replace. A real LastDB update writes only the fields it is
+      // handed and leaves the rest of the row intact (measured 2026-07-31,
+      // scripts/probe-narrow-write-shape.ts: a 2-field update left the other
+      // 22 fields readable at the full projection). A fake that replaces makes
+      // every narrow write look like data loss and every wide write look
+      // mandatory.
+      const prior = table.get(key)?.fields ?? {};
+      table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields: { ...prior, ...fields } });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
       tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
@@ -619,5 +626,166 @@ describe("board-cards-heal thin-field drift", () => {
 
     const clean = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
     expect(clean.report.drifted).toBe(0);
+  });
+});
+
+/**
+ * Narrow BoardCards writes.
+ *
+ * A BoardCards write costs roughly 200ms per field SENT on the primary, and
+ * the row has 24 fields. LastDB does skip a write whose every value is
+ * byte-identical (~140ms), but that skip is whole-record: change one field and
+ * the node pays for all 24 that were sent. So a `tag` that changes two fields
+ * cost ~4.7s for as long as it sent the whole row. Measured numbers and method:
+ * scripts/probe-partial-write-cost.ts.
+ *
+ * These tests lock the three things that make narrowing safe rather than just
+ * fast — because the failure mode of getting it wrong is silent: a row missing
+ * an atom on any projected field is DROPPED from every wide read, with no
+ * error (see BOARD_CARDS_SPINE_FIELDS).
+ */
+describe("board-cards narrow write", () => {
+  /** Wrap a node, recording every mutation's field payload. */
+  function writeRecordingNode(inner: NodeClient): {
+    node: NodeClient;
+    writes: Array<{ op: "create" | "update"; schemaHash: string; fields: string[] }>;
+    reads: Array<{ schemaHash: string }>;
+  } {
+    const writes: Array<{ op: "create" | "update"; schemaHash: string; fields: string[] }> = [];
+    const reads: Array<{ schemaHash: string }> = [];
+    const node: NodeClient = {
+      ...inner,
+      async createRecord(req) {
+        writes.push({ op: "create", schemaHash: req.schemaHash, fields: Object.keys(req.fields) });
+        return inner.createRecord(req);
+      },
+      async updateRecord(req) {
+        writes.push({ op: "update", schemaHash: req.schemaHash, fields: Object.keys(req.fields) });
+        return inner.updateRecord(req);
+      },
+      async queryAll(req) {
+        reads.push({ schemaHash: req.schemaHash });
+        return inner.queryAll(req);
+      },
+    };
+    return { node, writes, reads };
+  }
+
+  const BC = cfgWithBoardCards.schemaHashes.board_cards!;
+  const boardCardWrites = (
+    writes: Array<{ op: "create" | "update"; schemaHash: string; fields: string[] }>,
+  ) => writes.filter((w) => w.schemaHash === BC);
+
+  test("a metadata change sends only the changed fields, not the whole row", async () => {
+    const { node, writes } = writeRecordingNode(fakeNode());
+    const before = card({ slug: "narrow", tags: ["a"] });
+    await upsertBoardCard(node, cfgWithBoardCards, before, null, { wideWrite: true });
+    writes.length = 0;
+
+    // Same sk (column/position/slug unchanged) — a tag add.
+    const after = card({ slug: "narrow", tags: ["a", "b"], updated_at: "2026-02-02T00:00:00.000Z" });
+    await upsertBoardCard(node, cfgWithBoardCards, after, before);
+
+    const bc = boardCardWrites(writes);
+    expect(bc).toHaveLength(1);
+    expect(bc[0]!.op).toBe("update");
+    expect(bc[0]!.fields.sort()).toEqual(["tags", "updated_at"]);
+    // The whole point: nothing near the 24-field write shape.
+    expect(bc[0]!.fields.length).toBeLessThan(BOARD_CARDS_LIST_FIELDS.length);
+  });
+
+  test("the fields it did not send survive at the full projection", async () => {
+    const node = fakeNode();
+    const before = card({ slug: "narrow", tags: ["a"], milestone: "m1", repo: "EdgeVector/fkanban" });
+    await upsertBoardCard(node, cfgWithBoardCards, before, null, { wideWrite: true });
+
+    const after = card({
+      slug: "narrow",
+      tags: ["a", "b"],
+      milestone: "m1",
+      repo: "EdgeVector/fkanban",
+      updated_at: "2026-02-02T00:00:00.000Z",
+    });
+    await upsertBoardCard(node, cfgWithBoardCards, after, before);
+
+    const rows = (await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }])) ?? [];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.slug).toBe("narrow");
+    expect(rows[0]!.tags).toEqual(["a", "b"]);
+    // Untouched by the narrow write, still readable.
+    expect(rows[0]!.milestone).toBe("m1");
+    expect(rows[0]!.repo).toBe("EdgeVector/fkanban");
+    expect(rows[0]!.title).toBe(before.title);
+  });
+
+  test("a write that changes nothing issues no mutation at all", async () => {
+    const { node, writes } = writeRecordingNode(fakeNode());
+    const c = card({ slug: "narrow" });
+    await upsertBoardCard(node, cfgWithBoardCards, c, null, { wideWrite: true });
+    writes.length = 0;
+
+    await upsertBoardCard(node, cfgWithBoardCards, c, c);
+    expect(boardCardWrites(writes)).toHaveLength(0);
+  });
+
+  test("an INCOMPLETE row is repaired wide, never patched narrow", async () => {
+    const { node, writes } = writeRecordingNode(fakeNode());
+    const c = card({ slug: "narrow" });
+    const sk = boardCardSk(c.column, c.position, c.slug);
+    // A row that predates a schema expand: present, but missing an atom on a
+    // projected field. The probe read must refuse to treat this as diffable.
+    const partial = { ...boardCardFieldsFromCard(c) };
+    delete partial.milestone;
+    await node.createRecord({ schemaHash: BC, keyHash: "default", rangeKey: sk, fields: partial });
+    writes.length = 0;
+
+    await upsertBoardCard(node, cfgWithBoardCards, c, c);
+
+    const bc = boardCardWrites(writes);
+    expect(bc).toHaveLength(1);
+    // Full write shape — this is what heals the hole.
+    expect(bc[0]!.fields).toContain("milestone");
+    expect(bc[0]!.fields).toContain("slug");
+    expect(bc[0]!.fields.length).toBe(Object.keys(boardCardFieldsFromCard(c)).length);
+  });
+
+  test("a MOVE writes the destination row whole, and does not probe for it", async () => {
+    const { node, writes, reads } = writeRecordingNode(fakeNode());
+    const before = card({ slug: "narrow", column: "todo", position: "3" });
+    await upsertBoardCard(node, cfgWithBoardCards, before, null, { wideWrite: true });
+    writes.length = 0;
+    reads.length = 0;
+
+    const moved = card({ slug: "narrow", column: "doing", position: "3" });
+    await upsertBoardCard(node, cfgWithBoardCards, moved, before);
+
+    // The probe would return null here anyway — the destination sk is brand
+    // new — so skipping it is purely about not paying for an answer we can
+    // derive from `previous`. A move is the board's most common mutation, so
+    // that round trip is worth not making.
+    expect(reads.filter((r) => r.schemaHash === BC)).toHaveLength(0);
+
+    // The destination sk does not exist, so `write` update-then-creates; both
+    // attempts must carry the full shape.
+    const bc = boardCardWrites(writes);
+    expect(bc.length).toBeGreaterThan(0);
+    for (const w of bc) {
+      expect(w.fields.length).toBe(Object.keys(boardCardFieldsFromCard(moved)).length);
+    }
+    // And the card is where it was moved to, exactly once.
+    const rows = (await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }])) ?? [];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.column).toBe("doing");
+  });
+
+  test("wideWrite skips the probe read entirely", async () => {
+    const { node, reads } = writeRecordingNode(fakeNode());
+    const c = card({ slug: "narrow" });
+    reads.length = 0;
+    await upsertBoardCard(node, cfgWithBoardCards, c, null, {
+      wideWrite: true,
+      skipOrphanPurge: true,
+    });
+    expect(reads.filter((r) => r.schemaHash === BC)).toHaveLength(0);
   });
 });
