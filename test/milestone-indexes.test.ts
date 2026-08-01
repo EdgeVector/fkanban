@@ -607,6 +607,131 @@ describe("milestone HashRange indexes", () => {
     expect(node.directMilestoneCardMutations).toContain("delete");
   });
 
+  // A slug holding two MilestoneCards rows is the drift `reconcile` is meant to
+  // collapse, and `rows.length !== 1` does classify it as stale. But the sweep
+  // that actually removes the extra row lives inside `upsertMilestoneCard` and
+  // used to be gated on `previous.sk !== next.sk` — with `previous` set to
+  // `rows[0]`, one arbitrarily-ordered member of the group. When `rows[0]` is
+  // the row that is already CORRECT, that gate reads "nothing moved", the sweep
+  // is skipped, and reconcile rewrites the good row forever while the orphan
+  // survives every run. Column sks sort `backlog < doing < done < todo`, so on
+  // an sk-ordered partition read this is every backward move.
+  async function addOrphanIndexRow(
+    node: FakeNode,
+    milestone: string,
+    slug: string,
+    column: string,
+  ): Promise<string> {
+    const card = await findCard(node, cfg, slug);
+    const fields = { ...milestoneCardFieldsFromCard(card!)! };
+    const sk = `${column}#${String(card!.position).padStart(8, "0")}#${slug}`;
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: milestone,
+      rangeKey: sk,
+      fields: { ...fields, sk, column },
+    });
+    return sk;
+  }
+
+  test("reconcile clears a duplicate index row even when the CORRECT row comes back first", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-dup-first", ["dup-a"]);
+    // Insert order = read order in the fake, so the true `todo#…` row is
+    // rows[0] and the `done#…` orphan is rows[1] — the un-sweepable case.
+    const orphanSk = await addOrphanIndexRow(node, "ms-dup-first", "dup-a", "done");
+    const before = await listMilestoneCardsPartition(node, cfg, "ms-dup-first");
+    expect(before?.length).toBe(2);
+    expect(before?.[0]?.column).toBe("todo");
+
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-dup-first" });
+
+    expect(rec.children.map((c) => c.slug)).toEqual(["dup-a"]);
+    const after = await listMilestoneCardsPartition(node, cfg, "ms-dup-first");
+    expect(after?.length).toBe(1);
+    expect(after?.[0]?.column).toBe("todo");
+    expect(after?.map((c) => `${c.column}#${String(c.position).padStart(8, "0")}#${c.slug}`))
+      .not.toContain(orphanSk);
+  });
+
+  test("a duplicate that reconcile cannot sweep is re-reported on every run", async () => {
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-dup-conv", ["dup-b"]);
+    await addOrphanIndexRow(node, "ms-dup-conv", "dup-b", "done");
+
+    await milestoneReconcileResult({ cfg, node, slug: "ms-dup-conv" });
+    node.directMilestoneCardMutations.length = 0;
+    // Convergence is the property, not the single repair: a second run has
+    // nothing left to do. Before the fix the orphan was still there, so this
+    // run classified `dup-b` stale again and spent another write on it.
+    const second = await milestoneReconcileResult({ cfg, node, slug: "ms-dup-conv" });
+    expect(second.repairs).toMatchObject({ upserts: 0, removals: 0, issued: 0 });
+    expect(node.directMilestoneCardMutations).toEqual([]);
+  });
+
+  test("the orphan is swept regardless of which row the partition returns first", async () => {
+    // The mirror case — orphan first — already converged through the sk gate.
+    // It must keep converging: the fix widens when the sweep runs, it must not
+    // narrow it.
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-dup-last", ["dup-c"]);
+    const card = await findCard(node, cfg, "dup-c");
+    const trueFields = { ...milestoneCardFieldsFromCard(card!)! };
+    await node.deleteRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-dup-last",
+      rangeKey: String(trueFields.sk),
+    });
+    await addOrphanIndexRow(node, "ms-dup-last", "dup-c", "backlog");
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-dup-last",
+      rangeKey: String(trueFields.sk),
+      fields: trueFields,
+    });
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-dup-last"))?.[0]?.column).toBe("backlog");
+
+    await milestoneReconcileResult({ cfg, node, slug: "ms-dup-last" });
+
+    const after = await listMilestoneCardsPartition(node, cfg, "ms-dup-last");
+    expect(after?.length).toBe(1);
+    expect(after?.[0]?.column).toBe("todo");
+  });
+
+  test("a single stale row still repairs without a partition sweep", async () => {
+    // The sweep costs a whole-partition read. Widening it to "whenever the
+    // caller saw siblings" must not widen it to "always": one stale row with a
+    // known previous sk is still repairable by targeted delete + write.
+    const node = fakeNode();
+    await seedMilestoneWithCards(node, "ms-one-stale", ["one-stale"]);
+    const card = await findCard(node, cfg, "one-stale");
+    const fields = milestoneCardFieldsFromCard(card!)!;
+    await node.updateRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-one-stale",
+      rangeKey: String(fields.sk),
+      fields: { ...fields, title: "Stale title" },
+    });
+
+    let partitionReads = 0;
+    const counting: FakeNode = {
+      ...node,
+      queryAll: async (req) => {
+        if (req.schemaHash === cfg.schemaHashes.milestone_cards) partitionReads += 1;
+        return node.queryAll(req);
+      },
+    };
+    await milestoneReconcileResult({ cfg, node: counting, slug: "ms-one-stale" });
+    partitionReads = 0;
+    await milestoneReconcileResult({ cfg, node: counting, slug: "ms-one-stale" });
+
+    // Exactly the one read `milestoneReconcileResult` makes itself. A sweep
+    // inside the upsert would show up as a second.
+    expect(partitionReads).toBe(1);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-one-stale"))?.map((c) => c.title))
+      .toEqual(["PR one-stale"]);
+  });
+
   test("reconcile --dry-run classifies the repair without issuing it", async () => {
     const node = fakeNode();
     await seedMilestoneWithCards(node, "ms-dry", ["dry-a", "dry-b"]);

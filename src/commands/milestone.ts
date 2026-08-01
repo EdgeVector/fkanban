@@ -475,7 +475,7 @@ async function reconcileMilestoneCardChildren(
   // mutations inflate each other's latency rather than overlapping.
   const out: Card[] = [];
   const removals: Card[] = [];
-  const upserts: Array<{ truth: Card; previous: Card | null }> = [];
+  const upserts: Array<{ truth: Card; previous: Card | null; siblings: boolean }> = [];
 
   slugs.forEach((slug, i) => {
     const rows = rowsBySlug.get(slug) ?? [];
@@ -491,7 +491,11 @@ async function reconcileMilestoneCardChildren(
 
     // rows.length === 0 is the missing-index-row case reconcile exists to fix.
     const stale = rows.length !== 1 || !milestoneCardSummaryMatchesTruth(rows[0]!, truth);
-    if (stale) upserts.push({ truth, previous: rows[0] ?? null });
+    // `previous` is rows[0], one of possibly several. Say so: the upsert's
+    // orphan sweep is otherwise gated on rows[0] having a different sk, and
+    // rows[0] is whichever row the partition read returned first, not whichever
+    // one is wrong. See MilestoneCardUpsertOptions.purgeSiblings.
+    if (stale) upserts.push({ truth, previous: rows[0] ?? null, siblings: rows.length > 1 });
     out.push(truth);
   });
 
@@ -507,9 +511,10 @@ async function reconcileMilestoneCardChildren(
       await removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined);
       issued++;
     }
-    for (const { truth, previous } of upserts) {
+    for (const { truth, previous, siblings } of upserts) {
       if (exhausted()) break;
-      await upsertMilestoneCard(opts.node, opts.cfg, truth, previous).catch(() => undefined);
+      await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, { purgeSiblings: siblings })
+        .catch(() => undefined);
       issued++;
     }
   }
