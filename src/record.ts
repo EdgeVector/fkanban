@@ -3808,16 +3808,114 @@ export async function updateCardRecord(
   await writeCardMembership(opts, card, previous ?? null);
 }
 
-/** Remove Card + BoardCards + MilestoneCards membership (payload indexes only). */
+/**
+ * The fields a membership REMOVAL is keyed by, and nothing else.
+ *
+ * `board` and `column`/`position` are BoardCards spine fields, so a thin row
+ * already carries them. `milestone` is the one that is not: it is the
+ * MilestoneCards PARTITION KEY and it is absent from every thin projection in
+ * this app. Read narrow — six fields is the whole question.
+ */
+const CARD_MEMBERSHIP_KEY_FIELDS = ["slug", "board", "column", "position", "milestone"] as const;
+
+/**
+ * Remove Card + BoardCards + MilestoneCards membership (payload indexes only).
+ *
+ * **Why this re-reads the card it was just handed.** The two index removals key
+ * off different fields, and only one of them is guaranteed to be on the object:
+ *
+ *   removeBoardCard      partition = card.board       BoardCards SPINE, always projected
+ *   removeMilestoneCard  partition = card.milestone   NOT in the spine
+ *
+ * and `removeMilestoneCard` opens with `if (!ms) return`. LastDB returns "" for
+ * a field the caller did not project, so that guard cannot tell "no milestone"
+ * from "you did not ask" — and two of this function's three callers hand it a
+ * thin BoardCards row (`archive-done` via ARCHIVE_AGE_FIELDS, `board rm
+ * --force` via listCards). Both projections omit `milestone`.
+ *
+ * The result was not a failure but silent permanent drift: the Card goes away
+ * and its MilestoneCards row stays, and nothing can key its partition afterward
+ * because the Card that named it is gone. Measured on the primary 2026-08-01,
+ * `scripts/probe-archive-orphans-milestone-membership.ts`: 66 orphan rows, 63
+ * of them in the terminal column archive-done sweeps.
+ *
+ * This is the same refusal `readWholeCardRow` already makes on the write path —
+ * "inferring wholeness from an object that cannot state its own provenance is
+ * how a thin read becomes silent data loss". A delete is rare (archive-done is
+ * capped; `rm` is manual), so one narrow point-read is the cheapest honest
+ * answer available. On a miss the caller's card stands: a Card that is already
+ * gone cannot be re-derived, and refusing to clean up would be strictly worse.
+ *
+ * **Both milestones, not the better one.** The Card record is the authority on
+ * where this card belongs, but the caller's object is still evidence of where
+ * it USED to. Retiring a slug from a partition it does not occupy is a no-op,
+ * and `removeMilestoneCard` only ever touches rows carrying this slug — so
+ * there is no cost to honouring a stale hint and a permanent orphan to pay for
+ * discarding one. The read exists to ADD the partition the caller could not
+ * name, never to overrule one it did.
+ */
 export async function deleteCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
 ): Promise<void> {
   const hash = schemaHashFor("card", opts.cfg);
+  const truth = await readCardMembershipKeys(opts.node, opts.cfg, card);
   await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
   await patchCardListIndex(opts.node, opts.cfg, card, "remove");
-  await removeBoardCard(opts.node, opts.cfg, card);
-  await removeMilestoneCard(opts.node, opts.cfg, card);
+  await removeBoardCard(opts.node, opts.cfg, truth);
+  for (const milestone of membershipPartitionsToRetire(card, truth)) {
+    await removeMilestoneCard(opts.node, opts.cfg, { ...truth, milestone });
+  }
+}
+
+/** Every MilestoneCards partition that could hold a row for this slug. */
+function membershipPartitionsToRetire(card: Card, truth: Card): string[] {
+  const out: string[] = [];
+  for (const ms of [truth.milestone, card.milestone]) {
+    const trimmed = (ms ?? "").trim();
+    if (trimmed && !out.includes(trimmed)) out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * The card's own membership keys, read from the Card record rather than trusted
+ * from the caller's object. Falls back to `card` when the Card row is missing
+ * or unreadable — a best-effort cleanup beats none.
+ */
+async function readCardMembershipKeys(
+  node: NodeClient,
+  cfg: Config,
+  card: Card,
+): Promise<Card> {
+  const hash = schemaHashFor("card", cfg);
+  if (!hash || !card.slug) return card;
+  try {
+    const res = await node.queryAll({
+      schemaHash: hash,
+      fields: [...CARD_MEMBERSHIP_KEY_FIELDS],
+      filter: { HashKey: card.slug },
+    });
+    for (const row of res.results ?? []) {
+      const f = (row.fields ?? {}) as Record<string, unknown>;
+      if (String(f.slug ?? "") !== card.slug) continue;
+      return {
+        ...card,
+        board: String(f.board ?? "") || card.board,
+        column: String(f.column ?? "") || card.column,
+        position: String(f.position ?? "") || card.position,
+        // Deliberately NOT `|| card.milestone` — the caller's value is not lost,
+        // it is carried separately by `membershipPartitionsToRetire`. Folding it
+        // in here would make the two indistinguishable and the "retire both"
+        // decision unstatable.
+        milestone: String(f.milestone ?? ""),
+      };
+    }
+  } catch {
+    // Read-side failure must not strand the delete; fall through to the caller's
+    // card, which is what this function did unconditionally before.
+  }
+  return card;
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of
