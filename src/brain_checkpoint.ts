@@ -31,11 +31,6 @@ type BrainCheckpointClient = {
   append(slug: string, chunk: string, type?: string): Promise<void>;
 };
 
-export type BrainCheckpointResult =
-  | { action: "skipped"; reason: string }
-  | { action: "already-exists"; targetSlug: string }
-  | { action: "written"; targetSlug: string; ownerSlug: string; orphan: boolean };
-
 function defaultCheckpointWarn(msg: string): void {
   process.stderr.write(`fkanban: warning: ${msg}\n`);
 }
@@ -284,7 +279,11 @@ export async function checkpointCardCompletion(opts: {
   // Surface for a best-effort skip (F-Brain unconfigured/unreachable). Defaults
   // to a one-line stderr warning. The card write must never be gated on this.
   warn?: (msg: string) => void;
-}): Promise<BrainCheckpointResult> {
+}): Promise<
+  | { action: "skipped"; reason: string }
+  | { action: "already-exists"; targetSlug: string }
+  | { action: "written"; targetSlug: string; ownerSlug: string; orphan: boolean }
+> {
   if (opts.card.column !== terminalColumn(opts.boardColumns)) {
     return { action: "skipped", reason: "card is not in the board terminal column" };
   }
