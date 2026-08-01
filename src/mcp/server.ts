@@ -1324,7 +1324,9 @@ export function createFkanbanMcpServer(
         ok: z.boolean(),
         latency_ms: z.number().describe("Wall time of the single status request, also on failure."),
         version: z.string().describe("The installed fkanban CLI version (from package.json)."),
-        node_version: z.string().optional().describe("The node's own version when the status body carries one."),
+        // No `node_version`: the LastDB status contract has never carried one,
+        // so this advertised an output field that could not populate. See
+        // `PingReport` in src/client.ts.
         socket_path: z.string().optional(),
         error: z.string().optional(),
       },
@@ -1333,7 +1335,7 @@ export function createFkanbanMcpServer(
       try {
         const report = await runPingStructured();
         const line = report.ok
-          ? `✓ node ok in ${report.latency_ms}ms${report.node_version ? ` (node ${report.node_version})` : ""}`
+          ? `✓ node ok in ${report.latency_ms}ms`
           : `✗ node unreachable — ${report.error}`;
         return toolResult(line, { ...report }, { isError: !report.ok });
       } catch (err) {

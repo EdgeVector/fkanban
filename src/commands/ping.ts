@@ -48,8 +48,7 @@ export async function pingCommand(opts: PingOptions = {}): Promise<number> {
   if (opts.json) {
     print(JSON.stringify(report));
   } else if (report.ok) {
-    const version = report.node_version ? ` (node ${report.node_version})` : "";
-    print(`✓ node ok in ${report.latency_ms}ms${version}`);
+    print(`✓ node ok in ${report.latency_ms}ms`);
   } else {
     print(`✗ node unreachable — ${report.error}`);
   }
