@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { doctor } from "../src/commands/doctor.ts";
-import { fieldsFor } from "../src/schemas.ts";
+import { BOARD_CARDS_FIELDS, fieldsFor } from "../src/schemas.ts";
 import { BOARD_LIST_INDEX_KEY, CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
 
 const CARD_HASH = "ampcardhash";
@@ -243,11 +243,22 @@ describe("doctor read amplification", () => {
     const cfgPath = writeCfg("cardlist.json", node.socketPath);
     try {
       await doctor({ configPath: cfgPath, print: () => {} });
-      // The projection-parity check deliberately reads each partition TWICE
-      // (spine + wide) to compare them — that is the check, not amplification.
-      // Budget: 1 card-list fetch (1 read per board) + parity's 2 per board.
+      // The projection-parity check reads each partition once WIDE and once per
+      // FIELD — that is the check, not amplification, and the per-field half is
+      // not optional. A projection filters on its leading field, so the old
+      // spine-vs-wide comparison put the same blind spot on both sides of the
+      // subtraction and netted to zero: a row carrying neither `board` nor
+      // `slug` was missing from both reads and the check printed green over it.
+      // The union over leading fields is the only input here that is not itself
+      // a projection (see `listBoardCardsPartitionComplete`).
+      //
+      // Budget: 1 card-list fetch + 1 wide + one lead per BoardCards field, per
+      // board. Derived from the field list rather than hard-coded so adding a
+      // field cannot silently shrink the sweep — but the invariant that matters
+      // is what this does NOT contain: nothing here scales with cards per board.
       const boards = 2;
-      expect(cardListReads(node.queries).length).toBe(boards + boards * 2);
+      const perBoard = 1 + 1 + BOARD_CARDS_FIELDS.length;
+      expect(cardListReads(node.queries).length).toBe(boards * perBoard);
     } finally {
       node.stop();
     }
@@ -260,6 +271,9 @@ describe("doctor read amplification", () => {
     // slug-only-projection canary. Assert BOTH halves: the read budget for a
     // single board (1 card-list fetch + parity's spine+wide), and that the
     // check still reports green off the reused set.
+    //
+    // cardsPerBoard is 4 here and 3 in the test above, and both land on the same
+    // per-board budget — which is the point of asserting it at all.
     const node = makeCountingNode({ boards: ["default"], cardsPerBoard: 4 });
     const lines: string[] = [];
     try {
@@ -267,7 +281,7 @@ describe("doctor read amplification", () => {
         configPath: writeCfg("smoke.json", node.socketPath),
         print: (l) => lines.push(l),
       });
-      expect(cardListReads(node.queries).length).toBe(3);
+      expect(cardListReads(node.queries).length).toBe(1 + 1 + BOARD_CARDS_FIELDS.length);
       expect(lines.join("\n")).toContain("✓ card multi-field smoke");
     } finally {
       node.stop();

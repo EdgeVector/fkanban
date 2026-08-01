@@ -16,15 +16,26 @@
  *    catastrophic field loss. When `Card` was narrowed, 70 tests failed
  *    against the fakes and 0 against the node.
  *
- * 2. **A query returns a row only if EVERY projected field has an atom on
- *    it.** A field missing from the SCHEMA is a loud `unknown_fields` error; a
- *    field missing from a ROW is a silent drop of the whole row — no error, no
- *    null, the row simply is not in `results`. So a wide projection is not a
- *    superset read, it is a filter. This is the mechanism behind the
- *    2026-07-23 milestone incident (135 under-projected rows invisible to the
- *    reconciler built to find them), and it is what makes a narrow write
- *    against a missing or partial row a data-loss path: the row it creates is
- *    one no wide reader can see.
+ * 2. **A projection is a FILTER, not a superset read.** A field missing from
+ *    the SCHEMA is a loud `unknown_fields` error; a field missing from a ROW is
+ *    a silent drop of the whole row — no error, no null, the row simply is not
+ *    in `results`. This is the mechanism behind the 2026-07-23 milestone
+ *    incident (135 under-projected rows invisible to the reconciler built to
+ *    find them), and it is what makes a narrow write against a missing or
+ *    partial row a data-loss path: the row it creates is one no wide reader can
+ *    see.
+ *
+ *    **This fake is STRICTER than the node, deliberately, and the gap is now
+ *    measured.** It drops a row when ANY projected field lacks an atom. On the
+ *    primary the field that LEADS the projection is what gates the row:
+ *    `[title,board]` returns the witness row and `[board,title]` does not —
+ *    same set, two orders, two answers (2026-08-01,
+ *    `scripts/probe-projection-order-dependence.ts` and the three probes after
+ *    it). So production returns rows this fake drops, never the reverse.
+ *    Stricter is the safe direction for the guards under test here, and
+ *    modelling the real rule would rewrite the expectations of ~40 tests, so it
+ *    stays — but it is a KNOWN divergence, not fidelity. Do not cite this file
+ *    as evidence for what the node does.
  *
  * A fake that ignores the projection cannot reproduce either bug, and cannot
  * prove that the guards against them work. Faithful is the default here.

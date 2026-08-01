@@ -92,7 +92,7 @@ export function checkProjectionParity(
     dropped,
     reason:
       `${dropped} of ${spineRows} rows are invisible to the wide projection ` +
-      `(a projected field has no atom on them)` +
+      `(no atom for the field that LEADS it)` +
       (sample.length > 0 ? ` — e.g. ${sample.join(", ")}` : "") +
       ` — run \`kanban groom board-cards-heal --apply\``,
   };

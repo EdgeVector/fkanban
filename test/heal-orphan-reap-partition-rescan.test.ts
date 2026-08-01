@@ -35,7 +35,7 @@ import type { Config } from "../src/config.ts";
 import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
 import { boardToFields, nowIso, type Card } from "../src/record.ts";
 import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
-import { DEFAULT_COLUMNS } from "../src/schemas.ts";
+import { BOARD_CARDS_FIELDS, DEFAULT_COLUMNS } from "../src/schemas.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -157,6 +157,14 @@ describe("board-cards-heal: reaping orphans must not re-read the partition per r
 
     // Belt-and-braces absolute bound: whatever the census costs, five reaped
     // rows must not add five scans on top of it.
-    expect(partitionReads(node)).toBeLessThan(5);
+    //
+    // The census is a wide read plus one read per BoardCards field. The
+    // per-field half is the completeness sweep — a projection filters on its
+    // LEADING field, so no single read can enumerate a partition and the union
+    // over leads is what replaced the spine here (see
+    // `listBoardCardsPartitionComplete`). Derived from the field list, so the
+    // bound tracks the schema instead of drifting into a magic number, and the
+    // thing being asserted stays "nothing scales with ORPHANS".
+    expect(partitionReads(node)).toBeLessThanOrEqual(1 + BOARD_CARDS_FIELDS.length);
   });
 });
