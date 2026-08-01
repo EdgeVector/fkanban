@@ -29,11 +29,35 @@
  * A fake that ignores the projection cannot reproduce either bug, and cannot
  * prove that the guards against them work. Faithful is the default here.
  *
- * `dropIncompleteRows: false` models a node that has changed its mind and
- * returns incomplete rows instead. It exists for one purpose: a guard whose
- * only job is to be independent of the node's drop behaviour can only be
- * shown to be load-bearing by a fake willing to stop dropping. Do not reach
- * for it to make a failing test pass.
+ * **Rule 2 is CONDITIONAL, and nothing in this repo knows the condition.**
+ * Measured on the live primary 2026-08-01
+ * (`scripts/probe-projection-rule-regression.ts`,
+ * `scripts/probe-wire-projection-semantics.ts`), same node, same client, same
+ * query verb:
+ *
+ *   - `BoardCards`, HashKey=default: `["slug"]` -> 351 rows,
+ *     `["slug","milestone"]` -> 332. **19 rows dropped.** Rule 2 holds.
+ *   - `MilestoneCards`, one partition: `["slug"]` -> 56 rows, and EVERY payload
+ *     field projected one at a time -> 56 rows, 47-56 of them carrying the
+ *     field. **Nothing dropped; partial rows returned instead.** The single
+ *     exception is `milestone` — the partition key — which drops 7. Rule 2
+ *     does not hold.
+ *   - `BoardMilestones`, HashKey=default: `completed_at` is projected by every
+ *     read and written by no writer; 33 rows return, **0 carry the key**, none
+ *     dropped. Rule 2 does not hold.
+ *
+ * So `dropIncompleteRows` is not "faithful vs. a node that changed its mind" —
+ * it selects between two behaviours the node exhibits TODAY on different
+ * indexes. It stays `true` by default because that is the stricter model and
+ * because BoardCards, the busiest index, still behaves that way. Reach for
+ * `false` when the code under test reads an index measured NOT to drop
+ * (MilestoneCards, BoardMilestones) — not to make a failing test pass.
+ *
+ * When it is `false`, a projected field with no atom is OMITTED from `fields`
+ * rather than set to `undefined`, because that is what the node does: on the
+ * primary, `"completed_at" in row.fields` is false for all 33 BoardMilestones
+ * rows. A guard written as `"x" in fields` must fail here for the same reason
+ * it would fail in production.
  */
 import type {
   NodeClient,
@@ -181,7 +205,10 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
         // THE RULE: any projected field with no atom on this row drops the row.
         if (node.dropIncompleteRows && fields.some((name) => !(name in rec.fields))) continue;
         const projected: Record<string, unknown> = {};
-        for (const name of fields) projected[name] = rec.fields[name];
+        // Absent is ABSENT — not a key holding `undefined`. The node omits it.
+        for (const name of fields) {
+          if (name in rec.fields) projected[name] = rec.fields[name];
+        }
         results.push({ fields: projected, key: { hash: rec.keyHash, range: rec.rangeKey } });
       }
       return { ok: true, results, returned_count: results.length, total_count: results.length };

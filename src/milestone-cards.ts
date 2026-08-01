@@ -9,10 +9,30 @@ import type { NodeClient } from "./client.ts";
 import { MILESTONE_CARDS_FIELDS, MILESTONE_CARDS_LAYOUT } from "./schemas.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
-// boardCardSk is pure — safe to import without cycle.
-import { boardCardSk } from "./board-cards.ts";
+// boardCardSk / parseBoardCardSk are pure — safe to import without cycle.
+import { boardCardSk, parseBoardCardSk } from "./board-cards.ts";
 
 export { MILESTONE_CARDS_LAYOUT };
+
+/**
+ * A MilestoneCards row reduced to what identifies and addresses it.
+ *
+ * `sk` here is the row's REAL range key, not the payload copy of it.
+ */
+export type MilestoneCardRow = {
+  milestone: string;
+  sk: string;
+  slug: string;
+  column: string;
+  position: string;
+};
+
+/**
+ * The narrowest useful projection: everything else this index needs to be
+ * addressed is carried by the range key. See
+ * {@link listMilestoneCardsPartitionSpine} for why the partition key is not here.
+ */
+export const MILESTONE_CARDS_ADDRESS_FIELDS = ["slug"] as const;
 
 export function milestoneCardsHash(cfg: Config): string | null {
   const h = cfg.schemaHashes?.["milestone_cards"];
@@ -114,14 +134,17 @@ export async function purgeOtherMilestoneCardRows(
 ): Promise<number> {
   const schemaHash = milestoneCardsHash(cfg);
   if (!schemaHash || !slug || !milestone) return 0;
-  const part = await listMilestoneCardsPartition(node, cfg, milestone);
+  // Address rows by their range key, not by the display read. The display read
+  // denies a row whose `layout` copy did not come back, and a row this purge
+  // cannot see is an orphan nothing can ever delete — no later purge sees it
+  // either. See {@link listMilestoneCardsPartitionSpine}.
+  const part = await listMilestoneCardsPartitionSpine(node, cfg, milestone);
   if (!part) return 0;
   let n = 0;
   for (const row of part) {
     if (row.slug !== slug) continue;
-    const sk = milestoneCardSk(row.column, row.position, row.slug);
-    if (keepSk !== null && sk === keepSk) continue;
-    await deleteMilestoneCardSk(node, schemaHash, milestone, sk);
+    if (keepSk !== null && row.sk === keepSk) continue;
+    await deleteMilestoneCardSk(node, schemaHash, milestone, row.sk);
     n += 1;
   }
   return n;
@@ -265,6 +288,29 @@ export async function removeMilestoneCard(
   }
 }
 
+/**
+ * Is this row foreign, i.e. written under some other layout?
+ *
+ * Only a marker that is PRESENT and DIFFERENT answers yes. An ABSENT marker is
+ * a row that cannot state its own provenance, and the same reasoning
+ * `readWholeBoardCardRow` applies on the write path applies here: do not infer
+ * a fact from an object that has not stated it.
+ *
+ * This is not hypothetical. Measured on the live primary 2026-08-01
+ * (`scripts/probe-layout-marker-denial.ts`): the node returns partial rows on
+ * this index — every payload field comes back for some rows and not others,
+ * and only the partition-key field `milestone` drops a row at all. In the
+ * `lastdb-0231-read-regression-fixes` partition, 9 of 56 rows came back with no
+ * `layout` key. The old check read `f.layout ?? ""`, so each of those was
+ * denied — and a denied row is invisible to `milestone detail`, to `milestone
+ * reconcile`, and to {@link purgeOtherMilestoneCardRows}. Nothing could report
+ * it and nothing could delete it, which is the definition of a permanent
+ * orphan; reconcile then re-issued the same repair on every run forever.
+ */
+function isForeignLayout(marker: unknown, expected: string): boolean {
+  return typeof marker === "string" && marker.length > 0 && marker !== expected;
+}
+
 /** All thin cards under one milestone (no body). */
 export async function listMilestoneCardsPartition(
   node: NodeClient,
@@ -279,15 +325,87 @@ export async function listMilestoneCardsPartition(
       fields: [...MILESTONE_CARDS_FIELDS],
       filter: { HashKey: milestone },
     });
-    return res.results
-      .map((r) => {
-        const f = (r.fields ?? {}) as Record<string, unknown>;
-        if (String(f.layout ?? "") !== MILESTONE_CARDS_LAYOUT) return null;
-        return cardFromMilestoneCardFields(f);
-      })
-      .filter((c): c is Card => c !== null)
-      .filter((c) => c.slug.length > 0);
+    const out: Card[] = [];
+    for (const r of res.results) {
+      const f = (r.fields ?? {}) as Record<string, unknown>;
+      if (isForeignLayout(f.layout, MILESTONE_CARDS_LAYOUT)) continue;
+      const card = cardFromMilestoneCardFields(f);
+      // The range key IS the row's address; the copied scalars are just copies,
+      // and this read has measured them going missing. Recover identity from
+      // the address before falling back to a copy that may not have come back.
+      const parsed = parseBoardCardSk(typeof r.key?.range === "string" ? r.key.range : "");
+      if (parsed) {
+        if (card.slug.length === 0) card.slug = parsed.slug;
+        if (card.column.length === 0) card.column = parsed.column;
+        if (card.position.length === 0) card.position = parsed.position;
+      }
+      if (card.slug.length === 0) continue;
+      out.push(card);
+    }
+    return out;
   } catch {
     return null;
   }
+}
+
+/**
+ * Every row in a milestone partition, addressed by its range key.
+ *
+ * The counterpart to `listBoardCardsPartitionSpine`, and it exists for the same
+ * reason: "did I see every row?" and "what key do I delete?" must not be
+ * answered by a read that can deny rows or hand back a stale copy of an
+ * address.
+ *
+ * Two deliberate choices, both measured on the live primary 2026-08-01:
+ *
+ *  - it projects only `slug`, and **not** the partition key `milestone`.
+ *    Projecting the hash field is the one thing that DOES drop rows on this
+ *    index (56 -> 49 in the probed partition) and it buys nothing: the caller
+ *    already knows the milestone — it is the filter.
+ *  - it takes the sk from `QueryRow.key.range` rather than the `sk` payload
+ *    copy, which was absent on 9 of those 56 rows. `purgeOtherMilestoneCardRows`
+ *    used to rebuild the address from the `column`/`position`/`slug` copies, so
+ *    on a row whose copies did not come back it computed a key that addresses
+ *    nothing, deleted nothing, and counted the deletion anyway.
+ *
+ * A row whose address cannot be resolved at all is skipped, not guessed at.
+ */
+export async function listMilestoneCardsPartitionSpine(
+  node: NodeClient,
+  cfg: Config,
+  milestone: string,
+): Promise<MilestoneCardRow[] | null> {
+  const schemaHash = milestoneCardsHash(cfg);
+  if (!schemaHash || !milestone.trim()) return null;
+  let res;
+  try {
+    res = await node.queryAll({
+      schemaHash,
+      fields: [...MILESTONE_CARDS_ADDRESS_FIELDS],
+      filter: { HashKey: milestone },
+    });
+  } catch {
+    return null;
+  }
+  const out: MilestoneCardRow[] = [];
+  for (const r of res.results) {
+    const f = (r.fields ?? {}) as Record<string, unknown>;
+    const sk = typeof r.key?.range === "string" && r.key.range.length > 0
+      ? r.key.range
+      : typeof f.sk === "string"
+        ? f.sk
+        : "";
+    if (sk.length === 0) continue;
+    const parsed = parseBoardCardSk(sk);
+    const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
+    if (slug.length === 0) continue;
+    out.push({
+      milestone,
+      sk,
+      slug,
+      column: parsed?.column ?? "",
+      position: parsed?.position ?? "",
+    });
+  }
+  return out;
 }

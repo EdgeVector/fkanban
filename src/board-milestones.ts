@@ -113,14 +113,16 @@ export async function purgeOtherBoardMilestoneRows(
 ): Promise<number> {
   const schemaHash = boardMilestonesHash(cfg);
   if (!schemaHash || !slug) return 0;
-  const part = await listBoardMilestonesPartition(node, cfg, board);
+  // Address rows by their range key, not through the display read — which can
+  // deny a row whose `layout` copy did not come back, and which rebuilds the sk
+  // from copied scalars. See {@link listBoardMilestonesPartitionSpine}.
+  const part = await listBoardMilestonesPartitionSpine(node, cfg, board);
   if (!part) return 0;
   let n = 0;
   for (const row of part) {
     if (row.slug !== slug) continue;
-    const sk = boardMilestoneSk(row.state, row.position, row.slug);
-    if (keepSk !== null && sk === keepSk) continue;
-    await deleteBoardMilestoneSk(node, schemaHash, board, sk);
+    if (keepSk !== null && row.sk === keepSk) continue;
+    await deleteBoardMilestoneSk(node, schemaHash, board, row.sk);
     n += 1;
   }
   return n;
@@ -206,19 +208,96 @@ export async function listBoardMilestonesPartition(
       fields: [...BOARD_MILESTONES_FIELDS],
       filter: { HashKey: board },
     });
-    return res.results
-      .map((r) => {
-        const f = (r.fields ?? {}) as Record<string, unknown>;
-        // Only rows dual-written by this client (layout marker).
-        if (String(f.layout ?? "") !== BOARD_MILESTONES_LAYOUT) {
-          return null;
-        }
-        return milestoneFromBoardMilestoneFields(f);
-      })
-      .filter((m): m is Milestone => m !== null && m.slug.length > 0);
+    const out: Milestone[] = [];
+    for (const r of res.results) {
+      const f = (r.fields ?? {}) as Record<string, unknown>;
+      // Only rows dual-written by this client — but a marker that did not come
+      // back is NOT a foreign marker. The node returns partial rows (measured
+      // on the live primary 2026-08-01, `scripts/probe-wire-projection-semantics.ts`:
+      // 33 of 33 rows here come back with no `completed_at` key at all), so
+      // `f.layout ?? ""` reads absence as foreignness and denies a row the node
+      // supplied. Only a marker that is PRESENT and DIFFERENT is evidence.
+      const marker = f.layout;
+      if (typeof marker === "string" && marker.length > 0 && marker !== BOARD_MILESTONES_LAYOUT) {
+        continue;
+      }
+      const m = milestoneFromBoardMilestoneFields(f);
+      // The range key is the row's address; the copies are copies.
+      const parsed = parseBoardMilestoneSk(typeof r.key?.range === "string" ? r.key.range : "");
+      if (parsed) {
+        if (m.slug.length === 0) m.slug = parsed.slug;
+        if (m.position.length === 0) m.position = parsed.position;
+        if (!f.state) m.state = parsed.state;
+      }
+      if (m.slug.length === 0) continue;
+      out.push(m);
+    }
+    return out;
   } catch {
     return null;
   }
+}
+
+/**
+ * A BoardMilestones row reduced to what identifies and addresses it, with `sk`
+ * taken from the row's REAL range key rather than the payload copy of it.
+ */
+export type BoardMilestoneRow = {
+  board: string;
+  sk: string;
+  slug: string;
+  state: string;
+  position: string;
+};
+
+/**
+ * Every row in a board's milestone partition, addressed by its range key.
+ *
+ * The counterpart to `listBoardCardsPartitionSpine` and
+ * `listMilestoneCardsPartitionSpine`. It projects only `slug` — not the
+ * partition key `board`, which the caller already knows because it is the
+ * filter, and not the 15 payload fields the display read pays for and this
+ * caller drops. A row whose address cannot be resolved is skipped rather than
+ * addressed by a guess.
+ */
+export async function listBoardMilestonesPartitionSpine(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+): Promise<BoardMilestoneRow[] | null> {
+  const schemaHash = boardMilestonesHash(cfg);
+  if (!schemaHash) return null;
+  let res;
+  try {
+    res = await node.queryAll({
+      schemaHash,
+      fields: ["slug"],
+      filter: { HashKey: board },
+    });
+  } catch {
+    return null;
+  }
+  const out: BoardMilestoneRow[] = [];
+  for (const r of res.results) {
+    const f = (r.fields ?? {}) as Record<string, unknown>;
+    const sk = typeof r.key?.range === "string" && r.key.range.length > 0
+      ? r.key.range
+      : typeof f.sk === "string"
+        ? f.sk
+        : "";
+    if (sk.length === 0) continue;
+    const parsed = parseBoardMilestoneSk(sk);
+    const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
+    if (slug.length === 0) continue;
+    out.push({
+      board,
+      sk,
+      slug,
+      state: parsed?.state ?? "",
+      position: parsed?.position ?? "",
+    });
+  }
+  return out;
 }
 
 /**

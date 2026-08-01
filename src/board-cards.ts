@@ -101,10 +101,14 @@ export const BOARD_CARDS_DEP_SEED_FIELDS = [
  * `tags` to drop tombstones (`isHiddenCard`); it renders no card, so the other
  * 18 BoardCards fields are fetched and thrown away.
  *
- * Narrowing here is also strictly *less* droppable than the wide read it
- * replaces: LastDB returns a row only when every projected field has an atom,
- * so asking for 6 fields loses fewer rows than asking for 24. The footer count
- * can only get more accurate.
+ * Narrowing here is also *less* droppable than the wide read it replaces, so
+ * the footer count can only get more accurate — but the rule is narrower than
+ * it reads. Measured 2026-08-01 (`scripts/probe-projection-rule-regression.ts`):
+ * on THIS index a projected field with sparse atoms does drop rows (351 -> 332
+ * when `milestone` is added), but on `MilestoneCards` the same shape returns a
+ * PARTIAL row instead, and on `BoardMilestones` a field no row has drops
+ * nothing at all. Narrowing is still right here; do not carry the rule to
+ * another index without measuring that index.
  */
 export const BOARD_CARDS_FOOTER_FIELDS = [
   ...BOARD_CARDS_SPINE_FIELDS,
