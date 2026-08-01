@@ -3003,16 +3003,45 @@ export async function listCardsForDisplay(
  *
  * So: skip the viewed board at the QUERY, not in the reducer, and project only
  * {@link BOARD_CARDS_FOOTER_FIELDS}. Returns `null` when BoardCards cannot
- * serve the read (unconfigured schema / query failure), so the caller can fall
- * back to the cross-board path rather than silently print no footer — an absent
- * footer is indistinguishable from "no other board has cards".
+ * serve the read at all (unconfigured schema), so the caller can fall back to
+ * the cross-board path rather than silently print no footer — an absent footer
+ * is indistinguishable from "no other board has cards".
+ *
+ * ## Why a failed partition read does not propagate
+ *
+ * This read exists to render ONE LINE of navigation hint about boards the user
+ * is not looking at. It is the last read `list` issues and the only one whose
+ * absence costs nothing but the hint. Yet until 2026-08-01 a node error here
+ * escaped and took the whole command down: bare `kanban list` exited 1 and
+ * printed no board at all because the empty `agent-dogfood-scratch` partition
+ * answered this projection with `HTTP 400 … laststore: corrupt: empty rec`,
+ * while `default` — every card anyone cares about — had already been read back
+ * intact three queries earlier.
+ *
+ * Three properties made that outage possible at once, and the fix targets the
+ * only one that is fkanban's to own:
+ *
+ * 1. The corrupt marker is LastDB's
+ *    ([[papercut-lastdb-corrupt-empty-rec-on-one-lead-field-agent-dogfood-scratch]]).
+ * 2. It is reachable ONLY through a narrow projection — the same partition
+ *    answers the wide 14- and 22-field reads with 0 rows, cleanly. Narrowing a
+ *    projection is not purely a cost win; it changes which index structures the
+ *    node must touch, so it can newly EXPOSE damage a wide read never sees.
+ * 3. A decorative cross-board read could fail a command whose own board was
+ *    fine. That is the bug fixed here.
+ *
+ * So a per-board failure is neither swallowed nor rethrown — the same contract
+ * {@link sweepBoardCardsPartition} settled for `failedLeads`. The slug is
+ * RETURNED in `unreadable` and the footer names it, because a board that could
+ * not be read must never render as a board with no cards: those are different
+ * facts and only one of them is worth acting on.
  */
 export async function listOtherBoardCardsForFooter(
   node: NodeClient,
   cfg: Config,
   viewedBoard: string,
   boards: Array<{ slug: string }>,
-): Promise<Card[] | null> {
+): Promise<{ cards: Card[]; unreadable: string[] } | null> {
   // An EMPTY board list is "I don't know", not "there are no other boards".
   // The legacy shape (no `board_cards` hash, Board index unserved) discovers
   // other boards from the Card rows themselves, so returning [] here would
@@ -3021,12 +3050,21 @@ export async function listOtherBoardCardsForFooter(
   const others = boards.filter((b) => b.slug !== viewedBoard);
   // A genuine single-board install has nothing to advertise, and the footer
   // renders "" for an empty set. Costs zero reads.
-  if (others.length === 0) return [];
+  if (others.length === 0) return { cards: [], unreadable: [] };
   const out: Card[] = [];
+  const unreadable: string[] = [];
   for (const b of others) {
-    const part = await listBoardCardsPartition(node, cfg, b.slug, {
-      fields: BOARD_CARDS_FOOTER_FIELDS,
-    });
+    let part: Card[] | null;
+    try {
+      part = await listBoardCardsPartition(node, cfg, b.slug, {
+        fields: BOARD_CARDS_FOOTER_FIELDS,
+      });
+    } catch {
+      // This board's partition is unreadable. Keep the boards that ARE
+      // readable, name this one, and let `list` finish — see the note above.
+      unreadable.push(b.slug);
+      continue;
+    }
     if (part === null) return null; // caller falls back to the cross-board read
     for (const c of part) {
       if (isHiddenCard(c)) continue;
@@ -3036,7 +3074,7 @@ export async function listOtherBoardCardsForFooter(
       out.push(c.board ? c : { ...c, board: b.slug });
     }
   }
-  return out;
+  return { cards: out, unreadable };
 }
 
 // Point read by slug — the node resolves a HashKey filter as an indexed key
