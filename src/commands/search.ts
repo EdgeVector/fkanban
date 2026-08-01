@@ -225,8 +225,28 @@ async function indexedSearchCards(
   for (const card of scopedDisplay) {
     // `withLoadedBody` is the marker-clearing half of the BODY_OMITTED
     // contract: a card whose body we genuinely read is no longer "unread".
+    //
+    // AN EMPTY SCAN BODY IS NOT A READ. `listBoardCardsWithBodies` holds this
+    // same scan to that rule already; this is its other consumer, and clearing
+    // the marker on `""` was the laundering step the sweep fix named — it turns
+    // "the scan told me nothing" into "I read it, and it was empty".
+    //
+    // Here that DEFEATS a defence that is already in place. `fkanban_search`
+    // hydrates its capped page (`hydrateCardBodies` on ≤20 cards, mcp/server.ts)
+    // so every returned match carries a real body — and `hydrateCardBodies`
+    // correctly refuses to re-read a body someone claimed to have read. A card
+    // whose scan body was empty therefore skipped the very read that exists to
+    // fill it.
+    //
+    // Keeping the marker costs this path nothing: no read is issued here, and
+    // `cardMatchesQuery` sees `body: ""` either way. It only re-arms the bounded
+    // hydration downstream. Deliberately NOT hydrating the whole board here —
+    // measured on the live primary 2026-08-01, that is 12 point reads / 257ms on
+    // a 1139ms read phase for zero recall today
+    // (`scripts/probe-search-empty-body-denial.ts`), and the page-bounded read
+    // MCP already does is the proportionate place to pay it.
     const body = bodies?.get(card.slug);
-    const whole = body === undefined ? card : withLoadedBody(card, body);
+    const whole = body === undefined || body.length === 0 ? card : withLoadedBody(card, body);
     if (cardMatchesQuery(whole, opts.query)) bySlug.set(whole.slug, whole);
   }
 
