@@ -177,6 +177,24 @@ export async function retireMilestoneCardMembership(
   // BoardCards write creates the MilestoneCards tip when proteins are bound.
 }
 
+export type MilestoneCardUpsertOptions = {
+  /**
+   * The caller has SEEN more than one row for this slug in `nextMs` and is
+   * passing only one of them as `previous`.
+   *
+   * Without this, the sweep below is gated on `prevSk !== nextSk`, which asks
+   * "did the card move?" — a question that only answers the sweep's real one
+   * ("are there rows to clean up?") when `previous` is the ONLY other row.
+   * Reconcile passes `rows[0]` out of a group it already knows is larger than
+   * one, so the gate reads the partition's return order rather than the drift:
+   * if `rows[0]` happens to be the row that is already correct, the gate says
+   * "nothing moved", nothing is swept, and the same repair is re-issued on
+   * every subsequent run. Column sks sort `backlog < doing < done < todo`, so
+   * that is every backward move — `done -> doing`, `todo -> anything`.
+   */
+  purgeSiblings?: boolean;
+};
+
 /**
  * Upsert thin MilestoneCards row (full dual-write). Prefer
  * {@link retireMilestoneCardMembership} on the hot path; use this for heal /
@@ -187,6 +205,7 @@ export async function upsertMilestoneCard(
   cfg: Config,
   card: Card | CardSummary,
   previous?: Card | CardSummary | null,
+  opts: MilestoneCardUpsertOptions = {},
 ): Promise<void> {
   const schemaHash = milestoneCardsHash(cfg);
   if (!schemaHash) return;
@@ -202,7 +221,9 @@ export async function upsertMilestoneCard(
 
   if (!nextFields) return;
 
-  if (previous && prevMs) {
+  // A single `previous` can only license SKIPPING the sweep when it accounts
+  // for every other row. `purgeSiblings` is the caller saying it does not.
+  if (previous && prevMs && !opts.purgeSiblings) {
     const prevSk = milestoneCardSk(previous.column, previous.position, previous.slug);
     if (prevSk !== nextSk || prevMs !== nextMs) {
       await purgeOtherMilestoneCardRows(node, cfg, nextMs, slug, nextSk);
