@@ -224,3 +224,142 @@ describe("board-cards-heal and the rows it could not see", () => {
     expect(node.rowsOf(BOARD_CARDS_HASH).map((r) => r.fields.slug)).toContain("live-card");
   });
 });
+
+/**
+ * The spine's OWN blind spot — the one it claimed it could not have.
+ *
+ * `board` and `sk` are payload COPIES of the key. A write that lands some atoms
+ * and not others leaves the row keyed into the partition carrying neither, so
+ * the old five-field spine dropped it exactly like the wide read did. Measured
+ * on the live `default` partition 2026-08-01: 338 rows at the old spine width
+ * against 357 at `["slug"]`, and 18 of the missing 19 were Card-less orphans
+ * that `board-cards heal` exists to reap.
+ */
+describe("the spine cannot depend on copies of its own key", () => {
+  /**
+   * Partial-write residue: keyed into the partition, carrying no copy of its
+   * own address.
+   *
+   * This has to be seeded by hand rather than through `projectionFaithfulNode`,
+   * which derives the key FROM `row.board`/`row.sk` — the very fields that are
+   * absent here. That is not a test artifact, it is the bug restated: the code
+   * under test made the same assumption, that a row in a partition must carry a
+   * copy of the key that put it there.
+   */
+  function seedKeyOnlyRow(node: FakeNode, card: Card): void {
+    const row = sparseRow(card);
+    delete row.board;
+    delete row.sk;
+    delete row.layout;
+    node.seed({
+      schemaHash: BOARD_CARDS_HASH,
+      keyHash: card.board,
+      rangeKey: boardCardSk(card.column, card.position, card.slug),
+      fields: row,
+    });
+  }
+
+  test("the spine sees a row that carries no `board` or `sk` atom", async () => {
+    const visible = fullCard({ slug: "visible" });
+    const keyOnly = fullCard({ slug: "key-only", column: "todo", position: "20" });
+    const node = projectionFaithfulNode({
+      cards: [{ ...fullRow(visible), body: "" }],
+      boardCards: [fullRow(visible)],
+    });
+    seedKeyOnlyRow(node, keyOnly);
+
+    const spine = await listBoardCardsPartitionSpine(node, cfg, "default");
+    expect(spine!.map((r) => r.slug).sort()).toEqual(["key-only", "visible"]);
+  });
+
+  test("it recovers the full address of such a row from the key alone", async () => {
+    const keyOnly = fullCard({ slug: "key-only", column: "doing", position: "70" });
+    const node = projectionFaithfulNode({ cards: [], boardCards: [] });
+    seedKeyOnlyRow(node, keyOnly);
+
+    const spine = await listBoardCardsPartitionSpine(node, cfg, "default");
+    // Every field comes from `key.hash` / `key.range`; the row supplied none of
+    // them. An address assembled from absent copies is what made these rows
+    // undeletable — `purgeOtherBoardCardRows` computed a key addressing nothing.
+    expect(spine![0]).toEqual({
+      board: "default",
+      sk: boardCardSk("doing", "70", "key-only"),
+      slug: "key-only",
+      column: "doing",
+      position: "70",
+    });
+  });
+
+  test("the spine read projects one field, and not a copy of the key", async () => {
+    const node = projectionFaithfulNode({ cards: [], boardCards: [fullRow(fullCard())] });
+    const projections: string[][] = [];
+    const orig = node.queryAll.bind(node);
+    node.queryAll = async (opts) => {
+      projections.push([...opts.fields]);
+      return orig(opts);
+    };
+
+    await listBoardCardsPartitionSpine(node, cfg, "default");
+
+    expect(projections).toHaveLength(1);
+    // Anything droppable that the key already answers is a row this read can
+    // lose for nothing. `[]` is NOT the floor — the node reads it as the full
+    // field set (measured: identical 338 rows to the old spine).
+    expect(projections[0]).not.toContain("board");
+    expect(projections[0]).not.toContain("sk");
+    expect(projections[0]!.length).toBe(1);
+  });
+
+  test("heal reaps a Card-less orphan whose row lost its key copies", async () => {
+    const live = fullCard({ slug: "live-card" });
+    const orphan = fullCard({ slug: "orphan-key-only", position: "20" });
+    const node = projectionFaithfulNode({
+      cards: [{ ...fullRow(live), body: "" }],
+      boardCards: [fullRow(live)],
+    });
+    seedKeyOnlyRow(node, orphan);
+
+    const { report: res } = await boardCardsHealResult({ cfg, node, apply: true });
+
+    expect(res.missing_card).toBe(1);
+    expect(
+      res.actions.some((a) => a.action === "delete-orphan" && a.slug === "orphan-key-only"),
+    ).toBe(true);
+    expect(node.rowsOf(BOARD_CARDS_HASH).map((r) => r.fields.slug)).not.toContain("orphan-key-only");
+  });
+
+  test("`board` comes from the partition being read, not from the row", async () => {
+    // With the projection narrowed to `slug`, the row's own `board` copy is
+    // never fetched — so there is nothing to prefer it over. This pins the
+    // resolution that is left: the argument, which is the filter.
+    const drifted = fullCard({ slug: "drifted" });
+    const row = fullRow(drifted);
+    row.board = "some-other-board";
+    const node = projectionFaithfulNode({ cards: [], boardCards: [] });
+    node.seed({
+      schemaHash: BOARD_CARDS_HASH,
+      keyHash: "default",
+      rangeKey: boardCardSk(drifted.column, drifted.position, drifted.slug),
+      fields: row,
+    });
+
+    const spine = await listBoardCardsPartitionSpine(node, cfg, "default");
+    expect(spine![0]!.board).toBe("default");
+  });
+
+  test("the parity check can see the gap (it used to net to zero)", async () => {
+    const live = fullCard({ slug: "live-card" });
+    const keyOnly = fullCard({ slug: "key-only", position: "20" });
+    const node = projectionFaithfulNode({
+      cards: [{ ...fullRow(live), body: "" }],
+      boardCards: [fullRow(live)],
+    });
+    seedKeyOnlyRow(node, keyOnly);
+
+    const spine = await listBoardCardsPartitionSpine(node, cfg, "default");
+    const wide = await listBoardCardsPartition(node, cfg, "default");
+    // Both sides used to drop this row, so `spine.length - wide.length` was 0
+    // and doctor reported "spine agrees" over a partition with a hidden row.
+    expect(spine!.length - wide!.length).toBe(1);
+  });
+});

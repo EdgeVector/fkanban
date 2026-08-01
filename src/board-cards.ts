@@ -31,9 +31,17 @@ function isCreatedByFieldMiss(err: unknown): boolean {
 }
 
 /**
- * The membership SPINE: the only fields a BoardCards row is guaranteed to
- * carry, because `board` is the partition, `sk` is the range key, and
+ * The membership SPINE: the display base shared by every BoardCards read that
+ * renders a row, and the set a row was ASSUMED to be guaranteed to carry —
+ * because `board` is the partition, `sk` is the range key, and
  * column/position/slug are the three components `sk` is built from.
+ *
+ * That assumption is false, and {@link BOARD_CARDS_ADDRESS_FIELDS} exists
+ * because of it: `board` and `sk` are payload COPIES of the key, not the key.
+ * The key is `QueryRow.key.hash` / `.range`, and a write that lands some atoms
+ * and not others leaves the row keyed into the partition with no copy of its
+ * own address. This set is therefore a display projection like any other — do
+ * not read it to answer "did I see every row?".
  *
  * Why this exists — LastDB projection semantics (measured on the primary,
  * 2026-07-30). A query returns a row only if EVERY projected field has an
@@ -51,9 +59,9 @@ function isCreatedByFieldMiss(err: unknown): boolean {
  * partition it had just enumerated.
  *
  * So: anything that must see EVERY row (reconcilers, orphan reaping, parity
- * checks) reads the spine. Display paths keep the wide projection — a card
- * missing a display field is worth hiding, a row missing one is not worth
- * losing.
+ * checks) reads {@link BOARD_CARDS_ADDRESS_FIELDS}. Display paths keep the wide
+ * projection — a card missing a display field is worth hiding, a row missing
+ * one is not worth losing.
  */
 export const BOARD_CARDS_SPINE_FIELDS = [
   "board",
@@ -62,6 +70,50 @@ export const BOARD_CARDS_SPINE_FIELDS = [
   "column",
   "position",
 ] as const;
+
+/**
+ * The narrowest useful projection for "did I see every row?".
+ *
+ * Everything a {@link BoardCardSpineRow} needs is carried by the KEY: `board`
+ * is the partition (the caller passes it as the filter), and `sk` is the range
+ * key, from which `parseBoardCardSk` recovers column/position/slug. So the
+ * projected field's CONTENT is never consumed here — only its drop rate
+ * matters, and one field drops less than five.
+ *
+ * The counterpart to {@link MILESTONE_CARDS_ADDRESS_FIELDS}, which made this
+ * same move on MilestoneCards; BoardCards is the busiest of the three
+ * membership indexes and was the last still reading its spine wide.
+ *
+ * ## Measured, live primary `HashKey=default`, 2026-08-01
+ *
+ * (`scripts/probe-spine-hash-field-denial.ts`)
+ *
+ * | projection | rows |
+ * |---|---|
+ * | `["title"]` | 358 |
+ * | `["slug"]` (this) | 357 |
+ * | `["board","sk","slug","column","position"]` (the old spine) | **338** |
+ * | `[]` | **338** |
+ *
+ * 19 rows carry `slug`/`column`/`position`/`title` atoms but no `board`, `sk`,
+ * `milestone` or `layout` — partial-write residue, keyed into the partition and
+ * addressable by range key, invisible to a read that projects a copy of the key.
+ * 18 of the 19 have no Card record (orphans `board-cards heal` exists to reap);
+ * the 19th, `lastgit-blob-inventory-primary-cutover`, is a live `needs_human`
+ * card that `kanban show` renders and `kanban list` could not see.
+ *
+ * Two traps worth keeping written down:
+ *
+ *  - **`[]` is not "no projection"** — it is the WORST projection. The node
+ *    falls back to the full field set, so an empty array measures identically
+ *    to the old five-field spine.
+ *  - **No projection is drop-free.** `title` sees one row `slug` does not, so
+ *    this is the narrowest available read, not a complete one. The old doc
+ *    claimed completeness (*"this one cannot [drop rows], because a row that
+ *    lacks a spine field could not have been keyed into the partition"*) and
+ *    that claim is why nobody re-measured it for two days.
+ */
+export const BOARD_CARDS_ADDRESS_FIELDS = ["slug"] as const;
 
 export type BoardCardSpineRow = {
   board: string;
@@ -674,12 +726,21 @@ export async function listBoardCardsPartition(
 }
 
 /**
- * Every row in a board partition, projecting only {@link BOARD_CARDS_SPINE_FIELDS}.
+ * Every row in a board partition, projecting only
+ * {@link BOARD_CARDS_ADDRESS_FIELDS} and addressing each row by its REAL key.
  *
- * This is the drop-free read. `listBoardCardsPartition` projects all 24 fields
- * and silently loses any row missing one of them; this one cannot, because a
- * row that lacks a spine field could not have been keyed into the partition in
- * the first place. Use it wherever "did I see every row?" is the question.
+ * The narrowest available read, and the right one wherever "did I see every
+ * row?" is the question — but not a drop-free one, and it used to say it was.
+ * See {@link BOARD_CARDS_ADDRESS_FIELDS} for the measurement that retired that
+ * claim: projecting the five-field spine cost 19 of 357 rows on the live
+ * `default` partition, because `board` and `sk` are payload copies of the key
+ * and a partial write leaves a row keyed with neither.
+ *
+ * Identity comes from `QueryRow.key` first and the payload copies only as a
+ * fallback — the same order `listMilestoneCardsPartitionSpine` and
+ * `listBoardMilestonesPartitionSpine` already use. The range key IS the row's
+ * address; a copy of it is just a copy, and on precisely the damaged rows this
+ * read exists to surface, the copy is what went missing.
  */
 export async function listBoardCardsPartitionSpine(
   node: NodeClient,
@@ -697,20 +758,34 @@ export async function listBoardCardsPartitionSpine(
   ) as QueryFilter;
   const res = await node.queryAll({
     schemaHash,
-    fields: [...BOARD_CARDS_SPINE_FIELDS],
+    fields: [...BOARD_CARDS_ADDRESS_FIELDS],
     filter,
   });
   const out: BoardCardSpineRow[] = [];
   for (const r of res.results) {
     const f = r.fields as Record<string, unknown>;
-    const sk = typeof f.sk === "string" ? f.sk : "";
+    // The range key IS the row's address; `f.sk` is a copy that a partial write
+    // can leave behind. Take the real one, and fall back to the copy only when
+    // the wire did not carry a key at all.
+    const sk = typeof r.key?.range === "string" && r.key.range.length > 0
+      ? r.key.range
+      : typeof f.sk === "string"
+        ? f.sk
+        : "";
     // `sk` is the authority for column/position/slug — the copied scalar
-    // fields can drift, the range key cannot (it IS the row's address).
+    // fields can drift, the range key cannot.
     const parsed = parseBoardCardSk(sk);
     const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
-    if (slug.length === 0) continue;
+    // A row whose address cannot be resolved is skipped, not addressed by a
+    // guess: every caller here either deletes this key or writes to it.
+    if (sk.length === 0 || slug.length === 0) continue;
     out.push({
-      board: (typeof f.board === "string" && f.board) || board,
+      // The argument, not a payload copy and not `key.hash`: `board` IS the
+      // filter, so all three agree by construction and only one of them is
+      // guaranteed to be in hand. (A `key.hash` preference here was written and
+      // then removed — with the projection narrowed, `f.board` is never
+      // projected, so it could not have disagreed with anything.)
+      board,
       sk,
       slug,
       column: parsed?.column ?? (typeof f.column === "string" ? f.column : ""),
