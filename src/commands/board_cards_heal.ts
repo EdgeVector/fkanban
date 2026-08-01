@@ -11,8 +11,11 @@ import { mapWithConcurrency } from "../concurrency.ts";
 import {
   boardCardFieldsFromCard,
   boardCardSk,
+  classifyBoardCardDuplicateRows,
+  deleteBoardCardRowsBySk,
   listBoardCardsPartition,
   listBoardCardsPartitionSpine,
+  parseBoardCardSk,
   removeBoardCard,
   upsertBoardCard,
 } from "../board-cards.ts";
@@ -70,7 +73,13 @@ export type BoardCardsHealAction = {
   list_position: string;
   truth_column: string | null;
   truth_position: string | null;
-  action: "delete-orphan" | "upsert-truth" | "delete-stale-and-upsert" | "refresh-thin-fields" | "noop-match";
+  action:
+    | "delete-orphan"
+    | "upsert-truth"
+    | "delete-stale-and-upsert"
+    | "refresh-thin-fields"
+    | "retire-sparse-duplicate"
+    | "noop-match";
   reason: string;
 };
 
@@ -227,6 +236,17 @@ export async function boardCardsHealResult(
   // that failed to list (or a board with no Board record) keeps the defensive
   // purge, because there heal is as blind as any single-card writer.
   const enumeratedBoards = new Set<string>();
+  // `board\0slug` → every REAL range key the spine returned for that slug on
+  // that partition. The spine is the only read that sees sparse rows, so this
+  // is the only place a second membership row for a slug can be observed. A
+  // slug with two or more entries is a duplicate candidate, retired by its own
+  // pass below — the question it answers ("does a whole sibling carry this
+  // membership?") is different from, and safer than, the orphan reap.
+  //
+  // Collected here rather than re-listed later: heal already holds the
+  // partition, and re-reading it per duplicate slug would make partition reads
+  // scale with rows repaired (see heal-orphan-reap-partition-rescan.test.ts).
+  const spineSksBySlug = new Map<string, string[]>();
   for (const b of targetBoards) {
     const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug);
     if (!part) continue;
@@ -278,10 +298,24 @@ export async function boardCardsHealResult(
       // then reads as a stale sibling and gets "repaired" by deletion.
       //
       // Slug-level dedupe is narrower — a slug with one visible row and one
-      // sparse row keeps only the visible one this pass — but it cannot invent
-      // a row, and the sparse sibling is still reachable on a later pass once
-      // the visible one converges. Conservative is correct when the failure
-      // mode is deleting live membership.
+      // sparse row keeps only the visible one this pass — and it cannot invent
+      // a row. Conservative is correct when the failure mode is deleting live
+      // membership.
+      //
+      // It used to say the sparse sibling stayed "reachable on a later pass
+      // once the visible one converges". It does not: convergence is when heal
+      // STOPS acting on a slug, so a healthy card's sparse duplicate is skipped
+      // on this pass and on every future one. The duplicate pass below retires
+      // those, off the row addresses recorded here.
+      //
+      // NOTE `seenSlugs.has` is NOT the duplicate signal — every slug the wide
+      // read returned is in it, because both reads cover the same partition.
+      // The signal is this slug having more than one ROW, which only the spine
+      // can show.
+      const key = `${b.slug}\0${s.slug}`;
+      const sks = spineSksBySlug.get(key) ?? [];
+      if (s.sk.length > 0 && !sks.includes(s.sk)) sks.push(s.sk);
+      spineSksBySlug.set(key, sks);
       if (seenSlugs.has(s.slug)) continue;
       rawRows.push({
         board,
@@ -606,6 +640,38 @@ export async function boardCardsHealResult(
         skipOrphanPurge: enumeratedBoards.has(truthBoard),
         wideWrite: true,
       });
+      healed += 1;
+    }
+  }
+
+  // SPARSE DUPLICATES. A slug whose whole row is already correct reports no
+  // drift, so nothing above ever touches it — and its sparse sibling is
+  // membership nothing can remove. Retire those here, and only where a whole
+  // sibling is confirmed to carry the membership the delete would otherwise
+  // drop. `classifyBoardCardDuplicateRows` refuses on 0 or 2+ whole rows, so
+  // this pass acts only on the unambiguous case.
+  for (const [key, sks] of spineSksBySlug) {
+    if (sks.length < 2) continue;
+    const [board, slug] = key.split("\0") as [string, string];
+    const dup = await classifyBoardCardDuplicateRows(opts.node, opts.cfg, board, slug, sks);
+    if (!dup || dup.sparseSks.length === 0) continue;
+    drifted += 1;
+    actions.push({
+      slug,
+      board,
+      list_column: parseBoardCardSk(dup.sparseSks[0]!)?.column ?? "",
+      list_position: parseBoardCardSk(dup.sparseSks[0]!)?.position ?? "",
+      truth_column: parseBoardCardSk(dup.keepSk)?.column ?? null,
+      truth_position: parseBoardCardSk(dup.keepSk)?.position ?? null,
+      action: "retire-sparse-duplicate",
+      reason:
+        `${dup.sparseSks.length} sparse duplicate row(s) [${dup.sparseSks.join(", ")}] ` +
+        `— membership carried by whole row ${dup.keepSk}`,
+    });
+    if (opts.apply) {
+      // By address, not by purge: heal already holds the partition, and
+      // `purgeOtherBoardCardRows` would re-list it once per duplicate slug.
+      await deleteBoardCardRowsBySk(opts.node, opts.cfg, board, dup.sparseSks);
       healed += 1;
     }
   }
