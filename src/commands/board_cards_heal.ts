@@ -440,6 +440,15 @@ export async function boardCardsHealResult(
           reason: "card point-read missing; BoardCards row is orphan",
         });
         if (opts.apply) {
+          // Same exhaustiveness claim the delete-stale branch below makes, and
+          // for the same reason: `rows` is already every row this slug has on
+          // an enumerated partition, so the targeted delete is complete and
+          // `removeBoardCard`'s defensive rescan can only re-read what heal
+          // just read. On THIS branch the rescan is worse than redundant — it
+          // lists at the spine projection, which is precisely the read that
+          // DROPS sparse rows, and sparse orphans are what delete-orphan
+          // exists to reap. It hunts, at a whole partition per row, for
+          // exactly the rows it cannot see.
           await removeBoardCard(opts.node, opts.cfg, thinCard({
             slug,
             title: "",
@@ -462,7 +471,7 @@ export async function boardCardsHealResult(
             north_star: "",
             pr_url: "",
             branch: "",
-          }));
+          }), { skipOrphanPurge: enumeratedBoards.has(board) });
           healed += 1;
         }
       }
