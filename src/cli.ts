@@ -594,6 +594,7 @@ Usage:
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
   fkanban groom board-list-heal [--apply] [--json]
+  fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited]
   fkanban groom card-list-index-retire [--apply] [--json]
   fkanban groom archive-done [--apply] [--json] [--board SLUG] [--cutoff-hours N] [--max N]
 
@@ -619,6 +620,10 @@ Subcommands:
                        keeps showing in board list and costs a dead partition query
                        on every list) and add MISSING boards (record live, no entry —
                        every card on that board is invisible to list).
+  milestone-indexes-heal
+                       repair BoardMilestones and MilestoneCards projections from
+                       Milestone and BoardCards truth, with dry-run classification
+                       and a bounded per-run write budget.
   card-list-index-retire
                        clear the superseded CardListIndex all_cards rollup. BoardCards
                        already holds the same body-free summary one row per card; the
@@ -640,6 +645,8 @@ Flags:
   --slug S             (board-cards-heal) limit to one or more card slugs
   --max-drift N        (board-cards-heal-scheduled) refuse to apply above this
                        count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
+  --max-repairs N      (milestone-indexes-heal) cap repair writes for one run,
+                       default 25; "unlimited" opts out
   --cutoff-hours N     (archive-done) minimum age in a terminal column, default
                        ${DEFAULT_ARCHIVE_CUTOFF_HOURS}
   --max N              (archive-done) per-run delete ceiling, default
@@ -656,6 +663,7 @@ Examples:
   fkanban groom board-cards-heal-scheduled --json
   fkanban groom board-list-heal
   fkanban groom board-list-heal --apply
+  fkanban groom milestone-indexes-heal --dry-run
   fkanban groom card-list-index-retire
   fkanban groom card-list-index-retire --apply
   fkanban groom archive-done
@@ -1009,7 +1017,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "cutoff-hours", "max"]),
+  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "cutoff-hours", "max"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -2039,10 +2047,18 @@ async function dispatch(
       if (sub === "milestone-indexes-heal") {
         const extra = rejectExtraPositionals(positionals, 2, "groom milestone-indexes-heal");
         if (extra !== undefined) return extra;
+        const rawMax = values["max-repairs"] as string | undefined;
+        const maxRepairs = rawMax === undefined
+          ? undefined
+          : rawMax.trim() === "unlimited"
+            ? null
+            : parseIntFlag(rawMax, "max-repairs", "groom", { min: 0 });
         const healed = await milestoneIndexesHealResult({
           cfg: ctx.cfg,
           node: ctx.node,
           board: typeof values.board === "string" ? values.board : undefined,
+          apply: !values["dry-run"],
+          maxRepairs,
         });
         console.log(values.json ? JSON.stringify(healed, null, 2) : healed.text);
         return 0;
