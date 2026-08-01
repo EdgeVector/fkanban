@@ -142,41 +142,61 @@ export async function upsertBoardMilestone(
   const nextSk = String(nextFields.sk);
   const slug = String(nextFields.slug);
 
-  if (previous) {
-    const prevBoard = previous.board || "default";
-    const prevSk = boardMilestoneSk(previous.state, previous.position, previous.slug);
-    if (prevBoard !== nextBoard || prevSk !== nextSk) {
-      await deleteBoardMilestoneSk(node, schemaHash, prevBoard, prevSk);
-    }
-    if (prevBoard !== nextBoard && previous.slug) {
-      await purgeOtherBoardMilestoneRows(node, cfg, prevBoard, previous.slug, null);
-    }
-    if (prevSk !== nextSk || prevBoard !== nextBoard) {
-      await purgeOtherBoardMilestoneRows(node, cfg, nextBoard, slug, nextSk);
-    }
-  } else {
-    await purgeOtherBoardMilestoneRows(node, cfg, nextBoard, slug, nextSk);
-  }
-
-  const write = async (fields: Record<string, unknown>) => {
-    try {
-      await node.updateRecord({ schemaHash, fields, keyHash: nextBoard, rangeKey: nextSk });
-    } catch (updateErr) {
-      await node.createRecord({ schemaHash, fields, keyHash: nextBoard, rangeKey: nextSk });
-    }
-  };
-  try {
-    await write(nextFields);
-  } catch (err) {
-    // Drop completed_at if a composite expand schema rejects it (or other optional).
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("completed_at") && "completed_at" in nextFields) {
-      const { completed_at: _drop, ...rest } = nextFields as Record<string, unknown> & { completed_at?: unknown };
-      await write(rest);
+  // Retire the rows this write supersedes — AFTER the destination row is
+  // durable, never before. Same rule, and the same reasoning, as
+  // `upsertBoardCard`; see `test/board-milestones-move-durability.test.ts`.
+  //
+  // A state change rewrites the sk (`state#position#slug`), so the destination
+  // is a DIFFERENT row from the source and LastDB gives us no transaction
+  // spanning the two. Something is observable in between and the only choice is
+  // WHICH something. Deleting first makes it "the milestone has no
+  // BoardMilestones row on any board", and that is worse here than it is for
+  // cards: `listAllBoardMilestones` falls back to the fat Milestone scan only
+  // when a partition query THREW. A partition that answers, minus one row, is
+  // authoritative — so the milestone is simply absent from `milestone list`,
+  // `milestone portfolio` and `groom`, and STAYS absent if the destination
+  // write failed, until the next `groom milestone-indexes`. Live kanban
+  // mutations average ~2.2s and have been measured at 41s, so that window is
+  // seconds wide on the hot path of every state transition.
+  //
+  // Writing first makes the in-between state "the milestone has two rows" —
+  // one this module already resolves on purpose: `listAllBoardMilestones`
+  // dedupes by slug preferring the fresher `updated_at`, and `milestoneUpsertCmd`
+  // stamps that field on every mutation, so the row just written wins by
+  // construction. `purgeOtherBoardMilestoneRows` and `groom milestone-indexes`
+  // reap the loser.
+  //
+  // Both failures are recoverable. Only one of them is invisible while it
+  // waits, so prefer the visible one.
+  const retireSupersededRows = async () => {
+    if (previous) {
+      const prevBoard = previous.board || "default";
+      const prevSk = boardMilestoneSk(previous.state, previous.position, previous.slug);
+      if (prevBoard !== nextBoard || prevSk !== nextSk) {
+        await deleteBoardMilestoneSk(node, schemaHash, prevBoard, prevSk);
+      }
+      if (prevBoard !== nextBoard && previous.slug) {
+        await purgeOtherBoardMilestoneRows(node, cfg, prevBoard, previous.slug, null);
+      }
+      if (prevSk !== nextSk || prevBoard !== nextBoard) {
+        await purgeOtherBoardMilestoneRows(node, cfg, nextBoard, slug, nextSk);
+      }
       return;
     }
-    throw err;
+    await purgeOtherBoardMilestoneRows(node, cfg, nextBoard, slug, nextSk);
+  };
+
+  // No `completed_at` fallback here. There used to be one — a retry that
+  // stripped the field when the node rejected it — and it could not fire:
+  // `boardMilestoneFieldsFromMilestone` deliberately never emits
+  // `completed_at` (see its comment), so the `"completed_at" in nextFields`
+  // guard was always false. It advertised a defence this path did not have.
+  try {
+    await node.updateRecord({ schemaHash, fields: nextFields, keyHash: nextBoard, rangeKey: nextSk });
+  } catch {
+    await node.createRecord({ schemaHash, fields: nextFields, keyHash: nextBoard, rangeKey: nextSk });
   }
+  await retireSupersededRows();
 }
 
 export async function removeBoardMilestone(

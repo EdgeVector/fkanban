@@ -239,21 +239,39 @@ export async function upsertMilestoneCard(
   const nextSk = nextFields ? String(nextFields.sk) : "";
   const slug = card.slug;
 
-  // Lifecycle first (shared with protein-primary path).
-  await retireMilestoneCardMembership(node, cfg, card, previous);
-
-  if (!nextFields) return;
-
-  // A single `previous` can only license SKIPPING the sweep when it accounts
-  // for every other row. `purgeSiblings` is the caller saying it does not.
-  if (previous && prevMs && !opts.purgeSiblings) {
-    const prevSk = milestoneCardSk(previous.column, previous.position, previous.slug);
-    if (prevSk !== nextSk || prevMs !== nextMs) {
-      await purgeOtherMilestoneCardRows(node, cfg, nextMs, slug, nextSk);
-    }
-  } else {
-    await purgeOtherMilestoneCardRows(node, cfg, nextMs, slug, nextSk);
+  // Membership cleared: there is no destination row to write, so the
+  // retirement IS the operation and has nothing to wait for.
+  if (!nextFields) {
+    await retireMilestoneCardMembership(node, cfg, card, previous);
+    return;
   }
+
+  // Everything below retires rows this write supersedes, and all of it runs
+  // AFTER the destination row is durable — the rule `upsertBoardCard` and
+  // `upsertBoardMilestone` already follow, and it matters most here.
+  //
+  // This is the REPAIR path: `groom milestone-indexes` and `milestone
+  // reconcile` call it, with `previous = null` in the heal case, which takes
+  // the unconditional whole-partition sweep below. Retiring first meant a
+  // failed destination write left the card with NO MilestoneCards row at all —
+  // a repair verb that deletes more than it writes leaves the board worse than
+  // it found it, and the next heal cannot see the row it just destroyed.
+  //
+  // Writing first trades that for a transient duplicate, which the sweep on
+  // the next line — and the next heal — reap.
+  const retireSupersededRows = async () => {
+    await retireMilestoneCardMembership(node, cfg, card, previous);
+    // A single `previous` can only license SKIPPING the sweep when it accounts
+    // for every other row. `purgeSiblings` is the caller saying it does not.
+    if (previous && prevMs && !opts.purgeSiblings) {
+      const prevSk = milestoneCardSk(previous.column, previous.position, previous.slug);
+      if (prevSk !== nextSk || prevMs !== nextMs) {
+        await purgeOtherMilestoneCardRows(node, cfg, nextMs, slug, nextSk);
+      }
+      return;
+    }
+    await purgeOtherMilestoneCardRows(node, cfg, nextMs, slug, nextSk);
+  };
 
   try {
     await node.updateRecord({
@@ -270,6 +288,7 @@ export async function upsertMilestoneCard(
       rangeKey: nextSk,
     });
   }
+  await retireSupersededRows();
 }
 
 export async function removeMilestoneCard(
