@@ -3326,6 +3326,21 @@ export async function requireBoard(node: NodeClient, cfg: Config, slug: string):
 // that board: the cards prove the board slug is real user state, so recreate the
 // board metadata with default columns instead of stranding add/move.
 export async function ensureBoardRecord(node: NodeClient, cfg: Config, slug: string): Promise<Board> {
+  // The self-heal below infers a board's existence from cards that point at it,
+  // so it is only as trustworthy as those pointers. An EMPTY board slug is not
+  // a pointer: a card storing `board: ""` is a card that was never placed —
+  // the shape a deadline-truncated write leaves behind — and treating it as
+  // evidence would mint a board whose slug is "" as this path's response to
+  // data damage. Refuse before the read; nothing legitimate asks for it.
+  if (slug.length === 0) {
+    throw new FkanbanError({
+      code: "board_not_found",
+      message: `Board "" does not exist.`,
+      hint:
+        "An empty board slug means the card was never placed (a truncated write drops fields silently). " +
+        "Re-run the write with an explicit --board.",
+    });
+  }
   const board = await findBoard(node, cfg, slug);
   if (board) return board;
 
