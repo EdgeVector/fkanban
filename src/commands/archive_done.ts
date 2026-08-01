@@ -319,8 +319,3 @@ export async function archiveDoneResult(
   };
   return { text: renderArchiveDone(report), report };
 }
-
-export async function archiveDoneCmd(opts: ArchiveDoneOptions): Promise<string> {
-  const { text, report } = await archiveDoneResult(opts);
-  return opts.json ? JSON.stringify(report, null, 2) : text;
-}
