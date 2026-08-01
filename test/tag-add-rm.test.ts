@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { FkanbanError } from "../src/client.ts";
 import type { NodeClient } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { fakeNode } from "./fake-node.ts";
+import { fakeNode, type FakeNode } from "./fake-node.ts";
 import { boardToFields, findCard, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
@@ -39,7 +39,7 @@ function seedBoard(node: NodeClient, slug: string, columns: string[]) {
 }
 
 describe("tag add/rm edit one label without clobbering the rest", () => {
-  let node: NodeClient;
+  let node: FakeNode;
 
   beforeEach(async () => {
     node = fakeNode();
@@ -58,8 +58,12 @@ describe("tag add/rm edit one label without clobbering the rest", () => {
 
   test("tag add of a present tag is idempotent (no duplicate)", async () => {
     await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a", "b"], body: validPickupBody });
+    node.writes.length = 0;
+
     const res = await tagAddCmd({ cfg, node, slug: "probe", tag: ["a"] });
+
     expect(res.tags).toEqual(["a", "b"]);
+    expect(node.writes).toEqual([]);
   });
 
   test("tag add accepts multiple tags at once, normalized + deduped", async () => {
@@ -80,8 +84,12 @@ describe("tag add/rm edit one label without clobbering the rest", () => {
 
   test("tag rm of an absent tag is a no-op (succeeds)", async () => {
     await addCmd({ cfg, node, slug: "probe", column: "todo", tags: ["a"], body: validPickupBody });
+    node.writes.length = 0;
+
     const res = await tagRmCmd({ cfg, node, slug: "probe", tag: ["ghost"] });
+
     expect(res.tags).toEqual(["a"]);
+    expect(node.writes).toEqual([]);
   });
 
   test("tag add/rm never disturb dependency edges (deps survive a tag edit)", async () => {

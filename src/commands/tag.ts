@@ -16,6 +16,10 @@ import {
 } from "../record.ts";
 import type { TagResult } from "../format.ts";
 
+function sameTags(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((tag, i) => tag === b[i]);
+}
+
 // Reject the reserved tags users must not author by hand: legacy `dep:<slug>`
 // tags are migrated into the canonical `deps` field (use `dep add`/`dep rm`),
 // and the soft-delete tombstone is internal (use `rm`). Letting them through
@@ -57,6 +61,7 @@ export async function tagAddCmd(opts: {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Union: adding a tag the card already carries is idempotent (no duplicate).
   const tags = normalizeTags([...card.tags, ...incoming]);
+  if (sameTags(tags, card.tags)) return { slug: opts.slug, tags, action: "added", tag: incoming };
   await writeCardPatch(opts, card, { tags });
   return { slug: opts.slug, tags, action: "added", tag: incoming };
 }
@@ -78,6 +83,7 @@ export async function tagRmCmd(opts: {
     console.error(`fkanban: warning — card "${opts.slug}" had no tag(s): ${absent.join(", ")} (nothing removed for those).`);
   }
   const tags = card.tags.filter((t) => !drop.has(t));
+  if (sameTags(tags, card.tags)) return { slug: opts.slug, tags, action: "removed", tag: incoming };
   await writeCardPatch(opts, card, { tags });
   return { slug: opts.slug, tags, action: "removed", tag: incoming };
 }
