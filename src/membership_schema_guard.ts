@@ -62,7 +62,7 @@ export type ProjectionParityResult =
   | { ok: false; rows: number; dropped: number; reason: string };
 
 /**
- * Compare a drop-free spine read against the wide read the board actually
+ * Compare the NARROWEST spine read against the wide read the board actually
  * serves from.
  *
  * LastDB returns a row only when EVERY projected field has an atom on it. A
@@ -70,6 +70,13 @@ export type ProjectionParityResult =
  * that row with no error at all. So a wide projection is not a superset read —
  * it is a filter, and everything it filters out is invisible to the caller by
  * construction. This is the only check that can see the difference.
+ *
+ * Which is why the spine side must stay narrow, and why this check reported
+ * `ok` for two days while 19 rows were missing from the live `default`
+ * partition: the spine projected `board` and `sk` — copies of the key that a
+ * partial write leaves behind — so BOTH sides of the comparison dropped the
+ * same rows and the difference this exists to measure was zero. A parity check
+ * is only as good as the wider of its two reads.
  */
 export function checkProjectionParity(
   spineRows: number,

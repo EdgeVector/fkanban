@@ -252,10 +252,19 @@ export async function boardCardsHealResult(
     // to reap. Measured on the live board 2026-07-30: 58 orphan rows present,
     // `missing_card: 0` reported.
     //
-    // The spine read cannot drop rows, so it closes the gap. Each sparse row
-    // then falls through the SAME decision below as any other: no Card truth →
-    // delete-orphan; Card truth present → thin-field drift → upsert, which
-    // rewrites the row with every field and backfills what it was missing.
+    // The spine read is the NARROWEST available, which is not the same as
+    // drop-free — it said it was until 2026-08-01, and while it did it was
+    // reproducing the very failure this block was written to fix. It projected
+    // `board` and `sk`, which are payload COPIES of the key, so a row left by a
+    // partial write was keyed into the partition with no copy of its own
+    // address and dropped out of the "sees everything" read too: 338 of 357
+    // rows on the live `default` partition, 18 of the missing 19 being exactly
+    // the Card-less orphans this path exists to reap.
+    //
+    // Each sparse row falls through the SAME decision below as any other: no
+    // Card truth → delete-orphan; Card truth present → thin-field drift →
+    // upsert, which rewrites the row with every field and backfills what it was
+    // missing.
     const spine = await listBoardCardsPartitionSpine(opts.node, opts.cfg, b.slug);
     if (!spine) continue;
     for (const s of spine) {
@@ -343,10 +352,11 @@ export async function boardCardsHealResult(
   // discovered slug into one: `--board agent-dogfood-scratch` measured 16 point
   // reads before, 411 after. So "does this slug have membership at all" is
   // answered the cheap way instead, with one SPINE read per board heal did not
-  // already enumerate. The spine is the narrow projection that cannot drop rows
-  // (see the sparse-row note above), which is exactly what a membership census
-  // needs, and it costs one keyed partition read to skip several hundred point
-  // reads: the same run measures 81 after this, against 16 before.
+  // already enumerate. The spine is the NARROWEST projection (see the
+  // sparse-row note above — narrowest, not drop-free), which is what a
+  // membership census needs, and it costs one keyed partition read to skip
+  // several hundred point reads: the same run measures 81 after this, against
+  // 16 before.
   //
   // A slug membered on ANOTHER board is deliberately not a candidate here: a
   // row on the wrong board is stale membership, which is the unfiltered run's
