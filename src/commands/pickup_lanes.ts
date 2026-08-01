@@ -2,7 +2,7 @@
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
-import { listBoards, listCards, listMilestonesOnBoard } from "../record.ts";
+import { listBoards, listCards, listMilestones } from "../record.ts";
 import { buildPickupStatusReportWithSituations } from "../pickup.ts";
 import {
   buildLaneStatus,
@@ -33,6 +33,7 @@ export async function pickupLanesResult(opts: {
   situationPreflight?: SituationPreflight;
 }): Promise<PickupLanesResult> {
   const board = opts.board ?? "default";
+  // One listBoards for the whole command — do not re-fetch inside milestone load.
   const boards = await listBoards(opts.node, opts.cfg);
   const cards = await listCards(opts.node, opts.cfg, { boards });
   const boardRec = boards.find((b) => b.slug === board);
@@ -52,7 +53,10 @@ export async function pickupLanesResult(opts: {
 
   let hardCtx: HardTodoRankContext | undefined;
   try {
-    const milestones = await listMilestonesOnBoard(opts.node, opts.cfg, board);
+    // Reuse `boards` so we do not double-read all_boards (amplification guard).
+    const milestones = (await listMilestones(opts.node, opts.cfg, { boards })).filter(
+      (m) => m.board === board,
+    );
     hardCtx = {
       frontierMilestones: new Set(
         milestones.filter((m) => isFrontierMilestoneState(m.state)).map((m) => m.slug),

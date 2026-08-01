@@ -15,7 +15,7 @@ import {
   findBoard,
   listBoards,
   listCards,
-  listMilestonesOnBoard,
+  listMilestones,
   nowIso,
   normalizeKind,
   priorityOf,
@@ -458,7 +458,10 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   // Hard todo ranker: boost children of active|proving milestones within lanes.
   let hardCtx: HardTodoRankContext | undefined;
   try {
-    const milestones = await listMilestonesOnBoard(opts.node, opts.cfg, board);
+    // Reuse already-fetched `boards` — never re-list all_boards for milestones.
+    const milestones = (await listMilestones(opts.node, opts.cfg, { boards })).filter(
+      (m) => m.board === board,
+    );
     hardCtx = {
       frontierMilestones: new Set(
         milestones.filter((m) => isFrontierMilestoneState(m.state)).map((m) => m.slug),
