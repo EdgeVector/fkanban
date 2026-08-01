@@ -17,6 +17,7 @@
 import type { Config } from "./config.ts";
 import { FkanbanError, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
+import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 
@@ -44,11 +45,18 @@ function isCreatedByFieldMiss(err: unknown): boolean {
  * not read it to answer "did I see every row?".
  *
  * Why this exists — LastDB projection semantics (measured on the primary,
- * 2026-07-30). A query returns a row only if EVERY projected field has an
- * atom on that row. A field missing from the *schema* is a loud
- * `unknown_fields` error (see `isCreatedByFieldMiss`); a field missing from a
- * *row* is a SILENT DROP of the whole row — no error, no null, the row simply
- * is not in `results`.
+ * 2026-07-30, rule corrected 2026-08-01). A field missing from the *schema* is
+ * a loud `unknown_fields` error (see `isCreatedByFieldMiss`); a field missing
+ * from a *row* is a SILENT DROP of the whole row — no error, no null, the row
+ * simply is not in `results`.
+ *
+ * This block used to say the drop happens when ANY projected field lacks an
+ * atom. It does not: the field that LEADS the projection gates the row, and
+ * `milestone` gates from any position. See
+ * {@link listBoardCardsPartitionComplete} for the four probes that measured it.
+ * The correction does not change what this constant is for — one field still
+ * drops less than five — but it does mean this is a filter on `slug`, not a
+ * complete read, and callers that need completeness want that function.
  *
  * That bit us for real: the 2026-07-23 multi-key catalog expand added
  * `milestone` to this index and never backfilled it, so on the live board
@@ -115,6 +123,18 @@ export const BOARD_CARDS_SPINE_FIELDS = [
  */
 export const BOARD_CARDS_ADDRESS_FIELDS = ["slug"] as const;
 
+/** The result of {@link sweepBoardCardsPartition}: rows reached, and gaps. */
+export type BoardCardsPartitionSweep = {
+  /** Every row reachable under some leading field, deduped by range key. */
+  rows: BoardCardSpineRow[];
+  /**
+   * Leads the node refused. Non-empty means `rows` is a LOWER BOUND on the
+   * partition, and any caller whose correctness needs "I saw every row" must
+   * treat that as a failure rather than a clean result.
+   */
+  failedLeads: Array<{ field: string; error: string }>;
+};
+
 export type BoardCardSpineRow = {
   board: string;
   sk: string;
@@ -153,14 +173,14 @@ export const BOARD_CARDS_DEP_SEED_FIELDS = [
  * `tags` to drop tombstones (`isHiddenCard`); it renders no card, so the other
  * 18 BoardCards fields are fetched and thrown away.
  *
- * Narrowing here is also *less* droppable than the wide read it replaces, so
- * the footer count can only get more accurate — but the rule is narrower than
- * it reads. Measured 2026-08-01 (`scripts/probe-projection-rule-regression.ts`):
- * on THIS index a projected field with sparse atoms does drop rows (351 -> 332
- * when `milestone` is added), but on `MilestoneCards` the same shape returns a
- * PARTIAL row instead, and on `BoardMilestones` a field no row has drops
- * nothing at all. Narrowing is still right here; do not carry the rule to
- * another index without measuring that index.
+ * Narrowing here is right for COST. It is not automatically less droppable:
+ * this list and the wide one both lead with `board`, so they return the same
+ * rows — what makes the footer more accurate is dropping `milestone`, which
+ * gates from any position (measured 2026-08-01,
+ * `scripts/probe-projection-rule-regression.ts`: 351 -> 332 on THIS index when
+ * `milestone` is added). On `MilestoneCards` the same shape returns a PARTIAL
+ * row instead, and on `BoardMilestones` a field no row has drops nothing at
+ * all. Do not carry any of it to another index without measuring that index.
  */
 export const BOARD_CARDS_FOOTER_FIELDS = [
   ...BOARD_CARDS_SPINE_FIELDS,
@@ -795,10 +815,13 @@ export async function removeBoardCard(
  * not silently degrade to a full partition scan that papers over the bug.
  *
  * `opts.fields` narrows the projection for a caller that does not render the
- * rows (see {@link BOARD_CARDS_DEP_SEED_FIELDS}). Narrowing is safe in both
- * directions here: fewer projected fields is strictly cheaper AND strictly
- * less droppable, because a row is returned only when every projected field
- * has an atom on it.
+ * rows (see {@link BOARD_CARDS_DEP_SEED_FIELDS}). Narrowing is strictly
+ * cheaper. It is NOT strictly less droppable, which this said until
+ * 2026-08-01: the row set is decided by the LEADING field, so dropping trailing
+ * fields changes nothing about which rows come back, and reordering the list
+ * changes everything. The one exception is `milestone`, which gates from any
+ * position — removing it can only ADD rows. See
+ * {@link listBoardCardsPartitionComplete}.
  */
 export async function listBoardCardsPartition(
   node: NodeClient,
@@ -877,9 +900,17 @@ export async function listBoardCardsPartitionSpine(
     fields: [...BOARD_CARDS_ADDRESS_FIELDS],
     filter,
   });
+  return spineRowsFromQueryRows(res.results, board);
+}
+
+/** Shared row-building for every spine-shaped read. `board` is the filter. */
+function spineRowsFromQueryRows(
+  rows: readonly { fields?: unknown; key?: { hash: string | null; range: string | null } }[],
+  board: string,
+): BoardCardSpineRow[] {
   const out: BoardCardSpineRow[] = [];
-  for (const r of res.results) {
-    const f = r.fields as Record<string, unknown>;
+  for (const r of rows) {
+    const f = (r.fields ?? {}) as Record<string, unknown>;
     // The range key IS the row's address; `f.sk` is a copy that a partial write
     // can leave behind. Take the real one, and fall back to the copy only when
     // the wire did not carry a key at all.
@@ -909,6 +940,121 @@ export async function listBoardCardsPartitionSpine(
     });
   }
   return out;
+}
+
+/**
+ * Every row in a board partition that carries ANY atom — the only complete
+ * enumeration a client can perform, and the one "did I see every row?" actually
+ * needs.
+ *
+ * ## The rule this is built on (measured, live primary, 2026-08-01)
+ *
+ * `scripts/probe-projection-order-dependence.ts`, `-first-field-witness.ts`,
+ * `-width-scan.ts`, `-pair-matrix.ts`. Witness row
+ * `todo#00007777#debug-protein` on the live `default` partition carries exactly
+ * one atom (`title`):
+ *
+ * | projection | witness |
+ * |---|---|
+ * | `[title]` | visible |
+ * | `[title, board]` | visible |
+ * | `[board, title]` | **DROPPED** |
+ * | `[title, …19 more]` | visible |
+ * | `[title, milestone]` | **DROPPED** |
+ *
+ * Two independent effects, and neither is a set operation:
+ *
+ *  1. **The LEADING projected field gates the row.** `[title,X]` returned the
+ *     witness for 22 of the 23 other fields; `[X,title]` returned it for none.
+ *     Intersection and union are both commutative, so the same field set in two
+ *     orders giving two answers rules out each of them outright.
+ *  2. **`milestone` gates from any position** — it is the hash field of the
+ *     sibling MilestoneCards index (added here by the 2026-07-23 multi-key
+ *     expand), and projecting it anywhere denies every row with no `milestone`
+ *     atom.
+ *
+ * This retires the rule four files reasoned from — *"a row is returned only if
+ * EVERY projected field has an atom"* — and, in the other direction, the lastgit
+ * run's *"WIDENING ADDS ROWS; NARROWING DROPS THEM"*. Both are shadows of the
+ * leading-field rule cast by whichever field happened to lead: fkanban's spine
+ * led with `board` (sparse) and looked like intersection; lastgit's led with
+ * `lgpi_h` (dense) and looked like union.
+ *
+ * ## Why the sweep has to be this shape
+ *
+ * A row is visible iff SOME field leads it, so leading with each field in turn
+ * reaches every row that has any atom at all, and nothing narrower does. There
+ * is no cheaper complete read to find: a projection is a filter on exactly one
+ * field, so N fields need N queries. Skipping leads would restore precisely the
+ * failure this exists to remove — a completeness check that cannot read its own
+ * failure, which is the shape that has now cost this codebase five separate
+ * bugs.
+ *
+ * ## `failedLeads` is part of the answer, not an error channel
+ *
+ * A lead can fail on its own while its 23 siblings succeed, and the first run of
+ * this sweep on the live primary found exactly that: on board
+ * `agent-dogfood-scratch`, leading with `column` returns
+ * `HTTP 400 … laststore: corrupt: empty rec` while every other lead returns 0
+ * rows cleanly. No kanban read path leads with `column`, so that partition has
+ * reported itself empty and healthy to every existing check.
+ *
+ * When a lead fails the enumeration is INCOMPLETE BY EXACTLY THAT LEAD, and
+ * both wrong answers were available: swallowing it returns a short row set
+ * labelled complete (the failure mode this whole function exists to remove),
+ * and throwing lets one corrupt marker on one board stop heal from running on
+ * any board. So the gap is returned alongside the rows. Callers that DELETE
+ * may proceed — a row they cannot see is a row they cannot delete, so an
+ * incomplete sweep can only under-reap — and callers that ASSERT completeness
+ * must fail.
+ *
+ * Cost is real and bounded: 24 single-field queries, six in flight
+ * ({@link POINT_READ_CONCURRENCY}), measured 770-780ms on the 264-row live
+ * `default` partition against 166-292ms for the one-query spine — ~3x, not
+ * ~24x, because the pool hides socket latency and a one-field projection is
+ * the cheapest read the node serves. That is a heal / doctor price, not a list
+ * price; no product read path should call this.
+ */
+export async function sweepBoardCardsPartition(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+): Promise<BoardCardsPartitionSweep | null> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash) return null;
+  const filter = { HashKey: board } as QueryFilter;
+
+  const perLead = await mapWithConcurrency(BOARD_CARDS_FIELDS, async (lead) => {
+    try {
+      const res = await node.queryAll({ schemaHash, fields: [lead], filter });
+      return { rows: spineRowsFromQueryRows(res.results, board), failure: null };
+    } catch (err) {
+      // `created_by` is the one field a legacy catalog may genuinely not carry;
+      // its absence is a known schema shape, not a gap in the enumeration.
+      if (lead === "created_by" && isCreatedByFieldMiss(err)) {
+        return { rows: [], failure: null };
+      }
+      // Everything else is REPORTED, not swallowed and not thrown. Swallowing
+      // would hand back a short enumeration labelled complete — the exact
+      // failure this function exists to remove. Throwing would let one bad lead
+      // on one board disable heal for every board, and heal under-reaping is
+      // safe (a row it cannot see is a row it cannot delete) while heal not
+      // running at all is not. So the caller is told, and decides.
+      return {
+        rows: [] as BoardCardSpineRow[],
+        failure: { field: lead, error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  }, POINT_READ_CONCURRENCY);
+
+  // Union by the REAL address. A row reached under several leads is one row.
+  const bySk = new Map<string, BoardCardSpineRow>();
+  const failedLeads: BoardCardsPartitionSweep["failedLeads"] = [];
+  for (const lead of perLead) {
+    if (lead.failure) failedLeads.push(lead.failure);
+    for (const r of lead.rows) if (!bySk.has(r.sk)) bySk.set(r.sk, r);
+  }
+  return { rows: [...bySk.values()], failedLeads };
 }
 
 /**

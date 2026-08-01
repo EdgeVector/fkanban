@@ -17,6 +17,7 @@ import {
   listBoardCardsPartitionSpine,
   parseBoardCardSk,
   removeBoardCard,
+  sweepBoardCardsPartition,
   upsertBoardCard,
 } from "../board-cards.ts";
 import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "../card-list-index.ts";
@@ -88,6 +89,12 @@ export type BoardCardsHealReport = {
   drifted: number;
   healed: number;
   missing_card: number;
+  /**
+   * `<board>:<field>` for each completeness lead the node refused. Non-empty
+   * means every count in this report is a LOWER BOUND — see
+   * `sweepBoardCardsPartition`.
+   */
+  incomplete_leads: string[];
   dryRun: boolean;
   actions: BoardCardsHealAction[];
 };
@@ -231,6 +238,9 @@ export async function boardCardsHealResult(
   // `full` keeps the parsed row so the thin-field comparison below can judge
   // the projection's copied fields, not just its membership sk.
   const rawRows: Array<{ board: string; column: string; position: string; slug: string; full: Card }> = [];
+  // `<board>:<field>` for every completeness lead the node refused. Each one
+  // means this run's view of that partition is a lower bound.
+  const incompleteLeads: string[] = [];
   // Partitions we actually read end-to-end. Only for these can heal claim to
   // know every row for a slug and skip the per-write orphan rescan; a partition
   // that failed to list (or a board with no Board record) keeps the defensive
@@ -264,29 +274,50 @@ export async function boardCardsHealResult(
       });
     }
 
-    // SPARSE ROWS. The wide read above projects all 24 BoardCards fields, and
-    // LastDB drops any row missing even one of them — silently, with no error
-    // (see BOARD_CARDS_SPINE_FIELDS). So a row that predates a field the
-    // catalog later added is invisible to the wide read, and heal — the ONLY
-    // path allowed to delete orphans — could never see the orphans it exists
-    // to reap. Measured on the live board 2026-07-30: 58 orphan rows present,
+    // SPARSE ROWS. The wide read above projects all 24 BoardCards fields, so a
+    // row missing an atom on the field that LEADS that projection is dropped
+    // from it — silently, with no error. A row that predates a field the catalog
+    // later added is therefore invisible to the wide read, and heal — the ONLY
+    // path allowed to delete orphans — could never see the orphans it exists to
+    // reap. Measured on the live board 2026-07-30: 58 orphan rows present,
     // `missing_card: 0` reported.
     //
-    // The spine read is the NARROWEST available, which is not the same as
-    // drop-free — it said it was until 2026-08-01, and while it did it was
-    // reproducing the very failure this block was written to fix. It projected
-    // `board` and `sk`, which are payload COPIES of the key, so a row left by a
-    // partial write was keyed into the partition with no copy of its own
-    // address and dropped out of the "sees everything" read too: 338 of 357
-    // rows on the live `default` partition, 18 of the missing 19 being exactly
-    // the Card-less orphans this path exists to reap.
+    // This read has now been wrong twice in the same direction, each time by
+    // being narrower than the last while still being a filter:
+    //
+    //   - the five-field spine lost 19 of 357 rows (2026-08-01), because
+    //     `board`/`sk` are payload COPIES of the key and a partial write leaves
+    //     a row keyed with neither;
+    //   - `BOARD_CARDS_ADDRESS_FIELDS` (`["slug"]`) narrowed that to one field
+    //     and was called "the narrowest available" — true, and still a filter on
+    //     `slug`. It cannot see a row whose only atom is something else, and on
+    //     the live `default` partition exactly such a row exists:
+    //     `todo#00007777#debug-protein`, one `title` atom, no Card record, the
+    //     precise orphan shape this block reaps. Every projection in the file
+    //     missed it; the union over leading fields finds it.
+    //
+    // So the enumeration is no longer a projection at all. See
+    // {@link listBoardCardsPartitionComplete} for the measured rule (the LEADING
+    // projected field gates the row; `milestone` gates from any position) and
+    // why N fields require N queries.
     //
     // Each sparse row falls through the SAME decision below as any other: no
     // Card truth → delete-orphan; Card truth present → thin-field drift →
     // upsert, which rewrites the row with every field and backfills what it was
     // missing.
-    const spine = await listBoardCardsPartitionSpine(opts.node, opts.cfg, b.slug);
-    if (!spine) continue;
+    //
+    // A refused lead leaves the enumeration short, and heal proceeds anyway:
+    // every delete below is authorized by a Card point-read on a row heal can
+    // SEE, so rows it cannot see are rows it cannot delete. Under-reaping is the
+    // safe direction. It is still reported — a partition that keeps coming back
+    // incomplete is a storage problem, not a heal problem, and silence would
+    // make the next run's `missing_card: 0` look like convergence.
+    const sweep = await sweepBoardCardsPartition(opts.node, opts.cfg, b.slug);
+    if (!sweep) continue;
+    for (const f of sweep.failedLeads) {
+      incompleteLeads.push(`${b.slug}:${f.field}`);
+    }
+    const spine = sweep.rows;
     for (const s of spine) {
       if (slugFilter && !slugFilter.has(s.slug)) continue;
       const board = s.board || b.slug;
@@ -400,6 +431,12 @@ export async function boardCardsHealResult(
   const enumeratedSlugSources = new Set(targetBoards.map((b) => b.slug));
   for (const b of boards) {
     if (enumeratedSlugSources.has(b.slug)) continue;
+    // Spine, not the complete sweep, and the asymmetry is deliberate. This set
+    // only SUPPRESSES candidates, so a row it misses can cost at most one extra
+    // repair — heal writes a row here for a slug that turned out to be membered
+    // elsewhere. The scan above authorizes DELETES, where a missed row is
+    // permanent invisibility. Buying completeness at 24 queries per non-target
+    // board to avoid an over-repair is the wrong trade in the safe direction.
     const spine = await listBoardCardsPartitionSpine(opts.node, opts.cfg, b.slug);
     for (const s of spine ?? []) if (s.slug) memberedAnywhere.add(s.slug);
   }
@@ -681,6 +718,7 @@ export async function boardCardsHealResult(
     drifted,
     healed: opts.apply ? healed : drifted,
     missing_card,
+    incomplete_leads: incompleteLeads,
     dryRun: !opts.apply,
     actions: opts.json ? actions : actions.filter((a) => a.action !== "noop-match"),
   };
@@ -695,7 +733,16 @@ export async function boardCardsHealResult(
       (a) =>
         `  ${a.slug} list=${a.list_column} truth=${a.truth_column ?? "∅"} → ${a.action} (${a.reason})`,
     );
-  const text = [head, ...lines].join("\n");
+  // Loud, and above the per-row detail: a scan that could not read part of a
+  // partition must not report its counts as if it had.
+  const warn = incompleteLeads.length
+    ? [
+      `  ⚠ INCOMPLETE — the node refused ${incompleteLeads.length} completeness ` +
+      `lead(s): ${incompleteLeads.join(", ")}`,
+      `    Counts above are a LOWER BOUND; rows only reachable under those leads were not scanned.`,
+    ]
+    : [];
+  const text = [head, ...warn, ...lines].join("\n");
   return { text, report };
 }
 

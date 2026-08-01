@@ -27,6 +27,7 @@ function report(partial: Partial<BoardCardsHealReport> = {}): BoardCardsHealRepo
     drifted: 0,
     healed: 0,
     missing_card: 0,
+    incomplete_leads: [],
     dryRun: true,
     actions: [],
     ...partial,

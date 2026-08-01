@@ -16,7 +16,7 @@ import {
 } from "../membership_schema_guard.ts";
 import {
   listBoardCardsPartition,
-  listBoardCardsPartitionSpine,
+  sweepBoardCardsPartition,
 } from "../board-cards.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveLoadedSchema } from "../schemas.ts";
 
@@ -326,17 +326,47 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   //      check was reaching for, and it survives a multi-key expand that moves
   //      the catalog's reported hash_field.
   //   2. The wide projection sees every row the spine sees. LastDB drops a row
-  //      from a result set when any projected field has no atom on it — with no
-  //      error — so a card can fall out of list/pickup/overlap while every
-  //      other check stays green. On 2026-07-30 that was 58 rows on the live
-  //      board, and `board-cards-heal` reported missing_card: 0 because it was
-  //      reading through the same lossy projection.
+  //      from a result set when the field LEADING the projection has no atom on
+  //      it — with no error — so a card can fall out of list/pickup/overlap
+  //      while every other check stays green. On 2026-07-30 that was 58 rows on
+  //      the live board, and `board-cards-heal` reported missing_card: 0 because
+  //      it was reading through the same lossy projection.
+  //
+  // The baseline is `listBoardCardsPartitionComplete`, NOT the spine. Comparing
+  // the wide read against the spine compared two filtered reads and called their
+  // agreement clean: both are gated by their own leading field (`board` and
+  // `slug`), so a row carrying neither is missing from both sides of the
+  // subtraction and nets to zero. That is how `todo#00007777#debug-protein` — a
+  // Card-less row with one `title` atom — sat in the live `default` partition
+  // under a green "spine agrees". A check whose two inputs share the blind spot
+  // it is looking for cannot report the failure; the union over leading fields
+  // is the only input here that is not itself a projection.
   try {
     const boards = boardSet ?? (await listBoards(node, cfg));
     for (const b of boards) {
-      const spine = await listBoardCardsPartitionSpine(node, cfg, b.slug);
-      if (spine === null) {
+      const sweep = await sweepBoardCardsPartition(node, cfg, b.slug);
+      if (sweep === null) {
         info(`BoardCards partition probe (${b.slug})`, "board_cards not bound — skipped");
+        continue;
+      }
+      // A refused lead is a hole in the baseline, so parity below would be
+      // comparing the wide read against an enumeration that is itself short —
+      // and a parity check run on an incomplete baseline is the blind check
+      // this whole block replaced. Report the gap instead of a verdict.
+      //
+      // This is not hypothetical: the first sweep on the live primary found
+      // board `agent-dogfood-scratch` returning
+      // `HTTP 400 … laststore: corrupt: empty rec` for lead `column` while
+      // every other lead returned 0 rows. No kanban read leads with `column`,
+      // so that partition has looked empty and healthy to every check there is.
+      if (sweep.failedLeads.length > 0) {
+        check(
+          false,
+          `BoardCards projection parity (${b.slug})`,
+          `enumeration incomplete — node refused lead(s) ${
+            sweep.failedLeads.map((f) => f.field).join(", ")
+          }: ${sweep.failedLeads[0]!.error}`,
+        );
         continue;
       }
       const wide = await listBoardCardsPartition(node, cfg, b.slug);
@@ -345,13 +375,13 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         continue;
       }
       const wideSlugs = new Set(wide.map((c) => c.slug));
-      const droppedSlugs = [...new Set(spine.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
-      const parity = checkProjectionParity(spine.length, wide.length, droppedSlugs);
+      const droppedSlugs = [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
+      const parity = checkProjectionParity(sweep.rows.length, wide.length, droppedSlugs);
       check(
         parity.ok,
         `BoardCards projection parity (${b.slug})`,
         parity.ok
-          ? `${parity.rows} rows, spine agrees`
+          ? `${parity.rows} rows, every lead agrees`
           : parity.reason,
       );
     }
