@@ -222,6 +222,34 @@ async function assertBodyIsNotExistingSlugList(opts: AddOptions): Promise<void> 
   }
 }
 
+/**
+ * A placement (`board` / `column`) with `""` read as ABSENT — never as a board
+ * named "" or a column named "".
+ *
+ * Both fields are BoardCards key material (`board` is the partition, `column`
+ * leads the range key), so a card storing "" for either is not placed anywhere:
+ * it has no membership row and no list can surface it. That shape is reachable
+ * without anyone asking for it — a mutation that hits the client deadline
+ * mid-flight lands some of the card's fields and not others. Measured on the
+ * primary 2026-07-28: `body`, `column` and `milestone` written, `title` and
+ * `board` empty (papercut-kanban-write-timeout-leaves-a-partially-written-card).
+ *
+ * Resolving these with `??` made the empty value AUTHORITATIVE. `""` is not
+ * nullish, so it beat the `"default"` / first-column fallback and was then
+ * validated as if it were a real slug — `Card board "" does not match milestone
+ * "x" (default)` and `"" is not a valid kanban column`. The retry the timeout
+ * hint tells you to run ("writes are upserts keyed by slug, so re-running is
+ * safe") is precisely the retry that could not succeed, and the escape —
+ * passing `--board default` explicitly — is required by no other create.
+ *
+ * Applied to the caller's option as well as to the stored value: `--board ""`
+ * is not a request to place a card on a board named "", and honoring it is how
+ * a second damaged card would get made.
+ */
+function placementOrAbsent(value: string | undefined): string | undefined {
+  return value !== undefined && value.length > 0 ? value : undefined;
+}
+
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
@@ -231,7 +259,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   // card's existing board when no explicit `--board` is given. An explicit
   // `--board` still moves the card; only the implicit default would be wrong.
   const existing = await findCard(opts.node, opts.cfg, opts.slug);
-  const boardSlug = opts.board ?? existing?.board ?? "default";
+  const boardSlug = placementOrAbsent(opts.board) ?? placementOrAbsent(existing?.board) ?? "default";
   const milestoneSlug = opts.milestone ?? existing?.milestone ?? "";
   let resolvedMilestoneState = "";
   if (milestoneSlug) {
@@ -262,7 +290,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   }
   const board = await ensureBoardRecord(opts.node, opts.cfg, boardSlug);
   const columns = board.columns;
-  const targetColumn = existing ? (opts.column ?? existing.column) : (opts.column ?? columns[0] ?? "backlog");
+  // Same rule as `boardSlug`: an empty stored column is no column at all, so it
+  // must fall through to the board's first column rather than reach
+  // `ensureColumn` and be rejected as invalid. See {@link placementOrAbsent}.
+  const targetColumn = placementOrAbsent(opts.column)
+    ?? placementOrAbsent(existing?.column)
+    ?? columns[0]
+    ?? "backlog";
   ensureColumn(targetColumn, columns);
 
   const now = nowIso();
