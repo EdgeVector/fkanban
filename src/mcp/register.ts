@@ -6,8 +6,13 @@
 //   - otherwise:     claude mcp add fkanban -- bun <repoRoot>/src/mcp/main.ts
 //
 // and a matching entrypoint that `claude mcp add` would target:
-//   - shim on PATH:  the resolved `kanban-mcp` (or `kanban`) bin
+//   - shim on PATH:  that same shim bin — the one the `--` form invokes
 //   - otherwise:     <repoRoot>/src/mcp/main.ts
+//
+// "Can never drift" is a claim about BOTH functions, so each branch of
+// `mcpEntrypointPath()` reads its answer off the branch of `mcpAddCommand()`
+// that prints the command. Resolving the entrypoint independently is what let
+// a 192-commit-stale `kanban-mcp` collect a doctor ✓ — see the note there.
 
 import { fileURLToPath } from "node:url";
 import { resolveKanbanShim } from "../commands/doctor.ts";
@@ -47,31 +52,45 @@ export function fkanbanInvocation(): string {
 }
 
 // The MCP entrypoint `claude mcp add` would target, resolved for THIS dev:
-//   - shim on PATH → the installed `kanban-mcp` bin (else the `kanban` shim
-//     itself, which serves `kanban mcp`)
-//   - otherwise    → this repo's `src/mcp/main.ts`
+//   - shim on PATH → that same shim, because `mcpAddCommand()` emits
+//     `-- <shim.name> mcp` and `<shim.name>` is the file that gets executed
+//   - otherwise    → this repo's `src/mcp/main.ts`, the file the bun+path form
+//     names verbatim
 // Returns `null` only if neither resolves. Each result is a real path on disk
 // so callers can confirm it exists.
+//
+// ## Why this must not resolve `kanban-mcp`, even when one is installed
+//
+// This used to prefer a dedicated `kanban-mcp`/`fkanban-mcp` bin over the CLI
+// shim. Nothing ever RUNS that bin: `mcpAddCommand()` emits `<shim.name> mcp`
+// in this branch and always has, so the entrypoint doctor verified and the
+// entrypoint the register line starts were two different files that only
+// happened to serve the same code. The moment they diverge, doctor certifies
+// the one nobody runs.
+//
+// They diverged. `bin/host-track-refresh` bakes an ABSOLUTE `host_track` root
+// into each shim it writes, and the shim's only self-check is `[ -f $expected ]`
+// — existence, which a stale-but-present checkout satisfies forever. When the
+// host-track layout moved to `apps/fkanban/current`, the CLI shim was rewritten
+// by last-stack's safe-upgrade installer and `kanban-mcp` was not; it still
+// pointed at the pre-migration `~/.host-track/fkanban`, a directory host-track
+// no longer tracks and `host-track refresh kanban` therefore never updates
+// (its own error message recommends exactly that no-op repair). Measured on
+// this machine 2026-08-01: `kanban` served 93efa336 while `kanban-mcp` served
+// 48418d0 — **192 commits and 10 days apart** — and doctor printed
+// `✓ MCP entrypoint resolves` for the stale one, because `existsSync` cannot
+// tell current from abandoned. That tree predates the membership fixes; its
+// `deleteCardRecord` never touches MilestoneCards at all, which is the bug
+// measured at 66 orphan rows.
+//
+// The durable repair is to stop having two answers. The entrypoint is, by
+// definition, whatever the printed register command executes — so derive it
+// from the same branch that prints the command rather than re-resolving it
+// independently and hoping the two agree.
 export function mcpEntrypointPath(): string | null {
   const shim = resolveKanbanShim();
-  if (shim) {
-    const mcpBin = resolveBin("kanban-mcp") ?? resolveBin("fkanban-mcp");
-    if (mcpBin) return mcpBin;
-    // No dedicated MCP bin, but the CLI shim is on PATH and serves the same
-    // server via `<shim> mcp` — point at it.
-    return shim.path;
-  }
+  // `mcpAddCommand()` → `claude mcp add fkanban -- <shim.name> mcp`, and
+  // `shim.path` is where PATH resolves `<shim.name>`. Same file, by construction.
+  if (shim) return shim.path;
   return mainEntrypointPath();
-}
-
-// Resolve a bin name on PATH, or `null` if it doesn't resolve.
-function resolveBin(name: string): string | null {
-  try {
-    const which = Bun.spawnSync(["sh", "-c", `command -v ${name}`]);
-    const out = which.stdout.toString().trim();
-    if (which.exitCode === 0 && out) return out;
-  } catch {
-    // `command -v` unavailable — treat as not found.
-  }
-  return null;
 }
