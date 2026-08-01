@@ -59,17 +59,29 @@ export const OTHER_BOARDS_FOOTER_LIMIT = 5;
 // unfiltered live-card count (it ignores any --tag/--column/--assignee that
 // narrow the CURRENT view) — "these other boards have cards" is the useful
 // navigation signal, independent of the current filter.
+// `unreadable` names boards whose partition could not be read at all. They are
+// reported SEPARATELY from the counts rather than omitted, because "this board
+// has no cards" and "this board could not be read" are different facts and the
+// footer is the only place the second one would ever surface. Omitting them
+// would make an unreadable board indistinguishable from an empty one — the
+// failure mode `listOtherBoardCardsForFooter` exists to avoid.
 export function otherBoardsFooter(
   cards: Card[],
   viewedBoard: string,
   invocation: string,
+  unreadable: string[] = [],
 ): string {
   const counts = new Map<string, number>();
   for (const c of cards) {
     if (c.board === viewedBoard) continue;
     counts.set(c.board, (counts.get(c.board) ?? 0) + 1);
   }
-  if (counts.size === 0) return "";
+  const warn = unreadable.filter((slug) => slug !== viewedBoard).sort();
+  const warnLine = warn.length > 0
+    ? `⚠ ${warn.length} board${warn.length === 1 ? "" : "s"} could not be read: ${warn.join(", ")}. ` +
+      `Card counts above exclude ${warn.length === 1 ? "it" : "them"}; run \`${invocation} doctor\`.`
+    : "";
+  if (counts.size === 0) return warnLine;
 
   const boards = [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
   const n = boards.length;
@@ -81,7 +93,9 @@ export function otherBoardsFooter(
   // `counts.size > 0` guarantees a first entry; the `?? ""` only satisfies the
   // compiler's index-access check (noUncheckedIndexedAccess) and never fires.
   const hintSlug = boards[0]?.[0] ?? "";
-  return `ℹ ${n} other ${noun} cards: ${list}${tail}. View with \`${invocation} list --board ${hintSlug}\`.`;
+  const hint =
+    `ℹ ${n} other ${noun} cards: ${list}${tail}. View with \`${invocation} list --board ${hintSlug}\`.`;
+  return warnLine ? `${hint}\n${warnLine}` : hint;
 }
 
 export type ListOptions = {
@@ -277,8 +291,14 @@ export async function listResult(
       boardSlug,
       allBoards,
     );
-    const cross = others ?? (await listCardsForDisplay(opts.node, opts.cfg, { boards: allBoards }));
-    footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation());
+    // `null` means BoardCards cannot serve the footer read at all (unconfigured
+    // schema) — fall back to the cross-board path. A per-board FAILURE is a
+    // different thing: those slugs come back in `unreadable` and get named in
+    // the footer instead of failing the command. See
+    // listOtherBoardCardsForFooter.
+    const cross = others?.cards ??
+      (await listCardsForDisplay(opts.node, opts.cfg, { boards: allBoards }));
+    footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation(), others?.unreadable ?? []);
   }
   const milestones = opts.groupByMilestone ? (await listMilestones(opts.node, opts.cfg, { boards: allBoards })).filter((milestone) => milestone.board === boardSlug) : undefined;
   const rendered = milestones

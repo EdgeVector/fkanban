@@ -292,6 +292,90 @@ describe("list read amplification — cost must not scale with card count", () =
 
       expect(boardCardQueries(node).filter((q) => q.filter?.HashKey === "scratch")).toHaveLength(0);
     });
+
+    // 2026-08-01 live outage. Bare `kanban list` exited 1 and printed NOTHING
+    // because the empty `agent-dogfood-scratch` partition answered the footer's
+    // narrow projection with `HTTP 400 … laststore: corrupt: empty rec` — three
+    // queries after `default`, holding all 263 real cards, had been read back
+    // intact. A one-line navigation hint about a board the user was not looking
+    // at took down the board they were.
+    //
+    // The corrupt marker itself is LastDB's, and it is reachable only through
+    // the NARROW projection (the same partition answers the wide 14- and
+    // 22-field reads with 0 rows, cleanly). What is fkanban's to own is that a
+    // decorative cross-board read could fail a command whose own board was fine.
+    describe("when another board's partition cannot be read", () => {
+      // Reproduces the live shape: this ONE partition throws on the footer's
+      // narrow projection; every other read on the node is healthy.
+      const nodeWithCorruptScratch = () => {
+        const node = fakeNode(acrossBoards(), twoBoards);
+        const inner = node.queryAll.bind(node);
+        node.queryAll = (async (q: { schemaHash: string; fields: string[]; filter?: QueryFilter }) => {
+          if (q.schemaHash === "boardcardshash" && q.filter?.HashKey === "scratch") {
+            // Logged before throwing, so read-budget assertions still see it.
+            (node.queries as QueryLog[]).push({ schemaHash: q.schemaHash, filter: q.filter, fields: q.fields });
+            throw new Error(
+              "Node /api/query returned HTTP 400: Invalid data: read hash-key marker " +
+                "mhk:98fb8763:AIPo9o1OGEqqO1bus-P6Zw: Storage backend error: laststore: corrupt: empty rec.",
+            );
+          }
+          return inner(q);
+        }) as never;
+        return node;
+      };
+
+      test("the viewed board still renders instead of the command failing", async () => {
+        const out = await listCmd({ cfg: cfgWithIndexes, node: nodeWithCorruptScratch() });
+
+        // The 10 todo cards on `default` are what the user asked for.
+        expect(out).toContain("TODO  (10)");
+        expect(out).toContain("todo-0");
+        expect(out).toContain("todo-9");
+      });
+
+      test("the unreadable board is NAMED, never rendered as a board with no cards", async () => {
+        const out = await listCmd({ cfg: cfgWithIndexes, node: nodeWithCorruptScratch() });
+
+        expect(out).toContain("could not be read");
+        expect(out).toContain("scratch");
+        // The distinguishing assertion: "scratch (0)" would be a lie that reads
+        // exactly like a healthy empty board.
+        expect(out).not.toContain("scratch (0)");
+      });
+
+      test("one unreadable partition does not suppress the counts of readable ones", async () => {
+        const node = fakeNode(
+          [
+            ...todoCards(3),
+            card({ slug: "s-1", board: "scratch", column: "todo", position: "1" }),
+            card({ slug: "r-1", board: "roadmap", column: "todo", position: "1" }),
+          ],
+          [...twoBoards, board({ slug: "roadmap", title: "Roadmap" })],
+        );
+        const inner = node.queryAll.bind(node);
+        node.queryAll = (async (q: { schemaHash: string; filter?: QueryFilter }) => {
+          if (q.schemaHash === "boardcardshash" && q.filter?.HashKey === "scratch") {
+            throw new Error("HTTP 400: laststore: corrupt: empty rec");
+          }
+          return inner(q as never);
+        }) as never;
+
+        const out = await listCmd({ cfg: cfgWithIndexes, node });
+
+        expect(out).toContain("roadmap (1)");
+        expect(out).toContain("could not be read: scratch");
+      });
+
+      test("the failure does not fall back to the expensive cross-board re-read", async () => {
+        const node = nodeWithCorruptScratch();
+        await listCmd({ cfg: cfgWithIndexes, node });
+
+        // The `null` fallback path re-reads EVERY partition wide, including the
+        // one already on screen. A failed board is not a reason to pay that.
+        const viewed = boardCardQueries(node).filter((q) => q.filter?.HashKey === "default");
+        expect(viewed).toHaveLength(1);
+      });
+    });
   });
 
   test("duplicate sks for one slug collapse to the fresher row", async () => {
