@@ -1313,13 +1313,22 @@ export function isLoopbackNodeUrl(url: string): boolean {
 
 // The result of one `pingNode` liveness probe. `latency_ms` is wall time for
 // the single request, measured even on failure so a slow-then-failing node is
-// distinguishable from a fast connection refusal. `node_version` is surfaced
-// only when the status body carries one.
+// distinguishable from a fast connection refusal.
+//
+// There is deliberately no `node_version` here. This type used to carry one,
+// read from `body.version` on the success path — a field no LastDB node has
+// ever sent. The status contract is `{ok, user_hash, status:{…}}`; `version`
+// is absent at the top level AND under `status` (verified against the live
+// primary 2026-08-01 and against the node source, where the only `"version"`
+// keys are app-publish manifests). So the field was always `undefined`, the
+// ` (node X)` suffix never once printed, and the MCP tool advertised an output
+// field that could not populate. Reporting a capability you do not have is
+// worse than not having it: it reads as "this node is too old to say", not as
+// "nobody asks".
 export type PingReport = {
   ok: boolean;
   latency_ms: number;
   socket_path?: string;
-  node_version?: string;
   error?: string;
 };
 
@@ -1330,6 +1339,30 @@ export type PingReport = {
 // scans (`kanban list`), which request-ops telemetry showed as a meaningful
 // slice of fleet kanban load. Errors are returned in the report, never thrown:
 // a ping's job is to answer "up or not", not to crash the caller.
+//
+// ## Do not "fix" this by moving to GET /health
+//
+// This is the tempting one-line optimization and it is wrong, so it is written
+// down here rather than rediscovered. Measured on the live primary 2026-08-01,
+// median of 10 each over the socket:
+//
+// | endpoint      | body    | median |
+// |---|---|---|
+// | `/health`     | 15 B    | 183ms  |
+// | `/api/status` | 176 KB  | 515ms  |
+//
+// 2.8x faster and four orders of magnitude smaller — and useless as a liveness
+// check. In the node's own router `/health` is `ControlRoute::Health`,
+// documented there as "answerable **without node state**" and answered by a
+// static `health_response()`. It proves one UDS worker can format a constant.
+// It cannot observe storage, so it would answer `{"status":"ok"}` through
+// exactly the wedges a health check exists to catch — and `kanban ping` is what
+// CLAUDE.md tells the whole fleet to use instead of `doctor`/`list`.
+//
+// `/api/status` costs more BECAUSE it touches node state; that cost is the
+// signal, not waste. This is the same class as the six prior "a check that can
+// never read failure" findings in this repo, and swapping endpoints would have
+// introduced one at the exact spot the fleet trusts most.
 export async function pingNode(opts: {
   nodeUrl: string;
   socketPath?: string;
@@ -1354,8 +1387,24 @@ export async function pingNode(opts: {
       timeoutMs: opts.timeoutMs,
       socketPath,
     });
+    // The body is still READ on both paths, and that is not optional: `readBody`
+    // is what drains the response, clears the request deadline timer and marks
+    // the request done. Skipping it on success would leak a live timeout per
+    // ping. What is skipped is PARSING it.
+    //
+    // Worth knowing what this body is before "optimizing" it further: measured
+    // on the live primary 2026-08-01, `/api/status` is ~176 KB of which 176,383
+    // bytes — 98.3% — is `status.request_ops`, the node's request-telemetry
+    // ring (what `lastdb ops` prints). A liveness probe downloads the entire
+    // telemetry ring, every time. That is the node's response shape, not
+    // something this client can ask it to trim (`?counts=false` and
+    // `?brief=true` are both accepted and both ignored — the router drops the
+    // query string before the handler). Filed node-side; from here the only
+    // honest saving is to not JSON.parse 176 KB to look for nothing.
     const text = await readBody({ asText: true });
     if (!res.ok) {
+      // The failure path DOES parse: a node that answers non-2xx puts the
+      // reason in the body, and that reason is the entire value of the report.
       return {
         ok: false,
         latency_ms: latency(),
@@ -1363,13 +1412,7 @@ export async function pingNode(opts: {
         error: bodyError(parseJsonSafe(text)) ?? `node answered HTTP ${res.status}`,
       };
     }
-    const body = parseJsonSafe(text);
-    const version =
-      typeof body === "object" && body !== null && "version" in body &&
-      typeof (body as { version: unknown }).version === "string"
-        ? (body as { version: string }).version
-        : undefined;
-    return { ok: true, latency_ms: latency(), socket_path: socketPath, node_version: version };
+    return { ok: true, latency_ms: latency(), socket_path: socketPath };
   } catch (err) {
     return {
       ok: false,
