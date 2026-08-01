@@ -401,6 +401,97 @@ export async function purgeOtherBoardCardRows(
 }
 
 /**
+ * For ONE slug in ONE partition: which of its rows is whole, and which are
+ * sparse duplicates that can be retired?
+ *
+ * `board-cards heal` dedupes its row set by SLUG, so a slug holding both a
+ * whole row and a sparse one keeps only the whole one and the sparse sibling is
+ * skipped. That was documented as safe because the sibling stayed "reachable on
+ * a later pass once the visible one converges" — but convergence is exactly
+ * when heal stops acting: a whole row reports no drift, so the slug is never
+ * revisited and "later" never arrives. Measured on the live `default` partition
+ * 2026-08-01, after a heal run reached `drifted=0 healed=0 missing_card=0`:
+ * `["slug"]` returned 340 rows and the five-field spine 339, the difference
+ * being a second, sparse membership row for a healthy card.
+ *
+ * One permanently unreachable row is not itself a user-visible fault. The cost
+ * is that `doctor`'s BoardCards parity check can never read clean again, and a
+ * check with a standing non-zero floor is one nobody reads — which is how the
+ * 19-row gap of 2026-08-01 survived two days behind a check reporting
+ * `spine agrees`.
+ *
+ * Retiring a sparse DUPLICATE is a strictly safer question than the orphan reap
+ * heal already performs: the orphan reap must establish that no Card wants this
+ * membership, whereas here the card's membership provably survives the delete
+ * because a whole sibling row carries it.
+ *
+ * Refuses (returns `null`) unless there is exactly ONE whole row:
+ *
+ *  - zero whole rows → every row for the slug is sparse. Not a duplicate
+ *    question; heal's existing orphan / thin-field-drift paths own it.
+ *  - two or more whole rows → genuine ambiguity about which membership is
+ *    current. Deleting either could drop the live one, so this refuses and
+ *    leaves it for a human or the drift path.
+ *
+ * Takes the slug's row addresses from the CALLER rather than re-listing the
+ * partition. A caller that has already enumerated the partition end to end
+ * knows every sk the slug holds, and re-reading once per duplicate slug would
+ * make partition reads scale with the number of rows repaired — the exact cost
+ * regression `heal-orphan-reap-partition-rescan.test.ts` pins against. So this
+ * costs only one point read per candidate row, and only for slugs measured to
+ * hold more than one.
+ *
+ * Wholeness is decided by {@link readWholeBoardCardRow} — the same "all 24
+ * fields, and not returned means not whole" gate the narrow write path already
+ * trusts.
+ */
+export async function classifyBoardCardDuplicateRows(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  slug: string,
+  sks: readonly string[],
+): Promise<{ keepSk: string; sparseSks: string[] } | null> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash || !slug) return null;
+  const unique = [...new Set(sks.filter((sk) => sk.length > 0))];
+  // One row (or none) is not a duplicate question.
+  if (unique.length < 2) return null;
+  const whole: string[] = [];
+  const sparse: string[] = [];
+  for (const sk of unique) {
+    if (await readWholeBoardCardRow(node, cfg, board, sk)) whole.push(sk);
+    else sparse.push(sk);
+  }
+  if (whole.length !== 1) return null;
+  return { keepSk: whole[0]!, sparseSks: sparse };
+}
+
+/**
+ * Delete BoardCards rows by their REAL range keys, with no partition read.
+ *
+ * For a caller that already holds the addresses — {@link classifyBoardCardDuplicateRows}
+ * hands back exactly the sparse ones — and must not pay
+ * {@link purgeOtherBoardCardRows}'s partition scan per row.
+ */
+export async function deleteBoardCardRowsBySk(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  sks: readonly string[],
+): Promise<number> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash) return 0;
+  let n = 0;
+  for (const sk of sks) {
+    if (!sk) continue;
+    await deleteBoardCardSk(node, schemaHash, board, sk);
+    n += 1;
+  }
+  return n;
+}
+
+/**
  * Read exactly one BoardCards row, keyed by its full sk, at the WIDE
  * projection — and treat "not returned" as "not writable narrowly".
  *
