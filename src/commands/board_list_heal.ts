@@ -16,7 +16,7 @@ import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
   cardListIndexHash,
-  readBoardListIndex,
+  readBoardListIndexRow,
   writeBoardListIndex,
   type BoardSummary,
 } from "../card-list-index.ts";
@@ -44,7 +44,11 @@ export type BoardListHealReport = {
   drifted: number;
   healed: number;
   dryRun: boolean;
-  /** True when `all_boards` has no row at all — nothing to heal, list self-seeds. */
+  /**
+   * True when `all_boards` has no ROW at all — nothing to heal, list self-seeds.
+   * A row that exists but whose payload could not be read is NOT absent; it is
+   * drift, and it is reported and repaired as such.
+   */
   index_absent: boolean;
   actions: BoardListHealAction[];
 };
@@ -84,7 +88,10 @@ export async function boardListHealResult(
       },
     };
   }
-  const indexed = await readBoardListIndex(opts.node, opts.cfg);
+  const { entries: indexed, present: indexPresent } = await readBoardListIndexRow(
+    opts.node,
+    opts.cfg,
+  );
   const indexBySlug = new Map((indexed ?? []).map((b) => [b.slug, b]));
 
   // Board truth. Every entry already in the index is passed in as a candidate so
@@ -135,7 +142,13 @@ export async function boardListHealResult(
 
   // An absent index row is NOT drift: `listBoards` falls back to a Board scan and
   // re-seeds it. Writing one here would only race that seed.
-  const indexAbsent = indexed === null;
+  //
+  // A row that is PRESENT with an unreadable payload is the opposite case, and
+  // it used to land in this same branch because both arrive as `indexed ===
+  // null`. Nothing re-seeds it — the `listBoards` fallback only fires when the
+  // row is missing — so declining to heal left the rollup broken and reported
+  // the node healthy. That state is drift, and repairing it is this verb's job.
+  const indexAbsent = indexed === null && !indexPresent;
   let healed = 0;
   if (opts.apply && drifted > 0 && !indexAbsent) {
     // Rewrite from truth in one unconditional put — the payload is derived from

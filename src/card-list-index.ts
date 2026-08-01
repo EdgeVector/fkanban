@@ -99,30 +99,70 @@ export function toCardSummary(card: { slug: string; body?: string; [key: string]
  * patch — exact, and (unlike `updated_at`) immune to two writes landing inside
  * the same millisecond.
  *
- * `raw === null` means the row does not exist.
+ * `entries === null` means the payload could not be read. That is NOT the same
+ * as the row being absent, which is what `present` answers — see `readIndexRow`.
  */
-type IndexRow<T> = { entries: T[] | null; raw: string | null };
+type IndexRow<T> = { entries: T[] | null; raw: string | null; present: boolean };
 
+/**
+ * The one field this row's readers actually consume.
+ *
+ * The read used to project all three of `CARD_LIST_INDEX_FIELDS`; `key` is the
+ * filter, not a result, and `updated_at` is never looked at. Width is not free
+ * here and it is not only a cost: **LastDB returns a row only when every
+ * projected field has an atom** (the rule this repo states at
+ * board-cards.ts:105 and measured on the primary 2026-07-23, when one
+ * unbackfilled field hid 135 BoardCards rows from every wide read). Asking for
+ * three fields to use one gave a load-bearing row three ways to disappear
+ * instead of one, in exchange for nothing.
+ */
+const INDEX_PAYLOAD_FIELDS = ["payload_json"] as const;
+
+/**
+ * Read one rollup row.
+ *
+ * A projected read may SUPPLY a payload; it may not establish that the row is
+ * ABSENT. When the payload does not come back, this asks the minimal keyed
+ * question — the same `["key"]` existence probe `writeIndexPayload` uses to
+ * choose create-vs-update — and reports the answer as `present`, so callers can
+ * tell "there is no row" from "there is a row I could not read".
+ *
+ * That distinction is load-bearing rather than pedantic. `all_boards` decides
+ * which BoardCards partitions `kanban list` queries at all, and the CAS witness
+ * that protects it (`raw`) is DERIVED FROM THIS READ — so a read that fails to
+ * return the row loses the data and simultaneously disarms the guard that would
+ * have caught the loss. Both safety properties fail from the one cause.
+ *
+ * The probe costs an extra read only on the path where the payload was already
+ * unreadable — never on the hot `listBoards` path, which gets its row back on
+ * the first query.
+ */
 async function readIndexRow<T>(node: NodeClient, cfg: Config, key: string): Promise<IndexRow<T>> {
   const hash = cardListIndexHash(cfg);
-  if (!hash) return { entries: null, raw: null };
+  if (!hash) return { entries: null, raw: null, present: false };
   const res = await node.queryAll({
     schemaHash: hash,
-    fields: [...CARD_LIST_INDEX_FIELDS],
+    fields: [...INDEX_PAYLOAD_FIELDS],
     filter: { HashKey: key },
   });
   const row = res.results[0];
-  if (!row) return { entries: null, raw: null };
+  if (!row) return { entries: null, raw: null, present: await rowExists(node, hash, key) };
   const raw = (row.fields as Record<string, unknown> | undefined)?.payload_json;
   if (typeof raw !== "string" || raw.length === 0) {
-    return { entries: [], raw: typeof raw === "string" ? raw : null };
+    return { entries: [], raw: typeof raw === "string" ? raw : null, present: true };
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return { entries: Array.isArray(parsed) ? (parsed as T[]) : [], raw };
+    return { entries: Array.isArray(parsed) ? (parsed as T[]) : [], raw, present: true };
   } catch {
-    return { entries: [], raw };
+    return { entries: [], raw, present: true };
   }
+}
+
+/** Minimal keyed existence question: one field, so nothing else can drop the row. */
+async function rowExists(node: NodeClient, hash: string, key: string): Promise<boolean> {
+  const probe = await node.queryAll({ schemaHash: hash, fields: ["key"], filter: { HashKey: key } });
+  return probe.results[0] !== undefined;
 }
 
 async function readIndexPayload<T>(
@@ -223,6 +263,23 @@ export async function readBoardListIndex(
   return readIndexPayload<BoardSummary>(node, cfg, BOARD_LIST_INDEX_KEY);
 }
 
+/**
+ * `readBoardListIndex` plus whether the ROW exists at all.
+ *
+ * `groom board-list-heal` needs both halves and they mean opposite things: an
+ * absent row is NOT drift (`listBoards` re-seeds it from Board truth, and
+ * writing one here would only race that seed), while a row that is present with
+ * an unreadable payload is precisely the drift heal exists to repair — nothing
+ * else will, because the re-seed only fires when the row is missing.
+ */
+export async function readBoardListIndexRow(
+  node: NodeClient,
+  cfg: Config,
+): Promise<{ entries: BoardSummary[] | null; present: boolean }> {
+  const { entries, present } = await readIndexRow<BoardSummary>(node, cfg, BOARD_LIST_INDEX_KEY);
+  return { entries, present };
+}
+
 export async function writeBoardListIndex(
   node: NodeClient,
   cfg: Config,
@@ -259,7 +316,24 @@ export async function patchBoardListIndex(
 ): Promise<void> {
   if (!cardListIndexHash(cfg)) return;
   for (let attempt = 1; ; attempt += 1) {
-    const { entries, raw } = await readIndexRow<BoardSummary>(node, cfg, BOARD_LIST_INDEX_KEY);
+    const { entries, raw, present } = await readIndexRow<BoardSummary>(node, cfg, BOARD_LIST_INDEX_KEY);
+    if (entries === null && present) {
+      // The row is THERE and its payload did not come back. Treating that as an
+      // empty rollup would rebuild `all_boards` from nothing and write it with
+      // no CAS witness (`raw` is null, so the `expected` precondition below is
+      // omitted) — one board would survive and every other board's cards would
+      // vanish from `kanban list`.
+      //
+      // Refusing leaves the damage repairable instead of compounding it, which
+      // is the trade `board rm` already states at commands/board.ts:195: a
+      // visible ghost beats a live board that silently disappears.
+      throw new FkanbanError({
+        code: "index_unreadable",
+        message:
+          `all_boards exists but its payload could not be read — refusing to rebuild the ` +
+          `board rollup from an empty base. Repair it with \`kanban groom board-list-heal --apply\`.`,
+      });
+    }
     const current = entries ?? [];
     const without = current.filter((b) => b.slug !== board.slug);
     const next =
