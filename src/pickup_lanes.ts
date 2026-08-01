@@ -13,7 +13,7 @@
 // Claim order uses live board state so concurrent workers share a coherent
 // starvation signal without a perfect shared cursor.
 
-import { priorityOf, priorityRank, rankCards, type Card } from "./record.ts";
+import { priorityOf, priorityRank, type Card } from "./record.ts";
 
 export type LaneKind = "p0-now" | "program" | "papercut" | "unlaned";
 
