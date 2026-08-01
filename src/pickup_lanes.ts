@@ -1,21 +1,89 @@
 // Logical pickup lanes on the default board's shared `todo` queue.
 //
-// Algorithm (Tom 2026-07-17):
+// Hard todo ranker (Tom 2026-08-01 — factory graph todo_ranker):
 //   1. p0-now              — always first among ready cards (true interrupts)
-//   2. fair-share pool     — each program:* lane AND the unlaned lane compete
-//                            equally: prefer fewer in-flight `doing` cards
-//                            (starvation), then least-recent claim, then
-//                            oldest ready card within the lane
-//   3. papercut            — fill remaining capacity (routine-error / hygiene)
+//   2. fair-share(program) — each program:* lane competes by fewest doing /
+//                            oldest last-claim (starvation); never unlaned
+//   3. unlaned             — real work without NS/lane tags (after all programs)
+//   4. papercut            — hygiene / routine-error fill only
 //
+// Within a lane: active|proving milestone frontier → Priority P0→P3 → age.
 // Lane *annotation* (lane:program:… tags) is optional. Until annotations are
 // ubiquitous we derive lanes from priority, north_star, and papercut heuristics.
 // Claim order uses live board state so concurrent workers share a coherent
 // starvation signal without a perfect shared cursor.
 
-import { priorityOf, rankCards, type Card } from "./record.ts";
+import { priorityOf, priorityRank, rankCards, type Card } from "./record.ts";
 
 export type LaneKind = "p0-now" | "program" | "papercut" | "unlaned";
+
+/**
+ * Hard todo ranker (Tom factory graph — todo_ranker).
+ *
+ * Claim + board `position` must drain the same hard tiers:
+ *   0. p0-now          — true interrupts (non-papercut P0 / pipeline)
+ *   1. program:*       — North Star / milestone frontier work
+ *   2. unlaned         — real work without NS/lane tags (after all programs)
+ *   3. papercut        — hygiene / routine-error fill only
+ *
+ * Within a tier: active|proving milestone children first, then Priority P0→P3,
+ * then oldest created_at. Papercuts never outrank program frontier solely by
+ * being older or P0-tagged.
+ */
+export type HardTodoRankContext = {
+  /** Milestone slugs in state active or proving (frontier boost). */
+  frontierMilestones?: ReadonlySet<string>;
+};
+
+/** Lane hard tier — lower drains first. */
+export function hardLaneTier(lane: LaneId): number {
+  const kind = laneKind(lane);
+  if (kind === "p0-now") return 0;
+  if (kind === "program") return 1;
+  if (kind === "unlaned") return 2;
+  return 3; // papercut
+}
+
+/**
+ * 0 = child of active/proving milestone (frontier)
+ * 1 = has a milestone but not frontier
+ * 2 = no milestone
+ */
+export function frontierBoost(card: Card, ctx?: HardTodoRankContext): number {
+  const ms = (card.milestone || "").trim();
+  if (!ms) return 2;
+  if (ctx?.frontierMilestones?.has(ms)) return 0;
+  return 1;
+}
+
+/** Pure total order for hard todo ranking (stable for equal keys via slug). */
+export function compareHardTodo(a: Card, b: Card, ctx?: HardTodoRankContext): number {
+  const ta = hardLaneTier(laneOf(a));
+  const tb = hardLaneTier(laneOf(b));
+  if (ta !== tb) return ta - tb;
+
+  const fa = frontierBoost(a, ctx);
+  const fb = frontierBoost(b, ctx);
+  if (fa !== fb) return fa - fb;
+
+  const pa = priorityRank(priorityOf(a));
+  const pb = priorityRank(priorityOf(b));
+  if (pa !== pb) return pa - pb;
+
+  const ca = a.created_at.localeCompare(b.created_at);
+  if (ca !== 0) return ca;
+  return a.slug.localeCompare(b.slug);
+}
+
+/** Order cards by hard todo tiers (for `kanban rank` position rewrite). */
+export function rankCardsHardTodo<T extends Card>(cards: T[], ctx?: HardTodoRankContext): T[] {
+  return cards.slice().sort((a, b) => compareHardTodo(a, b, ctx));
+}
+
+export function isFrontierMilestoneState(state: string): boolean {
+  const s = (state || "").trim().toLowerCase();
+  return s === "active" || s === "proving";
+}
 
 export type LaneId =
   | "p0-now"
@@ -187,7 +255,7 @@ export type LaneBuckets = {
   unlaned: Card[];
 };
 
-export function bucketReadyCards(readyCards: Card[]): LaneBuckets {
+export function bucketReadyCards(readyCards: Card[], ctx?: HardTodoRankContext): LaneBuckets {
   const p0: Card[] = [];
   const programs = new Map<string, Card[]>();
   const papercut: Card[] = [];
@@ -205,13 +273,16 @@ export function bucketReadyCards(readyCards: Card[]): LaneBuckets {
     }
   }
 
+  // Within each lane: frontier milestone → priority → age (not priority alone).
+  const sortInLane = <T extends Card>(xs: T[]): T[] => rankCardsHardTodo(xs, ctx);
+
   return {
-    p0: rankCards(p0),
+    p0: sortInLane(p0),
     programs: new Map(
-      [...programs.entries()].map(([k, v]) => [k, rankCards(v)] as const),
+      [...programs.entries()].map(([k, v]) => [k, sortInLane(v)] as const),
     ),
-    papercut: rankCards(papercut),
-    unlaned: rankCards(unlaned),
+    papercut: sortInLane(papercut),
+    unlaned: sortInLane(unlaned),
   };
 }
 
@@ -259,9 +330,12 @@ export function orderProgramLanes(
 }
 
 /**
- * Full candidate order for pickup claim:
- * p0-now → fair-share(program:* + unlaned) → papercut.
- * Within each lane, cards stay in rankCards order.
+ * Full candidate order for pickup claim (hard todo ranker):
+ * p0-now → fair-share(program:* only) → unlaned → papercut.
+ *
+ * Unlaned is **not** a fair-share peer of programs: program/MS frontier work
+ * always drains before untagged cards; papercuts always last.
+ * Within each lane, cards use frontier → priority → age.
  */
 export function orderCandidatesByLanes(
   readyCards: Card[],
@@ -269,22 +343,21 @@ export function orderCandidatesByLanes(
   state: PickupLaneState,
   board = "default",
   preferRepo: string[] = [],
+  ctx?: HardTodoRankContext,
 ): Card[] {
-  const buckets = bucketReadyCards(readyCards);
+  const buckets = bucketReadyCards(readyCards, ctx);
   const doingCounts = doingCountsByLane(allCards, board);
 
-  // Unlaned is a first-class fair-share peer of program lanes (not last).
-  const fairShare = new Map(buckets.programs);
-  if (buckets.unlaned.length > 0) {
-    fairShare.set("unlaned", buckets.unlaned);
-  }
-  const fairOrder = orderProgramLanes(fairShare, doingCounts, state);
+  // Fair-share among North Star program lanes only — never let unlaned or
+  // papercut steal a slot while a program still has ready work.
+  const fairOrder = orderProgramLanes(buckets.programs, doingCounts, state);
 
   const out: Card[] = [];
   out.push(...buckets.p0);
   for (const lane of fairOrder) {
-    out.push(...(fairShare.get(lane) ?? []));
+    out.push(...(buckets.programs.get(lane) ?? []));
   }
+  out.push(...buckets.unlaned);
   out.push(...buckets.papercut);
 
   if (preferRepo.length === 0) return out;
@@ -293,26 +366,39 @@ export function orderCandidatesByLanes(
   // repos forward but keep relative lane order among equals by only
   // reordering inside each contiguous priority band is hard — simpler:
   // stable partition prefer vs rest while preserving relative order.
-  const prefer = new Set(preferRepo.map((r) => r.toLowerCase()));
-  const preferred: Card[] = [];
-  const rest: Card[] = [];
-  for (const c of out) {
-    const repo = (c.repo || "").toLowerCase();
-    if (repo && prefer.has(repo)) preferred.push(c);
-    else rest.push(c);
-  }
   // Only boost prefer-repo among non-p0: p0 must stay first.
+  // Hard tiers still apply: prefer-repo must not pull papercuts ahead of
+  // program work — only reorder within the same hard lane tier.
+  const prefer = new Set(preferRepo.map((r) => r.toLowerCase()));
   const p0Set = new Set(buckets.p0.map((c) => c.slug));
   const p0 = out.filter((c) => p0Set.has(c.slug));
-  const nonP0 = out.filter((c) => !p0Set.has(c.slug));
-  const prefNon: Card[] = [];
-  const restNon: Card[] = [];
-  for (const c of nonP0) {
-    const repo = (c.repo || "").toLowerCase();
-    if (repo && prefer.has(repo)) prefNon.push(c);
-    else restNon.push(c);
-  }
-  return [...p0, ...prefNon, ...restNon];
+  const rest = out.filter((c) => !p0Set.has(c.slug));
+
+  const reorderWithinTier = (cards: Card[]): Card[] => {
+    // Partition by hard lane tier, prefer-repo within each tier only.
+    const byTier = new Map<number, Card[]>();
+    for (const c of cards) {
+      const t = hardLaneTier(laneOf(c));
+      const list = byTier.get(t) ?? [];
+      list.push(c);
+      byTier.set(t, list);
+    }
+    const ordered: Card[] = [];
+    for (const t of [...byTier.keys()].sort((a, b) => a - b)) {
+      const tierCards = byTier.get(t) ?? [];
+      const pref: Card[] = [];
+      const other: Card[] = [];
+      for (const c of tierCards) {
+        const repo = (c.repo || "").toLowerCase();
+        if (repo && prefer.has(repo)) pref.push(c);
+        else other.push(c);
+      }
+      ordered.push(...pref, ...other);
+    }
+    return ordered;
+  };
+
+  return [...p0, ...reorderWithinTier(rest)];
 }
 
 export type LaneStatusRow = {
@@ -331,8 +417,9 @@ export function buildLaneStatus(
   allCards: Card[],
   state: PickupLaneState,
   board = "default",
+  ctx?: HardTodoRankContext,
 ): LaneStatusRow[] {
-  const buckets = bucketReadyCards(readyCards);
+  const buckets = bucketReadyCards(readyCards, ctx);
   const doingCounts = doingCountsByLane(allCards, board);
   const rows: LaneStatusRow[] = [];
 
@@ -352,17 +439,16 @@ export function buildLaneStatus(
 
   push("p0-now", buckets.p0);
 
-  const fairShare = new Map(buckets.programs);
-  if (buckets.unlaned.length > 0) fairShare.set("unlaned", buckets.unlaned);
-  const fairOrder = orderProgramLanes(fairShare, doingCounts, state);
+  // Display matches claim: programs (fair-share order) then unlaned then papercut.
+  const fairOrder = orderProgramLanes(buckets.programs, doingCounts, state);
   for (const lane of fairOrder) {
-    push(lane as LaneId, fairShare.get(lane) ?? []);
+    push(lane as LaneId, buckets.programs.get(lane) ?? []);
   }
-  // program/unlaned with only doing, no ready
+  // program with only doing, no ready
   for (const [lane, n] of doingCounts) {
     const kind = laneKind(lane as LaneId);
-    if (kind !== "program" && kind !== "unlaned") continue;
-    if (fairShare.has(lane)) continue;
+    if (kind !== "program") continue;
+    if (buckets.programs.has(lane)) continue;
     if (n > 0) {
       rows.push({
         lane: lane as LaneId,
@@ -371,6 +457,21 @@ export function buildLaneStatus(
         doing: n,
         starved: false,
         last_claim_at: state.lane_last_claim_at[lane],
+      });
+    }
+  }
+  push("unlaned", buckets.unlaned);
+  // unlaned doing-only
+  {
+    const n = doingCounts.get("unlaned") ?? 0;
+    if (n > 0 && buckets.unlaned.length === 0) {
+      rows.push({
+        lane: "unlaned",
+        kind: "unlaned",
+        ready: 0,
+        doing: n,
+        starved: false,
+        last_claim_at: state.lane_last_claim_at["unlaned"],
       });
     }
   }

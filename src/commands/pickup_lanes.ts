@@ -2,13 +2,15 @@
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
-import { listBoards, listCards } from "../record.ts";
+import { listBoards, listCards, listMilestonesOnBoard } from "../record.ts";
 import { buildPickupStatusReportWithSituations } from "../pickup.ts";
 import {
   buildLaneStatus,
+  isFrontierMilestoneState,
   laneOf,
   orderCandidatesByLanes,
   parsePickupLaneState,
+  type HardTodoRankContext,
   type LaneStatusRow,
   type PickupLaneState,
 } from "../pickup_lanes.ts";
@@ -48,13 +50,28 @@ export async function pickupLanesResult(opts: {
     .map((c) => bySlug.get(c.slug))
     .filter((c): c is NonNullable<typeof c> => !!c);
 
-  const lanes = buildLaneStatus(readyCards, cards, state, board);
-  const order = orderCandidatesByLanes(readyCards, cards, state, board).map((c) => c.slug);
+  let hardCtx: HardTodoRankContext | undefined;
+  try {
+    const milestones = await listMilestonesOnBoard(opts.node, opts.cfg, board);
+    hardCtx = {
+      frontierMilestones: new Set(
+        milestones.filter((m) => isFrontierMilestoneState(m.state)).map((m) => m.slug),
+      ),
+    };
+  } catch {
+    hardCtx = undefined;
+  }
+
+  const lanes = buildLaneStatus(readyCards, cards, state, board, hardCtx);
+  const order = orderCandidatesByLanes(readyCards, cards, state, board, [], hardCtx).map(
+    (c) => c.slug,
+  );
 
   return {
     board,
     algorithm:
-      "p0-now first → fair-share(program:* + unlaned by fewest doing / oldest last-claim) → papercut",
+      "hard todo ranker: p0-now → fair-share(program:* only) → unlaned → papercut " +
+      "(within lane: active|proving milestone frontier → priority → age)",
     state,
     lanes,
     next_claim_order: order.slice(0, 20),

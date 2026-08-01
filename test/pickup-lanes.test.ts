@@ -3,11 +3,14 @@ import { describe, expect, test } from "bun:test";
 import {
   bucketReadyCards,
   buildLaneStatus,
+  compareHardTodo,
   emptyPickupLaneState,
+  hardLaneTier,
   laneOf,
   orderCandidatesByLanes,
   orderProgramLanes,
   parsePickupLaneState,
+  rankCardsHardTodo,
   recordLaneClaim,
   upsertPickupLaneStateInBody,
   type PickupLaneState,
@@ -34,6 +37,7 @@ function card(partial: Partial<Card> & { slug: string; title?: string }): Card {
     base: partial.base ?? "main",
     kind: partial.kind ?? "pr",
     north_star: partial.north_star ?? "",
+    milestone: partial.milestone ?? "",
     branch: partial.branch ?? "",
     pr_url: partial.pr_url ?? "",
     block_status: partial.block_status ?? "none",
@@ -89,7 +93,7 @@ describe("orderCandidatesByLanes", () => {
     expect(ordered.map((c) => c.slug)).toEqual(["p0-fix", "prog-a", "papercut-1"]);
   });
 
-  test("unlaned fair-shares with program lanes (not always last)", () => {
+  test("hard ranker: program work always before unlaned (even when program has doing)", () => {
     const ready = [
       card({
         slug: "prog-busy",
@@ -112,9 +116,9 @@ describe("orderCandidatesByLanes", () => {
       }),
     ];
     const ordered = orderCandidatesByLanes(ready, [...ready, ...doing], emptyPickupLaneState());
-    // unlaned has 0 doing → before program with doing
-    expect(ordered[0]!.slug).toBe("unlaned-starved");
-    expect(ordered[1]!.slug).toBe("prog-busy");
+    // Hard todo ranker: program:* drains before unlaned — unlaned is not a fair-share peer.
+    expect(ordered[0]!.slug).toBe("prog-busy");
+    expect(ordered[1]!.slug).toBe("unlaned-starved");
   });
 
   test("starved program lane (0 doing) beats program with doing", () => {
@@ -204,6 +208,85 @@ describe("buildLaneStatus", () => {
     expect(prog?.starved).toBe(true);
     expect(prog?.ready).toBe(1);
     expect(prog?.doing).toBe(0);
+  });
+});
+
+describe("hard todo ranker", () => {
+  test("p0 < program < unlaned < papercut (hard tiers)", () => {
+    const p0 = card({ slug: "p0", tags: ["p0"] });
+    const prog = card({ slug: "prog", tags: ["p1"], north_star: "ns-a" });
+    const unlaned = card({ slug: "u", tags: ["p1"] });
+    const pc = card({ slug: "papercut-x", tags: ["p0", "papercut"] });
+    expect(hardLaneTier(laneOf(p0))).toBe(0);
+    expect(hardLaneTier(laneOf(prog))).toBe(1);
+    expect(hardLaneTier(laneOf(unlaned))).toBe(2);
+    expect(hardLaneTier(laneOf(pc))).toBe(3);
+    const ordered = rankCardsHardTodo([pc, unlaned, prog, p0]);
+    expect(ordered.map((c) => c.slug)).toEqual(["p0", "prog", "u", "papercut-x"]);
+  });
+
+  test("papercut never outranks program even when older P0", () => {
+    const prog = card({
+      slug: "ms-pr",
+      tags: ["p2"],
+      north_star: "ns-a",
+      created_at: "2026-08-01T00:00:00Z",
+    });
+    const pc = card({
+      slug: "routine-error-old",
+      tags: ["p0"],
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    expect(compareHardTodo(prog, pc)).toBeLessThan(0);
+    const ordered = orderCandidatesByLanes([pc, prog], [pc, prog], emptyPickupLaneState());
+    expect(ordered[0]!.slug).toBe("ms-pr");
+    expect(ordered[1]!.slug).toBe("routine-error-old");
+  });
+
+  test("active/proving milestone frontier before other milestone children", () => {
+    const frontier = card({
+      slug: "frontier",
+      tags: ["p2"],
+      north_star: "ns-a",
+      milestone: "ms-active",
+      created_at: "2026-08-01T00:00:00Z",
+    });
+    const other = card({
+      slug: "other-ms",
+      tags: ["p1"],
+      north_star: "ns-a",
+      milestone: "ms-planned",
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    const ctx = { frontierMilestones: new Set(["ms-active"]) };
+    const ordered = rankCardsHardTodo([other, frontier], ctx);
+    expect(ordered[0]!.slug).toBe("frontier");
+    expect(ordered[1]!.slug).toBe("other-ms");
+  });
+
+  test("prefer-repo does not pull papercut ahead of program", () => {
+    const ready = [
+      card({
+        slug: "prog",
+        tags: ["p1"],
+        north_star: "ns-a",
+        repo: "EdgeVector/other",
+      }),
+      card({
+        slug: "papercut-fold",
+        tags: ["p1", "papercut"],
+        repo: "EdgeVector/fold",
+      }),
+    ];
+    const ordered = orderCandidatesByLanes(
+      ready,
+      ready,
+      emptyPickupLaneState(),
+      "default",
+      ["EdgeVector/fold"],
+    );
+    expect(ordered[0]!.slug).toBe("prog");
+    expect(ordered[1]!.slug).toBe("papercut-fold");
   });
 });
 
