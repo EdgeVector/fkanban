@@ -140,10 +140,16 @@ function seedMilestone(node: FakeNode, partial: Partial<Milestone> = {}): void {
     rangeKey: boardMilestoneSk(m.state, m.position, m.slug),
     // `completed_at` is added on top of `boardMilestoneFieldsFromMilestone`,
     // which deliberately omits it — while `listBoardMilestonesPartition`
-    // projects all 17 BOARD_MILESTONES_FIELDS including it. Against a faithful
-    // node that asymmetry drops the row entirely, so this fixture models a row
-    // that HAS the atom (as the live primary's rows do). The asymmetry itself is
-    // noted for follow-up; it is not what these tests are about.
+    // projects all 17 BOARD_MILESTONES_FIELDS including it.
+    //
+    // This fixture used to justify itself with "as the live primary's rows do".
+    // MEASURED 2026-08-01, and both halves of that were wrong: the primary's
+    // rows do NOT have the atom (0 of 33 carry a `completed_at` key), and the
+    // node does NOT drop them for it (all 33 come back). See
+    // `scripts/probe-wire-projection-semantics.ts`. The atom stays here only so
+    // these tests keep exercising the completion path with a value; the
+    // partial-row behaviour they were silently modelling away is covered by
+    // `test/membership-partial-row-provenance.test.ts`.
     fields: { ...boardMilestoneFieldsFromMilestone(m), completed_at: m.completed_at },
   });
 }
