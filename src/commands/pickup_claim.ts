@@ -683,8 +683,3 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
   if (result.diagnostics) appendTodoBlockerDiagnostics(lines, result.diagnostics);
   return lines.join("\n");
 }
-
-export async function pickupClaimCmd(opts: PickupClaimOptions): Promise<string> {
-  const result = await pickupClaimResult(opts);
-  return formatPickupClaim(result, opts.json);
-}
