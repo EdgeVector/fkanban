@@ -348,6 +348,35 @@ async function deleteBoardCardSk(
  * Delete every BoardCards row for `slug` on `board` whose sk is not `keepSk`
  * (when keepSk is set). When keepSk is null, delete all rows for the slug.
  * Returns how many delete attempts ran.
+ *
+ * This is the ONLY mechanism that stops one slug from holding two rows in a
+ * partition, so a row it cannot address is stale membership nothing can ever
+ * remove — no later purge sees it either.
+ *
+ * **Why it reads the address spine.** It used to read
+ * {@link BOARD_CARDS_SPINE_FIELDS} and then rebuild each row's range key from
+ * the payload copies it read back. Both halves are measured hazards on this
+ * index, and the module's own rule (see {@link BOARD_CARDS_ADDRESS_FIELDS})
+ * already named this a reaping path that must read
+ * {@link BOARD_CARDS_ADDRESS_FIELDS}:
+ *
+ *  - the five-field spine projects `board` and `sk`, which are payload COPIES
+ *    of the key. A partial write leaves a row keyed into the partition
+ *    carrying neither, and LastDB drops any row missing an atom for a
+ *    projected field — so the read denies exactly the damaged rows.
+ *  - `boardCardSk(row.column, row.position, row.slug)` reconstructs an address
+ *    from copies that can drift, when `QueryRow.key.range` IS the address.
+ *
+ * Measured on the live primary 2026-08-01
+ * (`scripts/probe-boardcard-purge-reach.ts`), `HashKey=default`: the spine read
+ * returned 335 rows in 652ms, the address read 336 in 195ms. The one row only
+ * the address read could see was a SECOND membership row for
+ * `lastgit-blob-inventory-primary-cutover` — a live card, duplicated in the
+ * partition, that every purge since had walked past. Narrowing is both the
+ * complete read and the cheap one; there is no trade here.
+ *
+ * The sibling `purgeOtherMilestoneCardRows` made this move already
+ * (`listMilestoneCardsPartitionSpine`); this path was the one left behind.
  */
 export async function purgeOtherBoardCardRows(
   node: NodeClient,
@@ -358,18 +387,14 @@ export async function purgeOtherBoardCardRows(
 ): Promise<number> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash || !slug) return 0;
-  // Orphan purge only needs spine identity (slug + sk components) — not the
-  // 24-field wide projection that list pays for display.
-  const part = await listBoardCardsPartition(node, cfg, board, {
-    fields: BOARD_CARDS_SPINE_FIELDS,
-  });
+  const part = await listBoardCardsPartitionSpine(node, cfg, board);
   if (!part) return 0;
   let n = 0;
   for (const row of part) {
     if (row.slug !== slug) continue;
-    const sk = boardCardSk(row.column, row.position, row.slug);
-    if (keepSk !== null && sk === keepSk) continue;
-    await deleteBoardCardSk(node, schemaHash, board, sk);
+    // `row.sk` is the row's real range key, not a rebuild of it.
+    if (keepSk !== null && row.sk === keepSk) continue;
+    await deleteBoardCardSk(node, schemaHash, board, row.sk);
     n += 1;
   }
   return n;

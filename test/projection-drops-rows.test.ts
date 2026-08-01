@@ -33,6 +33,7 @@ import {
   boardCardSk,
   listBoardCardsPartition,
   listBoardCardsPartitionSpine,
+  purgeOtherBoardCardRows,
 } from "../src/board-cards.ts";
 import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
 import { cardExists, emptyStructuredFields, type Card } from "../src/record.ts";
@@ -361,5 +362,92 @@ describe("the spine cannot depend on copies of its own key", () => {
     // Both sides used to drop this row, so `spine.length - wide.length` was 0
     // and doctor reported "spine agrees" over a partition with a hidden row.
     expect(spine!.length - wide!.length).toBe(1);
+  });
+
+  /**
+   * The purge is the ONLY code that removes a duplicate membership row, so a
+   * row it cannot address is stale membership nothing can ever remove — every
+   * later purge is blind to it in exactly the same way.
+   *
+   * It read the five-field spine and then rebuilt each row's range key from
+   * the payload copies it read back, which fails on both halves: the read
+   * denies a row missing a `board`/`sk` atom, and the rebuild addresses a copy
+   * instead of the key. Measured on the live primary 2026-08-01
+   * (`scripts/probe-boardcard-purge-reach.ts`): `HashKey=default` returned 335
+   * rows at the spine against 336 at `["slug"]`, and the one row only the
+   * address read could see was a second membership row for the live card
+   * `lastgit-blob-inventory-primary-cutover`.
+   */
+  describe("the orphan purge can address the rows it exists to delete", () => {
+    test("it deletes a duplicate row carrying no `board` or `sk` atom", async () => {
+      const live = fullCard({ slug: "dup-card", column: "todo", position: "10" });
+      const ghost = fullCard({ slug: "dup-card", column: "todo", position: "20" });
+      const node = projectionFaithfulNode({
+        cards: [{ ...fullRow(live), body: "" }],
+        boardCards: [fullRow(live)],
+      });
+      seedKeyOnlyRow(node, ghost);
+      expect(node.rowsOf(BOARD_CARDS_HASH)).toHaveLength(2);
+
+      const keepSk = boardCardSk("todo", "10", "dup-card");
+      const purged = await purgeOtherBoardCardRows(node, cfg, "default", "dup-card", keepSk);
+
+      // The spine read dropped this row, so the purge counted 0 and returned
+      // leaving the board showing one card in two places.
+      expect(purged).toBe(1);
+      const rows = node.rowsOf(BOARD_CARDS_HASH);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.rangeKey).toBe(keepSk);
+    });
+
+    test("it addresses a row by its real key, not by the copies on the row", async () => {
+      // Keyed at todo#1 but carrying doing#9 in its payload — the shape a
+      // partial write leaves behind. Rebuilding the sk from `column`/`position`
+      // produced `doing#9#drifted`, which addresses nothing, so the delete was
+      // a silent no-op against a row that was right there.
+      const drifted = fullCard({ slug: "drifted", column: "todo", position: "1" });
+      const row = fullRow(drifted);
+      row.column = "doing";
+      row.position = "9";
+      const node = projectionFaithfulNode({ cards: [], boardCards: [] });
+      node.seed({
+        schemaHash: BOARD_CARDS_HASH,
+        keyHash: "default",
+        rangeKey: boardCardSk("todo", "1", "drifted"),
+        fields: row,
+      });
+
+      const purged = await purgeOtherBoardCardRows(node, cfg, "default", "drifted", null);
+
+      expect(purged).toBe(1);
+      expect(node.rowsOf(BOARD_CARDS_HASH)).toHaveLength(0);
+    });
+
+    test("it still keeps the row it was told to keep, and leaves other slugs alone", async () => {
+      const keep = fullCard({ slug: "keep-me", column: "doing", position: "9" });
+      const stale = fullCard({ slug: "keep-me", column: "todo", position: "1" });
+      const other = fullCard({ slug: "other-card", column: "todo", position: "5" });
+      const node = projectionFaithfulNode({
+        cards: [],
+        boardCards: [fullRow(keep), fullRow(stale), fullRow(other)],
+      });
+
+      const keepSk = boardCardSk("doing", "9", "keep-me");
+      const purged = await purgeOtherBoardCardRows(node, cfg, "default", "keep-me", keepSk);
+
+      expect(purged).toBe(1);
+      expect(node.rowsOf(BOARD_CARDS_HASH).map((r) => r.rangeKey).sort()).toEqual(
+        [keepSk, boardCardSk("todo", "5", "other-card")].sort(),
+      );
+    });
+
+    test("it reads the address projection, never a copy of the key", async () => {
+      const node = projectionFaithfulNode({ cards: [], boardCards: [fullRow(fullCard())] });
+      await purgeOtherBoardCardRows(node, cfg, "default", "healthy", null);
+      const boardReads = node.reads.filter((r) => r.schemaHash === BOARD_CARDS_HASH);
+      expect(boardReads).toHaveLength(1);
+      // `board` and `sk` are the copies; projecting either re-opens the hole.
+      expect(boardReads[0]!.fields).toEqual(["slug"]);
+    });
   });
 });
