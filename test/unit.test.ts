@@ -1,6 +1,7 @@
 // Pure-logic unit tests — no node / schema-service required.
 
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 
 import {
   DEFAULT_COLUMNS,
@@ -769,13 +770,52 @@ describe("mcp register helper (single source of truth)", () => {
     expect(entry).not.toBeNull();
     const cmd = mcpAddCommand();
     if (cmd.endsWith(" mcp")) {
-      // shim form — entrypoint is an installed bin, just assert it resolved.
-      expect(entry!.length).toBeGreaterThan(0);
+      // Shim form. This branch used to assert only `entry.length > 0`, which is
+      // to say nothing: it waived the invariant in the ONE branch where the two
+      // sides can disagree, and left it enforced only where they are the same
+      // string by construction. They did disagree — `mcpEntrypointPath()`
+      // preferred a `kanban-mcp` bin nothing ever runs, and on 2026-08-01 that
+      // bin served a checkout 192 commits behind the `kanban` shim this command
+      // actually invokes, with a doctor ✓ on top of it.
+      //
+      // So assert the real thing: the entrypoint must be the executable this
+      // exact command line runs. Resolve `<name>` from the command itself
+      // rather than calling resolveKanbanShim() again — re-deriving it here
+      // would reintroduce the same independent-resolution hole one level up.
+      const name = cmd.slice(cmd.indexOf(" -- ") + 4, -" mcp".length);
+      expect(name).toMatch(/^(kanban|fkanban)$/);
+      const resolved = Bun.spawnSync(["sh", "-c", `command -v ${name}`])
+        .stdout.toString().trim();
+      expect(resolved.length).toBeGreaterThan(0);
+      expect(entry).toBe(resolved);
     } else {
       // bun+path form — the command must name the very file the entrypoint is.
       expect(cmd).toContain(entry!);
       expect(entry!.endsWith("/src/mcp/main.ts")).toBe(true);
     }
+  });
+
+  // The invariant above is conditional on which branch this machine happens to
+  // be in, so on a shim-less runner it proves nothing about the shim form and
+  // vice versa. Pin the property that holds in BOTH: whatever `mcpAddCommand()`
+  // says to run, `mcpEntrypointPath()` names a real file on disk, and doctor's
+  // existsSync check is therefore checking the file that will be served.
+  test("the entrypoint is the file the add command would execute, in either form", () => {
+    const cmd = mcpAddCommand();
+    const entry = mcpEntrypointPath();
+    expect(entry).not.toBeNull();
+    expect(existsSync(entry!)).toBe(true);
+
+    const runs = cmd.endsWith(" mcp")
+      // `-- <name> mcp` executes whatever PATH resolves `<name>` to.
+      ? Bun.spawnSync([
+          "sh",
+          "-c",
+          `command -v ${cmd.slice(cmd.indexOf(" -- ") + 4, -" mcp".length)}`,
+        ]).stdout.toString().trim()
+      // `-- bun <path>` executes <path>.
+      : cmd.slice(cmd.indexOf(" -- bun ") + " -- bun ".length);
+    expect(entry).toBe(runs);
   });
 });
 
