@@ -943,7 +943,7 @@ export function createFkanbanMcpServer(
     {
       title: "Rank a column by priority",
       description:
-        "Reorder a column by card priority so fkanban-pickup (which drains the lowest `position` first) works the most urgent cards first. Reassigns each card's `position` in priority order (P0→P3, tie-broken by created_at). Priority comes from a `Priority: P<n>` body header or a p0–p3 tag (set via fkanban_add's `priority`); cards with neither rank as P2. Defaults to the `todo` column on the default board — the column pickup reads. Idempotent: a re-run on an already-ranked column writes nothing.",
+        "Hard todo ranker: rewrite column `position` so pickup drains p0-now → program (NS/MS frontier) → unlaned → papercut (within tier: active|proving milestone → Priority P0–P3 → age). Defaults to default/todo. Optional mode=priority for legacy P0→P3-only. Idempotent.",
       annotations: { title: "Rank a column by priority", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         board: z.string().optional().describe("Board whose column to rank (default: `default`)."),

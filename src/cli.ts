@@ -100,7 +100,7 @@ Commands:
                        column, so board reads stop scaling with board history
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
                        (--apply --min-age-hours N --pileup-threshold N --json)
-  rank                 reorder a column by card priority so pickup works urgent cards first (--board --column, default todo)
+  rank                 hard todo ranker: p0 → program/MS frontier → unlaned → papercut (--board --column --mode hard|priority)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json --full-body)
   gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
@@ -434,27 +434,30 @@ Example:
   fkanban pickup claim --json --worker last-stack-fkanban-pickup
   fkanban pickup claim --dry-run --prefer-repo EdgeVector/fold`),
 
-  rank: withFooter(`fkanban rank — reorder a column by card priority
+  rank: withFooter(`fkanban rank — hard todo ranker (position rewrite for pickup)
 
 Usage:
   fkanban rank [options]
 
-Reassigns each work card's \`position\` in priority order so \`fkanban-pickup\` (which
-drains the LOWEST position first) works the most urgent cards first. Priority is
-read from a \`Priority: P<n>\` body header (wins) or a p0–p3 tag (set via
-\`add --priority\`); cards with neither sort as P2 (normal). Ties break by
-created_at (oldest first). Registry/tracker/umbrella/meta cards are skipped so
-grouping cards do not affect pickup order. Idempotent — re-running an
-already-ranked column writes nothing. This is the step the board groomer runs
-after promoting cards into \`todo\`.
+Reassigns each work card's \`position\` so \`pickup claim\` (lowest position first
+for list displays) matches the **hard todo ranker**:
+
+  p0-now → program (North Star / MS frontier) → unlaned → papercut
+
+Within a tier: children of active|proving milestones first, then Priority
+P0→P3 (body header or p0–p3 tag; default P2), then oldest created_at.
+Papercuts never outrank program frontier solely by age or P0 tags.
+Registry/tracker/umbrella/meta cards are skipped. Idempotent.
 
 Options:
   --board <slug>        board whose column to rank (default: default)
   --column <col>        column to rank (default: todo — the column pickup reads)
+  --mode hard|priority  hard (default) = lane+frontier+priority; priority = legacy P0→P3 only
   --json                echo the resulting order as JSON
 
 Example:
   fkanban rank
+  fkanban rank --mode priority
   fkanban rank --board roadmap --column backlog`),
 
   search: withFooter(`fkanban search — find cards by text across slug/title/body/tags/assignee
@@ -1208,6 +1211,7 @@ async function main(argv: string[]): Promise<number> {
         "replace-deps": { type: "boolean" },
         surfaces: { type: "string" },
         priority: { type: "string" },
+        mode: { type: "string" },
         repo: { type: "string" },
         base: { type: "string" },
         kind: { type: "string" },
@@ -2127,12 +2131,18 @@ async function dispatch(
     case "rank": {
       const extra = rejectExtraPositionals(positionals, 1, "rank");
       if (extra !== undefined) return extra;
+      const modeRaw = (values.mode as string | undefined)?.trim().toLowerCase();
+      if (modeRaw && modeRaw !== "hard" && modeRaw !== "priority") {
+        console.error(`kanban: --mode must be hard or priority (got ${modeRaw})`);
+        return 2;
+      }
       const ctx = loadCtx({ verbose });
       const res = await rankCmd({
         cfg: ctx.cfg,
         node: ctx.node,
         board: values.board as string | undefined,
         column: values.column as string | undefined,
+        mode: modeRaw === "priority" ? "priority" : "hard",
       });
       console.log(formatRank(res, values.json as boolean | undefined));
       return 0;

@@ -15,6 +15,7 @@ import {
   findBoard,
   listBoards,
   listCards,
+  listMilestones,
   nowIso,
   normalizeKind,
   priorityOf,
@@ -35,11 +36,13 @@ import {
   type PickupStatusReport,
 } from "../pickup.ts";
 import {
+  isFrontierMilestoneState,
   laneOf,
   orderCandidatesByLanes,
   parsePickupLaneState,
   recordLaneClaim,
   upsertPickupLaneStateInBody,
+  type HardTodoRankContext,
   type LaneId,
 } from "../pickup_lanes.ts";
 import { type SituationPreflight } from "../situations.ts";
@@ -452,12 +455,28 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
 
   const boardRec = boards.find((b) => b.slug === board);
   const laneState = parsePickupLaneState(boardRec?.body ?? "");
+  // Hard todo ranker: boost children of active|proving milestones within lanes.
+  let hardCtx: HardTodoRankContext | undefined;
+  try {
+    // Reuse already-fetched `boards` — never re-list all_boards for milestones.
+    const milestones = (await listMilestones(opts.node, opts.cfg, { boards })).filter(
+      (m) => m.board === board,
+    );
+    hardCtx = {
+      frontierMilestones: new Set(
+        milestones.filter((m) => isFrontierMilestoneState(m.state)).map((m) => m.slug),
+      ),
+    };
+  } catch {
+    hardCtx = undefined;
+  }
   const candidates = orderCandidatesByLanes(
     readyCards,
     cardsForSelection,
     laneState,
     board,
     preferRepo,
+    hardCtx,
   );
 
   // Working copy of board state so we can mark a CAS conflict as no longer todo

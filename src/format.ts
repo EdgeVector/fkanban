@@ -67,7 +67,9 @@ export interface RankResult {
   column: string;
   total: number;
   reordered: number;
-  order: { slug: string; priority: string; position: number }[];
+  order: { slug: string; priority: string; position: number; lane?: string; hard_tier?: number }[];
+  /** hard = lane+frontier (default); priority = legacy P0→P3 only */
+  mode?: "hard" | "priority";
 }
 
 export interface MigrateAreaTagsResult {
@@ -140,11 +142,19 @@ export function formatBoardRm(res: BoardRmResult, json?: boolean): string {
 }
 
 export function formatRank(res: RankResult, json?: boolean): string {
+  const mode = res.mode ?? "hard";
   const human =
     res.total === 0
       ? `ranked ${res.board}/${res.column}: no cards`
-      : `ranked ${res.board}/${res.column}: ${res.reordered} of ${res.total} reordered by priority ` +
-        `(${res.order.map((c) => `${c.slug}[${c.priority}]`).join(", ")})`;
+      : `ranked ${res.board}/${res.column}: ${res.reordered} of ${res.total} reordered ` +
+        `(mode=${mode}) ` +
+        `(${res.order
+          .map((c) =>
+            c.lane
+              ? `${c.slug}[${c.priority}|${c.lane}]`
+              : `${c.slug}[${c.priority}]`,
+          )
+          .join(", ")})`;
   return emit(res, human, json);
 }
 
