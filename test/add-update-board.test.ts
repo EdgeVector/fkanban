@@ -673,6 +673,69 @@ describe("mark command and add --body slug-list tripwire", () => {
     expect((await findCard(node, cfg, "script-victim"))?.body).toBe(originalBody);
   });
 
+  test("add --body rejects unrelated full-brief replacement unless forced", async () => {
+    const originalBody = [
+      "Repo: EdgeVector/fkanban",
+      "Base: main",
+      "",
+      "## GOAL",
+      "Preserve scheduler pickup eligibility notes for board recovery and morning queue ranking.",
+      "",
+      "## CONTEXT",
+      "The existing brief discusses milestone routing, body restoration, checkout isolation, and proof evidence.",
+      "",
+      "## END STATE",
+      "The recovered board card keeps its original operational acceptance criteria and validation trail.",
+    ].join("\n");
+    const unrelatedBody = [
+      "Repo: EdgeVector/fkanban",
+      "Base: main",
+      "",
+      "## GOAL",
+      "Document terminal archive retention thresholds for completed cards and cold partition cleanup.",
+      "",
+      "## CONTEXT",
+      "This replacement talks about retention windows, archived partitions, delete ceilings, and storage pruning.",
+      "",
+      "## END STATE",
+      "Operators can inspect archive sweep output and confirm old terminal rows moved out of active reads.",
+    ].join("\n");
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "unrelated-victim",
+      title: "Unrelated victim",
+      column: "todo",
+      body: originalBody,
+    });
+
+    await expect(
+      addCmd({ cfg, node, slug: "unrelated-victim", body: unrelatedBody }),
+    ).rejects.toMatchObject({ code: "destructive_body_replace" });
+    expect((await findCard(node, cfg, "unrelated-victim"))?.body).toBe(originalBody);
+
+    await addCmd({ cfg, node, slug: "unrelated-victim", body: unrelatedBody, force: true });
+    expect((await findCard(node, cfg, "unrelated-victim"))?.body).toBe(unrelatedBody);
+  });
+
+  test("metadata-only updates keep the existing brief out of the replace guard", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "metadata-only-brief",
+      title: "Metadata only",
+      column: "todo",
+      body: validPickupBody,
+    });
+
+    await addCmd({ cfg, node, slug: "metadata-only-brief", title: "Metadata only edited" });
+
+    const card = await findCard(node, cfg, "metadata-only-brief");
+    expect(card?.body).toBe(validPickupBody);
+    expect(card?.title).toBe("Metadata only edited");
+  });
+
   test("source tripwire allows explicit force and markdown briefs that mention code", async () => {
     await addCmd({
       cfg,

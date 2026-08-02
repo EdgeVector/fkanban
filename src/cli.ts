@@ -29,7 +29,7 @@ import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
-import { groomStaleBlockersCmd, groomStructuredRoutingCmd } from "./commands/groom.ts";
+import { groomBodyClobberScanCmd, groomStaleBlockersCmd, groomStructuredRoutingCmd } from "./commands/groom.ts";
 import {
   archiveDoneResult,
   DEFAULT_ARCHIVE_CUTOFF_HOURS,
@@ -90,6 +90,7 @@ Commands:
   pickup claim         claim the next ready card into doing (lanes + priority + overlap + CAS)
   pickup lanes         show logical pickup lanes, starvation, and next claim order
   groom structured-routing dry-run/apply backfill body Repo/Base into structured fields
+  groom body-clobber-scan report bodies matching generated/script clobber signatures (--json)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
   groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
@@ -597,6 +598,7 @@ Example:
 
 Usage:
   fkanban groom structured-routing [--apply] [--json]
+  fkanban groom body-clobber-scan [--json]
   fkanban groom stale-blockers [--apply] [--json]
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
@@ -610,6 +612,8 @@ Subcommands:
                        body Repo:/Base: headers on active cards. Registry cards,
                        absent/ambiguous headers, and already-set fields are left
                        untouched.
+  body-clobber-scan   non-mutating scan for card bodies that match the known
+                       generated/script clobber signature.
   stale-blockers       detect stale generated pickup/blocker metadata, malformed
                        Repo header lines, stale area-overlap holds, and
                        human/parking candidates; --apply also parks unheld
@@ -664,6 +668,7 @@ Flags:
 
 Examples:
   fkanban groom structured-routing
+  fkanban groom body-clobber-scan
   fkanban groom structured-routing --apply
   fkanban groom stale-blockers
   fkanban groom stale-blockers --apply
@@ -1628,6 +1633,7 @@ async function dispatch(
             err.code === "db_locator_mismatch" ||
             err.code === "body_slug_list_tripwire" ||
             err.code === "body_source_tripwire" ||
+            err.code === "destructive_body_replace" ||
             err.code === "stdin_body_unavailable" ||
             err.code === "created_by_immutable"
           )
@@ -1974,6 +1980,7 @@ async function dispatch(
     case "groom": {
       const sub = positionals[1];
       if (
+        sub !== "body-clobber-scan" &&
         sub !== "stale-blockers" &&
         sub !== "structured-routing" &&
         sub !== "board-cards-heal" &&
@@ -1984,7 +1991,7 @@ async function dispatch(
         sub !== "card-list-index-retire"
       ) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom archive-done | groom card-list-index-retire`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom body-clobber-scan | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom archive-done | groom card-list-index-retire`,
         );
         return 2;
       }
@@ -2041,6 +2048,16 @@ async function dispatch(
           cfg: ctx.cfg,
           node: ctx.node,
           apply: values.apply as boolean | undefined,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      if (sub === "body-clobber-scan") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom body-clobber-scan");
+        if (extra !== undefined) return extra;
+        console.log(await groomBodyClobberScanCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
           json: values.json as boolean | undefined,
         }));
         return 0;
