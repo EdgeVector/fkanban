@@ -23,7 +23,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { listCards, boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
-import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
+import { BOARD_CARDS_WRITE_BATCH, boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import type { NodeClient, QueryFilter, QueryResponse } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 
@@ -83,9 +83,15 @@ type BoardCardsMode = "throw" | "empty";
 function fakeNode(
   cards: Card[],
   mode: BoardCardsMode,
-  opts: { failWritesFor?: string[] } = {},
-): NodeClient & { writes: Write[]; partitionScans: number; cardScans: number } {
+  opts: { failWritesFor?: string[]; noBatchVerb?: boolean } = {},
+): NodeClient & {
+  writes: Write[];
+  batchRequests: number[];
+  partitionScans: number;
+  cardScans: number;
+} {
   const writes: Write[] = [];
+  const batchRequests: number[] = [];
   const state = { partitionScans: 0, cardScans: 0, boardCardsReads: 0 };
   const stub = () => {
     throw new Error("not implemented in fake node");
@@ -99,11 +105,32 @@ function fakeNode(
     writes.push({ schemaHash: q.schemaHash, keyHash: q.keyHash, rangeKey: q.rangeKey });
   };
 
+  // All-or-nothing, exactly as the node is: `write_mutations_batch_async`
+  // rejects the whole batch on any item's failure and never reports WHICH item.
+  // Modelling that faithfully is what makes the fallback test below real — a
+  // fake that let the good rows through would prove the opposite of the truth.
+  const writeBatch = async (
+    rows: Array<{ schemaHash: string; keyHash: string; rangeKey?: string | null }>,
+  ) => {
+    const slugOf = (r: { rangeKey?: string | null }) => String(r.rangeKey ?? "").split("#").pop() ?? "";
+    if (rows.some((r) => opts.failWritesFor?.includes(slugOf(r)))) {
+      throw new Error("batch refused");
+    }
+    batchRequests.push(rows.length);
+    for (const r of rows) {
+      writes.push({ schemaHash: r.schemaHash, keyHash: r.keyHash, rangeKey: r.rangeKey ?? undefined });
+    }
+  };
+
   return {
     baseUrl: "http://fake",
     userHash: "test-user",
     get writes() {
       return writes;
+    },
+    /** Row count per `updateRecords` REQUEST — empty when nothing batched. */
+    get batchRequests() {
+      return batchRequests;
     },
     get partitionScans() {
       return state.partitionScans;
@@ -120,6 +147,9 @@ function fakeNode(
     createRecord: write as never,
     updateRecord: write as never,
     deleteRecord: write as never,
+    // `noBatchVerb` models the ad-hoc fakes and any client predating the batch
+    // route: the wrapper must still write every row, just slower.
+    ...(opts.noBatchVerb ? {} : { updateRecords: writeBatch as never }),
     async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
       if (q.schemaHash === "boardcardshash") {
         const prefix = (q.filter as unknown as { HashRangePrefix?: unknown } | undefined)?.HashRangePrefix;
@@ -143,7 +173,12 @@ function fakeNode(
       if (q.schemaHash === "boardhash") return { ok: true, results: boardRows };
       return { ok: true, results: [] };
     },
-  } as unknown as NodeClient & { writes: Write[]; partitionScans: number; cardScans: number };
+  } as unknown as NodeClient & {
+    writes: Write[];
+    batchRequests: number[];
+    partitionScans: number;
+    cardScans: number;
+  };
 }
 
 const someCards = (n: number): Card[] =>
@@ -190,9 +225,71 @@ describe("list membership seed — a failed read is not evidence of a missing in
 
     const seeded = new Set(node.writes.map((w) => String(w.rangeKey ?? "").split("#").pop()));
     // The catch used to sit outside the loop: card-0 failing meant cards 1..9
-    // were never seeded at all.
+    // were never seeded at all. Now the BATCH carrying card-0 is rejected whole
+    // — the node never says which row was at fault — so the same guarantee has
+    // to survive a different failure shape: the chunk retries per row.
     expect(seeded.has("card-9")).toBe(true);
     expect(seeded.size).toBeGreaterThanOrEqual(8);
+    expect(seeded.has("card-0")).toBe(false);
+  });
+});
+
+describe("list membership seed — writes go in BATCHES, because the partition is a lock", () => {
+  // Every card seeded here lands in one board partition, and the node gates a
+  // write per `(molecule, hash)` — `acquire_molecule_write_locks` builds its key
+  // from `ChangedKey::disk_hash()`, so the range half of a HashRange key is not
+  // in it. Measured on the live primary
+  // (`scripts/probe-boardcards-write-lock-contention.ts`, 12 rows, identical
+  // payload): serial 1.00x, concurrent-x3-same-partition **0.91x**, one batch
+  // 2.10x. The fan-out this replaced was slower than not fanning out at all.
+  //
+  // These assertions are on the REQUEST COUNT, not the row count, because that
+  // is the only thing that distinguishes the two: 12 rows written one at a time
+  // and 12 rows in one request produce identical `writes`.
+
+  test("N cards under one chunk are seeded in ONE request, not N", async () => {
+    const node = fakeNode(someCards(12), "empty");
+
+    await listCards(node, cfg);
+
+    expect(node.batchRequests).toEqual([12]);
+  });
+
+  test("a seed larger than one chunk is split, and every card still lands", async () => {
+    const n = BOARD_CARDS_WRITE_BATCH + 7;
+    const node = fakeNode(someCards(n), "empty");
+
+    await listCards(node, cfg);
+
+    // Chunked, not one unbounded request: a batch is all-or-nothing and holds
+    // the partition gate for its whole duration, so the chunk bounds both the
+    // blast radius of a failure and how long other writers queue.
+    expect(node.batchRequests).toEqual([BOARD_CARDS_WRITE_BATCH, 7]);
+    const seeded = new Set(node.writes.map((w) => String(w.rangeKey ?? "").split("#").pop()));
+    expect(seeded.size).toBe(n);
+  });
+
+  test("a rejected chunk falls back to per-row, sparing only the bad row", async () => {
+    const node = fakeNode(someCards(6), "empty", { failWritesFor: ["card-3"] });
+
+    await listCards(node, cfg);
+
+    // The batch never landed — all-or-nothing — so nothing was recorded as a
+    // batch, and the five good rows arrived one at a time.
+    expect(node.batchRequests).toEqual([]);
+    const seeded = new Set(node.writes.map((w) => String(w.rangeKey ?? "").split("#").pop()));
+    expect(seeded.size).toBe(5);
+    expect(seeded.has("card-3")).toBe(false);
+  });
+
+  test("a client with no batch verb still seeds every card", async () => {
+    const node = fakeNode(someCards(9), "empty", { noBatchVerb: true });
+
+    await listCards(node, cfg);
+
+    expect(node.batchRequests).toEqual([]);
+    const seeded = new Set(node.writes.map((w) => String(w.rangeKey ?? "").split("#").pop()));
+    expect(seeded.size).toBe(9);
   });
 
   test("a scan's duplicate slug-only row never displaces the real row", async () => {

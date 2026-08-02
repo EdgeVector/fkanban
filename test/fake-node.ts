@@ -107,6 +107,15 @@ export type FakeNode = NodeClient & {
   }): void;
   /** Writes in issue order. */
   writes: RecordedWrite[];
+  /**
+   * One entry per `updateRecords` REQUEST, holding that request's row keys.
+   *
+   * `writes` cannot answer "did this batch?" — a batch of 48 and 48 separate
+   * writes both append 48 entries to it, and the difference between them is the
+   * whole reason the batch path exists (48 partition-gate acquisitions vs one).
+   * This is the surface that can tell them apart.
+   */
+  batches: string[][];
   /** Reads in issue order — `fields` is the projection asked for. */
   reads: Array<{ schemaHash: string; fields: string[]; filter?: QueryFilter }>;
   /** See the file header. Faithful (`true`) unless a test says otherwise. */
@@ -156,6 +165,7 @@ function matchesFilter(rec: StoredRecord, filter?: QueryFilter): boolean {
 export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
   const store = new Map<string, Map<string, StoredRecord>>();
   const writes: RecordedWrite[] = [];
+  const batches: string[][] = [];
   const reads: Array<{ schemaHash: string; fields: string[]; filter?: QueryFilter }> = [];
 
   const tableFor = (schemaHash: string) => {
@@ -172,6 +182,7 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
     userHash: opts.userHash ?? "test-user",
     dropIncompleteRows: opts.dropIncompleteRows ?? true,
     writes,
+    batches,
     reads,
 
     autoIdentity: notImpl("autoIdentity"),
@@ -201,6 +212,26 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
         rangeKey: rangeKey ?? null,
         fields: { ...prior?.fields, ...fields },
       });
+    },
+
+    // Implemented — NOT left off — so the batch write path is exercised rather
+    // than falling back to per-row here and shipping untested. Each row lands
+    // through the same merge `updateRecord` does and is recorded in `writes` in
+    // order, so assertions written against per-row writes keep reading true;
+    // `batches` is what distinguishes "N rows written" from "N rows written in
+    // one request", which is the entire point of the path under test.
+    async updateRecords(rows) {
+      batches.push(rows.map((row) => row.rangeKey ?? row.keyHash));
+      for (const { schemaHash, fields, keyHash, rangeKey } of rows) {
+        writes.push({ op: "update", schemaHash, keyHash, rangeKey: rangeKey ?? null, fields: { ...fields } });
+        const key = storeKey(keyHash, rangeKey);
+        const prior = tableFor(schemaHash).get(key);
+        tableFor(schemaHash).set(key, {
+          keyHash,
+          rangeKey: rangeKey ?? null,
+          fields: { ...prior?.fields, ...fields },
+        });
+      }
     },
 
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {

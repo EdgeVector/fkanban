@@ -350,6 +350,53 @@ export type NodeClient = {
     expected?: CasExpectation;
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string; rangeKey?: string | null }): Promise<void>;
+  /**
+   * Upsert many records in ONE request (`POST /api/mutations/batch`).
+   *
+   * ## Why this exists, and why it is not just "fewer round trips"
+   *
+   * The node takes a write gate before applying a mutation, keyed per
+   * `(molecule, hash)` — `acquire_molecule_write_locks` builds its key from
+   * `ChangedKey::disk_hash()`, so the RANGE half of a HashRange key is not in
+   * it. Every row of one BoardCards partition therefore shares one gate, and
+   * concurrent writers of that partition do not overlap: they queue.
+   *
+   * Measured on the live primary (`probe-boardcards-write-lock-contention.ts`,
+   * 12 rows, identical payload):
+   *
+   * | regime                          | vs serial |
+   * |---------------------------------|-----------|
+   * | serial, one partition           | 1.00x     |
+   * | concurrent x3, ONE partition    | **0.91x** |
+   * | concurrent x3, 12 partitions    | 2.12x     |
+   * | one batch request               | 2.10x     |
+   *
+   * The second row is the one that matters: fanning writes out across a single
+   * partition is not merely a wash, it is a small net LOSS — the concurrency
+   * buys nothing and the extra in-flight requests cost something. A batch gets
+   * the whole win without needing the rows to live on different boards, because
+   * `write_mutations_batch_async` groups by schema and takes the gate ONCE for
+   * the group.
+   *
+   * All-or-nothing: the node rejects the whole batch on any item's validation
+   * or access failure, so callers that need per-item error isolation must
+   * handle the throw and retry individually. {@link upsertBoardCardsBatch} is
+   * the BoardCards-shaped wrapper that does exactly that.
+   *
+   * Optional for the same reason `search?` and `getSchema?` are: the ad-hoc
+   * test fakes implement only the slice of `NodeClient` their subject touches,
+   * and making this required is a mechanical edit to ~28 files that buys no
+   * assertion. The SHARED fake (`test/fake-node.ts`) DOES implement it, so the
+   * batch path is exercised rather than silently fallen back over — see
+   * `test/board-cards-batch-write.test.ts`, which fails if the seed reverts to
+   * one-write-per-card.
+   */
+  updateRecords?(rows: Array<{
+    schemaHash: string;
+    fields: Record<string, unknown>;
+    keyHash: string;
+    rangeKey?: string | null;
+  }>): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse>;
   search?(query: string, opts?: AppSearchOptions): Promise<AppSearchHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
@@ -862,6 +909,47 @@ export function newNodeClient(opts: {
     return result;
   };
 
+  // Hoisted out of the returned object literal so sibling methods can call it.
+  // `updateRecords` needs it because the vendored SDK carries no batch verb,
+  // and the object cannot reference itself from inside its own literal.
+  const rawCallImpl: NodeClient["rawCall"] = async (method, path, body) => {
+    const sdkSearch = sdkSearchFromNativeIndexPath(method, path);
+    if (sdkSearch !== null) {
+      const hits = await appSearch(sdkSearch.query, { k: sdkSearch.k });
+      const json = nativeIndexJsonFromAppSearchHits(hits);
+      return { status: 200, headers: new Headers(), body: JSON.stringify(json), json };
+    }
+    await ensureAttested();
+    const doFetch = async () =>
+      verboseFetch({
+        baseUrl: url,
+        path,
+        method,
+        body,
+        verbose,
+        service: "node",
+        headers: nodeHeaders(),
+        timeoutMs,
+        socketPath,
+      });
+    let { res, readBody } = await doFetch();
+    let text = await readBody({ asText: true });
+    if (res.status === 403 && bodyError(parseJsonSafe(text)) === "transport_not_attested" && socketPath) {
+      verbose("node: transport_not_attested — re-pairing owner session and retrying");
+      await ensureAttested(true);
+      ({ res, readBody } = await doFetch());
+      text = await readBody({ asText: true });
+    }
+    if (
+      res.status === 403 &&
+      bodyError(parseJsonSafe(text)) === "transport_not_attested" &&
+      sessionToken === null
+    ) {
+      throw attestationUnavailableError(path);
+    }
+    return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
+  };
+
   return {
     baseUrl: url,
     userHash,
@@ -1000,6 +1088,29 @@ export function newNodeClient(opts: {
         }),
       );
     },
+    async updateRecords(rows) {
+      if (rows.length === 0) return;
+      // The vendored SDK has no batch verb, so this goes over `rawCall`. The
+      // wire type is fold's `Operation`, which is
+      // `#[serde(tag = "type", deny_unknown_fields)]` — an extra or misspelled
+      // key is a 400, not a silently dropped field, so the shape below is
+      // exact rather than best-effort. `mutation_type: "update"` covers create
+      // too: an update against an absent row is an upsert storing what is sent.
+      const ops = rows.map((row) => ({
+        type: "mutation",
+        schema: row.schemaHash,
+        fields_and_values: row.fields,
+        key_value: {
+          hash: row.keyHash,
+          range: row.rangeKey === undefined ? null : row.rangeKey,
+        },
+        mutation_type: "update",
+      }));
+      const res = await rawCallImpl("POST", "/api/mutations/batch", ops);
+      if (res.status !== 200) {
+        throw mapNodeError(res.status, res.json ?? res.body, "/api/mutations/batch");
+      }
+    },
     // Both branches page through `queryAllPaged`. The vendored SDK's own
     // `queryAll` (0.2.0) prefers a returned cursor over the offset and has no
     // no-progress guard, so on this node it loops ~1000 requests on any
@@ -1010,43 +1121,7 @@ export function newNodeClient(opts: {
       return queryAllPaged({ schemaHash, fields, filter, allowFullScan });
     },
     search: appSearch,
-    async rawCall(method, path, body) {
-      const sdkSearch = sdkSearchFromNativeIndexPath(method, path);
-      if (sdkSearch !== null) {
-        const hits = await appSearch(sdkSearch.query, { k: sdkSearch.k });
-        const json = nativeIndexJsonFromAppSearchHits(hits);
-        return { status: 200, headers: new Headers(), body: JSON.stringify(json), json };
-      }
-      await ensureAttested();
-      const doFetch = async () =>
-        verboseFetch({
-          baseUrl: url,
-          path,
-          method,
-          body,
-          verbose,
-          service: "node",
-          headers: nodeHeaders(),
-          timeoutMs,
-          socketPath,
-        });
-      let { res, readBody } = await doFetch();
-      let text = await readBody({ asText: true });
-      if (res.status === 403 && bodyError(parseJsonSafe(text)) === "transport_not_attested" && socketPath) {
-        verbose("node: transport_not_attested — re-pairing owner session and retrying");
-        await ensureAttested(true);
-        ({ res, readBody } = await doFetch());
-        text = await readBody({ asText: true });
-      }
-      if (
-        res.status === 403 &&
-        bodyError(parseJsonSafe(text)) === "transport_not_attested" &&
-        sessionToken === null
-      ) {
-        throw attestationUnavailableError(path);
-      }
-      return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
-    },
+    rawCall: rawCallImpl,
     nodeTransport() {
       const live = socketPath !== undefined && socketPath.length > 0 && existsSync(socketPath);
       return live ? { transport: "socket", socketPath } : { transport: "unavailable", socketPath };
