@@ -2030,7 +2030,24 @@ export function assertBodyLoaded(card: Card, operation: string): void {
  * a newly created board would stay invisible until restart — trading a 212ms
  * read for a correctness bug.
  */
-type BoardListOpt = { boards?: Board[] };
+type BoardListOpt = {
+  boards?: Board[];
+  /**
+   * Read only the non-terminal columns of each board.
+   *
+   * ONLY for a caller that provably discards the terminal column anyway —
+   * `pickup status` classifies `activeCards` and nothing else. It is a read
+   * narrowing, not a filter: a caller that passes this and then looks for a
+   * finished card will not find one, so it does not belong on `list`, `show`,
+   * `search`, or any sweep that repairs or counts the archive.
+   *
+   * Best-effort by design. It applies only on the BoardCards partition path;
+   * every fallback below (CardListIndex, the admin scan) still returns the
+   * whole board, which is correct for these callers — they filter — and keeps
+   * this option from turning a degraded read into a wrong one.
+   */
+  activeOnly?: boolean;
+};
 
 /**
  * Rebuild BoardCards membership from Card truth, after the scan fallback in
@@ -2149,7 +2166,10 @@ async function listCardsWithFields(
         cardFields.length > 0
           ? boardCardsProjectionForCardFields(cardFields)
           : [...BOARD_CARDS_LIST_FIELDS];
-      const partitioned = await listAllBoardCards(node, cfg, boards, { fields: projection });
+      const partitioned = await listAllBoardCards(node, cfg, boards, {
+        fields: projection,
+        skipTerminalColumn: opts.activeOnly === true,
+      });
       if (partitioned !== null && partitioned.length > 0) {
         // BoardCards rows are already body-free; promote any structured fields.
         return markBodyOmitted(
@@ -2161,6 +2181,16 @@ async function listCardsWithFields(
       // Empty partition may mean "no cards" OR "not dual-written yet".
       // Fall through to CardListIndex when partitions are empty so dual-read
       // still sees legacy boards until backfill.
+      //
+      // EXCEPT under `activeOnly`, where empty legitimately means "every card
+      // is finished" — a read that deliberately excluded the terminal column is
+      // no evidence at all about dual-write coverage. Without this the moment
+      // the board went all-`done` every `pickup status` would take the
+      // fall-through below: an admin full scan of Card, an index rewrite and a
+      // BoardCards reseed, i.e. a WRITE storm triggered by finishing the work.
+      if (partitioned !== null && partitioned.length === 0 && opts.activeOnly === true) {
+        return [];
+      }
       if (partitioned !== null && partitioned.length === 0) {
         const indexedEmpty = await readCardListIndex(node, cfg);
         if (indexedEmpty !== null && indexedEmpty.length === 0) {

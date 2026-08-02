@@ -143,6 +143,23 @@ function fakeNode(
             ),
           };
         }
+        const range = (q.filter as unknown as { HashRangeRange?: { hash: string; start: string; end: string } } | undefined)
+          ?.HashRangeRange;
+        if (range) {
+          // Inclusive start, exclusive end. Modelled rather than waved through:
+          // the fall-through below returns the WHOLE partition, so an
+          // unrecognised range filter would make `pickup status` look like it
+          // still reads every column — the exact thing under test.
+          return {
+            ok: true,
+            results: boardCardRows.filter(
+              (r) =>
+                r.fields.board === range.hash &&
+                String(r.fields.sk) >= range.start &&
+                String(r.fields.sk) < range.end,
+            ),
+          };
+        }
         if (q.filter?.HashKey) {
           return { ok: true, results: boardCardRows.filter((r) => r.fields.board === q.filter!.HashKey) };
         }
@@ -270,8 +287,15 @@ describe("board-list read amplification — one command reads the board list onc
       node.queries
         .filter((q) => q.schemaHash === "boardcardshash")
         .map((q) => {
-          const prefix = (q.filter as unknown as { HashRangePrefix?: { hash?: string } } | undefined)?.HashRangePrefix;
-          return prefix?.hash ?? (q.filter?.HashKey as string | undefined);
+          // Every key-restricted shape fkanban sends names its partition in a
+          // different field. Read all of them: `pickup status` reads the active
+          // set as two `HashRangeRange` bounds, and a matcher that only knew
+          // `HashRangePrefix`/`HashKey` would report "no partitions queried"
+          // and fail this test for a change that queried exactly the right two.
+          const f = q.filter as unknown as
+            | { HashRangePrefix?: { hash?: string }; HashRangeRange?: { hash?: string } }
+            | undefined;
+          return f?.HashRangePrefix?.hash ?? f?.HashRangeRange?.hash ?? (q.filter?.HashKey as string | undefined);
         })
         .filter((h): h is string => typeof h === "string"),
     );

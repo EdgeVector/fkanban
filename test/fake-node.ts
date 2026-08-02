@@ -138,8 +138,16 @@ const notImpl = (member: string) => async (): Promise<never> => {
 };
 
 /**
- * Matches the four filter shapes fkanban actually sends: `HashKey`,
- * `HashRangePrefix`, `HashRangeKey`, and plain field equality.
+ * Matches the five filter shapes fkanban actually sends: `HashKey`,
+ * `HashRangePrefix`, `HashRangeKey`, `HashRangeRange`, and plain field
+ * equality.
+ *
+ * Every one of them must be listed here, not just the ones a test happens to
+ * exercise. An unknown key-shaped filter falls through to the field-equality
+ * branch below, where it compares a filter OBJECT against a stored string and
+ * matches nothing — so a new filter shape does not fail loudly, it silently
+ * returns zero rows, and a test asserting "the terminal column was excluded"
+ * passes because everything was.
  *
  * The key-shaped filters address the row; anything else compares against
  * stored field values, which is how callers like `findCard` look a card up by
@@ -158,6 +166,13 @@ function matchesFilter(rec: StoredRecord, filter?: QueryFilter): boolean {
 
   const exact = f.HashRangeKey as { hash: string; range: string } | undefined;
   if (exact) return rec.keyHash === exact.hash && (rec.rangeKey ?? "") === exact.range;
+
+  // Inclusive start, exclusive end — fold's `HashRangeFilter::HashRangeRange`.
+  const range = f.HashRangeRange as { hash: string; start: string; end: string } | undefined;
+  if (range) {
+    const rk = rec.rangeKey ?? "";
+    return rec.keyHash === range.hash && rk >= range.start && rk < range.end;
+  }
 
   return Object.entries(f).every(([field, value]) => rec.fields[field] === value);
 }
