@@ -181,10 +181,33 @@ export async function listResult(
   // (matching `add`), not silently render an empty default-column board. The
   // no-`--board` path defaults to `default`, which always exists, so it stays
   // on the cheap `findBoard` lookup with no extra read on the hot path.
-  const board =
+  //
+  // ISSUED WITH the board-list read below, not before it. The two answer
+  // different questions off different keys — Board truth at HashKey(boardSlug)
+  // vs the `all_boards` rollup — and neither feeds the other, so serializing
+  // them only added a round trip. On this node round trips are what a list
+  // costs: `probe-read-fanout-serial-vs-concurrent.ts` (live, 7 interleaved
+  // reps) measured this pair at 153ms serial against 119ms overlapped, 7/7
+  // reps to the overlap. Reads overlap here even though WRITES do not
+  // (`probe-boardcards-write-lock-contention.ts` measured write fan-out at
+  // 0.91x of serial) — the write gate is a per-partition lock, and a read
+  // takes none.
+  const boardRead =
     opts.board !== undefined
-      ? await requireBoard(opts.node, opts.cfg, boardSlug)
-      : await findBoard(opts.node, opts.cfg, boardSlug);
+      ? requireBoard(opts.node, opts.cfg, boardSlug)
+      : findBoard(opts.node, opts.cfg, boardSlug);
+  // Terminal map needs the board list; the footer needs the other boards' slugs.
+  // Re-deriving either would be a second Board read for data already in hand.
+  const boardsRead = listBoards(opts.node, opts.cfg);
+  // `allSettled`, not `all`: with `all` whichever read rejects FIRST decides the
+  // error, so a flaky rollup read could mask "no such board" on a typo'd
+  // `--board`. Settling both and rethrowing in the old serial order keeps the
+  // error a caller sees identical to the one they got before.
+  const [boardSettled, boardsSettled] = await Promise.allSettled([boardRead, boardsRead]);
+  if (boardSettled.status === "rejected") throw boardSettled.reason;
+  if (boardsSettled.status === "rejected") throw boardsSettled.reason;
+  const board = boardSettled.value;
+  const allBoards = boardsSettled.value;
 
   const resolvedBoard = board ?? {
     slug: boardSlug,
@@ -226,10 +249,7 @@ export async function listResult(
   // that includes body, which BoardCards does not store and which forced the
   // wide 24-field partition projection by accident.
   const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : CARD_LIST_FIELDS;
-  // Terminal map first — needed for dep seed column and blocked rendering.
-  // Keep the board list itself: the footer needs the other boards' slugs, and
-  // re-deriving them would be a second Board read for data already in hand.
-  const allBoards = await listBoards(opts.node, opts.cfg);
+  // `allBoards` was read above, overlapped with the board lookup.
   const boardTerminal = boardTerminalMap(allBoards);
   const terminalCol = boardTerminal.get(boardSlug) ?? "done";
 

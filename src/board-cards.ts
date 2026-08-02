@@ -1189,6 +1189,39 @@ export function preferFresherBoardCard(a: Card, b: Card): Card {
  *
  * Default projection is {@link BOARD_CARDS_LIST_FIELDS} (product list), not the
  * full write shape — callers that need every atom (heal) pass `fields` explicitly.
+ *
+ * ## Why the partitions are read together
+ *
+ * This is the read behind `kanban list` and `kanban pickup status`, the two
+ * commands the routine fleet runs constantly, and what they pay for is ROUND
+ * TRIPS rather than rows. Two probes on 2026-08-02 pinned that down on the live
+ * board (169 rows, 141 of them the `done` archive):
+ *
+ *   - `probe-pickup-active-vs-whole.ts` — reading only the ACTIVE columns and
+ *     point-reading the k=8 off-set deps, which avoids 83% of the rows, ran
+ *     **797ms against 522ms** for the whole-partition reads it replaced. Six
+ *     prefix queries lost to two, verdicts identical. Per-query fixed overhead
+ *     beat the archive outright.
+ *   - `probe-pickup-projection-width.ts` — at 169 rows the read is flat in
+ *     projection WIDTH within noise (7 fields 382ms, 14 fields 272ms, 22 fields
+ *     400ms), so narrowing is not the lever either.
+ *
+ * So the boards are read concurrently rather than one after another:
+ * `probe-read-fanout-serial-vs-concurrent.ts`, 7 interleaved reps, 573ms serial
+ * against 424ms overlapped (1.35x), concurrent winning 6/7. The saving is one
+ * partition round trip per board past the first, so it grows with the number of
+ * boards an install has — this node has carried 34 Board slugs at once.
+ *
+ * BOUNDED, not `Promise.all`. Mini sheds with "too many concurrent reads", and
+ * a partition read is heavier than the point read {@link POINT_READ_CONCURRENCY}
+ * was sized for. The width is reused rather than re-tuned because the bound
+ * here is a LOAD GUARD, not an optimum: what was measured is 2-wide, and
+ * widening past that is unmeasured on this path.
+ *
+ * Ordering is unchanged. `mapWithConcurrency` lands each result at its input
+ * index, so the dedupe below still walks boards in the caller's order and
+ * `preferFresherBoardCard` resolves a cross-board duplicate exactly as it did
+ * when the reads were serial.
  */
 export async function listAllBoardCards(
   node: NodeClient,
@@ -1199,10 +1232,12 @@ export async function listAllBoardCards(
   if (!boardCardsHash(cfg)) return null;
   if (boards.length === 0) return [];
   const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
+  const parts = await mapWithConcurrency(boards, (b) =>
+    listBoardCardsPartition(node, cfg, b.slug, { fields: projection }),
+  );
   const out: Card[] = [];
   const bySlug = new Map<string, Card>();
-  for (const b of boards) {
-    const part = await listBoardCardsPartition(node, cfg, b.slug, { fields: projection });
+  for (const part of parts) {
     if (part === null) return null; // schema missing or query failed → caller falls back
     for (const c of part) {
       const prev = bySlug.get(c.slug);
