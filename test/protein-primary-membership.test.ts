@@ -194,4 +194,53 @@ describe("protein-primary membership writes", () => {
     expect(board.layout).toContain("board membership");
     expect(ms.layout).toContain("milestone membership");
   });
+
+  test("Card and BoardCards share thin field identity while body stays Card-only", async () => {
+    const { cardSchema, boardCardsSchema } = await import("../src/schemas.ts");
+    const cardFields = new Set(cardSchema.schema.fields);
+    const boardFields = new Set(boardCardsSchema.schema.fields);
+    const sharedThinFields = boardCardsSchema.schema.fields.filter(
+      (field) => cardFields.has(field) && field !== "body",
+    );
+
+    expect(sharedThinFields).toEqual([
+      "board",
+      "slug",
+      "title",
+      "column",
+      "position",
+      "assignee",
+      "tags",
+      "deps",
+      "surfaces",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "db",
+      "repo",
+      "base",
+      "kind",
+      "block_status",
+      "block_reason",
+      "north_star",
+      "milestone",
+      "pr_url",
+      "branch",
+    ]);
+
+    for (const field of sharedThinFields) {
+      expect(
+        boardCardsSchema.schema.field_descriptions[field],
+        `${field} should fold through the same Card/BoardCards field identity`,
+      ).toBe(cardSchema.schema.field_descriptions[field]);
+      expect(boardCardsSchema.schema.field_types[field]).toEqual(cardSchema.schema.field_types[field]);
+    }
+
+    expect(boardFields.has("body")).toBe(false);
+    expect(cardFields.has("body")).toBe(true);
+    expect(boardFields.has("sk")).toBe(true);
+    expect(cardFields.has("sk")).toBe(false);
+    expect(boardCardsSchema.schema.key).toEqual({ hash_field: "board", range_field: "sk" });
+    expect(cardSchema.schema.key).toEqual({ hash_field: "slug" });
+  });
 });
