@@ -162,7 +162,10 @@ describe("declared MCP read tools do not mutate", () => {
       (w) => w.schemaHash === cfg.schemaHashes.milestone_cards && w.op !== "delete",
     );
     expect(boardCardWrites.length).toBeGreaterThan(0);
-    expect(milestoneCardPayloadWrites).toEqual([]);
+    // This write tool is also the bounded key-regeneration owner when Mini
+    // accepts the BoardCards fold request but does not materialize the sibling
+    // MilestoneCards row.
+    expect(milestoneCardPayloadWrites.length).toBeGreaterThan(0);
   });
 
   for (const [tool, args] of Object.entries(READ_TOOL_ARGS)) {

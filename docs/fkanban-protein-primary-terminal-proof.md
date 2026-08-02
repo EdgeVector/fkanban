@@ -50,14 +50,29 @@ bun run typecheck
 
 Result: pass.
 
-Full suite:
+Additional targeted reruns:
+
+```bash
+bun test test/mcp-read-tools-do-not-mutate.test.ts
+bun test test/field-projection.test.ts
+bun test test/kanban-stress-cleanup.test.ts
+```
+
+Result:
+
+```text
+14 pass
+6 pass
+7 pass
+```
+
+Full-suite attempts:
 
 ```bash
 bun test
 ```
 
-Result: failed with unrelated timeout/fixture failures outside the milestone
-repair path.
+First result before the MCP fixture expectation was updated:
 
 ```text
 1227 pass
@@ -71,6 +86,11 @@ Failures:
 declared MCP read tools do not mutate > the fixture provokes a write from the tool that is allowed to write
 kanban-stress scratch cleanup > reaps every throwaway board it created
 ```
+
+After updating the MCP fixture, the three previously failing files passed when
+run directly. A second full-suite attempt became invalid after an MCP SDK file
+under `node_modules` disappeared mid-run; subsequent CLI-spawn tests returned
+exit 1. `bun install --frozen-lockfile` restored the install.
 
 Live repair and terminal dry-run:
 
