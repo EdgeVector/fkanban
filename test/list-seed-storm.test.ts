@@ -207,6 +207,21 @@ describe("list membership seed — a failed read is not evidence of a missing in
     expect(node.writes.length).toBeGreaterThanOrEqual(12);
   });
 
+  test("EMPTY under activeOnly is 'everything is finished', and seeds nothing", async () => {
+    // `activeOnly` deliberately excludes the terminal column, so an empty
+    // result says nothing whatsoever about dual-write coverage. Reading it as
+    // "the index is missing" would make FINISHING THE LAST CARD trigger an
+    // admin full scan of Card, an index rewrite and a full BoardCards reseed —
+    // on every `pickup status`, for as long as the board stayed drained.
+    const node = fakeNode(someCards(12), "empty");
+
+    const out = await listCards(node, cfg, { activeOnly: true });
+
+    expect(out).toEqual([]);
+    expect(node.writes).toHaveLength(0);
+    expect(node.cardScans).toBe(0);
+  });
+
   test("the seed does not pay a whole-partition orphan scan per card", async () => {
     const node = fakeNode(someCards(25), "empty");
 

@@ -917,9 +917,36 @@ export async function removeBoardCard(
 }
 
 /**
+ * The two key ranges that bracket one column, i.e. everything in a partition
+ * EXCEPT `column`.
+ *
+ * The sort key is `column#pos#slug`, so a column occupies the single contiguous
+ * span `[column#, column$)` — `$` is the byte after `#`, so the upper bound is
+ * exclusive of every `column#…` key and inclusive of nothing else. Its
+ * complement is therefore exactly two ranges, whatever the board's column list
+ * is; this does NOT scale with column count the way naming the wanted columns
+ * would.
+ *
+ * That distinction is the whole reason this shape exists. Reading the ACTIVE
+ * COLUMNS by name (six `HashRangePrefix` queries) was measured on 2026-08-02
+ * and LOST to one whole-partition read, 797ms vs 522ms — a kanban read pays for
+ * round trips, not rows, so six of them cannot win by dropping rows. Two do:
+ * measured on the live `default` partition (170 rows, 141 of them `done`),
+ * whole-partition-then-filter 449ms vs these two ranges concurrently 214ms,
+ * winning 7/7 interleaved reps with identical results
+ * (`scripts/probe-nonterminal-range-vs-whole.ts`).
+ */
+function excludeColumnRanges(board: string, column: string): [QueryFilter, QueryFilter] {
+  const below = { HashRangeRange: { hash: board, start: "", end: `${column}#` } };
+  const above = { HashRangeRange: { hash: board, start: `${column}$`, end: "￿" } };
+  return [below as unknown as QueryFilter, above as unknown as QueryFilter];
+}
+
+/**
  * One keyed BoardCards query (no body).
  * - board only → HashKey partition (all columns on that board)
  * - board + column → HashRangePrefix column# (server-side column pushdown)
+ * - board + excludeColumn → two HashRangeRange reads around that column
  *
  * No HashKey + client-filter fallback when the prefix path fails. A broken
  * HashRangePrefix must surface as an error (or empty fields → empty list),
@@ -938,41 +965,53 @@ export async function listBoardCardsPartition(
   node: NodeClient,
   cfg: Config,
   board: string,
-  opts?: { column?: string; fields?: readonly string[] },
+  opts?: { column?: string; excludeColumn?: string; fields?: readonly string[] },
 ): Promise<Card[] | null> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return null;
   const column = opts?.column?.trim();
+  const excluded = opts?.excludeColumn?.trim();
   const projection = opts?.fields;
-  // HashRangePrefix is a fold HashRangeFilter object; QueryFilter's TS type
-  // is string-map only — cast at the edge (runtime accepts the object).
-  const filter = (
+  // HashRangePrefix / HashRangeRange are fold HashRangeFilter objects;
+  // QueryFilter's TS type is string-map only — cast at the edge (runtime
+  // accepts the object).
+  const filters: QueryFilter[] =
     column && column.length > 0
-      ? { HashRangePrefix: { hash: board, prefix: `${column}#` } }
-      : { HashKey: board }
-  ) as QueryFilter;
-  let res;
-  try {
-    res = await node.queryAll({
-      schemaHash,
-      fields: [...(projection ?? BOARD_CARDS_FIELDS)],
-      filter,
-    });
-  } catch (err) {
-    // Schema drift only (created_by optional) — not a list-path fallback.
-    if (!isCreatedByFieldMiss(err)) throw err;
-    res = await node.queryAll({
-      schemaHash,
-      fields: [...(projection ?? LEGACY_BOARD_CARDS_FIELDS)].filter(
-        (field) => field !== "created_by",
-      ),
-      filter,
-    });
-  }
-  return res.results
+      ? [{ HashRangePrefix: { hash: board, prefix: `${column}#` } } as unknown as QueryFilter]
+      : excluded && excluded.length > 0
+        ? excludeColumnRanges(board, excluded)
+        : [{ HashKey: board } as unknown as QueryFilter];
+  const readOne = async (filter: QueryFilter) => {
+    try {
+      return await node.queryAll({
+        schemaHash,
+        fields: [...(projection ?? BOARD_CARDS_FIELDS)],
+        filter,
+      });
+    } catch (err) {
+      // Schema drift only (created_by optional) — not a list-path fallback.
+      if (!isCreatedByFieldMiss(err)) throw err;
+      return await node.queryAll({
+        schemaHash,
+        fields: [...(projection ?? LEGACY_BOARD_CARDS_FIELDS)].filter(
+          (field) => field !== "created_by",
+        ),
+        filter,
+      });
+    }
+  };
+  // The two exclude-ranges are independent, so they overlap — the same reason
+  // `listAllBoardCards` fans its partitions out. A single filter still makes
+  // exactly one round trip.
+  const responses = await Promise.all(filters.map(readOne));
+  return responses
+    .flatMap((res) => res.results)
     .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
     .filter((c) => c.slug.length > 0)
-    .filter((c) => !column || c.column === column);
+    .filter((c) => !column || c.column === column)
+    // Belt-and-braces against a node that widens a range bound: the caller
+    // asked for "not this column" and must never be handed one.
+    .filter((c) => !excluded || c.column !== excluded);
 }
 
 /**
@@ -1226,14 +1265,24 @@ export function preferFresherBoardCard(a: Card, b: Card): Card {
 export async function listAllBoardCards(
   node: NodeClient,
   cfg: Config,
-  boards: Array<{ slug: string }>,
-  opts?: { fields?: readonly string[] },
+  boards: Array<{ slug: string; columns?: readonly string[] }>,
+  opts?: { fields?: readonly string[]; skipTerminalColumn?: boolean },
 ): Promise<Card[] | null> {
   if (!boardCardsHash(cfg)) return null;
   if (boards.length === 0) return [];
   const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
   const parts = await mapWithConcurrency(boards, (b) =>
-    listBoardCardsPartition(node, cfg, b.slug, { fields: projection }),
+    listBoardCardsPartition(node, cfg, b.slug, {
+      fields: projection,
+      // Per BOARD, not a global constant: the terminal column is whatever that
+      // board's column list ends with, and a caller that only reads the active
+      // set must not assume every board calls it `done`. A board whose columns
+      // we do not know reads whole — degrading to correct-and-slower, never to
+      // silently-dropping-the-wrong-column.
+      ...(opts?.skipTerminalColumn === true && b.columns && b.columns.length > 0
+        ? { excludeColumn: b.columns[b.columns.length - 1] }
+        : {}),
+    }),
   );
   const out: Card[] = [];
   const bySlug = new Map<string, Card>();

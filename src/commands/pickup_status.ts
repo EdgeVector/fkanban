@@ -23,7 +23,11 @@ export async function pickupStatusResult(opts: PickupStatusOptions): Promise<{
   // to know which BoardCards partitions to query, so fetching both in parallel
   // read card_list_index twice for the same answer.
   const boards = await listBoards(opts.node, opts.cfg);
-  const cards = await listCards(opts.node, opts.cfg, { boards });
+  // `activeOnly`: this report classifies `activeCards` and NOTHING else — every
+  // terminal-column row read here was read to be thrown away. On the live board
+  // that was 141 of 170 rows. See `BoardListOpt.activeOnly` for why this is a
+  // read narrowing rather than a filter, and why it must not spread to `list`.
+  const cards = await listCards(opts.node, opts.cfg, { boards, activeOnly: true });
   const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight, {
     cfg: opts.cfg,
     node: opts.node,
