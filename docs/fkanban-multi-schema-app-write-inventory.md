@@ -74,8 +74,11 @@ Classification:
 
 Follow-up migration:
 
-- `fkanban-protein-primary-card-boardcards-shared-fields` should retire the
-  full app payload write only after fold/backfill proof exists.
+- `fkanban-protein-primary-card-boardcards-shared-fields` aligns Card and
+  BoardCards shared thin field identity and keeps `body` Card-only. That is the
+  explicit inventory waiver for now: the app must keep writing BoardCards
+  payloads until fold/backfill coverage is proven, then a later hot-path change
+  can retire the full app payload write.
 
 ## MilestoneCards
 
