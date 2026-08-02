@@ -18,9 +18,29 @@ describe("schema-sync architecture boundary", () => {
     ["src/sync.ts", "const copy_rows = true", "implicit-row-copy"],
     ["src/other.ts", 'post("/api/apps/declare-schema")', "duplicate-canonical-transport"],
     ["scripts/register-card-schema.ts", "run()", "registration-script"],
+    [
+      "src/commands/add.ts",
+      'import { upsertMilestoneCard } from "../milestone-cards.ts";\nawait upsertMilestoneCard(node, cfg, card);',
+      "milestone-cards-hot-path-payload-write",
+    ],
   ])("rejects %s", (path, content, rule) => {
     expect(findSchemaSyncBoundaryViolations([{ path, content }])).toContainEqual(
       expect.objectContaining({ path, rule }),
     );
+  });
+
+  test("allows MilestoneCards payload upserts only in repair/reconcile owners", () => {
+    expect(
+      findSchemaSyncBoundaryViolations([
+        {
+          path: "src/commands/milestone.ts",
+          content: 'import { upsertMilestoneCard } from "../milestone-cards.ts";\nawait upsertMilestoneCard(node, cfg, card);',
+        },
+        {
+          path: "src/record.ts",
+          content: "/** docs may mention upsertMilestoneCard(card) without authorizing a call */",
+        },
+      ]),
+    ).toEqual([]);
   });
 });
