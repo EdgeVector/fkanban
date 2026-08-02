@@ -641,6 +641,61 @@ describe("mark command and add --body slug-list tripwire", () => {
       addCmd({ cfg, node, slug: "victim", body: "slug-one\nslug-two" }),
     ).rejects.toMatchObject({ code: "body_slug_list_tripwire" });
   });
+
+  test("add --body rejects script-shaped content before it can clobber a brief", async () => {
+    const originalBody =
+      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nKeep the real brief.\n\n## END STATE\nDone.";
+    const scriptBody = [
+      "import json, subprocess, time, sys",
+      "from collections import defaultdict",
+      "",
+      "ASSIGN = {",
+      "    \"victim\": (\"north-star\", \"milestone\"),",
+      "}",
+      "",
+      "def run(*args):",
+      "    return subprocess.check_output(args, text=True)",
+      "",
+    ].join("\n");
+
+    await addCmd({
+      cfg,
+      node,
+      slug: "script-victim",
+      title: "Script victim",
+      column: "todo",
+      body: originalBody,
+    });
+
+    await expect(
+      addCmd({ cfg, node, slug: "script-victim", body: scriptBody }),
+    ).rejects.toMatchObject({ code: "body_source_tripwire" });
+    expect((await findCard(node, cfg, "script-victim"))?.body).toBe(originalBody);
+  });
+
+  test("source tripwire allows explicit force and markdown briefs that mention code", async () => {
+    await addCmd({
+      cfg,
+      node,
+      slug: "forced-source-body",
+      title: "Forced source body",
+      body: "import json\nprint(json.dumps({\"ok\": True}))\n",
+      force: true,
+    });
+    expect((await findCard(node, cfg, "forced-source-body"))?.body).toContain("import json");
+
+    const markdownBody =
+      "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nDocument `subprocess.check_output` handling.\n\n## END STATE\nDone.";
+    await addCmd({
+      cfg,
+      node,
+      slug: "markdown-code-mention",
+      title: "Markdown code mention",
+      column: "todo",
+      body: markdownBody,
+    });
+    expect((await findCard(node, cfg, "markdown-code-mention"))?.body).toBe(markdownBody);
+  });
 });
 
 // `add --deps` must reject a dep slug that doesn't resolve to a live card.

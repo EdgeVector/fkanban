@@ -222,6 +222,33 @@ async function assertBodyIsNotExistingSlugList(opts: AddOptions): Promise<void> 
   }
 }
 
+function assertBodyIsNotSourceCode(opts: AddOptions): void {
+  if (opts.force || opts.body === undefined) return;
+  const normalized = opts.body.replace(/\r\n/g, "\n");
+  const trimmed = normalized.trimStart();
+  if (trimmed.length === 0) return;
+
+  const hasMarkdownSection = /^##\s+\S/m.test(normalized);
+  if (hasMarkdownSection) return;
+
+  const firstLine = trimmed.split("\n", 1)[0] ?? "";
+  const sourceLike =
+    /^#!\s*\//.test(firstLine) ||
+    /^(?:from\s+[A-Za-z_][\w.]*\s+import\s+|import\s+[A-Za-z_][\w.]*)/.test(firstLine) ||
+    /\bsubprocess\.check_output\b/.test(normalized) ||
+    /^\s*def\s+[A-Za-z_]\w*\s*\(/m.test(normalized) ||
+    /^\s*function\s+[A-Za-z_$][\w$]*\s*\(/m.test(normalized) ||
+    /^\s*\/\*/m.test(normalized);
+
+  if (sourceLike) {
+    throw new FkanbanError({
+      code: "body_source_tripwire",
+      message: "`add --body` was given content that looks like source code, not a card brief.",
+      hint: "Pipe a real card brief with markdown sections, or pass --force for an intentional source-code body.",
+    });
+  }
+}
+
 /**
  * A placement (`board` / `column`) with `""` read as ABSENT — never as a board
  * named "" or a column named "".
@@ -253,6 +280,7 @@ function placementOrAbsent(value: string | undefined): string | undefined {
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
+  assertBodyIsNotSourceCode(opts);
   await assertBodyIsNotExistingSlugList(opts);
 
   // Resolve the card BEFORE the board context: on update we must honor the

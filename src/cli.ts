@@ -1620,6 +1620,7 @@ async function dispatch(
             err.code === "invalid_db_locator" ||
             err.code === "db_locator_mismatch" ||
             err.code === "body_slug_list_tripwire" ||
+            err.code === "body_source_tripwire" ||
             err.code === "stdin_body_unavailable" ||
             err.code === "created_by_immutable"
           )
