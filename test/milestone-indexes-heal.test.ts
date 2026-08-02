@@ -4,7 +4,8 @@ import type { Config } from "../src/config.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { milestoneAddCmd } from "../src/commands/milestone.ts";
 import { milestoneIndexesHealResult } from "../src/commands/milestone_indexes_heal.ts";
-import { boardToFields, nowIso } from "../src/record.ts";
+import { boardMilestoneFieldsFromMilestone, boardMilestoneSk } from "../src/board-milestones.ts";
+import { boardToFields, findMilestone, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { fakeNode, type FakeNode } from "./fake-node.ts";
 
@@ -49,6 +50,14 @@ async function seedMilestoneWithChildren(node: FakeNode, childCount: number): Pr
     state: "active",
     northStar: "north-star-heal",
     driver: "last-stack-milestone-driver",
+  });
+  const milestone = await findMilestone(node, cfg, "ms-heal");
+  if (!milestone) throw new Error("seed milestone missing");
+  node.seed({
+    schemaHash: cfg.schemaHashes.board_milestones!,
+    keyHash: milestone.board || "default",
+    rangeKey: boardMilestoneSk(milestone.state, milestone.position, milestone.slug),
+    fields: { ...boardMilestoneFieldsFromMilestone(milestone), completed_at: milestone.completed_at },
   });
   for (let i = 1; i <= childCount; i += 1) {
     await addCmd({

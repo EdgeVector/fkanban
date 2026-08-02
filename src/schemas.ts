@@ -151,6 +151,29 @@ export const MILESTONE_FIELDS = [
   "created_at", "updated_at", "completed_at",
 ] as const;
 
+/**
+ * Shared by Milestone (hash=slug) and BoardMilestones (hash=board, range=sk).
+ * Byte-identical field descriptions let Mini treat the common payload fields
+ * as one product under different keys; `sk` and `layout` remain index-only.
+ */
+export const MILESTONE_SHARED_FIELD_DESCRIPTIONS: Record<string, string> = {
+  slug: "milestone slug",
+  title: "one-line outcome name",
+  body: "markdown outcome, acceptance criteria, and rationale",
+  board: "board whose cards this milestone groups",
+  state: "planned|active|blocked|proving|complete|abandoned",
+  position: "integer-as-string portfolio ordering",
+  north_star: "fbrain North Star slug this outcome advances",
+  driver: "person, agent, or routine responsible for reconciliation",
+  deps: "array of milestone slugs that must complete first",
+  proof_card: "terminal validation card slug",
+  proof_status: "pending|passing|failing|not_required",
+  block_reason: "why the milestone is blocked",
+  created_at: "RFC 3339 timestamp",
+  updated_at: "RFC 3339 timestamp",
+  completed_at: "RFC 3339 completion timestamp, empty until complete",
+};
+
 function defaultStringFieldTypes(
   fields: readonly string[],
   arrayFields: readonly string[],
@@ -248,23 +271,7 @@ export const milestoneSchema: AddSchemaRequest = {
     key: { hash_field: "slug" },
     fields: [...MILESTONE_FIELDS],
     field_types: defaultStringFieldTypes(MILESTONE_FIELDS, ["deps"]),
-    field_descriptions: {
-      slug: "stable milestone id",
-      title: "one-line outcome name",
-      body: "markdown outcome, acceptance criteria, and rationale",
-      board: "board whose cards this milestone groups",
-      state: "planned|active|blocked|proving|complete|abandoned",
-      position: "integer-as-string portfolio ordering",
-      north_star: "fbrain North Star slug this outcome advances",
-      driver: "person, agent, or routine responsible for reconciliation",
-      deps: "array of milestone slugs that must complete first",
-      proof_card: "terminal validation card slug",
-      proof_status: "pending|passing|failing|not_required",
-      block_reason: "why the milestone is blocked",
-      created_at: "RFC 3339 timestamp",
-      updated_at: "RFC 3339 timestamp",
-      completed_at: "RFC 3339 completion timestamp, empty until complete",
-    },
+    field_descriptions: { ...MILESTONE_SHARED_FIELD_DESCRIPTIONS },
     field_classifications: { title: ["word"], body: ["word"] },
     field_data_classifications: generalDataClassifications(MILESTONE_FIELDS),
   },
@@ -468,22 +475,8 @@ export const boardMilestonesSchema: AddSchemaRequest = {
     fields: [...BOARD_MILESTONES_FIELDS],
     field_types: defaultStringFieldTypes(BOARD_MILESTONES_FIELDS, ["deps"]),
     field_descriptions: {
-      board: "board slug (HashRange partition key)",
+      ...MILESTONE_SHARED_FIELD_DESCRIPTIONS,
       sk: "sort key state#position(8)#slug for ordered portfolio lists",
-      slug: "milestone slug (matches Milestone hash key)",
-      title: "one-line outcome name",
-      body: "markdown outcome / acceptance (mirrored for list parity)",
-      state: "planned|active|blocked|proving|complete|abandoned",
-      position: "integer-as-string portfolio ordering",
-      north_star: "North Star slug",
-      driver: "reconciliation driver",
-      deps: "array of dependency milestone slugs",
-      proof_card: "terminal validation card slug",
-      proof_status: "pending|passing|failing|not_required",
-      block_reason: "why blocked",
-      created_at: "RFC 3339 timestamp",
-      updated_at: "RFC 3339 timestamp",
-      completed_at: "RFC 3339 completion timestamp",
       layout: "identity marker for HashRange layout",
     },
     field_classifications: { title: ["word"], body: ["word"] },

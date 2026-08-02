@@ -29,6 +29,7 @@ import {
   listAllBoardMilestones,
   listBoardMilestonesPartition,
   removeBoardMilestone,
+  retireBoardMilestoneMembership,
   upsertBoardMilestone,
 } from "./board-milestones.ts";
 import {
@@ -3582,7 +3583,11 @@ export async function upsertMilestoneRecord(
     keyHash: milestone.slug,
     fields: milestoneToFields(milestone),
   });
-  await upsertBoardMilestone(node, cfg, milestone, previous ?? null);
+  if (boardMilestonesHash(cfg)) {
+    await retireBoardMilestoneMembership(node, cfg, milestone, previous ?? null);
+  } else {
+    await upsertBoardMilestone(node, cfg, milestone, previous ?? null);
+  }
 }
 
 /** Remove fat Milestone + BoardMilestones dual index. */

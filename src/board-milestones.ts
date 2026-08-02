@@ -101,6 +101,50 @@ async function deleteBoardMilestoneSk(
   }
 }
 
+async function retireSupersededBoardMilestoneRows(
+  node: NodeClient,
+  cfg: Config,
+  milestone: Milestone,
+  previous?: Milestone | null,
+): Promise<void> {
+  const nextFields = boardMilestoneFieldsFromMilestone(milestone);
+  const nextBoard = String(nextFields.board);
+  const nextSk = String(nextFields.sk);
+  const slug = String(nextFields.slug);
+
+  if (previous) {
+    const prevBoard = previous.board || "default";
+    const prevSk = boardMilestoneSk(previous.state, previous.position, previous.slug);
+    if (prevBoard !== nextBoard || prevSk !== nextSk) {
+      await deleteBoardMilestoneSk(node, boardMilestonesHash(cfg)!, prevBoard, prevSk);
+    }
+    if (prevBoard !== nextBoard && previous.slug) {
+      await purgeOtherBoardMilestoneRows(node, cfg, prevBoard, previous.slug, null);
+    }
+    if (prevSk !== nextSk || prevBoard !== nextBoard) {
+      await purgeOtherBoardMilestoneRows(node, cfg, nextBoard, slug, nextSk);
+    }
+    return;
+  }
+
+  await purgeOtherBoardMilestoneRows(node, cfg, nextBoard, slug, nextSk);
+}
+
+/**
+ * Delete-only cleanup for the protein-primary hot milestone path. The fat
+ * Milestone write is the payload owner; Mini folds the current BoardMilestones
+ * tip, while fkanban retires obsolete keyed rows it can address.
+ */
+export async function retireBoardMilestoneMembership(
+  node: NodeClient,
+  cfg: Config,
+  milestone: Milestone,
+  previous?: Milestone | null,
+): Promise<void> {
+  if (!boardMilestonesHash(cfg)) return;
+  await retireSupersededBoardMilestoneRows(node, cfg, milestone, previous ?? null);
+}
+
 /**
  * Delete BoardMilestones rows for `slug` on `board` except optional keepSk.
  */
