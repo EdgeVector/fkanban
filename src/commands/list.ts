@@ -16,6 +16,7 @@ import {
   listCardsByColumn,
   listCardsForDisplay,
   listCardsOnBoard,
+  listDependencyStatusesForCards,
   listOtherBoardCardsForFooter,
   listMilestones,
   requireBoard,
@@ -42,6 +43,36 @@ import { type CardDetail } from "./show.ts";
 // Cards shown per column before the rest collapse to a "… N more" line.
 // Comfortably above a healthy active column; trims an unbounded `done`.
 export const DEFAULT_COLUMN_LIMIT = 12;
+
+/**
+ * Above this many off-set dep slugs, `list --column` resolves 🔒 by scanning the
+ * terminal column instead of point-reading each slug.
+ *
+ * The two reads scale on different axes, which is the whole reason to choose:
+ * the scan is flat in k and linear in the size of an append-only archive that
+ * only grows; the point-reads are flat in the archive and linear in k. Measured
+ * on the live `default` board 2026-08-02 (138 `done` rows, interleaved reps,
+ * probe-dep-seed-vs-point.ts):
+ *
+ * | k (off-set deps) | scan   | point-reads | winner        |
+ * |------------------|--------|-------------|---------------|
+ * | 1  (`todo`)      | 303ms  | 21ms        | point, 14.5x  |
+ * | 7  (`backlog`)   | 375ms  | 237ms       | point, 1.6x   |
+ *
+ * ~34ms per point-read against ~2.7ms per archive row puts the crossover near
+ * k ≈ rows/13 ≈ 11 here, so 12 is that crossover at today's board — a balance
+ * point, not a constant of nature. It is deliberately NOT scaled by archive size
+ * (which would cost a read to learn) because the fallback above the threshold is
+ * exactly the behavior that shipped before this: the choice can match today or
+ * beat it, never lose to it. As `done` grows the true crossover rises and a
+ * fixed 12 gets conservative — in the direction that keeps the guard honest.
+ *
+ * This replaces a design justified by "a rows=1 Card point-read averages ~2s"
+ * (concurrency.ts, 2026-07-29, node 0.23.1 HashGroup warm-cap). Re-measured
+ * 2026-08-02 that read is ~21–34ms. The design was dodging a cost that had
+ * already gone away, and paying an unbounded archive scan to do it.
+ */
+export const DEP_SEED_POINT_READ_MAX = 12;
 
 // How many other-board names the multi-board footer enumerates inline before
 // collapsing the remainder to a `+K more` tail — keeps the hint a single line.
@@ -173,17 +204,23 @@ export async function listResult(
   // Body-free fetch on the text path (`displayOnly`): the render + filters need
   // CARD_DISPLAY_FIELDS, never `body`.
   //
-  // Latency bar (measured primary under HashGroup thrash):
+  // Latency bar. The 2026-07-29 figures below were taken on node 0.23.1 under
+  // HashGroup thrash and are kept because they are why this path is shaped the
+  // way it is — but the third line no longer holds, and a stale number that
+  // rules out a whole read shape is worth re-timing before trusting:
   //   - BoardCards HashRangePrefix one column ≈ 1–2s
   //   - Full board HashKey partition ≈ 2–7s (798 rows)
-  //   - Card HashKey point-read ≈ 0.7–10s each (N+1 dep fan-out was the storm)
+  //   - Card HashKey point-read ≈ 0.7–10s each  ← re-measured 2026-08-02: 21–34ms
   //
-  // Hot path — **no Card point-reads on list**:
-  //   - With --column: BoardCards prefix for that column. If any row has deps,
-  //     also prefix the board's terminal column so finished same-board deps
-  //     clear 🔒 without loading the whole partition or hitting Card.
+  // Hot path — **no UNBOUNDED reads on list**:
+  //   - With --column: BoardCards prefix for that column. Deps that point off
+  //     that column are then resolved by whichever seed is cheaper for the
+  //     number of them, k — see DEP_SEED_POINT_READ_MAX. k is free to compute
+  //     from rows already in hand, so the choice costs nothing to make.
   //   - Without --column: one full board partition (all columns already present).
-  // show/move still call listDependencyStatusesForCards for authoritative checks.
+  // show/move call the same listDependencyStatusesForCards for their
+  // authoritative check, so at k <= threshold list now agrees with them by
+  // construction rather than by two paths happening to concur.
   // Text → CARD_DISPLAY_FIELDS (~half the BoardCards atoms). JSON / structured
   // → CARD_LIST_FIELDS (body-free product fields). Never fieldsFor("card") —
   // that includes body, which BoardCards does not store and which forced the
@@ -213,7 +250,29 @@ export async function listResult(
           (!opts.assignee || c.assignee === opts.assignee),
       ),
     );
-    if (cards.some((c) => (c.deps?.length ?? 0) > 0) && opts.column !== terminalCol) {
+    // How many dep edges actually point OFF the column we just read? That is
+    // the only thing the seed has to resolve, it is known for free here (deps
+    // are already on the rows in hand), and until now it was never asked.
+    const inColumn = new Set(columnOnly.map((c) => c.slug));
+    const offSetDeps = [...new Set(cards.flatMap((c) => c.deps ?? []))].filter(
+      (slug) => slug.length > 0 && !inColumn.has(slug),
+    );
+    if (offSetDeps.length === 0 || opts.column === terminalCol) {
+      // Nothing to resolve. Note the gate this replaced fired on "any visible
+      // card has any dep" — so a column whose deps all point WITHIN itself read
+      // the whole archive to learn what it already had.
+      boardCards = columnOnly;
+    } else if (offSetDeps.length <= DEP_SEED_POINT_READ_MAX) {
+      // Resolve exactly those slugs. `listDependencyStatusesForCards` is the
+      // same path `show`/`move` use for their authoritative check, so this makes
+      // the list agree with them rather than diverge.
+      boardCards = await listDependencyStatusesForCards(
+        opts.node,
+        opts.cfg,
+        cards,
+        columnOnly,
+      );
+    } else {
       // Seed finished-dep columns without a full-board HashKey scan.
       //
       // These rows are never rendered — they exist only so `depStatus` can see
@@ -233,8 +292,6 @@ export async function listResult(
       for (const c of columnOnly) bySlug.set(c.slug, c);
       for (const c of terminalCards) bySlug.set(c.slug, c);
       boardCards = [...bySlug.values()];
-    } else {
-      boardCards = columnOnly;
     }
   } else {
     boardCards = await listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);

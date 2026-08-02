@@ -21,7 +21,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { boardListCmd, boardListResult } from "../src/commands/board.ts";
-import { listCmd } from "../src/commands/list.ts";
+import { DEP_SEED_POINT_READ_MAX, listCmd } from "../src/commands/list.ts";
 import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
@@ -630,10 +630,13 @@ describe("list — text path fetches body-free fields, structured views keep ful
     expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);
   });
 
-  test("--column resolves blocked metadata without Card HashKey N+1", async () => {
-    // Hot path (list.ts): dep / 🔒 status from BoardCards rows only — never Card
-    // fan-out. Unresolved same-board or missing deps still mark blocked/blockedBy
-    // without point-reading Card by slug.
+  test("--column keeps Card HashKey dep fan-out BOUNDED by k, never N+1", async () => {
+    // This assertion used to read "zero Card point-reads". Zero was real, but it
+    // was bought with an unbounded read of the terminal column — so the check
+    // passed while the cost it existed to prevent had merely moved onto an axis
+    // it wasn't watching. What made N+1 a storm was that it was unbounded, so
+    // that is what gets pinned: at most one point-read per off-set dep slug, and
+    // never more than DEP_SEED_POINT_READ_MAX of them.
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -645,12 +648,70 @@ describe("list — text path fetches body-free fields, structured views keep ful
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
     const parsed = JSON.parse(out) as Array<Card & { blocked: boolean; blockedBy: string[] }>;
     expect(parsed.map((c) => c.slug)).toEqual(["todo-a"]);
+    // The verdict is the invariant that must not move, and it does not: an
+    // unfinished dep blocks whether it was resolved by scan or by point-read.
     expect(parsed[0]!.blocked).toBe(true);
     expect(parsed[0]!.blockedBy).toEqual(["dep-a"]);
 
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
-    // No Card HashKey N+1 for any dep slug on the list hot path.
-    expect(node.cardQueries.some((q) => q.filter?.HashKey === "dep-a")).toBe(false);
+    const pointReads = node.cardQueries.filter((q) => q.filter?.HashKey !== undefined);
+    // k = 1 here (only `dep-a` points off the todo column), so: exactly one.
+    expect(pointReads).toHaveLength(1);
+    expect(pointReads[0]!.filter?.HashKey).toBe("dep-a");
+  });
+
+  test("--column does not report a LIVE unfinished dep as missing", async () => {
+    // The correctness half, and the reason the old seed was not merely slower.
+    //
+    // `missingDeps` means "this dep has no card" — a dangling edge. Seeding only
+    // from the terminal column made every dep that was alive but UNFINISHED
+    // indistinguishable from one that did not exist, because the one place the
+    // seed looked was the archive of finished work. So `list` reported live
+    // cards as dangling while `show` — same board, authoritative path — reported
+    // them correctly. Measured on the live default board 2026-08-02: `backlog`
+    // named 2 such deps, both sitting in `default/todo`.
+    //
+    // `blocked` was right either way, which is why this survived: the loud field
+    // agreed and the quiet one did not.
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "todo-a", column: "todo", deps: ["dep-live", "dep-ghost"] }),
+        card({ slug: "dep-live", column: "doing" }),
+      ],
+    });
+    const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
+    const parsed = JSON.parse(out) as Array<
+      Card & { blocked: boolean; blockedBy: string[]; missingDeps: string[] }
+    >;
+    expect(parsed[0]!.blocked).toBe(true);
+    // Both block. Only the one with no card anywhere is MISSING.
+    expect(parsed[0]!.blockedBy.sort()).toEqual(["dep-ghost", "dep-live"]);
+    expect(parsed[0]!.missingDeps).toEqual(["dep-ghost"]);
+  });
+
+  test("--column falls back to the archive scan rather than fan out past the cap", async () => {
+    // The other half of bounded. Past the threshold the flat read is the cheaper
+    // one, so the fan-out must STOP — an uncapped point-read path would be the
+    // original storm rebuilt, just with a nicer reason for existing.
+    //
+    // Verified green against the PRE-CHANGE code too, and that is expected: the
+    // old path always scanned, so this branch is where new and old agree. It is
+    // a regression guard on the fallback, not evidence that the cap works — the
+    // three tests that go red without the change are what carry that.
+    const deps = Array.from({ length: DEP_SEED_POINT_READ_MAX + 5 }, (_, i) => `dep-${i}`);
+    const node = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      cards: [
+        card({ slug: "todo-a", column: "todo", deps }),
+        ...deps.map((slug, i) => card({ slug, column: "done", position: String(i + 1) })),
+      ],
+    });
+    const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
+    const parsed = JSON.parse(out) as Array<Card & { blocked: boolean }>;
+    // Every dep is finished, so the scan seed must clear the block — proving the
+    // fallback resolved them rather than merely declining to point-read.
+    expect(parsed[0]!.blocked).toBe(false);
     expect(node.cardQueries.some((q) => q.filter?.HashKey !== undefined)).toBe(false);
   });
 
