@@ -3,6 +3,7 @@ import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/cl
 import type { Config } from "../src/config.ts";
 import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
+import { moveCmd } from "../src/commands/move.ts";
 import {
   boardToFields,
   findCard,
@@ -330,6 +331,76 @@ describe("milestone HashRange indexes", () => {
     const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-b" });
     expect(rec.children.map((c) => c.slug)).toContain("pr-b");
     expect(rec.ready.map((c) => c.slug)).toContain("pr-b");
+  });
+
+  test("hot-path metadata updates do not direct-write MilestoneCards payloads", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-meta",
+      title: "Metadata outcome",
+      state: "active",
+      northStar: "ns-meta",
+      driver: "driver",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "meta-pr",
+      title: "Metadata PR",
+      milestone: "ms-meta",
+      northStar: "ns-meta",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nMetadata child.\n\n## END STATE\nDone.\n",
+    });
+
+    node.directMilestoneCardMutations.length = 0;
+    await addCmd({
+      cfg,
+      node,
+      slug: "meta-pr",
+      title: "Metadata PR renamed",
+    });
+
+    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
+  });
+
+  test("hot-path moves only retire obsolete MilestoneCards tips", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-move",
+      title: "Move outcome",
+      state: "active",
+      northStar: "ns-move",
+      driver: "driver",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "move-pr",
+      title: "Move PR",
+      milestone: "ms-move",
+      northStar: "ns-move",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nMove child.\n\n## END STATE\nDone.\n",
+    });
+
+    node.directMilestoneCardMutations.length = 0;
+    await moveCmd({ cfg, node, slug: "move-pr", column: "doing" });
+
+    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-move"))?.map((c) => c.column)).toEqual(["doing"]);
   });
 
   test("milestone detail dedupes stale membership rows against Card truth", async () => {
