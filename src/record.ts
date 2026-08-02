@@ -2276,14 +2276,28 @@ async function listCardsWithFields(
     }
 
     const indexed = await readCardListIndex(node, cfg);
-    // A *retired* rollup is empty on purpose (`groom card-list-index-retire`
-    // stores `[]`, which reads back as an empty array, not a missing row). This
-    // fall-through is only reached when the BoardCards query THREW or the schema
-    // is unbound — so here an empty payload is absence of information, not proof
-    // of an empty board. Returning [] would report "the board has no cards" on a
-    // transient BoardCards error, and agents read an empty board as "no work".
-    // Treat it as a miss and seed from Card truth below instead.
-    if (indexed !== null && !(indexed.length === 0 && cardListIndexIsSuperseded(cfg))) {
+    // A RETIRED rollup is never the answer — not when it is empty, and not when
+    // it still holds its legacy payload.
+    //
+    // This fall-through is only reached when the BoardCards query THREW or the
+    // schema is unbound, and the two cases want opposite things:
+    //
+    //   board_cards bound (superseded) — the write path has not maintained
+    //     `all_cards` since 2026-07-28 (`patchCardListIndex` returns early on
+    //     the same predicate), so whatever it holds is frozen at that date.
+    //     Serving it answers a transient shed with stale membership: measured
+    //     on the primary 2026-08-02, 721 entries of which 714 had no Card
+    //     record at all. Seed from Card truth below instead — an empty payload
+    //     is likewise absence of information, not proof of an empty board, and
+    //     agents read an empty board as "no work".
+    //
+    //   board_cards unbound (legacy) — the rollup IS the card index on this
+    //     node. Unchanged: it is served exactly as before.
+    //
+    // So the read path's trust now matches the write path's refusal. Widening
+    // this to `length === 0` only, as it was, made the guard decline the rollup
+    // precisely when it had nothing to give and accept it when it did.
+    if (indexed !== null && !cardListIndexIsSuperseded(cfg)) {
       // CardListIndex is body-free by construction — never N+1 hydrate.
       return markBodyOmitted(
         (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
