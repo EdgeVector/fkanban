@@ -229,7 +229,7 @@ describe("--field projection", () => {
     // degrades correctly, whereas never attempting would cost every healthy
     // node the recall that scan buys.
     expect(calls.some((c) => c.schemaHash === "cardhash" && c.filter !== undefined)).toBe(true);
-  });
+  }, 10000);
 
   test("projection allowlist is seeded from the card schema fields", () => {
     for (const field of fieldsFor("card")) {

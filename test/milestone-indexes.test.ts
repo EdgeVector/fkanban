@@ -8,10 +8,11 @@ import {
   boardToFields,
   findCard,
   listMilestones,
+  type Milestone,
   nowIso,
 } from "../src/record.ts";
 import { listMilestoneCardsPartition, milestoneCardFieldsFromCard } from "../src/milestone-cards.ts";
-import { listBoardMilestonesPartition } from "../src/board-milestones.ts";
+import { boardMilestoneFieldsFromMilestone, boardMilestoneSk, listBoardMilestonesPartition } from "../src/board-milestones.ts";
 import {
   boardCardsSchema,
   DEFAULT_COLUMNS,
@@ -102,6 +103,17 @@ function fakeNode(): FakeNode {
       foldingMembership = false;
     }
   };
+  const foldMilestoneToBoardMilestone = (fields: Record<string, unknown> | undefined) => {
+    const boardMilestonesHash = cfg.schemaHashes.board_milestones;
+    if (!boardMilestonesHash || !fields) return;
+    const milestone = fields as Milestone;
+    const board = milestone.board || "default";
+    const sk = boardMilestoneSk(milestone.state, milestone.position, milestone.slug);
+    table(boardMilestonesHash).set(rowKey(board, sk), {
+      ...boardMilestoneFieldsFromMilestone(milestone),
+      completed_at: milestone.completed_at,
+    });
+  };
 
   const node: FakeNode = {
     baseUrl: cfg.nodeUrl,
@@ -118,16 +130,23 @@ function fakeNode(): FakeNode {
       if (schemaHash === cfg.schemaHashes.board_cards) {
         await foldBoardCardToMilestoneCard("upsert", fields);
       }
+      if (schemaHash === cfg.schemaHashes.milestone) {
+        foldMilestoneToBoardMilestone(fields);
+      }
     },
     async updateRecord({ schemaHash, keyHash, fields, rangeKey }) {
       const previous = table(schemaHash).get(rowKey(keyHash, rangeKey));
-      table(schemaHash).set(rowKey(keyHash, rangeKey), { ...table(schemaHash).get(rowKey(keyHash, rangeKey)), ...fields });
+      const merged = { ...table(schemaHash).get(rowKey(keyHash, rangeKey)), ...fields };
+      table(schemaHash).set(rowKey(keyHash, rangeKey), merged);
       if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
         directMilestoneCardMutations.push("update");
       }
       if (schemaHash === cfg.schemaHashes.board_cards) {
         await foldBoardCardToMilestoneCard("delete", previous);
         await foldBoardCardToMilestoneCard("upsert", fields);
+      }
+      if (schemaHash === cfg.schemaHashes.milestone) {
+        foldMilestoneToBoardMilestone(merged);
       }
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
@@ -168,7 +187,7 @@ async function seedBoard(node: NodeClient): Promise<void> {
 }
 
 describe("milestone HashRange indexes", () => {
-  test("dual-write BoardMilestones on milestone add; list uses partition not scan", async () => {
+  test("folds BoardMilestones on milestone add; list uses partition not scan", async () => {
     const node = fakeNode();
     await seedBoard(node);
     await milestoneAddCmd({
@@ -923,7 +942,7 @@ describe("milestone HashRange indexes", () => {
     expect(detail.text).toContain("kanban milestone reconcile ms-look");
   });
 
-  test("gap-report sees north_star via BoardMilestones dual-write", async () => {
+  test("gap-report sees north_star via folded BoardMilestones", async () => {
     const node = fakeNode();
     await seedBoard(node);
     await milestoneAddCmd({
