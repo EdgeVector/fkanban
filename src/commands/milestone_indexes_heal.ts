@@ -1,5 +1,5 @@
-// One-shot backfill: dual-write BoardMilestones + MilestoneCards from fat
-// Milestone point-reads and board card lists. Admin/heal path only.
+// One-shot heal for reverse indexes. BoardMilestones remains explicit repair;
+// MilestoneCards defaults to protein-aware BoardCards fold requests.
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -37,6 +37,7 @@ export type MilestoneIndexesHealResult = {
   /** @deprecated use milestone_card_upserts */
   cards_written: number;
   text: string;
+  direct_milestone_card_payload_upsert: boolean;
 };
 
 type BoardMilestoneOp =
@@ -124,9 +125,11 @@ export async function milestoneIndexesHealResult(opts: {
   board?: string;
   apply?: boolean;
   maxRepairs?: number | null;
+  directMilestoneCardPayloadUpsert?: boolean;
 }): Promise<MilestoneIndexesHealResult> {
   const apply = opts.apply ?? true;
   const budget = opts.maxRepairs === undefined ? DEFAULT_MILESTONE_INDEXES_HEAL_BUDGET : opts.maxRepairs;
+  const directMilestoneCardPayloadUpsert = opts.directMilestoneCardPayloadUpsert ?? false;
   const boardMsBound = Boolean(boardMilestonesHash(opts.cfg));
   const msCardsBound = Boolean(milestoneCardsHash(opts.cfg));
   if (!boardMsBound && !msCardsBound) {
@@ -145,6 +148,7 @@ export async function milestoneIndexesHealResult(opts: {
       deferred: 0,
       milestones_written: 0,
       cards_written: 0,
+      direct_milestone_card_payload_upsert: directMilestoneCardPayloadUpsert,
       text:
         "milestone indexes heal: board_milestones and milestone_cards not bound in config — run `fkanban init` first",
     };
@@ -195,6 +199,7 @@ export async function milestoneIndexesHealResult(opts: {
         slug: m.slug,
         apply: false,
         maxRepairs: 0,
+        directPayloadUpsert: directMilestoneCardPayloadUpsert,
       });
       milestoneCardChildrenScanned += dry.children.length;
       if (dry.repairs.upserts + dry.repairs.removals === 0) continue;
@@ -227,6 +232,7 @@ export async function milestoneIndexesHealResult(opts: {
         slug: plan.slug,
         apply: true,
         maxRepairs: remaining,
+        directPayloadUpsert: directMilestoneCardPayloadUpsert,
       });
       issued += repaired.repairs.issued;
     }
@@ -243,7 +249,7 @@ export async function milestoneIndexesHealResult(opts: {
     "milestone indexes heal:",
     `  applied=${apply} budget=${budget === null ? "unlimited" : budget}`,
     `  board_milestones bound=${boardMsBound} scanned=${milestones.length} upserts=${boardMilestoneUpserts} removals=${boardMilestoneRemovals}`,
-    `  milestone_cards bound=${msCardsBound} children_scanned=${milestoneCardChildrenScanned} upserts=${milestoneCardUpserts} removals=${milestoneCardRemovals}`,
+    `  milestone_cards bound=${msCardsBound} mode=${directMilestoneCardPayloadUpsert ? "direct-payload-upsert" : "protein-fold-request"} children_scanned=${milestoneCardChildrenScanned} upserts=${milestoneCardUpserts} removals=${milestoneCardRemovals}`,
     `  issued=${issued} deferred=${deferred}`,
   ].join("\n");
 
@@ -262,6 +268,7 @@ export async function milestoneIndexesHealResult(opts: {
     deferred,
     milestones_written: boardMilestoneUpserts,
     cards_written: milestoneCardUpserts,
+    direct_milestone_card_payload_upsert: directMilestoneCardPayloadUpsert,
     text,
   };
 }

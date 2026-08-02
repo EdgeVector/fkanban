@@ -102,23 +102,36 @@ describe("groom milestone-indexes-heal", () => {
     });
     expect(node.rowsOf(cfg.schemaHashes.milestone_cards!).length).toBe(0);
     expect(node.writes).toEqual([]);
+    expect(result.direct_milestone_card_payload_upsert).toBe(false);
+    expect(result.text).toContain("mode=protein-fold-request");
   });
 
-  test("maxRepairs bounds one apply pass and later runs continue", async () => {
+  test("maxRepairs bounds one explicit full-payload apply pass and later runs continue", async () => {
     const node = fakeNode({ dropIncompleteRows: false });
     await seedMilestoneWithChildren(node, 2);
     node.writes.length = 0;
 
-    const first = await milestoneIndexesHealResult({ cfg, node, maxRepairs: 1 });
+    const first = await milestoneIndexesHealResult({
+      cfg,
+      node,
+      maxRepairs: 1,
+      directMilestoneCardPayloadUpsert: true,
+    });
     expect(first).toMatchObject({
       applied: true,
       milestone_card_upserts: 2,
       issued: 1,
       deferred: 1,
+      direct_milestone_card_payload_upsert: true,
     });
     expect(node.rowsOf(cfg.schemaHashes.milestone_cards!).length).toBe(1);
 
-    const second = await milestoneIndexesHealResult({ cfg, node, maxRepairs: 1 });
+    const second = await milestoneIndexesHealResult({
+      cfg,
+      node,
+      maxRepairs: 1,
+      directMilestoneCardPayloadUpsert: true,
+    });
     expect(second).toMatchObject({
       applied: true,
       milestone_card_upserts: 1,

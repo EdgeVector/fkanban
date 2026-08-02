@@ -157,8 +157,12 @@ describe("declared MCP read tools do not mutate", () => {
     const res = await client.callTool({ name: "fkanban_milestone_reconcile", arguments: { slug: "ms-look" } });
 
     expect(res.isError).toBeFalsy();
-    const milestoneCardWrites = node.writes.filter((w) => w.schemaHash === cfg.schemaHashes.milestone_cards);
-    expect(milestoneCardWrites.length).toBeGreaterThan(0);
+    const boardCardWrites = node.writes.filter((w) => w.schemaHash === cfg.schemaHashes.board_cards);
+    const milestoneCardPayloadWrites = node.writes.filter(
+      (w) => w.schemaHash === cfg.schemaHashes.milestone_cards && w.op !== "delete",
+    );
+    expect(boardCardWrites.length).toBeGreaterThan(0);
+    expect(milestoneCardPayloadWrites).toEqual([]);
   });
 
   for (const [tool, args] of Object.entries(READ_TOOL_ARGS)) {
