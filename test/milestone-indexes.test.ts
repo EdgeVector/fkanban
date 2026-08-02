@@ -4,12 +4,16 @@ import type { Config } from "../src/config.ts";
 import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
+import { rankCmd } from "../src/commands/rank.ts";
+import { tagAddCmd } from "../src/commands/tag.ts";
 import {
   boardToFields,
+  type Card,
   findCard,
   listMilestones,
   type Milestone,
   nowIso,
+  writeCardPatch,
 } from "../src/record.ts";
 import { listMilestoneCardsPartition, milestoneCardFieldsFromCard } from "../src/milestone-cards.ts";
 import { boardMilestoneFieldsFromMilestone, boardMilestoneSk, listBoardMilestonesPartition } from "../src/board-milestones.ts";
@@ -35,11 +39,22 @@ const cfg: Config = {
   },
 };
 
-type FakeNode = NodeClient & { directMilestoneCardMutations: string[] };
+type Mutation = {
+  op: "create" | "update" | "delete";
+  schema: string;
+  direct: boolean;
+  fields: string[];
+};
+
+type FakeNode = NodeClient & {
+  directMilestoneCardMutations: string[];
+  mutations: Mutation[];
+};
 
 function fakeNode(): FakeNode {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
   const directMilestoneCardMutations: string[] = [];
+  const mutations: Mutation[] = [];
   let foldingMembership = false;
   // HashRange: key = `${hash}\0${range}`
   const table = (hash: string) => {
@@ -77,6 +92,27 @@ function fakeNode(): FakeNode {
 
   const notImplemented = async (): Promise<never> => {
     throw new Error("not implemented");
+  };
+  const schemaName = (schemaHash: string) => {
+    if (schemaHash === cfg.schemaHashes.card) return "Card";
+    if (schemaHash === cfg.schemaHashes.board) return "Board";
+    if (schemaHash === cfg.schemaHashes.milestone) return "Milestone";
+    if (schemaHash === cfg.schemaHashes.board_cards) return "BoardCards";
+    if (schemaHash === cfg.schemaHashes.board_milestones) return "BoardMilestones";
+    if (schemaHash === cfg.schemaHashes.milestone_cards) return "MilestoneCards";
+    return schemaHash;
+  };
+  const recordMutation = (
+    op: Mutation["op"],
+    schemaHash: string,
+    fields?: Record<string, unknown>,
+  ) => {
+    mutations.push({
+      op,
+      schema: schemaName(schemaHash),
+      direct: !(schemaHash === cfg.schemaHashes.milestone_cards && foldingMembership),
+      fields: fields ? Object.keys(fields).sort() : [],
+    });
   };
   const foldBoardCardToMilestoneCard = async (
     action: "upsert" | "delete",
@@ -123,6 +159,7 @@ function fakeNode(): FakeNode {
     loadSchemas: notImplemented,
     listSchemas: notImplemented,
     async createRecord({ schemaHash, keyHash, fields, rangeKey }) {
+      recordMutation("create", schemaHash, fields);
       table(schemaHash).set(rowKey(keyHash, rangeKey), { ...fields });
       if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
         directMilestoneCardMutations.push("create");
@@ -135,6 +172,7 @@ function fakeNode(): FakeNode {
       }
     },
     async updateRecord({ schemaHash, keyHash, fields, rangeKey }) {
+      recordMutation("update", schemaHash, fields);
       const previous = table(schemaHash).get(rowKey(keyHash, rangeKey));
       const merged = { ...table(schemaHash).get(rowKey(keyHash, rangeKey)), ...fields };
       table(schemaHash).set(rowKey(keyHash, rangeKey), merged);
@@ -150,6 +188,7 @@ function fakeNode(): FakeNode {
       }
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      recordMutation("delete", schemaHash);
       const previous = table(schemaHash).get(rowKey(keyHash, rangeKey));
       table(schemaHash).delete(rowKey(keyHash, rangeKey));
       if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
@@ -166,6 +205,7 @@ function fakeNode(): FakeNode {
     rawCall: notImplemented,
     nodeTransport: () => ({ transport: "unavailable" as const }),
     directMilestoneCardMutations,
+    mutations,
   };
   return node;
 }
@@ -184,6 +224,52 @@ async function seedBoard(node: NodeClient): Promise<void> {
       updated_at: now,
     }),
   });
+}
+
+const hotPathBody = (goal: string) =>
+  `Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\n${goal}\n\n## END STATE\nDone.\n`;
+
+async function seedMilestoneChild(
+  node: NodeClient,
+  card: Partial<Card> & Pick<Card, "slug" | "title">,
+): Promise<void> {
+  await addCmd({
+    cfg,
+    node,
+    slug: card.slug,
+    title: card.title,
+    milestone: card.milestone ?? "ms-hot",
+    northStar: card.north_star ?? "ns-hot",
+    repo: "EdgeVector/fkanban",
+    base: "main",
+    kind: "pr",
+    column: card.column ?? "todo",
+    tags: card.tags,
+    body: card.body ?? hotPathBody(card.title),
+  });
+}
+
+function resetMutationLog(node: FakeNode): void {
+  node.directMilestoneCardMutations.length = 0;
+  node.mutations.length = 0;
+}
+
+function expectHotCardPathMutationShape(node: FakeNode, label: string): void {
+  const allowedSchemas = new Set(["Card", "BoardCards", "MilestoneCards"]);
+  expect(
+    node.mutations.filter((m) => !allowedSchemas.has(m.schema)).map((m) => `${m.op}:${m.schema}`),
+    label,
+  ).toEqual([]);
+  expect(
+    node.mutations
+      .filter((m) => m.schema === "MilestoneCards" && m.direct && m.op !== "delete")
+      .map((m) => `${m.op}:${m.fields.join(",")}`),
+    label,
+  ).toEqual([]);
+  expect(
+    node.directMilestoneCardMutations.filter((op) => op !== "delete"),
+    label,
+  ).toEqual([]);
 }
 
 describe("milestone HashRange indexes", () => {
@@ -413,74 +499,49 @@ describe("milestone HashRange indexes", () => {
       .toEqual(["fold-heal-indexed", "fold-heal-missing"]);
   });
 
-  test("hot-path metadata updates do not direct-write MilestoneCards payloads", async () => {
+  test("hot card paths do not direct-write MilestoneCards payloads", async () => {
     const node = fakeNode();
     await seedBoard(node);
     await milestoneAddCmd({
       cfg,
       node,
-      slug: "ms-meta",
-      title: "Metadata outcome",
+      slug: "ms-hot",
+      title: "Hot-path outcome",
       state: "active",
-      northStar: "ns-meta",
+      northStar: "ns-hot",
       driver: "driver",
     });
+    await seedMilestoneChild(node, { slug: "hot-pr", title: "Hot PR" });
+    await seedMilestoneChild(node, { slug: "rank-peer", title: "Rank peer", tags: ["p0"] });
+
+    resetMutationLog(node);
     await addCmd({
       cfg,
       node,
-      slug: "meta-pr",
-      title: "Metadata PR",
-      milestone: "ms-meta",
-      northStar: "ns-meta",
-      repo: "EdgeVector/fkanban",
-      base: "main",
-      kind: "pr",
-      column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nMetadata child.\n\n## END STATE\nDone.\n",
+      slug: "hot-pr",
+      title: "Hot PR renamed",
     });
+    expectHotCardPathMutationShape(node, "add update");
 
-    node.directMilestoneCardMutations.length = 0;
-    await addCmd({
-      cfg,
-      node,
-      slug: "meta-pr",
-      title: "Metadata PR renamed",
-    });
+    resetMutationLog(node);
+    const patched = await findCard(node, cfg, "hot-pr");
+    expect(patched).not.toBeNull();
+    await writeCardPatch({ cfg, node }, patched!, { assignee: "routine" });
+    expectHotCardPathMutationShape(node, "writeCardPatch");
 
-    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
-  });
+    resetMutationLog(node);
+    await tagAddCmd({ cfg, node, slug: "hot-pr", tag: ["guarded"] });
+    expectHotCardPathMutationShape(node, "tag add");
 
-  test("hot-path moves only retire obsolete MilestoneCards tips", async () => {
-    const node = fakeNode();
-    await seedBoard(node);
-    await milestoneAddCmd({
-      cfg,
-      node,
-      slug: "ms-move",
-      title: "Move outcome",
-      state: "active",
-      northStar: "ns-move",
-      driver: "driver",
-    });
-    await addCmd({
-      cfg,
-      node,
-      slug: "move-pr",
-      title: "Move PR",
-      milestone: "ms-move",
-      northStar: "ns-move",
-      repo: "EdgeVector/fkanban",
-      base: "main",
-      kind: "pr",
-      column: "todo",
-      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nMove child.\n\n## END STATE\nDone.\n",
-    });
+    resetMutationLog(node);
+    await rankCmd({ cfg, node });
+    expectHotCardPathMutationShape(node, "rank");
 
-    node.directMilestoneCardMutations.length = 0;
-    await moveCmd({ cfg, node, slug: "move-pr", column: "doing" });
+    resetMutationLog(node);
+    await moveCmd({ cfg, node, slug: "hot-pr", column: "doing" });
 
-    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
-    expect((await listMilestoneCardsPartition(node, cfg, "ms-move"))?.map((c) => c.column)).toEqual(["doing"]);
+    expectHotCardPathMutationShape(node, "move");
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-hot"))?.map((c) => c.column)).toContain("doing");
   });
 
   test("milestone detail dedupes stale membership rows against Card truth", async () => {

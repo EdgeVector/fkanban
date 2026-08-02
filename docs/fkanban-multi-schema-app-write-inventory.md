@@ -50,6 +50,16 @@ Classification:
   it. `src/card-list-index.ts:239` exits early when `cardListIndexIsSuperseded`
   is true.
 
+CI guard:
+
+- `test/milestone-indexes.test.ts` pins `add` update, direct
+  `writeCardPatch`, `tag add`, `rank`, and `move` as hot card paths.
+- Those operations may mutate `Card` and `BoardCards`.
+- They may touch `MilestoneCards` only for direct delete-only retirement of
+  obsolete keys, or via a folded BoardCards write owned by LastDB proteins.
+- A direct app `createRecord` / `updateRecord` payload write to
+  `MilestoneCards` from any of those hot paths is a regression.
+
 Double-write risk:
 
 - The main risk is stacking a future fold from `Card` to `BoardCards` while
@@ -166,6 +176,10 @@ Classification:
 - Keep them available until Mini provides the equivalent background reindex.
 - They must remain explicit, bounded where possible, and must not become part
   of ordinary card or milestone mutation.
+- `upsertMilestoneCard(..., { writePayload: true })` is valid only in these
+  explicit repair/backfill contexts. Hot card commands must use BoardCards as
+  the protein-primary payload source and restrict app-authored MilestoneCards
+  work to key retirement.
 
 ## Short Scan of Other EdgeVector Apps
 
