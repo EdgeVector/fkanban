@@ -136,6 +136,39 @@ export const CARD_FIELDS = [
 // missing only these fields as operationally writable.
 export const CARD_OPTIONAL_SCHEMA_FIELDS = ["surfaces", "db", "created_by", "milestone"] as const;
 
+/**
+ * Field descriptions shared by Card and its thin keyed membership projections.
+ *
+ * LastDB protein bind uses field identity H(name, description, type, version).
+ * Shared Card/BoardCards values must therefore use byte-identical descriptions.
+ * Key-local fields such as `sk`/`layout` and Card-only fields such as `body`
+ * stay out of this set.
+ */
+export const CARD_THIN_SHARED_FIELD_DESCRIPTIONS: Record<string, string> = {
+  slug: "card slug",
+  title: "one-line card name",
+  board: "board slug",
+  column: DEFAULT_COLUMNS.join("|"),
+  position: "integer-as-string ordering within the column",
+  assignee: "who owns the card",
+  tags: "array of freeform labels",
+  deps: "array of dependency card slugs",
+  surfaces: "array of path globs / subsystem names",
+  created_at: "RFC 3339 timestamp",
+  created_by: "creator identity",
+  updated_at: "RFC 3339 timestamp",
+  db: "home LastDB locator",
+  repo: "owner/name of the code repo",
+  base: "PR base branch",
+  kind: "pr|registry|tracker|...",
+  block_status: "none|needs_human|design_first|deferred",
+  block_reason: "free-text when blocked",
+  north_star: "North Star slug",
+  milestone: "Milestone slug",
+  pr_url: "PR URL when in flight",
+  branch: "feature branch",
+};
+
 export const BOARD_FIELDS = [
   "slug",
   "title",
@@ -182,29 +215,8 @@ export const cardSchema: AddSchemaRequest = {
     fields: [...CARD_FIELDS],
     field_types: defaultStringFieldTypes(CARD_FIELDS, ["tags", "deps", "surfaces"]),
     field_descriptions: {
-      slug: "stable url-style id (board-unique card key)",
-      title: "one-line card name",
+      ...CARD_THIN_SHARED_FIELD_DESCRIPTIONS,
       body: "markdown description / notes",
-      board: "slug of the board this card belongs to",
-      column: DEFAULT_COLUMNS.join("|"),
-      position: "integer-as-string ordering within the column (lower = higher)",
-      assignee: "who owns the card, empty string if unassigned",
-      tags: "array of freeform labels",
-      deps: "array of card slugs this card depends on; dependencies are satisfied when each referenced card reaches its board's terminal column",
-      surfaces: "array of repo-relative path globs or subsystem names this card expects to touch",
-      created_at: "RFC 3339 timestamp",
-      created_by: "immutable self-reported creator identity captured when the card is first created",
-      updated_at: "RFC 3339 timestamp",
-      db: "home LastDB locator for this card, e.g. lastdb://personal or lastdb://org/<slug>/<db>",
-      repo: "owner/name of the repo a build agent clones (empty = not a code card)",
-      base: "base branch a PR targets (default: main)",
-      kind: "pr|registry|tracker|umbrella|meta|program|capstone|validation — pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up",
-      block_status: "none|needs_human|design_first|deferred — INTENTIONAL holds only (dependency-blocked stays derived from deps)",
-      block_reason: "free-text why, when block_status != none",
-      north_star: "fbrain North Star slug this card advances",
-      milestone: "fkanban Milestone slug this card advances",
-      pr_url: "URL/number of the PR driving this card, when in flight",
-      branch: "worktree/feature branch a build agent works on",
     },
     field_classifications: { title: ["word"], body: ["word"] },
     field_data_classifications: generalDataClassifications(CARD_FIELDS),
@@ -369,29 +381,8 @@ export const BOARD_CARDS_FIELDS = [
  * not fold (board vs milestone membership).
  */
 export const CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS: Record<string, string> = {
-  board: "board slug",
+  ...CARD_THIN_SHARED_FIELD_DESCRIPTIONS,
   sk: "sort key column#position(8)#slug",
-  slug: "card slug (matches Card hash key)",
-  title: "one-line card name",
-  column: DEFAULT_COLUMNS.join("|"),
-  position: "integer-as-string ordering within the column",
-  assignee: "who owns the card",
-  tags: "array of freeform labels",
-  deps: "array of dependency card slugs",
-  surfaces: "array of path globs / subsystem names",
-  created_at: "RFC 3339 timestamp",
-  created_by: "creator identity",
-  updated_at: "RFC 3339 timestamp",
-  db: "home LastDB locator",
-  repo: "owner/name of the code repo",
-  base: "PR base branch",
-  kind: "pr|registry|tracker|…",
-  block_status: "none|needs_human|design_first|deferred",
-  block_reason: "free-text when blocked",
-  north_star: "North Star slug",
-  milestone: "Milestone slug",
-  pr_url: "PR URL when in flight",
-  branch: "feature branch",
 };
 
 export const boardCardsSchema: AddSchemaRequest = {
