@@ -352,6 +352,67 @@ describe("milestone HashRange indexes", () => {
     expect(rec.ready.map((c) => c.slug)).toContain("pr-b");
   });
 
+  test("reconcile heals missing MilestoneCards through BoardCards fold by default", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-heal-fold",
+      title: "Fold-healed outcome",
+      state: "active",
+      northStar: "ns-heal-fold",
+      driver: "driver",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "fold-heal-missing",
+      title: "Fold heal missing",
+      milestone: "ms-heal-fold",
+      northStar: "ns-heal-fold",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nFold-healed child.\n\n## END STATE\nDone.\n",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "fold-heal-indexed",
+      title: "Fold heal indexed",
+      milestone: "ms-heal-fold",
+      northStar: "ns-heal-fold",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nAlready indexed child.\n\n## END STATE\nDone.\n",
+    });
+
+    const missing = await findCard(node, cfg, "fold-heal-missing");
+    const missingFields = milestoneCardFieldsFromCard(missing!);
+    await node.deleteRecord({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      keyHash: "ms-heal-fold",
+      rangeKey: String(missingFields!.sk),
+    });
+    node.directMilestoneCardMutations.length = 0;
+
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-heal-fold" });
+
+    expect(rec.repairs).toMatchObject({
+      upserts: 1,
+      removals: 0,
+      issued: 1,
+      direct_payload_upsert: false,
+    });
+    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-heal-fold"))?.map((c) => c.slug).sort())
+      .toEqual(["fold-heal-indexed", "fold-heal-missing"]);
+  });
+
   test("hot-path metadata updates do not direct-write MilestoneCards payloads", async () => {
     const node = fakeNode();
     await seedBoard(node);
@@ -654,7 +715,7 @@ describe("milestone HashRange indexes", () => {
     // a single clean row and reconcile left the index short.
     expect((await listMilestoneCardsPartition(node, cfg, "ms-missing"))?.map((c) => c.slug).sort())
       .toEqual(["miss-a", "miss-b"]);
-    expect(node.directMilestoneCardMutations).toContain("update");
+    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
   });
 
   test("reconcile repairs only the missing child, not its converged sibling", async () => {
@@ -665,12 +726,11 @@ describe("milestone HashRange indexes", () => {
     node.directMilestoneCardMutations.length = 0;
     await milestoneReconcileResult({ cfg, node, slug: "ms-mixed" });
 
-    // Exactly one row was written, and it was the missing one. The converged
+    // Exactly one row is restored through the BoardCards fold. The converged
     // sibling is present in BOTH the index and board membership; that
     // duplication is the union working, not drift, and it must not cost a
-    // write. Asserting the write COUNT alone is not enough — the pre-fix code
-    // also issued exactly one upsert here, just for the wrong card.
-    expect(node.directMilestoneCardMutations.filter((m) => m !== "delete")).toEqual(["update"]);
+    // direct MilestoneCards payload write.
+    expect(node.directMilestoneCardMutations.filter((m) => m !== "delete")).toEqual([]);
     expect((await listMilestoneCardsPartition(node, cfg, "ms-mixed"))?.map((c) => c.slug).sort())
       .toEqual(["mix-indexed", "mix-missing"]);
   });
@@ -692,7 +752,7 @@ describe("milestone HashRange indexes", () => {
 
     const rows = await listMilestoneCardsPartition(node, cfg, "ms-stale");
     expect(rows?.map((c) => c.title)).toEqual(["PR stale-pr"]);
-    expect(node.directMilestoneCardMutations).toContain("update");
+    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
   });
 
   test("reconcile retires an index row whose card no longer exists", async () => {

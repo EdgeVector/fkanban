@@ -10,7 +10,7 @@ import { MILESTONE_CARDS_FIELDS, MILESTONE_CARDS_LAYOUT } from "./schemas.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 // boardCardSk / parseBoardCardSk are pure — safe to import without cycle.
-import { boardCardSk, parseBoardCardSk } from "./board-cards.ts";
+import { boardCardSk, parseBoardCardSk, upsertBoardCard } from "./board-cards.ts";
 
 export { MILESTONE_CARDS_LAYOUT };
 
@@ -216,12 +216,20 @@ export type MilestoneCardUpsertOptions = {
    * that is every backward move — `done -> doing`, `todo -> anything`.
    */
   purgeSiblings?: boolean;
+  /**
+   * Write the MilestoneCards payload directly. Default true for explicit
+   * low-level repair callers; reconcile/heal paths pass false so bound
+   * BoardCards -> MilestoneCards proteins own the destination payload.
+   */
+  writePayload?: boolean;
 };
 
 /**
- * Upsert thin MilestoneCards row (full dual-write). Prefer
- * {@link retireMilestoneCardMembership} on the hot path; use this for heal /
- * one-shot backfill when protein fold cannot be assumed.
+ * Upsert thin MilestoneCards row. Prefer {@link retireMilestoneCardMembership}
+ * on the hot path; pass `writePayload: false` for protein-aware heal/reconcile
+ * so the app writes BoardCards and lets Mini fold the MilestoneCards tip.
+ * Leave `writePayload` at its default only for explicit emergency repair when
+ * protein fold cannot be assumed.
  */
 export async function upsertMilestoneCard(
   node: NodeClient,
@@ -243,6 +251,17 @@ export async function upsertMilestoneCard(
   // retirement IS the operation and has nothing to wait for.
   if (!nextFields) {
     await retireMilestoneCardMembership(node, cfg, card, previous);
+    return;
+  }
+
+  if (opts.writePayload === false) {
+    await upsertBoardCard(node, cfg, card, previous, { wideWrite: true });
+    if (previous && prevMs) {
+      await retireMilestoneCardMembership(node, cfg, card, previous);
+      if (opts.purgeSiblings) {
+        await purgeOtherMilestoneCardRows(node, cfg, nextMs, slug, nextSk);
+      }
+    }
     return;
   }
 

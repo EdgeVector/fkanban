@@ -236,7 +236,7 @@ Usage:
   fkanban milestone list [--board <slug>] [--state <state>] [--json]
   fkanban milestone show <slug> [--json]
   fkanban milestone state <slug> <state> [--proof-status <status>] [--json]
-  fkanban milestone reconcile <slug> [--dry-run] [--max-repairs N|unlimited] [--json]
+  fkanban milestone reconcile <slug> [--dry-run] [--max-repairs N|unlimited] [--force-milestone-card-payload-upsert] [--json]
   fkanban milestone portfolio [--board <slug>] [--json]
   fkanban milestone detail <slug> [--json]
   fkanban milestone groom [--board <slug>] [--json]
@@ -262,10 +262,14 @@ Reconcile options:
                         to lift the cap, 0 to classify only). Reconcile is
                         convergent, so a capped run makes strict progress and
                         reports the remainder.
+  --force-milestone-card-payload-upsert
+                        emergency repair override: direct-write MilestoneCards
+                        payloads instead of requesting BoardCards protein fold
 
-reconcile repairs the MilestoneCards index as it reads; detail and portfolio
-never write. A repair costs seconds per row on the shared node, so a drifted
-milestone is reported by the read commands and fixed by this one.
+reconcile repairs the MilestoneCards index as it reads by defaulting to
+BoardCards protein-fold requests; detail and portfolio never write. A direct
+payload repair costs seconds per row on the shared node and requires the force
+flag above.
 
 Milestones are supervisory records, never pickup cards.
 New milestones default to driver last-stack-milestone-driver. Superseded
@@ -597,7 +601,7 @@ Usage:
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
   fkanban groom board-list-heal [--apply] [--json]
-  fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited]
+  fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--force-milestone-card-payload-upsert]
   fkanban groom card-list-index-retire [--apply] [--json]
   fkanban groom archive-done [--apply] [--json] [--board SLUG] [--cutoff-hours N] [--max N]
 
@@ -624,9 +628,9 @@ Subcommands:
                        on every list) and add MISSING boards (record live, no entry —
                        every card on that board is invisible to list).
   milestone-indexes-heal
-                       repair BoardMilestones and MilestoneCards projections from
-                       Milestone and BoardCards truth, with dry-run classification
-                       and a bounded per-run write budget.
+                       repair BoardMilestones explicitly and MilestoneCards via
+                       BoardCards protein-fold requests by default, with dry-run
+                       classification and a bounded per-run write budget.
   card-list-index-retire
                        clear the superseded CardListIndex all_cards rollup. BoardCards
                        already holds the same body-free summary one row per card; the
@@ -650,6 +654,8 @@ Flags:
                        count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
   --max-repairs N      (milestone-indexes-heal) cap repair writes for one run,
                        default 25; "unlimited" opts out
+  --force-milestone-card-payload-upsert
+                       (milestone-indexes-heal) emergency direct payload repair
   --cutoff-hours N     (archive-done) minimum age in a terminal column, default
                        ${DEFAULT_ARCHIVE_CUTOFF_HOURS}
   --max N              (archive-done) per-run delete ceiling, default
@@ -1004,7 +1010,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   ]),
   // reconcile repairs MilestoneCards as it reads; --dry-run classifies without
   // writing and --max-repairs bounds how much it writes in one invocation.
-  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs"]),
+  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["from", "expect", "position", "force"]),
@@ -1020,7 +1026,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "cutoff-hours", "max"]),
+  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "cutoff-hours", "max", "force-milestone-card-payload-upsert"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -1447,6 +1453,7 @@ async function dispatch(
           slug,
           apply: !values["dry-run"],
           maxRepairs,
+          directPayloadUpsert: Boolean(values["force-milestone-card-payload-upsert"]),
         });
         console.log(values.json ? JSON.stringify({ milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, repairs: result.repairs }, null, 2) : result.text);
         return 0;
@@ -2064,6 +2071,7 @@ async function dispatch(
           board: typeof values.board === "string" ? values.board : undefined,
           apply: !values["dry-run"],
           maxRepairs,
+          directMilestoneCardPayloadUpsert: Boolean(values["force-milestone-card-payload-upsert"]),
         });
         console.log(values.json ? JSON.stringify(healed, null, 2) : healed.text);
         return 0;

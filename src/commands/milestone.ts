@@ -82,6 +82,8 @@ export type MilestoneRepairPlan = {
   deferred: number;
   /** Repair budget in force; null when unlimited. */
   budget: number | null;
+  /** True when destination MilestoneCards payload writes are explicit. */
+  direct_payload_upsert: boolean;
 };
 
 /**
@@ -452,7 +454,7 @@ async function reconcileMilestoneCardChildren(
   milestone: Milestone,
   indexRows: Card[],
   boardRows: Card[],
-  repair: { apply: boolean; budget: number | null },
+  repair: { apply: boolean; budget: number | null; directPayloadUpsert: boolean },
 ): Promise<{ children: Card[]; repairs: MilestoneRepairPlan }> {
   const rowsBySlug = new Map<string, Card[]>();
   for (const row of indexRows) {
@@ -513,7 +515,10 @@ async function reconcileMilestoneCardChildren(
     }
     for (const { truth, previous, siblings } of upserts) {
       if (exhausted()) break;
-      await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, { purgeSiblings: siblings })
+      await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
+        purgeSiblings: siblings,
+        writePayload: repair.directPayloadUpsert,
+      })
         .catch(() => undefined);
       issued++;
     }
@@ -534,6 +539,7 @@ async function reconcileMilestoneCardChildren(
       issued,
       deferred: removals.length + upserts.length - issued,
       budget: repair.budget,
+      direct_payload_upsert: repair.directPayloadUpsert,
     },
   };
 }
@@ -550,9 +556,15 @@ export async function milestoneReconcileResult(opts: {
   apply?: boolean;
   /** Cap on repair writes; null = unlimited. Defaults to the budget above. */
   maxRepairs?: number | null;
+  /**
+   * Emergency/operator override: repair MilestoneCards by direct payload upsert.
+   * Normal reconcile/heal writes BoardCards and relies on protein fold.
+   */
+  directPayloadUpsert?: boolean;
 }): Promise<MilestoneReconcileResult & { text: string; repairs: MilestoneRepairPlan }> {
   const apply = opts.apply ?? true;
   const budget = opts.maxRepairs === undefined ? DEFAULT_MILESTONE_REPAIR_BUDGET : opts.maxRepairs;
+  const directPayloadUpsert = opts.directPayloadUpsert ?? false;
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
   // Prefer keyed partitions, but union MilestoneCards with current board
   // membership so a lagging/missing milestone-keyed fold cannot hide a live
@@ -560,13 +572,21 @@ export async function milestoneReconcileResult(opts: {
   const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
   const fromBoard = (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
   const reconciled = fromIndex !== null
-    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, fromBoard, { apply, budget })
+    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, fromBoard, { apply, budget, directPayloadUpsert })
     : {
       // No MilestoneCards partition to reconcile against: membership came
       // straight from the board, so nothing was classified and nothing is
       // deferred — not "0 repairs because we chose to skip them".
       children: fromBoard,
-      repairs: { applied: apply, upserts: 0, removals: 0, issued: 0, deferred: 0, budget } satisfies MilestoneRepairPlan,
+      repairs: {
+        applied: apply,
+        upserts: 0,
+        removals: 0,
+        issued: 0,
+        deferred: 0,
+        budget,
+        direct_payload_upsert: directPayloadUpsert,
+      } satisfies MilestoneRepairPlan,
     };
   const children = reconciled.children;
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
@@ -654,7 +674,8 @@ export function milestoneReconcileFromSnapshot(
 function renderRepairPlan(slug: string, repairs: MilestoneRepairPlan): string[] {
   const classified = repairs.upserts + repairs.removals;
   if (classified === 0) return [];
-  const shape = `${repairs.upserts} to write, ${repairs.removals} to retire`;
+  const writeLabel = repairs.direct_payload_upsert ? "payload write" : "protein fold request";
+  const shape = `${repairs.upserts} ${writeLabel}(s), ${repairs.removals} to retire`;
   if (!repairs.applied) {
     return [`index drift: ${classified} row(s) need repair (${shape}) — run \`kanban milestone reconcile ${slug}\` to fix`];
   }
