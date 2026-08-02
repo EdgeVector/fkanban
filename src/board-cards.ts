@@ -788,6 +788,117 @@ export async function upsertBoardCard(
   await retireSupersededRows();
 }
 
+/**
+ * How many BoardCards rows ride in one `/api/mutations/batch` request.
+ *
+ * Measured, not chosen by feel (`probe-boardcards-batch-size.ts`, 48 rows into
+ * one partition on the live primary):
+ *
+ * | chunk | requests | per-write | largest request |
+ * |-------|----------|-----------|-----------------|
+ * | 1     | 48       | 1282ms    | 1 KiB           |
+ * | 4     | 12       | 539ms     | 3 KiB           |
+ * | 12    | 4        | 313ms     | 8 KiB           |
+ * | 24    | 2        | 236ms     | 15 KiB          |
+ * | 48    | 1        | **160ms** | 30 KiB          |
+ *
+ * The curve had NOT flattened at 48, so this is a balance point rather than a
+ * measured optimum — say so plainly rather than implying an elbow that the data
+ * does not show. What bounds it is the two costs that grow with the chunk:
+ *
+ *   - a batch is all-or-nothing, so a failing chunk is a chunk to retry
+ *     one-at-a-time, and 48 is the most work one bad row can cost
+ *   - one request holds the partition's write gate for its whole duration
+ *     (~7.7s at 48), and every other kanban process writing that board queues
+ *     behind it
+ *
+ * The second reads like an argument for a small chunk and is in fact the
+ * opposite: batching cuts TOTAL gate-hold for the same work by the same 8x.
+ * A 331-card seed holds the gate ~55s across 7 requests instead of ~6 minutes
+ * across 331. Longer individual holds, far less of them.
+ */
+export const BOARD_CARDS_WRITE_BATCH = 48;
+
+/**
+ * Write many BoardCards rows with the fewest partition-gate acquisitions.
+ *
+ * ## The measurement this exists for
+ *
+ * The node gates a write per `(molecule, hash)`, and for a HashRange field the
+ * key is built from the hash HALF only (`ChangedKey::disk_hash()`), so every
+ * row of one board shares one gate. On the live primary
+ * (`probe-boardcards-write-lock-contention.ts`) that makes concurrent writes
+ * into one partition **0.91x** of serial — the fan-out is a net loss, not a
+ * wash — while the identical work in one batch is 2.10x.
+ *
+ * So this does NOT fan out. It sends chunks, in order, and each chunk pays the
+ * gate once.
+ *
+ * ## Why it falls back instead of failing
+ *
+ * The node rejects a whole batch on any item's failure, and the callers here
+ * are repair paths whose entire value is finishing: `seedBoardCards` learned
+ * that the hard way when one unwritable card abandoned the seed for every card
+ * after it. A rejected chunk is therefore retried ONE ROW AT A TIME through
+ * {@link upsertBoardCard}, which restores exactly the per-item isolation the
+ * batch gives up — the slow path costs what today already costs, and only for
+ * the chunk that actually failed.
+ *
+ * `onError` sees each individually-failed row so callers keep their own
+ * best-effort accounting; a caller that omits it gets the row skipped.
+ *
+ * Rows are written WIDE (every field) and with no orphan purge: both callers
+ * are writing current truth for a card whose superseded rows are either
+ * provably absent or `groom board-cards-heal`'s job. Do not reach for this on
+ * the interactive path — a `move` must retire its source sk, which is a
+ * per-card decision this deliberately does not make.
+ */
+export async function upsertBoardCardsBatch(
+  node: NodeClient,
+  cfg: Config,
+  cards: Array<Card | CardSummary>,
+  onError?: (card: Card | CardSummary, err: unknown) => void,
+): Promise<void> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash || cards.length === 0) return;
+
+  // A client with no batch verb (the ad-hoc test fakes) still has to write.
+  // Per-row is what this used to do everywhere, so falling back to it is a loss
+  // of speed and nothing else.
+  const batch = node.updateRecords?.bind(node);
+
+  for (let i = 0; i < cards.length; i += BOARD_CARDS_WRITE_BATCH) {
+    const chunk = cards.slice(i, i + BOARD_CARDS_WRITE_BATCH);
+    try {
+      if (!batch) throw new Error("node client exposes no batch write");
+      await batch(
+        chunk.map((card) => {
+          const fields = boardCardFieldsFromCard(card);
+          return {
+            schemaHash,
+            fields,
+            keyHash: String(fields.board),
+            rangeKey: String(fields.sk),
+          };
+        }),
+      );
+    } catch {
+      // Per-row from here. The batch told us the CHUNK failed, never which row,
+      // so the only way to write the other 47 is to ask for them separately.
+      for (const card of chunk) {
+        try {
+          await upsertBoardCard(node, cfg, card, null, {
+            skipOrphanPurge: true,
+            wideWrite: true,
+          });
+        } catch (err) {
+          onError?.(card, err);
+        }
+      }
+    }
+  }
+}
+
 export async function removeBoardCard(
   node: NodeClient,
   cfg: Config,

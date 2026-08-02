@@ -22,6 +22,7 @@ import {
   preferFresherBoardCard,
   removeBoardCard,
   upsertBoardCard,
+  upsertBoardCardsBatch,
   type BoardCardWriteOptions,
 } from "./board-cards.ts";
 import {
@@ -2032,15 +2033,6 @@ export function assertBodyLoaded(card: Card, operation: string): void {
 type BoardListOpt = { boards?: Board[] };
 
 /**
- * Fan-out width for the membership seed.
- *
- * Narrower than {@link POINT_READ_CONCURRENCY} because each item is a
- * read-then-WRITE, not a point read: this runs only when the index is missing,
- * and a repair that saturates the node is how a cold start becomes an outage.
- */
-const BOARD_CARDS_SEED_CONCURRENCY = 3;
-
-/**
  * Rebuild BoardCards membership from Card truth, after the scan fallback in
  * {@link listCardsWithFields} found no usable index.
  *
@@ -2104,18 +2096,20 @@ async function seedBoardCards(
       bySlug.set(card.slug, card);
     }
   }
-  await mapWithConcurrency(
-    [...bySlug.values()],
-    async (card) => {
-      try {
-        await upsertBoardCard(node, cfg, card, null, { skipOrphanPurge: true });
-      } catch {
-        // Best-effort PER CARD. One card that will not seed must not abandon
-        // the rest of the repair.
-      }
-    },
-    BOARD_CARDS_SEED_CONCURRENCY,
-  );
+  // Batched, NOT fanned out. Every card seeded here lands in the same board
+  // partition, and the node gates a write per `(molecule, hash)` — the range
+  // half of a HashRange key is not in the lock key — so concurrent writers of
+  // one board queue rather than overlap. Measured on the live primary
+  // (`probe-boardcards-write-lock-contention.ts`), the fan-out this replaces
+  // ran at **0.91x of serial**: it was paying for concurrency and getting less
+  // than nothing back. One batch of the same 12 rows ran 2.10x, and at the
+  // seed's own chunk size the per-write cost drops 1282ms -> 160ms.
+  //
+  // The per-card best-effort contract survives: `upsertBoardCardsBatch` retries
+  // a rejected chunk one row at a time, so a single unseedable card still
+  // cannot abandon the rest of the repair — which was the whole reason the
+  // try/catch moved inside the loop in the first place.
+  await upsertBoardCardsBatch(node, cfg, [...bySlug.values()]);
 }
 
 /**
