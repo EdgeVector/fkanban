@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { listCmd } from "../src/commands/list.ts";
+import { DEP_SEED_POINT_READ_MAX, listCmd } from "../src/commands/list.ts";
 import { hydrateForPickupClassification } from "../src/pickup.ts";
 import type { NodeClient, QueryFilter, QueryResponse } from "../src/client.ts";
 import {
@@ -153,8 +153,24 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
     card({ slug: "done-a", column: "done", position: "1" }),
   ];
 
+  // Above DEP_SEED_POINT_READ_MAX off-set deps the archive scan is still the
+  // cheaper seed, so it is still the one that runs — and it must still be
+  // narrow. Build k = MAX + 1 finished deps to land on that branch on purpose:
+  // pinning the projection matters precisely where the read is unbounded.
+  const wideFanoutCards = [
+    card({
+      slug: "todo-a",
+      column: "todo",
+      position: "1",
+      deps: Array.from({ length: DEP_SEED_POINT_READ_MAX + 1 }, (_, i) => `done-${i}`),
+    }),
+    ...Array.from({ length: DEP_SEED_POINT_READ_MAX + 1 }, (_, i) =>
+      card({ slug: `done-${i}`, column: "done", position: String(i + 1) }),
+    ),
+  ];
+
   test("the terminal-column read asks for the dep-seed projection, not every field", async () => {
-    const node = fakeNode(cards);
+    const node = fakeNode(wideFanoutCards);
     await listCmd({ cfg, node, column: "todo", json: true });
 
     const seed = prefixReads(node, "done");
@@ -162,6 +178,34 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
     expect(seed[0]!.fields).toEqual([...BOARD_CARDS_DEP_SEED_FIELDS]);
     // The regression: 17 fields fetched off an append-only archive and dropped.
     expect(seed[0]!.fields.length).toBeLessThan(BOARD_CARDS_FIELDS.length);
+  });
+
+  test("below the threshold the archive is not read AT ALL — k point-reads instead", async () => {
+    // The narrow projection made the archive read cheaper; it could not make it
+    // bounded, because its cost is the size of everything the board has ever
+    // finished. At k=1 that whole read is unnecessary — the one dep slug is
+    // known before the read is issued, so ask for it directly.
+    const node = fakeNode(cards);
+    await listCmd({ cfg, node, column: "todo", json: true });
+
+    expect(prefixReads(node, "done")).toHaveLength(0);
+    // Still the column being listed, exactly once — the cheap read is kept.
+    expect(prefixReads(node, "todo")).toHaveLength(1);
+  });
+
+  test("the switch is k, not the archive's size: same k stays off the archive as `done` grows", async () => {
+    // Guards the axis the choice actually turns on. A seed keyed to anything
+    // about the archive would start scanning again as the board ages, which is
+    // the failure this whole branch exists to prevent.
+    const node = fakeNode([
+      ...cards,
+      ...Array.from({ length: 200 }, (_, i) =>
+        card({ slug: `archive-${i}`, column: "done", position: String(i + 2) }),
+      ),
+    ]);
+    await listCmd({ cfg, node, column: "todo", json: true });
+
+    expect(prefixReads(node, "done")).toHaveLength(0);
   });
 
   test("the column being LISTED keeps the product list projection — those rows render", async () => {
