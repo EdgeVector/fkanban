@@ -11,7 +11,12 @@ import {
 } from "../src/record.ts";
 import { listMilestoneCardsPartition, milestoneCardFieldsFromCard } from "../src/milestone-cards.ts";
 import { listBoardMilestonesPartition } from "../src/board-milestones.ts";
-import { DEFAULT_COLUMNS, MILESTONE_CARDS_LAYOUT } from "../src/schemas.ts";
+import {
+  boardCardsSchema,
+  DEFAULT_COLUMNS,
+  milestoneCardsSchema,
+  MILESTONE_CARDS_LAYOUT,
+} from "../src/schemas.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -297,6 +302,30 @@ describe("milestone HashRange indexes", () => {
     expect(kids?.map((c) => c.slug)).toEqual(["pr-b"]);
     expect(kids?.[0]?.body).toBe(""); // thin index
     expect(node.directMilestoneCardMutations).toEqual([]);
+
+    const boardRows = await node.queryAll({
+      schemaHash: cfg.schemaHashes.board_cards!,
+      fields: [...boardCardsSchema.schema.fields],
+      filter: { HashKey: "default" },
+    });
+    const milestoneRows = await node.queryAll({
+      schemaHash: cfg.schemaHashes.milestone_cards!,
+      fields: [...milestoneCardsSchema.schema.fields],
+      filter: { HashKey: "ms-b" },
+    });
+    expect(boardRows.results).toHaveLength(1);
+    expect(milestoneRows.results).toHaveLength(1);
+
+    const boardFields = boardRows.results[0]!.fields;
+    const milestoneFields = milestoneRows.results[0]!.fields;
+    const sharedFields = boardCardsSchema.schema.fields.filter(
+      (field) => field !== "layout" && milestoneCardsSchema.schema.fields.includes(field),
+    );
+    for (const field of sharedFields) {
+      expect(milestoneFields[field], `${field} should fold from BoardCards`).toEqual(boardFields[field]);
+    }
+    expect(milestoneFields.layout).toBe(MILESTONE_CARDS_LAYOUT);
+    expect(milestoneFields.layout).not.toBe(boardFields.layout);
 
     const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-b" });
     expect(rec.children.map((c) => c.slug)).toContain("pr-b");
