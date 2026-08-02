@@ -334,6 +334,85 @@ describe("first-class milestones", () => {
     expect(hollow.promoteable).toEqual([]);
   });
 
+  test("gap-report complete_proof when impl done and not_required or no proof card", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+
+    // All PR children done + proof_status not_required → complete_proof
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-done-nr", title: "Done not required", state: "active",
+      northStar: "ns-a", driver: "driver", proofStatus: "not_required",
+    });
+    await addCmd({
+      cfg, node, slug: "done-pr-nr", title: "Done PR", milestone: "ms-done-nr", northStar: "ns-a",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+
+    // All PR done + empty proof_card + pending → still complete_proof (prefer not_required)
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-done-noproof", title: "Done no card", state: "active",
+      northStar: "ns-b", driver: "driver", proofStatus: "pending",
+    });
+    await addCmd({
+      cfg, node, slug: "done-pr-np", title: "Done PR 2", milestone: "ms-done-noproof", northStar: "ns-b",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+
+    // Linked proof card still pending with no PASS → await_proof (must not false-complete)
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-await", title: "Await real proof", state: "active",
+      northStar: "ns-c", driver: "driver", proofStatus: "pending",
+    });
+    await addCmd({
+      cfg, node, slug: "await-proof-card", title: "Proof", milestone: "ms-await", northStar: "ns-c",
+      kind: "validation", column: "backlog",
+      body: "## GOAL\nProve.\n\n## END STATE\nPASS.\n\nDONE-WHEN: date >= 2099-01-01\n",
+    });
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-await", proofCard: "await-proof-card",
+    });
+    await addCmd({
+      cfg, node, slug: "await-impl-pr", title: "Impl", milestone: "ms-await", northStar: "ns-c",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+
+    const { report } = await milestoneGapReportResult({ cfg, node });
+    const bySlug = Object.fromEntries(report.milestones.map((m) => [m.slug, m]));
+
+    expect(bySlug["ms-done-nr"]?.status).toBe("proof_ready");
+    expect(bySlug["ms-done-nr"]?.action).toBe("complete_proof");
+    expect(bySlug["ms-done-noproof"]?.status).toBe("proof_ready");
+    expect(bySlug["ms-done-noproof"]?.action).toBe("complete_proof");
+    expect(bySlug["ms-await"]?.status).toBe("proof_pending");
+    expect(bySlug["ms-await"]?.action).toBe("await_proof");
+
+    const completeSlugs = report.work_queue.filter((w) => w.action === "complete_proof").map((w) => w.slug);
+    expect(completeSlugs).toEqual(expect.arrayContaining(["ms-done-nr", "ms-done-noproof"]));
+    expect(completeSlugs).not.toContain("ms-await");
+  });
+
+  test("milestone complete with proof_status not_required skips proof card gate", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-nr-complete", title: "NR complete", state: "active",
+      northStar: "ns-a", driver: "driver", proofStatus: "not_required",
+    });
+    await addCmd({
+      cfg, node, slug: "nr-pr", title: "PR", milestone: "ms-nr-complete", northStar: "ns-a",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+    const res = await milestoneStateCmd({
+      cfg, node, slug: "ms-nr-complete", state: "complete", proofStatus: "not_required",
+    });
+    expect(res.to).toBe("complete");
+    expect(res.proof_status).toBe("not_required");
+  });
+
   test("milestoneQueryFieldsLookSparse detects slug-only full-scan rows", () => {
     expect(milestoneQueryFieldsLookSparse({ slug: "ms-a" })).toBe(true);
     expect(milestoneQueryFieldsLookSparse({ slug: "ms-a", title: "", north_star: "" })).toBe(true);
