@@ -235,11 +235,20 @@ async function proofGate(
   target: string,
 ): Promise<void> {
   if (target !== "proving" && target !== "complete") return;
+  // Complete-without-harness path: all implementation PRs done and no product
+  // proof card is the preferred alternative to minting hollow Kind:validation
+  // shells (milestone-driver contract). proving always needs a real proof card.
+  if (target === "complete" && milestone.proof_status === "not_required") {
+    return;
+  }
   if (!milestone.proof_card) {
     throw new FkanbanError({
       code: "milestone_proof_card_required",
       message: `Milestone "${milestone.slug}" cannot enter ${target} without a proof card.`,
-      hint: "Link a live validation card with --proof-card, then retry.",
+      hint:
+        target === "complete"
+          ? "Link a validation card with --proof-card, or complete with --proof-status not_required when no executable harness exists."
+          : "Link a live validation card with --proof-card, then retry.",
     });
   }
   // This one genuinely needs the fields (board/milestone/kind below), so it stays
@@ -307,11 +316,16 @@ async function validateTransition(
 ): Promise<void> {
   const from = existing?.state ?? "planned";
   const to = milestone.state;
-  if (from !== to && !(ALLOWED_TRANSITIONS[from] ?? []).includes(to)) {
+  const allowed = [...(ALLOWED_TRANSITIONS[from] ?? [])];
+  // not_required skips the proving phase (no harness to exercise).
+  if (from === "active" && to === "complete" && milestone.proof_status === "not_required") {
+    allowed.push("complete");
+  }
+  if (from !== to && !allowed.includes(to)) {
     throw new FkanbanError({
       code: "invalid_milestone_transition",
       message: `Milestone "${milestone.slug}" cannot transition ${from} → ${to}.`,
-      hint: `Allowed from ${from}: ${(ALLOWED_TRANSITIONS[from] ?? []).join(", ") || "none"}.`,
+      hint: `Allowed from ${from}: ${allowed.join(", ") || "none"}.`,
     });
   }
   if (milestone.proof_status === "failing" && to !== "active") {
@@ -655,8 +669,15 @@ export function milestoneReconcileFromSnapshot(
   } : null;
   const warnings: MilestoneWarning[] = [];
   if (!milestone.driver) warnings.push({ code: "no-driver", message: "Milestone has no reconciliation driver.", hint: "Assign --driver to a person, agent, or routine." });
-  if (!milestone.proof_card) warnings.push({ code: "no-proof-card", message: "Milestone has no terminal proof card.", hint: "Create and link a validation card with --proof-card." });
-  else if (!proofCard && proofCardSparse) warnings.push({ code: "unreadable-proof-card", message: `Linked proof card "${milestone.proof_card}" exists but could not be read in full.`, hint: `The card is missing one or more indexed fields, so wide reads drop it. Re-save it, or run \`kanban groom board-cards-heal --slug ${milestone.proof_card} --apply\`.` });
+  if (!milestone.proof_card) {
+    if (milestone.proof_status !== "not_required") {
+      warnings.push({
+        code: "no-proof-card",
+        message: "Milestone has no terminal proof card.",
+        hint: "Create and link a validation card with --proof-card, or set --proof-status not_required when no harness exists.",
+      });
+    }
+  } else if (!proofCard && proofCardSparse) warnings.push({ code: "unreadable-proof-card", message: `Linked proof card "${milestone.proof_card}" exists but could not be read in full.`, hint: `The card is missing one or more indexed fields, so wide reads drop it. Re-save it, or run \`kanban groom board-cards-heal --slug ${milestone.proof_card} --apply\`.` });
   else if (!proofCard) warnings.push({ code: "missing-proof-card", message: `Linked proof card "${milestone.proof_card}" is missing.`, hint: "Repair the proof link before proving." });
   else if (proofCard.board !== milestone.board || proofCard.milestone !== milestone.slug) warnings.push({ code: "proof-card-mismatch", message: "Proof card board or milestone link does not match.", hint: "Align the proof card's --board and --milestone fields." });
   if (milestone.state === "blocked" && !milestone.block_reason) warnings.push({ code: "blocked-no-reason", message: "Blocked milestone has no reason.", hint: "Add --block-reason or return it to active." });
@@ -671,15 +692,17 @@ export function milestoneReconcileFromSnapshot(
   if (milestone.state === "active" && incomplete.length > 0 && ready.length === 0 && !inFlight) warnings.push({ code: "active-no-ready-card", message: "Active milestone has implementation work but no ready or in-flight card frontier.", hint: "Resolve dependencies/holds or promote the next implementation card to todo." });
   // Only when real implementation work exists and is fully terminal, with proof still not PASS.
   // Zero children / proof-only milestones must NOT get this warning (false factory-fill poison).
+  // not_required is an intentional complete path — do not keep this as a hang signal.
   if (
     allImplementationDone
     && milestone.state !== "complete"
+    && milestone.proof_status !== "not_required"
     && (!proof?.terminal || !proof.passingEvidence || milestone.proof_status !== "passing")
   ) {
     warnings.push({
       code: "implementation-done-proof-pending",
       message: "Implementation is done but terminal passing proof is still pending.",
-      hint: "Run the proof, record `PROOF: PASS`, mark its status passing, then complete the milestone.",
+      hint: "Run the proof, record `PROOF: PASS`, mark its status passing, then complete the milestone — or complete with --proof-status not_required when no harness exists.",
     });
   }
   if (milestone.state === "complete" && childStatuses.some((child) => child.column !== terminalCol)) warnings.push({ code: "complete-has-active-cards", message: "Complete milestone still has non-terminal child cards.", hint: "Reopen the milestone or finish/abandon the remaining cards." });
@@ -950,7 +973,11 @@ export type MilestoneGapReport = {
   action_counts: Record<MilestoneGapAction, number>;
   milestones: MilestoneGapEntry[];
   /** Ordered work queue for the driver: promote first, then decompose. */
-  work_queue: Array<{ slug: string; action: "promote" | "decompose"; promoteable: string[] }>;
+  work_queue: Array<{
+    slug: string;
+    action: "promote" | "decompose" | "complete_proof";
+    promoteable: string[];
+  }>;
 };
 
 const BODY_STOP_RE = /STOPPED by Tom|resume only by explicit direction|resume only after explicit/i;
@@ -1044,6 +1071,19 @@ export function classifyMilestoneGap(
     if (proof?.passingEvidence) {
       return { ...base, status: "proof_ready", action: "complete_proof", reason: "implementation done; proof body has PASS evidence" };
     }
+    // Prefer closing with not_required over hanging forever or minting hollow
+    // validation shells (last-stack-milestone-driver contract).
+    if (milestone.proof_status === "not_required" || !String(milestone.proof_card ?? "").trim()) {
+      return {
+        ...base,
+        status: "proof_ready",
+        action: "complete_proof",
+        reason:
+          milestone.proof_status === "not_required"
+            ? "implementation Kind:pr done; proof_status=not_required — complete without harness"
+            : "implementation Kind:pr done; no proof card — complete with not_required (no theater shell)",
+      };
+    }
     return { ...base, status: "proof_pending", action: "await_proof", reason: "implementation Kind:pr done; terminal proof still pending" };
   }
   if (pr_live === 0 && pr_done === 0) {
@@ -1121,13 +1161,18 @@ export function buildMilestoneGapReport(
     milestones.push(entry);
   }
 
-  // Work queue: promote before decompose; stable order = portfolio order already in reconciled
+  // Work queue: promote → decompose → complete_proof; stable order = portfolio order
   const work_queue: MilestoneGapReport["work_queue"] = [];
   for (const entry of milestones) {
     if (entry.action === "promote") work_queue.push({ slug: entry.slug, action: "promote", promoteable: entry.promoteable });
   }
   for (const entry of milestones) {
     if (entry.action === "decompose") work_queue.push({ slug: entry.slug, action: "decompose", promoteable: [] });
+  }
+  for (const entry of milestones) {
+    if (entry.action === "complete_proof") {
+      work_queue.push({ slug: entry.slug, action: "complete_proof", promoteable: [] });
+    }
   }
 
   return {
