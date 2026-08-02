@@ -4,10 +4,8 @@ export const FKANBAN_APP_ID = "fkanban";
 export const GATES_LOCAL_SCHEMA = "Reference";
 export const OPEN_DECISIONS_SLUG = "open-decisions";
 
-export type GateStatus = "open" | "cleared";
-
 export type GateEntry = {
-  status: GateStatus;
+  status: "open" | "cleared";
   slug: string;
   program: string;
   unblocks: string;
