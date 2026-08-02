@@ -1015,7 +1015,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["from", "expect", "position", "force"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone"]),
-  rank: new Set(["board", "column"]),
+  rank: new Set(["board", "column", "mode"]),
   search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body"]),
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it

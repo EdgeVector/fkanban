@@ -156,4 +156,14 @@ describe("misapplied-flag rejection (globally-known, wrong command)", () => {
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option");
   });
+
+  test("rank --mode: accepted on rank (NOT an exit-2 unknown-flag rejection)", async () => {
+    // --mode is documented in `kanban rank --help` (hard|priority) and read by
+    // the rank dispatch, so it must never trip the misapplied-flag rejection.
+    // Regression for the pickup-fleet ranker noop: the scheduled todo-rank
+    // wrapper calls `kanban rank --board default --column todo --mode hard`.
+    const { code, stderr } = await runCli(["rank", "--board", "default", "--column", "todo", "--mode", "hard"]);
+    expect(code).not.toBe(2);
+    expect(stderr).not.toContain("Unknown option '--mode'");
+  });
 });
