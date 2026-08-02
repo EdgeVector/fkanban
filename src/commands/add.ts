@@ -18,6 +18,7 @@ import {
   assertUnlessAlreadyViolating,
   sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
+  isScriptLikeCardBody,
   BLOCK_STATUSES,
   CARD_KINDS,
   createCardRecord,
@@ -225,22 +226,11 @@ async function assertBodyIsNotExistingSlugList(opts: AddOptions): Promise<void> 
 function assertBodyIsNotSourceCode(opts: AddOptions): void {
   if (opts.force || opts.body === undefined) return;
   const normalized = opts.body.replace(/\r\n/g, "\n");
-  const trimmed = normalized.trimStart();
-  if (trimmed.length === 0) return;
 
   const hasMarkdownSection = /^##\s+\S/m.test(normalized);
   if (hasMarkdownSection) return;
 
-  const firstLine = trimmed.split("\n", 1)[0] ?? "";
-  const sourceLike =
-    /^#!\s*\//.test(firstLine) ||
-    /^(?:from\s+[A-Za-z_][\w.]*\s+import\s+|import\s+[A-Za-z_][\w.]*)/.test(firstLine) ||
-    /\bsubprocess\.check_output\b/.test(normalized) ||
-    /^\s*def\s+[A-Za-z_]\w*\s*\(/m.test(normalized) ||
-    /^\s*function\s+[A-Za-z_$][\w$]*\s*\(/m.test(normalized) ||
-    /^\s*\/\*/m.test(normalized);
-
-  if (sourceLike) {
+  if (isScriptLikeCardBody(normalized)) {
     throw new FkanbanError({
       code: "body_source_tripwire",
       message: "`add --body` was given content that looks like source code, not a card brief.",

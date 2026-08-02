@@ -1193,6 +1193,55 @@ export function isSubstantiveCardBody(body: string): boolean {
   return prose.join(" ").replace(/\s+/g, " ").trim().length >= 12;
 }
 
+const BODY_TOKEN_STOPWORDS = new Set([
+  "the", "and", "for", "that", "with", "this", "from", "into", "card", "body",
+  "repo", "base", "kind", "goal", "state", "steps", "verify", "done", "when",
+  "context", "end", "edgevector", "fkanban", "main",
+]);
+
+function bodyTokens(body: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const match of body.toLowerCase().matchAll(/[a-z][a-z0-9_-]{2,}/g)) {
+    const token = match[0]!.replace(/^[-_]+|[-_]+$/g, "");
+    if (token.length < 3 || BODY_TOKEN_STOPWORDS.has(token)) continue;
+    tokens.add(token);
+  }
+  return tokens;
+}
+
+function bodyTokenOverlapRatio(a: string, b: string): number {
+  const left = bodyTokens(a);
+  const right = bodyTokens(b);
+  if (left.size === 0 || right.size === 0) return 0;
+  let shared = 0;
+  for (const token of left) if (right.has(token)) shared += 1;
+  return shared / Math.min(left.size, right.size);
+}
+
+export function isScriptLikeCardBody(body: string): boolean {
+  const normalized = body.replace(/\r\n/g, "\n");
+  const trimmed = normalized.trimStart();
+  if (trimmed.length === 0) return false;
+
+  const firstLine = trimmed.split("\n", 1)[0] ?? "";
+  return (
+    /^#!\s*\//.test(firstLine) ||
+    /^(?:from\s+[A-Za-z_][\w.]*\s+import\s+|import\s+[A-Za-z_][\w.]*)/.test(firstLine) ||
+    /\bsubprocess\.check_output\b/.test(normalized) ||
+    /^\s*def\s+[A-Za-z_]\w*\s*\(/m.test(normalized) ||
+    /^\s*function\s+[A-Za-z_$][\w$]*\s*\(/m.test(normalized) ||
+    /^\s*\/\*/m.test(normalized)
+  );
+}
+
+export function bodyLooksLikeKnownClobber(body: string): boolean {
+  return (
+    isScriptLikeCardBody(body) ||
+    /\bASSIGN\s*=\s*\{/m.test(body) ||
+    /\bsubprocess\.check_output\b/.test(body)
+  );
+}
+
 /**
  * Kind:pr work briefs need both a goal and a terminal acceptance section so
  * bulk "scaffold a North Star" sessions cannot park header-only shells that
@@ -1381,6 +1430,27 @@ export function assertBodyReplaceSafe(
   if (force) return;
   if (existingBody === nextBody) return;
   if (!isSubstantiveCardBody(existingBody)) return;
+  if (nextBody.includes(existingBody.trim())) return;
+  if (bodyLooksLikeKnownClobber(nextBody)) {
+    throw new FkanbanError({
+      code: "destructive_body_replace",
+      message: `Refusing to replace the body of "${slug}" with content that looks like generated source code.`,
+      hint: "Use `fkanban mark <slug> \"...\"` for annotations, pipe the full recovered brief via stdin, or pass --force for an intentional audited full-body replacement.",
+    });
+  }
+  if (
+    hasPrWorkBrief(existingBody) &&
+    hasPrWorkBrief(nextBody) &&
+    existingBody.length >= 200 &&
+    nextBody.length >= 200 &&
+    bodyTokenOverlapRatio(existingBody, nextBody) < 0.08
+  ) {
+    throw new FkanbanError({
+      code: "destructive_body_replace",
+      message: `Refusing to replace the body of "${slug}" with an unrelated full brief.`,
+      hint: "Use incremental metadata flags or `fkanban mark` when you are not rewriting the brief. Pass --force for an intentional audited full-body replacement.",
+    });
+  }
   if (isSubstantiveCardBody(nextBody)) return;
   throw new FkanbanError({
     code: "destructive_body_replace",

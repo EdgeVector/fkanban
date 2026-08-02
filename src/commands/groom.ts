@@ -1,6 +1,7 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
+  bodyLooksLikeKnownClobber,
   deriveStructuredFields,
   listBoards,
   listBoardCardsWithBodies,
@@ -43,6 +44,21 @@ export type StructuredRoutingReport = {
   changed: number;
   dryRun: boolean;
   cards: StructuredRoutingRepair[];
+};
+
+export type BodyClobberScanHit = {
+  slug: string;
+  board: string;
+  column: string;
+  reason: string;
+};
+
+export type BodyClobberScanReport = {
+  scanned: number;
+  candidates: number;
+  changed: 0;
+  dryRun: true;
+  cards: BodyClobberScanHit[];
 };
 
 function renderGroomReport(report: GroomReport): string {
@@ -97,6 +113,47 @@ function renderStructuredRoutingReport(report: StructuredRoutingReport): string 
     return `  ${card.slug} [${card.board}/${card.column}] ${fields}`;
   });
   return lines.length ? `${head}\n${lines.join("\n")}` : head;
+}
+
+function renderBodyClobberScanReport(report: BodyClobberScanReport): string {
+  const head =
+    `body-clobber scan: ${report.candidates} candidate cards of ${report.scanned} scanned; ` +
+    "0 changed - DRY RUN, no writes";
+  const lines = report.cards.map((card) =>
+    `  ${card.slug} [${card.board}/${card.column}] - ${card.reason}`
+  );
+  return lines.length ? `${head}\n${lines.join("\n")}` : head;
+}
+
+export async function groomBodyClobberScanResult(opts: GroomStructuredRoutingOptions): Promise<{
+  text: string;
+  report: BodyClobberScanReport;
+}> {
+  const boards = await listBoards(opts.node, opts.cfg);
+  const cards = sortCards(await listBoardCardsWithBodies(opts.node, opts.cfg, { boards }));
+  const hits: BodyClobberScanHit[] = [];
+  for (const card of cards) {
+    if (!bodyLooksLikeKnownClobber(card.body)) continue;
+    hits.push({
+      slug: card.slug,
+      board: card.board,
+      column: card.column,
+      reason: "body matches generated/script clobber signature",
+    });
+  }
+  const report: BodyClobberScanReport = {
+    scanned: cards.length,
+    candidates: hits.length,
+    changed: 0,
+    dryRun: true,
+    cards: hits,
+  };
+  return { text: renderBodyClobberScanReport(report), report };
+}
+
+export async function groomBodyClobberScanCmd(opts: GroomStructuredRoutingOptions): Promise<string> {
+  const { text, report } = await groomBodyClobberScanResult(opts);
+  return opts.json ? JSON.stringify(report, null, 2) : text;
 }
 
 export async function groomStructuredRoutingResult(opts: GroomStructuredRoutingOptions): Promise<{
