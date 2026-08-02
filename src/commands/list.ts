@@ -199,11 +199,49 @@ export async function listResult(
   // Terminal map needs the board list; the footer needs the other boards' slugs.
   // Re-deriving either would be a second Board read for data already in hand.
   const boardsRead = listBoards(opts.node, opts.cfg);
+  // Text → CARD_DISPLAY_FIELDS (~half the BoardCards atoms). JSON / structured
+  // → CARD_LIST_FIELDS (body-free product fields). Never fieldsFor("card") —
+  // that includes body, which BoardCards does not store and which forced the
+  // wide 24-field partition projection by accident.
+  //
+  // Hoisted above the settle because the BoardCards read now joins it, and this
+  // is the only input to that read not already known from `opts`.
+  const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : CARD_LIST_FIELDS;
+  // THIRD read in the same settle, not a second stage after it.
+  //
+  // The board pair above already overlaps with each other; the BoardCards read
+  // that followed was still awaited separately, so a list paid TWO serial round
+  // trips. It did not have to: every input to this read — `boardSlug`,
+  // `opts.column`, the projection — is known before any read is issued, and
+  // nothing the board resolution returns feeds it. The board results are
+  // consumed only AFTER, by `ensureColumn` (column validation) and
+  // `boardTerminalMap` (the dep-seed choice), both of which still run against
+  // the rows below exactly as before.
+  //
+  // Measured live, `probe-list-boardcards-overlap.ts`, 7 interleaved reps
+  // (median): bare `list` 552ms serial -> 291ms overlapped, **0.53x, 7/7 reps**;
+  // `list --column todo` 212ms -> 176ms, 0.83x, 5/7 reps. That is the
+  // round-trips-are-the-cost result (runs d/e/f) applied to the one stage
+  // boundary still left in the hot path.
+  //
+  // The cost of being wrong is bounded and lands only on error paths: a typo'd
+  // `--column` or a missing board now issues one BoardCards read whose rows are
+  // discarded (a prefix read on a slug that matches nothing, rows=0). The happy
+  // path — every list the fleet actually runs — saves a whole round trip.
+  const boardCardsRead = opts.column
+    ? listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields, boardSlug)
+    : listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);
   // `allSettled`, not `all`: with `all` whichever read rejects FIRST decides the
   // error, so a flaky rollup read could mask "no such board" on a typo'd
-  // `--board`. Settling both and rethrowing in the old serial order keeps the
-  // error a caller sees identical to the one they got before.
-  const [boardSettled, boardsSettled] = await Promise.allSettled([boardRead, boardsRead]);
+  // `--board`. Settling all three and rethrowing in the old serial order keeps
+  // the error a caller sees identical to the one they got before — including
+  // the BoardCards read, which used to be issued only after both board reads
+  // had already succeeded and so must still surface last.
+  const [boardSettled, boardsSettled, boardCardsSettled] = await Promise.allSettled([
+    boardRead,
+    boardsRead,
+    boardCardsRead,
+  ]);
   if (boardSettled.status === "rejected") throw boardSettled.reason;
   if (boardsSettled.status === "rejected") throw boardsSettled.reason;
   const board = boardSettled.value;
@@ -244,25 +282,23 @@ export async function listResult(
   // show/move call the same listDependencyStatusesForCards for their
   // authoritative check, so at k <= threshold list now agrees with them by
   // construction rather than by two paths happening to concur.
-  // Text → CARD_DISPLAY_FIELDS (~half the BoardCards atoms). JSON / structured
-  // → CARD_LIST_FIELDS (body-free product fields). Never fieldsFor("card") —
-  // that includes body, which BoardCards does not store and which forced the
-  // wide 24-field partition projection by accident.
-  const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : CARD_LIST_FIELDS;
+  // `visibleFields` is declared above the settle — the BoardCards read needs it.
+  //
   // `allBoards` was read above, overlapped with the board lookup.
   const boardTerminal = boardTerminalMap(allBoards);
   const terminalCol = boardTerminal.get(boardSlug) ?? "done";
 
+  // Rethrown here rather than beside the two board reads: a BoardCards failure
+  // used to surface only after both of those had succeeded, and `ensureColumn`
+  // ran before the read was issued at all. Keeping the throw below that check
+  // preserves both orders, so a caller with a typo'd `--column` on an unreadable
+  // board still gets the column error rather than a read failure.
+  if (boardCardsSettled.status === "rejected") throw boardCardsSettled.reason;
+
   let boardCards: Card[];
   let cards: Card[];
   if (opts.column) {
-    const columnOnly = await listCardsByColumn(
-      opts.node,
-      opts.cfg,
-      opts.column,
-      visibleFields,
-      boardSlug,
-    );
+    const columnOnly = boardCardsSettled.value;
     cards = sortCards(
       columnOnly.filter(
         (c) =>
@@ -314,7 +350,7 @@ export async function listResult(
       boardCards = [...bySlug.values()];
     }
   } else {
-    boardCards = await listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);
+    boardCards = boardCardsSettled.value;
     cards = sortCards(
       boardCards.filter(
         (c) =>

@@ -189,6 +189,55 @@ describe("list overlaps the board lookup with the board-list read", () => {
   // It is here to stop a later `Promise.all` "simplification" from silently
   // swapping which error a caller sees. The other three tests in this file were
   // verified RED against the serial implementation (they time out on it).
+  test("the BoardCards read is in flight with them, not a second stage after", async () => {
+    // The board pair already overlapped with each other, but the BoardCards
+    // read was awaited AFTER both settled — so a list paid two serial round
+    // trips. Nothing the board resolution returns feeds that read: `boardSlug`,
+    // the column and the projection are all known before any read is issued,
+    // and the board results are consumed only afterwards by `ensureColumn` and
+    // `boardTerminalMap`.
+    //
+    // Measured live (`probe-list-boardcards-overlap.ts`, 7 interleaved reps,
+    // median): bare `list` 552ms serial -> 291ms overlapped, 0.53x, 7/7 reps.
+    //
+    // Three readers must arrive before the gate opens: findBoard's point read,
+    // listBoards' scan, and the BoardCards partition. Serial code only ever
+    // gets two of them there — it is still awaiting the pair — so it parks
+    // forever and this test times out. That is the regression signal.
+    const gate = rendezvous(3);
+    const b = board();
+    const node = baseNode(async (q): Promise<QueryResponse> => {
+      await gate.wait();
+      if (q.schemaHash === "boardhash") {
+        return { ok: true, results: [{ fields: boardToFields(b), key: { hash: b.slug, range: null } }] };
+      }
+      return { ok: true, results: [] };
+    });
+
+    const res = await listResult({ node, cfg, displayOnly: true });
+    expect(gate.arrived).toBeGreaterThanOrEqual(3);
+    expect(res.board.slug).toBe("default");
+  });
+
+  test("a typo'd --column still errors on the column, though its read already went out", async () => {
+    // Issuing the BoardCards read before the board resolves means a bad column
+    // now costs one discarded read. What it must NOT change is which error the
+    // caller sees: `ensureColumn` still runs against the resolved board's
+    // columns, and still wins over anything the early read did.
+    const b = board();
+    const node = baseNode(async (q): Promise<QueryResponse> => {
+      if (q.schemaHash === "boardhash") {
+        return { ok: true, results: [{ fields: boardToFields(b), key: { hash: b.slug, range: null } }] };
+      }
+      // The speculative BoardCards read for a column that does not exist.
+      return { ok: true, results: [] };
+    });
+
+    await expect(
+      listResult({ node, cfg, column: "nosuchcolumn", displayOnly: true }),
+    ).rejects.toThrow(/nosuchcolumn/);
+  });
+
   test("a missing --board still reports itself, not whatever the board list did", async () => {
     // With `Promise.all` the FIRST rejection wins, so a flaky rollup read could
     // mask "no such board" on a typo. Both reads fail here; the board error is
