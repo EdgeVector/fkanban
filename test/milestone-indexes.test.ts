@@ -51,11 +51,12 @@ type FakeNode = NodeClient & {
   mutations: Mutation[];
 };
 
-function fakeNode(): FakeNode {
+function fakeNode(opts: { foldMembership?: boolean } = {}): FakeNode {
   const store = new Map<string, Map<string, Record<string, unknown>>>();
   const directMilestoneCardMutations: string[] = [];
   const mutations: Mutation[] = [];
   let foldingMembership = false;
+  const foldMembership = opts.foldMembership ?? true;
   // HashRange: key = `${hash}\0${range}`
   const table = (hash: string) => {
     let value = store.get(hash);
@@ -164,7 +165,7 @@ function fakeNode(): FakeNode {
       if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
         directMilestoneCardMutations.push("create");
       }
-      if (schemaHash === cfg.schemaHashes.board_cards) {
+      if (schemaHash === cfg.schemaHashes.board_cards && foldMembership) {
         await foldBoardCardToMilestoneCard("upsert", fields);
       }
       if (schemaHash === cfg.schemaHashes.milestone) {
@@ -179,7 +180,7 @@ function fakeNode(): FakeNode {
       if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
         directMilestoneCardMutations.push("update");
       }
-      if (schemaHash === cfg.schemaHashes.board_cards) {
+      if (schemaHash === cfg.schemaHashes.board_cards && foldMembership) {
         await foldBoardCardToMilestoneCard("delete", previous);
         await foldBoardCardToMilestoneCard("upsert", fields);
       }
@@ -194,7 +195,7 @@ function fakeNode(): FakeNode {
       if (schemaHash === cfg.schemaHashes.milestone_cards && !foldingMembership) {
         directMilestoneCardMutations.push("delete");
       }
-      if (schemaHash === cfg.schemaHashes.board_cards) {
+      if (schemaHash === cfg.schemaHashes.board_cards && foldMembership) {
         await foldBoardCardToMilestoneCard("delete", previous);
       }
     },
@@ -497,6 +498,49 @@ describe("milestone HashRange indexes", () => {
     expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual([]);
     expect((await listMilestoneCardsPartition(node, cfg, "ms-heal-fold"))?.map((c) => c.slug).sort())
       .toEqual(["fold-heal-indexed", "fold-heal-missing"]);
+  });
+
+  test("reconcile falls back to key reindex when the protein fold does not materialize", async () => {
+    const node = fakeNode({ foldMembership: false });
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-heal-reindex",
+      title: "Reindex-healed outcome",
+      state: "active",
+      northStar: "ns-heal-reindex",
+      driver: "driver",
+    });
+    await addCmd({
+      cfg,
+      node,
+      slug: "reindex-heal-missing",
+      title: "Reindex heal missing",
+      milestone: "ms-heal-reindex",
+      northStar: "ns-heal-reindex",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nReindex-healed child.\n\n## END STATE\nDone.\n",
+    });
+
+    expect(await listMilestoneCardsPartition(node, cfg, "ms-heal-reindex")).toEqual([]);
+    node.directMilestoneCardMutations.length = 0;
+
+    const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-heal-reindex" });
+
+    expect(rec.repairs).toMatchObject({
+      upserts: 1,
+      removals: 0,
+      issued: 1,
+      deferred: 0,
+      direct_payload_upsert: true,
+    });
+    expect(node.directMilestoneCardMutations.filter((op) => op !== "delete")).toEqual(["update"]);
+    expect((await listMilestoneCardsPartition(node, cfg, "ms-heal-reindex"))?.map((c) => c.slug))
+      .toEqual(["reindex-heal-missing"]);
   });
 
   test("hot card paths do not direct-write MilestoneCards payloads", async () => {

@@ -5,7 +5,7 @@
 // Empty milestone field → no row (remove prior if cleared).
 
 import type { Config } from "./config.ts";
-import type { NodeClient } from "./client.ts";
+import type { NodeClient, QueryFilter } from "./client.ts";
 import { MILESTONE_CARDS_FIELDS, MILESTONE_CARDS_LAYOUT } from "./schemas.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
@@ -381,6 +381,41 @@ export async function listMilestoneCardsPartition(
       out.push(card);
     }
     return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Read one MilestoneCards row by its real partition/range key. */
+export async function findMilestoneCardBySk(
+  node: NodeClient,
+  cfg: Config,
+  milestone: string,
+  sk: string,
+): Promise<Card | null> {
+  const schemaHash = milestoneCardsHash(cfg);
+  if (!schemaHash || !milestone.trim() || !sk.trim()) return null;
+  const filter = { HashRangePrefix: { hash: milestone, prefix: sk } } as unknown as QueryFilter;
+  try {
+    const res = await node.queryAll({
+      schemaHash,
+      fields: [...MILESTONE_CARDS_FIELDS],
+      filter,
+    });
+    for (const r of res.results) {
+      if (r.key?.range !== sk) continue;
+      const f = (r.fields ?? {}) as Record<string, unknown>;
+      if (isForeignLayout(f.layout, MILESTONE_CARDS_LAYOUT)) continue;
+      const card = cardFromMilestoneCardFields(f);
+      const parsed = parseBoardCardSk(sk);
+      if (parsed) {
+        if (card.slug.length === 0) card.slug = parsed.slug;
+        if (card.column.length === 0) card.column = parsed.column;
+        if (card.position.length === 0) card.position = parsed.position;
+      }
+      return card.slug.length > 0 ? card : null;
+    }
+    return null;
   } catch {
     return null;
   }

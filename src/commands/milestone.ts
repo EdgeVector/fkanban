@@ -36,7 +36,7 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
-import { listMilestoneCardsPartition, milestoneCardSk, removeMilestoneCard, upsertMilestoneCard } from "../milestone-cards.ts";
+import { findMilestoneCardBySk, listMilestoneCardsPartition, milestoneCardFieldsFromCard, milestoneCardSk, removeMilestoneCard, upsertMilestoneCard } from "../milestone-cards.ts";
 
 export type MilestoneWarning = {
   code: string;
@@ -506,6 +506,7 @@ async function reconcileMilestoneCardChildren(
   // write on the shared primary), so spending it on removals first and then
   // reporting the upserts as deferred is the honest accounting.
   let issued = 0;
+  let fallbackDirectPayloadUpsert = false;
   const exhausted = () => repair.budget !== null && issued >= repair.budget;
   if (repair.apply) {
     for (const row of removals) {
@@ -515,11 +516,34 @@ async function reconcileMilestoneCardChildren(
     }
     for (const { truth, previous, siblings } of upserts) {
       if (exhausted()) break;
-      await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
-        purgeSiblings: siblings,
-        writePayload: repair.directPayloadUpsert,
-      })
-        .catch(() => undefined);
+      if (repair.directPayloadUpsert) {
+        await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
+          purgeSiblings: siblings,
+          writePayload: true,
+        })
+          .catch(() => undefined);
+      } else {
+        await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
+          purgeSiblings: siblings,
+          writePayload: false,
+        })
+          .catch(() => undefined);
+        const expected = milestoneCardFieldsFromCard(truth);
+        const folded = expected
+          ? await findMilestoneCardBySk(opts.node, opts.cfg, String(expected.milestone), String(expected.sk))
+          : null;
+        if (!folded || !milestoneCardSummaryMatchesTruth(folded, truth)) {
+          // Key regeneration is still the repair job's responsibility on nodes
+          // whose protein fold accepted the source write but did not materialize
+          // the sibling tip. Keep the hot card path BoardCards-only.
+          fallbackDirectPayloadUpsert = true;
+          await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
+            purgeSiblings: siblings,
+            writePayload: true,
+          })
+            .catch(() => undefined);
+        }
+      }
       issued++;
     }
   }
@@ -539,7 +563,7 @@ async function reconcileMilestoneCardChildren(
       issued,
       deferred: removals.length + upserts.length - issued,
       budget: repair.budget,
-      direct_payload_upsert: repair.directPayloadUpsert,
+      direct_payload_upsert: repair.directPayloadUpsert || fallbackDirectPayloadUpsert,
     },
   };
 }
