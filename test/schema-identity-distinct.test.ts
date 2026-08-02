@@ -8,6 +8,7 @@ import {
   boardCardsSchema,
   boardMilestonesSchema,
   milestoneCardsSchema,
+  CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS,
   type AddSchemaRequest,
 } from "../src/schemas.ts";
 
@@ -82,17 +83,29 @@ describe("fkanban schema identity distinctness", () => {
     expect(boardMilestonesSchema.schema.fields).toContain("completed_at");
   });
 
-  test("BoardCards and MilestoneCards share matching field descriptions except key-local layout", () => {
+  test("BoardCards and MilestoneCards share matching field identities except layout", () => {
     const boardDescriptions = boardCardsSchema.schema.field_descriptions;
     const milestoneDescriptions = milestoneCardsSchema.schema.field_descriptions;
+    const boardTypes = boardCardsSchema.schema.field_types;
+    const milestoneTypes = milestoneCardsSchema.schema.field_types;
+    const sharedFields = boardCardsSchema.schema.fields.filter(
+      (field) => field !== "layout" && milestoneCardsSchema.schema.fields.includes(field),
+    );
 
-    for (const field of ["board", "milestone", "sk", "assignee", "created_by"]) {
+    expect(sharedFields).toEqual(Object.keys(CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS));
+
+    for (const field of sharedFields) {
       expect(
         milestoneDescriptions[field],
-        `${field} should fold through the same field identity`,
+        `${field} description should fold through the same field identity`,
       ).toBe(boardDescriptions[field]);
+      expect(
+        JSON.stringify(milestoneTypes[field]),
+        `${field} type should fold through the same field identity`,
+      ).toBe(JSON.stringify(boardTypes[field]));
     }
 
     expect(milestoneDescriptions.layout).not.toBe(boardDescriptions.layout);
+    expect(JSON.stringify(milestoneTypes.layout)).toBe(JSON.stringify(boardTypes.layout));
   });
 });
