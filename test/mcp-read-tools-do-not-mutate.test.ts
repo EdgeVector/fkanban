@@ -20,6 +20,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { createFkanbanMcpServer, FKANBAN_READ_TOOLS } from "../src/mcp/server.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { Config } from "../src/config.ts";
 import { boardToFields, nowIso } from "../src/record.ts";
 import { addCmd } from "../src/commands/add.ts";
@@ -75,12 +79,53 @@ const READ_TOOL_ARGS: Record<string, Record<string, unknown>> = {
   fkanban_ping: {},
 };
 
-async function connect(node: FakeNode): Promise<Client> {
+async function connect(node: FakeNode, serverCfg: Config = cfg): Promise<Client> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0.0.0" });
-  const server = createFkanbanMcpServer({ cfg, node });
+  const server = createFkanbanMcpServer({ cfg: serverCfg, node });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   return client;
+}
+
+/**
+ * A throwaway LastDB status endpoint on a Unix socket, for `fkanban_ping`.
+ *
+ * Ping is the one read tool that does not go through the injected `NodeClient`
+ * — it is a raw `GET /api/status`, which is the whole point of it being the
+ * cheap liveness check. Until 2026-08-02 it also re-read the config from DISK,
+ * so this unit test issued a real status request to Tom's PRIMARY brain on
+ * every run: ~176 KB of response, 98% of it the node's telemetry ring, inside
+ * a 5s test budget. That is a unit test load-testing production, and it duly
+ * failed a merge gate at 5001ms while passing locally in 600ms.
+ *
+ * The tool now takes the server's own config (`PingOptions.cfg`), so the fix is
+ * to give this test a node of its own. The socket must be named `folddb.sock`:
+ * `/api/status` is not in `SOCKET_OWNER_ROUTES`, so the client only routes it
+ * over a socket it recognises as full-surface — canonical basename with no
+ * `folddb-full.sock` sibling. Any other name silently falls back to TCP and the
+ * probe fails against a server that is right there.
+ */
+function startStatusSocket(): { cfg: Config; stop: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "kanban-ping-"));
+  const socketPath = join(dir, "folddb.sock");
+  const server = Bun.serve({
+    unix: socketPath,
+    fetch(req) {
+      if (new URL(req.url).pathname === "/api/status") {
+        return new Response(JSON.stringify({ ok: true, status: {} }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+  return {
+    cfg: { ...cfg, nodeUrl: "http://localhost", nodeSocketPath: socketPath },
+    stop: () => {
+      server.stop(true);
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 /**
@@ -171,15 +216,33 @@ describe("declared MCP read tools do not mutate", () => {
   for (const [tool, args] of Object.entries(READ_TOOL_ARGS)) {
     test(`${tool} issues no writes`, async () => {
       const node = await seedDriftedBoard();
-      const client = await connect(node);
-      node.writes.length = 0;
+      // Ping reaches a node directly rather than through the fake client, so it
+      // gets one of its own — see `startStatusSocket`. Everything else runs
+      // against the shared fake config.
+      const status = tool === "fkanban_ping" ? startStatusSocket() : null;
+      try {
+        const client = await connect(node, status?.cfg ?? cfg);
+        node.writes.length = 0;
 
-      const res = await client.callTool({ name: tool, arguments: args });
+        const res = await client.callTool({ name: tool, arguments: args });
 
-      // A tool that failed early would also have written nothing, which would
-      // make the real assertion hollow — so require it actually ran.
-      expect(res.isError).toBeFalsy();
-      expect(node.writes).toEqual([]);
+        // A tool that failed early would also have written nothing, which would
+        // make the real assertion hollow — so require it actually ran.
+        expect(res.isError).toBeFalsy();
+        expect(node.writes).toEqual([]);
+        if (status) {
+          // The load-bearing assertion, and NOT `isError` — a ping aimed at the
+          // real primary succeeds too, which is exactly how this test spent
+          // months probing production without anyone noticing. Naming the
+          // socket it actually reached is the only thing that can tell the two
+          // successes apart.
+          expect((res.structuredContent as { socket_path?: string }).socket_path).toBe(
+            status.cfg.nodeSocketPath!,
+          );
+        }
+      } finally {
+        status?.stop();
+      }
     });
   }
 

@@ -1333,7 +1333,11 @@ export function createFkanbanMcpServer(
     },
     async () => {
       try {
-        const report = await runPingStructured();
+        // The server's OWN config, not whatever is on disk. `fkanban_ping` was
+        // the one tool here that re-read the config file, so a server pointed
+        // at a specific node could probe a different one — and a unit test
+        // could not stop it reaching the real primary. See `PingOptions.cfg`.
+        const report = await runPingStructured({ cfg: cfg ?? undefined });
         const line = report.ok
           ? `✓ node ok in ${report.latency_ms}ms`
           : `✗ node unreachable — ${report.error}`;

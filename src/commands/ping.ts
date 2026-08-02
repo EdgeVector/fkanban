@@ -6,7 +6,7 @@
 
 import pkg from "../../package.json" with { type: "json" };
 import { pingNode, type PingReport, type Verbose } from "../client.ts";
-import { resolveSocketPath, tryReadConfig } from "../config.ts";
+import { resolveSocketPath, tryReadConfig, type Config } from "../config.ts";
 
 // `version` is the installed fkanban CLI version (same source as
 // `kanban --version`) — a report field, not a liveness signal.
@@ -14,6 +14,26 @@ export type PingCommandReport = PingReport & { version: string };
 
 export type PingOptions = {
   configPath?: string;
+  /**
+   * Config to probe, for a caller that already HAS one.
+   *
+   * The MCP server is that caller: it is handed a `Config` at construction and
+   * every other tool it exposes uses it, but `fkanban_ping` alone went back to
+   * disk through `tryReadConfig` and probed whatever node THAT file named. Two
+   * consequences, and the second is why this parameter exists:
+   *
+   *   - a server explicitly pointed at one node could ping a different one, and
+   *   - the tool could not be exercised hermetically, so
+   *     `mcp-read-tools-do-not-mutate.test.ts` — a unit test — issued a real
+   *     status request to Tom's primary brain on every run. `/api/status` is
+   *     ~176 KB, 98% of it the node's telemetry ring, and the test's 5s budget
+   *     was then a bet on the shared primary's latency. It lost on 2026-08-02
+   *     (5001ms) and failed a merge gate that had nothing to do with ping.
+   *
+   * `configPath` still wins nothing over this: an explicit config is the most
+   * specific thing a caller can supply, so it short-circuits the disk read.
+   */
+  cfg?: Config;
   json?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
@@ -25,7 +45,7 @@ export type PingOptions = {
 export async function runPingStructured(
   opts: Omit<PingOptions, "json" | "print"> = {},
 ): Promise<PingCommandReport> {
-  const cfg = tryReadConfig(opts.configPath);
+  const cfg = opts.cfg ?? tryReadConfig(opts.configPath);
   if (!cfg) {
     return {
       ok: false,
