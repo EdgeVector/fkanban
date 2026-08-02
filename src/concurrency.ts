@@ -14,12 +14,20 @@
 // them back against the input without tracking slugs.
 
 /**
- * Default fan-out width for point-read pools.
+ * Default fan-out width for read pools.
  *
  * Six is enough to hide socket latency on a few-hundred-card board without
- * looking like a scraper. Deliberately modest: a `rows=1` Card point-read
- * averages ~2s on the primary under the 0.23.1 HashGroup warm-cap read
- * regression, so a wide pool buys little and risks the shed threshold.
+ * looking like a scraper. Deliberately modest: the bound exists to stay under
+ * the shed threshold, not to be an optimum.
+ *
+ * This used to justify itself with "a `rows=1` Card point-read averages ~2s on
+ * the primary under the 0.23.1 HashGroup warm-cap read regression". That number
+ * is retired — re-measured 2026-08-02 the same read is **21–34ms**
+ * (`probe-dep-seed-vs-point.ts`), and the stale version of it had already
+ * bought an unbounded archive scan in the `list` dep seed to dodge a cost that
+ * no longer existed. The width stays at six anyway, for the load-guard reason
+ * above; the point is that it is no longer propped up by a measurement two
+ * orders of magnitude off.
  */
 export const POINT_READ_CONCURRENCY = 6;
 
