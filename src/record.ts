@@ -1137,25 +1137,73 @@ function strictBaseProblem(card: Pick<Card, "base" | "body">): string | null {
  * and pickup classified the card as a collision so it was never claimed).
  *
  * Call after applying explicit structured fields. Mutates `card` in place.
- * Returns true when any field was cleared.
+ * Returns the field names it cleared (empty when it cleared nothing) — callers
+ * need the names, not just "something changed", so they can tell the operator
+ * which write was discarded. A clear that nobody reports is how `add --pr-url`
+ * spent months exiting 0 on a card whose `pr_url` stayed `""`.
  */
-export function sanitizeDefaultTodoLaneMetadata(card: Card): boolean {
-  if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return false;
-  let changed = false;
+export function sanitizeDefaultTodoLaneMetadata(card: Card): TodoLaneField[] {
+  if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return [];
+  const cleared: TodoLaneField[] = [];
   // Planned branch names belong in the body brief only until a PR is open AND
   // the card is in doing. Structured `branch` on todo blocks/collides pickup.
   if (card.branch.trim()) {
     card.branch = "";
-    changed = true;
+    cleared.push("branch");
   }
   // An open PR on a *todo* card means requeue/incomplete reconcile — not a
   // claimable unit. Clear so the next pickup can own it (or watch can re-attach
   // after move to doing). Agents set pr_url after claiming into doing.
   if (card.pr_url.trim()) {
     card.pr_url = "";
-    changed = true;
+    cleared.push("pr_url");
   }
-  return changed;
+  return cleared;
+}
+
+// The fields `sanitizeDefaultTodoLaneMetadata` owns, and the CLI flag each one
+// is written through — the flag is what the operator typed, so it is what an
+// error about a discarded write has to name.
+export type TodoLaneField = "branch" | "pr_url";
+const TODO_LANE_FIELD_FLAG: Record<TodoLaneField, string> = {
+  branch: "--branch",
+  pr_url: "--pr-url",
+};
+
+/**
+ * Reject an explicit `--branch` / `--pr-url` write that lands in default/todo.
+ *
+ * `sanitizeDefaultTodoLaneMetadata` clears both fields there unconditionally —
+ * `--force` does not preserve them, because the lane invariant is what keeps a
+ * todo card claimable. So there is no state in which the requested value
+ * survives, and the honest answer is a refusal the caller can act on rather
+ * than an exit 0 over a field that stayed empty. Clearing (an explicit empty
+ * value) is always allowed: it asks for what the lane already guarantees.
+ *
+ * Call with the card's FINAL resolved board/column, before the record write.
+ */
+export function assertNoExplicitTodoLaneMetadata(
+  card: Pick<Card, "slug" | "board" | "column">,
+  explicit: { branch?: string; prUrl?: string },
+): void {
+  if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return;
+  const requested: TodoLaneField[] = [];
+  if (explicit.branch !== undefined && explicit.branch.trim()) requested.push("branch");
+  if (explicit.prUrl !== undefined && explicit.prUrl.trim()) requested.push("pr_url");
+  if (requested.length === 0) return;
+
+  const flags = requested.map((f) => TODO_LANE_FIELD_FLAG[f]).join(" / ");
+  throw new FkanbanError({
+    code: "todo_lane_metadata_rejected",
+    message:
+      `Card "${card.slug}" cannot carry ${flags} in default/todo — ` +
+      `${requested.join(" and ")} are always cleared there.`,
+    hint:
+      "Default todo is the pickup claim lane; in-flight PR/branch metadata makes pickup " +
+      `classify the card as a collision, so --force cannot preserve ${requested.join("/")} either. ` +
+      `Claim the card first (\`fkanban move ${card.slug} doing\`), then set the field. ` +
+      "Passing an empty value to clear is always allowed.",
+  });
 }
 
 // Lines that are ownership headers, provenance, or routine annotations — not

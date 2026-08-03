@@ -14,6 +14,7 @@ import {
   assertDefaultTodoPickupReady,
   assertDepUnblocked,
   assertLivePrMilestone,
+  assertNoExplicitTodoLaneMetadata,
   assertPrWorkBrief,
   assertUnlessAlreadyViolating,
   sanitizeDefaultTodoLaneMetadata,
@@ -415,6 +416,11 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
           enforce: opts.cfg.enforceLivePrMilestone === true,
         }),
     );
+    // An explicit --branch/--pr-url that the lane is about to clear is refused
+    // rather than dropped. Unconditional: unlike the guards above, this is not
+    // a placement violation the card can already be in — it is a write THIS
+    // call asked for and the lane cannot keep.
+    assertNoExplicitTodoLaneMetadata(updated, { branch: opts.branch, prUrl: opts.prUrl });
     sanitizeDefaultTodoLaneMetadata(updated);
     assertUnlessAlreadyViolating(
       placementUnchanged,
@@ -477,6 +483,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     milestoneState: resolvedMilestoneState,
     enforce: opts.cfg.enforceLivePrMilestone === true,
   });
+  assertNoExplicitTodoLaneMetadata(card, { branch: opts.branch, prUrl: opts.prUrl });
   sanitizeDefaultTodoLaneMetadata(card);
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertSituationPreflightAllowed(card, opts.situationPreflight);
