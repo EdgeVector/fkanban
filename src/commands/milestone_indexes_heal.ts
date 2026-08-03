@@ -24,6 +24,11 @@ export type MilestoneIndexesHealResult = {
   milestone_cards_bound: boolean;
   applied: boolean;
   budget: number | null;
+  /** Slugs the full scan returned — mostly husks; NOT a count of live milestones. */
+  milestones_enumerated: number;
+  /** Enumerated slugs whose point-read found nothing (deleted husks). */
+  milestone_husks_dropped: number;
+  /** Enumerated slugs that point-read back to a live milestone. */
   milestones_scanned: number;
   milestone_card_children_scanned: number;
   board_milestone_upserts: number;
@@ -90,6 +95,7 @@ async function classifyBoardMilestoneOps(opts: {
     }
   }
 
+  const recovered = new Set<string>();
   for (const [board, rows] of rowsByBoard) {
     if (rows === null) continue;
     for (const row of rows) {
@@ -99,6 +105,20 @@ async function classifyBoardMilestoneOps(opts: {
       const truth = bySlug.get(row.slug) ?? await findMilestone(opts.node, opts.cfg, row.slug);
       if (!truth || (truth.board || "default") !== board) {
         ops.push({ kind: "remove", milestone: row });
+        continue;
+      }
+      // The point-read above just proved this milestone is LIVE and on this
+      // board. If the scan never enumerated it, the upsert loop never saw it,
+      // and a stale row for it would stay stale forever — the under-repair this
+      // command's doc deferred. The truth is already in hand, so closing that
+      // gap costs NO extra read: run it through the same drift check.
+      //
+      // The index supplies a CANDIDATE here, never truth — every candidate is
+      // confirmed by point-read before use — so a degraded BoardMilestones
+      // cannot shrink its own repair set below what the scan already covers.
+      if (!bySlug.has(row.slug) && !recovered.has(row.slug) && !boardMilestoneMatchesTruth(row, truth)) {
+        recovered.add(row.slug);
+        ops.push({ kind: "upsert", milestone: truth, previous: row });
       }
     }
   }
@@ -148,10 +168,29 @@ function budgetAllowsAnother(budget: number | null, issued: number): boolean {
  * one read per index row the scan could not account for, on a repair path that
  * is already the slowest command here — and only for rows about to be deleted.
  *
- * A milestone the scan misses is still under-repaired: it lands in neither the
- * upsert set nor the removal set, so a STALE row for it stays stale. That is
- * the safe direction (a stale row beats a deleted one) and is deliberately left
- * to a follow-up rather than widened here.
+ * ## Recall: the scan is a candidate source, not an enumeration
+ *
+ * Fixing the delete stopped the damage but left the command repairing almost
+ * nothing. Measured on the primary 2026-08-03
+ * (`scripts/probe-milestone-heal-hydrate-drop.ts`): the scan enumerated **21**
+ * slugs, of which **10** point-read back to a live milestone and **11** were
+ * husks of deleted ones — against **38** live milestones in BoardMilestones.
+ * So as a truth source the scan ran at ~48% precision and ~26% recall, and the
+ * upsert loop only ever saw those 10. A stale row for any of the other 28 could
+ * never be repaired, while the command printed `scanned=10 ... removals=0` and
+ * exited 0.
+ *
+ * The removal loop was already point-reading every one of those 28 rows to
+ * prove it must not delete them — and discarding the hydrated truth. So the
+ * upsert set is now widened from that same read: an index row whose point-read
+ * confirms it LIVE and on-board is drift-checked like any scanned milestone.
+ * This costs **no additional node reads**.
+ *
+ * That does not reintroduce the hazard this command was built to avoid. The
+ * index supplies a CANDIDATE; truth still comes only from the point-read. A
+ * degraded BoardMilestones can therefore only fail to *offer* a candidate — it
+ * can never shrink the repair set below what the scan already covers, and it
+ * can never authorize a write on its own say-so.
  */
 export async function milestoneIndexesHealResult(opts: {
   cfg: Config;
@@ -172,6 +211,8 @@ export async function milestoneIndexesHealResult(opts: {
       milestone_cards_bound: false,
       applied: apply,
       budget,
+      milestones_enumerated: 0,
+      milestone_husks_dropped: 0,
       milestones_scanned: 0,
       milestone_card_children_scanned: 0,
       board_milestone_upserts: 0,
@@ -206,10 +247,18 @@ export async function milestoneIndexesHealResult(opts: {
     return mapped.slug || String((row.fields as { slug?: string } | undefined)?.slug ?? "");
   }).filter(Boolean);
 
+  // The scan ENUMERATES; only a point-read establishes truth. Most of what it
+  // returns on the live primary is husks of deleted milestones, so track what
+  // the hydrate discards instead of letting `scanned` imply the scan found it.
+  // Measured 2026-08-03: 21 enumerated -> 10 live, 11 husks.
   const milestones: Milestone[] = [];
+  let husksDropped = 0;
   for (const slug of slugs) {
     const full = await findMilestone(opts.node, opts.cfg, slug);
-    if (!full) continue;
+    if (!full) {
+      husksDropped++;
+      continue;
+    }
     if (opts.board && full.board !== opts.board) continue;
     milestones.push(full);
   }
@@ -282,7 +331,7 @@ export async function milestoneIndexesHealResult(opts: {
   const text = [
     "milestone indexes heal:",
     `  applied=${apply} budget=${budget === null ? "unlimited" : budget}`,
-    `  board_milestones bound=${boardMsBound} scanned=${milestones.length} upserts=${boardMilestoneUpserts} removals=${boardMilestoneRemovals}`,
+    `  board_milestones bound=${boardMsBound} scanned=${milestones.length} (enumerated=${slugs.length} husks_dropped=${husksDropped}) upserts=${boardMilestoneUpserts} removals=${boardMilestoneRemovals}`,
     `  milestone_cards bound=${msCardsBound} mode=${directMilestoneCardPayloadUpsert ? "direct-payload-upsert" : "protein-fold-request"} children_scanned=${milestoneCardChildrenScanned} upserts=${milestoneCardUpserts} removals=${milestoneCardRemovals}`,
     `  issued=${issued} deferred=${deferred}`,
   ].join("\n");
@@ -292,6 +341,8 @@ export async function milestoneIndexesHealResult(opts: {
     milestone_cards_bound: msCardsBound,
     applied: apply,
     budget,
+    milestones_enumerated: slugs.length,
+    milestone_husks_dropped: husksDropped,
     milestones_scanned: milestones.length,
     milestone_card_children_scanned: milestoneCardChildrenScanned,
     board_milestone_upserts: boardMilestoneUpserts,
