@@ -262,6 +262,42 @@ export function boardCardSk(column: string, position: string | number, slug: str
   return `${column}#${pos}#${slug}`;
 }
 
+/**
+ * Invert {@link boardCardSk}'s `padStart(8, "0")` on the position segment.
+ *
+ * The inverse of STRING padding is STRING stripping. This used to be
+ * `String(Number(seg))`, which is a different operation that happens to agree
+ * on plain integers and disagrees destructively everywhere else:
+ *
+ * | position | key segment | `String(Number(…))` | strip |
+ * |---|---|---|---|
+ * | `7777` | `00007777` | `7777` | `7777` |
+ * | `m` | `0000000m` | **`NaN`** | `m` |
+ * | `-5` | `000000-5` | **`NaN`** | `-5` |
+ * | `1e3` | `000001e3` | **`1000`** | `1e3` |
+ *
+ * The `1e3` row is the one worth staring at: the numeric path did not fail
+ * loudly there, it returned a plausible DIFFERENT position. `board_cards_heal`
+ * compares rebuilt addresses (`boardCardSk(r.column, r.position, r.slug) ===
+ * truthSk`) and writes the parsed value back, so a value that parses to
+ * something else is how a correct membership row gets reported stale and then
+ * "repaired" into a wrong rank.
+ *
+ * What still does not round-trip is a position whose own string form STARTS
+ * with `0` (`"007"` pads to `"00000007"` and strips back to `"7"`). That is not
+ * recoverable here and not a parse bug: `padStart` is not injective over such
+ * inputs, so the key format itself cannot represent them distinctly. Callers
+ * that need to know go through the rebuild check — a position that survives
+ * `boardCardSk(column, position, slug) === sk` is exact, and that comparison is
+ * what heal already gates on.
+ *
+ * An all-zero segment is the position `0`, not the empty string.
+ */
+function unpadBoardCardPosition(segment: string): string {
+  const stripped = segment.replace(/^0+/, "");
+  return stripped.length > 0 ? stripped : "0";
+}
+
 export function parseBoardCardSk(
   sk: string,
 ): { column: string; position: string; slug: string } | null {
@@ -271,7 +307,7 @@ export function parseBoardCardSk(
   if (j < 0) return null;
   return {
     column: sk.slice(0, i),
-    position: String(Number(sk.slice(i + 1, j))),
+    position: unpadBoardCardPosition(sk.slice(i + 1, j)),
     slug: sk.slice(j + 1),
   };
 }
@@ -354,12 +390,19 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
  * `sk` IS `QueryRow.key.range`; `parseBoardCardSk` slices `column` off its head
  * and `slug` off its tail, both exactly.
  *
- * `position` is deliberately NOT here. `boardCardSk` pads it
- * (`String(position).padStart(8,"0")`) and `parseBoardCardSk` un-pads it with
- * `String(Number(...))` — a round trip that only holds for NUMERIC positions.
- * A lexical position (`"m"`) becomes `"0000000m"` in the key and parses back as
- * `"NaN"`, so reconstructing it would silently corrupt the field that ORDERS
- * the board. `board` is excluded too, but for a different reason: it leads the
+ * `position` is deliberately NOT here, and the reason CHANGED on 2026-08-03.
+ * It used to be that `parseBoardCardSk` un-padded through `String(Number(...))`
+ * and turned a lexical position into `"NaN"` — that is now fixed
+ * ({@link parseBoardCardSk}), so the key does recover `position` for every
+ * value the key can represent.
+ *
+ * What is left is the narrower gap that `padStart` itself cannot close: a
+ * position whose string form starts with `0` (`"007"`) is indistinguishable in
+ * the key from `"7"`. Deriving `position` from the key would silently rewrite
+ * those, and unlike `slug`/`column` there is no projected copy left to check
+ * the derivation against — dropping the field IS giving up the only witness. So
+ * the field stays projected and the key-derived value stays a cross-check, not
+ * a source. `board` is excluded too, but for a different reason: it leads the
  * projection, and the leading field gates the row set.
  */
 const BOARD_CARDS_KEY_DERIVED_FIELDS = ["sk", "slug", "column"] as const;

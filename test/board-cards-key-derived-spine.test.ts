@@ -8,12 +8,17 @@
 // identical row sets and zero disagreement on the reconstructed values.
 //
 // `position` looks like it belongs in that set and does not. `boardCardSk`
-// pads it to 8 chars and `parseBoardCardSk` un-pads it through `Number`, so
-// the round trip holds for numeric positions and DESTROYS lexical ones:
-// "m" -> "0000000m" -> "NaN". Deriving it would have silently corrupted the
-// field that orders the board — caught here because
-// `heal-scan-board-attribution.test.ts` uses position "m" and started
-// reporting a correctly-membered card as stale.
+// pads it to 8 chars, and `parseBoardCardSk` used to un-pad it through
+// `Number` — so "m" -> "0000000m" -> "NaN" and "1e3" -> "000001e3" -> "1000".
+// Caught here because `heal-scan-board-attribution.test.ts` uses position "m"
+// and started reporting a correctly-membered card as stale.
+//
+// That un-pad is fixed (2026-08-03): it strips the padding at the string
+// level, which is the actual inverse of `padStart`. `position` still stays
+// projected, for the smaller reason that survives the fix — `padStart` is not
+// injective over positions whose string form starts with "0" ("007" and "7"
+// share a key segment), and unlike slug/column there is no second copy left to
+// check a key-derived value against once the field is dropped.
 
 import { describe, expect, test } from "bun:test";
 
@@ -81,10 +86,41 @@ describe("boardCardsWireProjection", () => {
   test("keeps `position` — the key cannot supply it losslessly", () => {
     expect(boardCardsWireProjection([...BOARD_CARDS_LIST_FIELDS])).toContain("position");
     expect(boardCardsWireProjection([...BOARD_CARDS_DEP_SEED_FIELDS])).toContain("position");
-    // The reason, pinned directly: a lexical position does not survive the
-    // pad/un-pad round trip the key forces it through.
-    expect(parseBoardCardSk(boardCardSk("todo", "m", "x"))!.position).toBe("NaN");
-    expect(parseBoardCardSk(boardCardSk("todo", "7777", "x"))!.position).toBe("7777");
+    // The reason, pinned directly — and it is NOT "lexical positions break"
+    // any more (parseBoardCardSk un-pads at the string level since 2026-08-03).
+    // It is that `padStart` is not injective over positions whose own string
+    // form starts with "0", and dropping the field would remove the only copy
+    // left to check a key-derived value against.
+    expect(parseBoardCardSk(boardCardSk("todo", "007", "x"))!.position).toBe("7");
+    expect(parseBoardCardSk(boardCardSk("todo", "7", "x"))!.position).toBe("7");
+  });
+
+  test("parseBoardCardSk inverts the pad instead of parsing it as a number", () => {
+    // The papercut this closes: `String(Number(segment))` agrees with the real
+    // inverse on plain integers and diverges destructively elsewhere. Each row
+    // is a position `boardCardSk` CAN represent, so the round trip must be
+    // exact.
+    for (const position of ["7777", "0", "1", "1.5", "m", "a0", "-5", "1e3", "z9z"]) {
+      const sk = boardCardSk("todo", position, "x");
+      const parsed = parseBoardCardSk(sk)!;
+      expect(parsed.position).toBe(position);
+      // The property heal actually gates on: the rebuilt address equals the
+      // real key, so a correct membership row can never read as stale.
+      expect(boardCardSk(parsed.column, parsed.position, parsed.slug)).toBe(sk);
+    }
+  });
+
+  test("`1e3` is the row that made this destructive rather than merely broken", () => {
+    // Number() did not fail loudly here — it returned a plausible DIFFERENT
+    // position (1000), which heal would have compared, rejected, and written
+    // back over a correct rank.
+    expect(String(Number("000001e3"))).toBe("1000");
+    expect(parseBoardCardSk(boardCardSk("todo", "1e3", "x"))!.position).toBe("1e3");
+  });
+
+  test("a position longer than the pad width is untouched in both directions", () => {
+    const sk = boardCardSk("todo", "123456789", "x");
+    expect(parseBoardCardSk(sk)!.position).toBe("123456789");
   });
 
   test("preserves the LEADING field verbatim, even when it is key-derived", () => {
