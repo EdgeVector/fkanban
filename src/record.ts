@@ -1939,27 +1939,97 @@ export function depStatus(
   return { blockedBy, missing, blocked: blockedBy.length > 0 };
 }
 
+// The warning `--force` prints when it waives the dependency soft-block. Kept
+// beside `blockedByMessage` because it voices the same verdict: the operator
+// gets the identical "blocked by X, Y" sentence whether the gate refused or was
+// overridden, so the two readings cannot drift into disagreeing about the card.
+export function forcedDepWaiverWarning(slug: string, column: string, blockedBy: string[]): string {
+  return `warning: --force placed blocked card "${slug}" in ${column} — ` +
+    `${blockedByMessage(slug, blockedBy)} The dependency block was overridden, not satisfied.`;
+}
+
+/**
+ * Refuse to place a card into a dep-enforced column while a dependency is
+ * unfinished — and under `--force`, SAY SO instead of waiving in silence.
+ *
+ * ## Why the waiver had to start speaking
+ *
+ * `--force` is one global waiver over independent guards: in `move` alone it
+ * disables the live-PR milestone gate, the default/todo pickup-readiness gate,
+ * the lifecycle CI gate and this one. The gates do not share a subject, so
+ * clearing one is not evidence about the others — but the error messages
+ * recommend the flag per-gate. `assertLivePrMilestone`'s hint ends "or --force
+ * for an intentional Unassigned/Operational exception", and an operator who
+ * follows that sentence to get past a MILESTONE requirement also, silently,
+ * moves a card into `doing` with unfinished dependencies.
+ *
+ * Measured on the live board 2026-08-03: `move <slug> doing --force`, offered
+ * by the milestone error, printed only `moved … todo → doing` while `show`
+ * immediately rendered the same card `🔒 blocked` in `doing`. Two guards
+ * waived, one asked for, neither reported.
+ *
+ * This project already treats that overload as a hazard — `kanban-stress-script`
+ * has a dedicated test forbidding `--force` in the stress harness precisely
+ * because it "would also disable assertBodyReplaceSafe, assertDepUnblocked and
+ * the Situations preflight". The hazard was banned in the harness and
+ * recommended in the error message; this closes that gap from the other side.
+ *
+ * The waiver still waives — agents and operators depend on it, and a blocked
+ * card in `doing` is a legitimate thing to ask for. It just stops being invisible.
+ *
+ * ## Two constraints the shape here exists to honor
+ *
+ *   1. **The fast path stays free.** `depStatus` only ever iterates `card.deps`,
+ *      so a card with no deps cannot be blocked. Returning on that BEFORE the
+ *      reads keeps every forced write on a dep-free card exactly as cheap as it
+ *      was; the reads are paid only when there is a real verdict to report, and
+ *      then they are the same two reads the unforced path always pays.
+ *   2. **Reporting must never gate.** `--force` is what you reach for when the
+ *      node is degraded, so a read failure here must not turn a write that used
+ *      to succeed into one that fails. The lookup is therefore best-effort under
+ *      force and the waiver proceeds regardless — the same convention
+ *      `checkpointCardCompletion` follows for its Brain write.
+ */
 export async function assertDepUnblocked(
   node: NodeClient,
   cfg: Config,
   card: Card,
   force?: boolean,
 ): Promise<void> {
-  if (force) return;
-  const boardTerminal = boardTerminalMap(await listBoards(node, cfg));
-  if (!isDepEnforcedColumn(card.column, card.board, boardTerminal)) return;
-  const status = depStatus(
-    card,
-    await listDependencyStatusesForCards(node, cfg, [card]),
-    boardTerminal,
-  );
-  if (status.blocked) {
-    throw new FkanbanError({
-      code: "card_blocked",
-      message: blockedByMessage(card.slug, status.blockedBy),
-      hint: blockedByHint(),
-    });
+  if (force && card.deps.length === 0) return;
+
+  let boardTerminal: Map<string, string>;
+  let status: DepStatus;
+  try {
+    boardTerminal = boardTerminalMap(await listBoards(node, cfg));
+    if (!isDepEnforcedColumn(card.column, card.board, boardTerminal)) return;
+    status = depStatus(
+      card,
+      await listDependencyStatusesForCards(node, cfg, [card]),
+      boardTerminal,
+    );
+  } catch (err) {
+    // Under force this read exists only to describe the waiver, so a node that
+    // cannot answer must not convert an override into a refusal. Unforced, the
+    // gate is load-bearing and the failure has to surface.
+    if (!force) throw err;
+    console.error(
+      `warning: --force placed "${card.slug}" in ${card.column} without checking its ` +
+        `${card.deps.length} dependency(ies) — the board could not be read.`,
+    );
+    return;
   }
+
+  if (!status.blocked) return;
+  if (force) {
+    console.error(forcedDepWaiverWarning(card.slug, card.column, status.blockedBy));
+    return;
+  }
+  throw new FkanbanError({
+    code: "card_blocked",
+    message: blockedByMessage(card.slug, status.blockedBy),
+    hint: blockedByHint(),
+  });
 }
 
 export async function writeCardPatch(
