@@ -41,7 +41,9 @@ import {
   FALLBACK_TERMINAL_COLUMN,
   type Board,
   type Card,
+  type Milestone,
 } from "../record.ts";
+import { proofCardRefsFrom, proofHoldReason, readProofCardRefs } from "../proof_card_refs.ts";
 
 const terminalFor = (board: string, terminals: Map<string, string>): string =>
   terminals.get(board) ?? FALLBACK_TERMINAL_COLUMN;
@@ -83,7 +85,7 @@ export type ArchiveDoneAction = {
   slug: string;
   board: string;
   age_hours: number;
-  action: "archived" | "would-archive" | "skipped-dependency" | "failed" | "skipped-cap";
+  action: "archived" | "would-archive" | "skipped-dependency" | "skipped-proof-card" | "failed" | "skipped-cap";
   reason: string;
 };
 
@@ -108,6 +110,8 @@ export type ArchiveDoneReport = {
   /** Eligible but left for the next run because `max` was reached. */
   deferred: number;
   skipped_dependency: number;
+  /** Held back because a milestone names the card as its proof. */
+  skipped_proof_card: number;
   failed: number;
   actions: ArchiveDoneAction[];
 };
@@ -130,6 +134,7 @@ export type ArchiveDoneOptions = {
     board: string,
   ) => Promise<Card[]>;
   remove?: (opts: { cfg: Config; node: NodeClient }, card: Card) => Promise<void>;
+  milestonesFor?: (node: NodeClient, cfg: Config, boards: Board[]) => Promise<Milestone[]>;
 };
 
 function ageHours(card: Card, now: number): number | null {
@@ -154,6 +159,7 @@ export function renderArchiveDone(report: ArchiveDoneReport): string {
     `${report.dryRun ? "would_archive" : "archived"}=${report.dryRun ? wouldArchive : report.archived} ` +
     `deferred=${report.deferred} ` +
     `skipped_dependency=${report.skipped_dependency} ` +
+    `skipped_proof_card=${report.skipped_proof_card} ` +
     `failed=${report.failed} ` +
     `cutoff_hours=${report.cutoff_hours} max=${report.max}` +
     (report.dryRun ? " (dry-run — pass --apply to archive)" : "");
@@ -163,7 +169,12 @@ export function renderArchiveDone(report: ArchiveDoneReport): string {
       (b.unparsable_age > 0 ? ` unparsable_age=${b.unparsable_age}` : ""),
   );
   const notable = report.actions
-    .filter((a) => a.action === "failed" || a.action === "skipped-dependency")
+    .filter(
+      (a) =>
+        a.action === "failed" ||
+        a.action === "skipped-dependency" ||
+        a.action === "skipped-proof-card",
+    )
     .map((a) => `  ${a.action.padEnd(20)} ${a.slug} — ${a.reason}`);
   return [head, ...boards, ...notable].join("\n");
 }
@@ -244,9 +255,23 @@ export async function archiveDoneResult(
     for (const { card } of eligible) if (depTargets.has(card.slug)) stillDependedOn.add(card.slug);
   }
 
+  // A card a milestone names as its proof is EVIDENCE for that milestone's
+  // `proof_status`, and this sweep would otherwise delete it without knowing
+  // that. Unlike the dependency hold above, state is NOT consulted: a proof
+  // matters BECAUSE the milestone finished, so a `complete` milestone's proof
+  // card is the one that must survive longest. See `src/proof_card_refs.ts`.
+  //
+  // Two partition reads (one per board), and the read throws rather than
+  // answering from a wrong list when a read fails — so an unverifiable reference
+  // aborts the sweep instead of archiving through it.
+  const proofRefs = opts.milestonesFor
+    ? proofCardRefsFrom(await opts.milestonesFor(opts.node, opts.cfg, allBoards))
+    : await readProofCardRefs(opts.node, opts.cfg, allBoards);
+
   let archived = 0;
   let failed = 0;
   let skippedDependency = 0;
+  let skippedProofCard = 0;
   let deferred = 0;
   /** Cards this run took into scope (archived, failed, or previewed) — the cap's subject. */
   let attempted = 0;
@@ -260,6 +285,18 @@ export async function archiveDoneResult(
         age_hours: Math.round(age),
         action: "skipped-dependency",
         reason: "a live card in a non-terminal column still declares this as a dep",
+      });
+      continue;
+    }
+    const proofHold = proofHoldReason(proofRefs, card.slug);
+    if (proofHold) {
+      skippedProofCard += 1;
+      actions.push({
+        slug: card.slug,
+        board: card.board,
+        age_hours: Math.round(age),
+        action: "skipped-proof-card",
+        reason: proofHold,
       });
       continue;
     }
@@ -314,6 +351,7 @@ export async function archiveDoneResult(
     archived,
     deferred,
     skipped_dependency: skippedDependency,
+    skipped_proof_card: skippedProofCard,
     failed,
     actions,
   };
