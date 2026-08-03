@@ -27,6 +27,7 @@ import {
 } from "./board-cards.ts";
 import {
   boardMilestonesHash,
+  ensureBoardMilestoneMembership,
   listAllBoardMilestones,
   listBoardMilestonesPartition,
   removeBoardMilestone,
@@ -3692,7 +3693,15 @@ export async function upsertMilestoneRecord(
     fields: milestoneToFields(milestone),
   });
   if (boardMilestonesHash(cfg)) {
+    // Protein-primary: Mini should fold BoardMilestones tips from the fat
+    // Milestone write; we only retire obsolete keyed rows we can address.
+    // List / portfolio / gap-report read BoardMilestones only — if fold did
+    // not land a membership tip (unbound sibling, missing key fields, lag),
+    // the milestone is invisible to factory drivers while still point-readable
+    // via `milestone show`. Ensure the index row exists after retire.
+    // Brain: papercut-milestone-portfolio-list-undercount.
     await retireBoardMilestoneMembership(node, cfg, milestone, previous ?? null);
+    await ensureBoardMilestoneMembership(node, cfg, milestone, previous ?? null);
   } else {
     await upsertBoardMilestone(node, cfg, milestone, previous ?? null);
   }
