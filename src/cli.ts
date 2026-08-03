@@ -35,7 +35,11 @@ import {
   DEFAULT_ARCHIVE_CUTOFF_HOURS,
   DEFAULT_ARCHIVE_MAX,
 } from "./commands/archive_done.ts";
-import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
+import {
+  boardCardsHealCmd,
+  DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR,
+  DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO,
+} from "./commands/board_cards_heal.ts";
 import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
 import {
@@ -604,7 +608,7 @@ Usage:
   fkanban groom structured-routing [--apply] [--json]
   fkanban groom body-clobber-scan [--json]
   fkanban groom stale-blockers [--apply] [--json]
-  fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
+  fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]... [--max-removals N|unlimited]
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
   fkanban groom board-list-heal [--apply] [--json]
   fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--max-removals N|unlimited] [--force-milestone-card-payload-upsert]
@@ -662,8 +666,16 @@ Flags:
                        count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
   --max-repairs N      (milestone-indexes-heal) cap repair writes for one run,
                        default 25; "unlimited" opts out
-  --max-removals N     (milestone-indexes-heal) refuse the whole apply when a
-                       run classifies more removals than this. Unlike
+  --max-removals N     (board-cards-heal, milestone-indexes-heal) refuse the
+                       whole apply when a run classifies more removals than
+                       this.
+                       On board-cards-heal it counts delete-orphan ONLY (the
+                       one action that leaves a card on no board); its default
+                       is ${Math.round(DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO * 100)}% of rows examined, floor ${DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR} — a wider
+                       ratio than the sibling below because this command's
+                       legitimate bootstrap reap was measured at 27% of the
+                       board.
+                       On milestone-indexes-heal: unlike
                        --max-repairs, which RATIONS deletions, this REFUSES
                        them: an index far enough from truth is more likely
                        misclassified than genuinely orphaned. Default scales
@@ -2140,6 +2152,12 @@ async function dispatch(
           ? [slugFlag]
           : [];
       const slugs = [...fromFlag, ...positionals.slice(2).filter((s) => s.length > 0)];
+      const rawHealMaxRemovals = values["max-removals"] as string | undefined;
+      const healMaxRemovals = rawHealMaxRemovals === undefined
+        ? undefined
+        : rawHealMaxRemovals.trim() === "unlimited"
+          ? null
+          : parseIntFlag(rawHealMaxRemovals, "max-removals", "groom", { min: 0 });
       console.log(await boardCardsHealCmd({
         cfg: ctx.cfg,
         node: ctx.node,
@@ -2147,6 +2165,7 @@ async function dispatch(
         json: values.json as boolean | undefined,
         board: typeof values.board === "string" ? values.board : undefined,
         slugs: slugs.length > 0 ? slugs : undefined,
+        maxRemovals: healMaxRemovals,
       }));
       return 0;
     }
