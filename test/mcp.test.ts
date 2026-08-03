@@ -880,3 +880,109 @@ describe("MCP read tools preview card bodies by default, full under full_body / 
     expect(ml.bodyTruncated).toBe(false);
   });
 });
+
+// The loop that loses briefs, end to end over MCP.
+//
+// `fkanban_list`/`fkanban_search` return a ~200-char single-line PREVIEW by
+// default; `fkanban_add`'s `body` REPLACES the whole body. Put those two
+// together — read a card, write it back — and 97.5% of the brief is gone with
+// no error at either step (measured on the live primary 2026-08-03: an
+// 8092-char brief, a 200-char preview, guard silent).
+//
+// Two things close it, and both are asserted here rather than assumed: the
+// guard refuses the write, and the append tool it points at EXISTS on this
+// surface. The second half is the one that was missing — three guards had been
+// telling MCP agents to "use `fkanban mark`" while the MCP server registered no
+// such tool, so the only advice on offer was unreachable.
+describe("MCP: writing a previewed body back cannot silently truncate a card", () => {
+  let node: NodeClient;
+  let client: Client;
+
+  // Prose-leading, like every real Kind:pr card — its flattened preview reads
+  // as substantive, which is exactly why the older annotation-stub arm does
+  // not catch this and the proportion arm must.
+  const REAL_BRIEF =
+    "Follow the fkanban-agent skill, WORK mode. Drive this to a merged PR.\n" +
+    "Repo: EdgeVector/fkanban\nBase: main\nKind: pr\n\n## GOAL\n" +
+    Array.from(
+      { length: 30 },
+      (_, i) => `Step ${i}: reconcile the milestone index against the board partition (${i}).`,
+    ).join("\n") +
+    "\n\n## END STATE\nThe heal reports zero drift on two consecutive runs.\n";
+
+  beforeEach(async () => {
+    node = fakeNode();
+    await seedDefaultBoard(node);
+    client = await connectedClient(node);
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "brief-card", title: "Brief", body: REAL_BRIEF, column: "todo" },
+    });
+  });
+
+  async function bodyOf(slug: string): Promise<string> {
+    const res = await client.callTool({ name: "fkanban_show", arguments: { slug } });
+    return (res.structuredContent as { body: string }).body;
+  }
+
+  test("the search preview is a tiny fraction of the brief, and writing it back is REFUSED", async () => {
+    const found = await client.callTool({ name: "fkanban_search", arguments: { query: "reconcile" } });
+    const preview = (found.structuredContent as { cards: Array<{ slug: string; body: string; bodyTruncated: boolean }> })
+      .cards.find((c) => c.slug === "brief-card")!;
+    expect(preview.bodyTruncated).toBe(true);
+    expect(preview.body.length * 5).toBeLessThan(REAL_BRIEF.length);
+
+    const wroteBack = await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "brief-card", body: preview.body },
+    });
+    expect(wroteBack.isError).toBe(true);
+    const text = (wroteBack.content as Array<{ text: string }>)[0]!.text;
+    expect(text).toContain("truncated copy of itself");
+    expect(text).toContain("fkanban_mark");
+
+    // The brief is intact — a refused write must not be a partial one.
+    expect(await bodyOf("brief-card")).toBe(REAL_BRIEF);
+  });
+
+  test("fkanban_mark appends the line the refusal points at, keeping the brief whole", async () => {
+    const res = await client.callTool({
+      name: "fkanban_mark",
+      arguments: { slug: "brief-card", line: "PROGRESS 2026-08-03: index reconciled." },
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toEqual({
+      slug: "brief-card",
+      action: "updated",
+      board: "default",
+      column: "todo",
+    });
+
+    const after = await bodyOf("brief-card");
+    expect(after.startsWith(REAL_BRIEF.trimEnd())).toBe(true);
+    expect(after).toContain("PROGRESS 2026-08-03: index reconciled.");
+
+    // Idempotent: the same line twice does not double it.
+    await client.callTool({
+      name: "fkanban_mark",
+      arguments: { slug: "brief-card", line: "PROGRESS 2026-08-03: index reconciled." },
+    });
+    expect(await bodyOf("brief-card")).toBe(after);
+  });
+
+  test("fkanban_mark refuses to append onto an already-damaged body", async () => {
+    await client.callTool({
+      name: "fkanban_add",
+      // backlog, not todo: default/todo has its own pickup-readiness guard, and
+      // this test is about `mark`, not about lane policy.
+      arguments: { slug: "stub-card", title: "Stub", body: "HANDOFF: parked.", column: "backlog" },
+    });
+    const res = await client.callTool({
+      name: "fkanban_mark",
+      arguments: { slug: "stub-card", line: "PROGRESS: more." },
+    });
+    // Appending would freeze the loss into a fresh full-body write.
+    expect(res.isError).toBe(true);
+    expect((res.content as Array<{ text: string }>)[0]!.text).toContain("truncated or empty");
+  });
+});

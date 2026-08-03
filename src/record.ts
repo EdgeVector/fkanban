@@ -1436,7 +1436,7 @@ export function assertBodyReplaceSafe(
     throw new FkanbanError({
       code: "destructive_body_replace",
       message: `Refusing to replace the body of "${slug}" with content that looks like generated source code.`,
-      hint: "Use `fkanban mark <slug> \"...\"` for annotations, pipe the full recovered brief via stdin, or pass --force for an intentional audited full-body replacement.",
+      hint: BODY_REPLACE_HINT("append annotations", "an intentional audited full-body replacement"),
     });
   }
   if (
@@ -1449,16 +1449,96 @@ export function assertBodyReplaceSafe(
     throw new FkanbanError({
       code: "destructive_body_replace",
       message: `Refusing to replace the body of "${slug}" with an unrelated full brief.`,
-      hint: "Use incremental metadata flags or `fkanban mark` when you are not rewriting the brief. Pass --force for an intentional audited full-body replacement.",
+      hint: BODY_REPLACE_HINT(
+        "append a line when you are not rewriting the brief",
+        "an intentional audited full-body replacement",
+      ),
     });
   }
+  assertNotATruncatedEcho(slug, existingBody, nextBody);
   if (isSubstantiveCardBody(nextBody)) return;
   throw new FkanbanError({
     code: "destructive_body_replace",
     message: `Refusing to replace the body of "${slug}" with an empty or annotation-only stub.`,
-    hint: "Use `fkanban mark <slug> \"…\"` to append a HANDOFF/reap line, pipe the full recovered body via stdin, or pass --force for an intentional wipe.",
+    hint: BODY_REPLACE_HINT("append a HANDOFF/reap line", "an intentional wipe"),
   });
 }
+
+/**
+ * The shrink the other arms cannot see: a body replaced by a SHORTER version of
+ * ITSELF.
+ *
+ * Every arm above classifies the replacement by its SHAPE — source code, an
+ * unrelated brief, an annotation-only stub. A truncation is none of those. It
+ * is the real brief, just less of it, so it reads as substantive prose and
+ * walks straight out of `isSubstantiveCardBody`.
+ *
+ * ## Measured, live primary 2026-08-03 (`scripts/probe-body-shrink-guard.ts`)
+ *
+ * `papercut-fkanban-milestone-guard-blocks-non-placement-writes` carries an
+ * 8092-char brief. Its `fkanban_list`/`fkanban_search` preview — flattened to
+ * one line and cut at `BODY_PREVIEW_CHARS` — is 200 chars, **2.5% of the
+ * brief**, and writing it back passed every guard.
+ *
+ * That is not a hypothetical path. The MCP read tools return exactly that
+ * preview by default (with `bodyTruncated: true`), and `fkanban_add`'s `body`
+ * REPLACES the whole body, so "search, then write the card back" loses 97.5%
+ * of the brief with no error at either step.
+ *
+ * ## Why both conditions, and not a bare length ratio
+ *
+ * A length ratio alone would also refuse a legitimate rewrite that genuinely
+ * says less. The second condition is what makes this specific: the replacement
+ * introduces essentially NO vocabulary the old body did not already have, so
+ * it is a subset of what was there — an echo of a read, not an edit. A real
+ * rewrite brings new words with it and passes.
+ *
+ * `bodyTokenOverlapRatio` divides by the SMALLER token set, so for an echo it
+ * approaches 1.0 regardless of how much was cut. That is the property being
+ * read here, and it is why this arm is not a duplicate of the `< 0.08`
+ * unrelated-brief arm above: the two sit at opposite ends of the same ratio.
+ *
+ * Deliberately NOT covered: a short, genuinely NEW body that replaces a long
+ * brief. Its overlap is low, so it passes here — and no evidence says that
+ * shape has ever cost anyone a brief. `--force` remains the audited path for
+ * any intentional shrink.
+ */
+function assertNotATruncatedEcho(slug: string, existingBody: string, nextBody: string): void {
+  // Small bodies are excluded: at a few hundred chars an ordinary edit can
+  // halve the length and still share all its vocabulary, and there is little
+  // to lose either way.
+  if (existingBody.length < TRUNCATED_ECHO_MIN_EXISTING_CHARS) return;
+  if (nextBody.length * 2 >= existingBody.length) return;
+  if (bodyTokenOverlapRatio(existingBody, nextBody) < TRUNCATED_ECHO_MIN_OVERLAP) return;
+
+  const kept = Math.round((nextBody.length / existingBody.length) * 100);
+  throw new FkanbanError({
+    code: "destructive_body_replace",
+    message:
+      `Refusing to replace the body of "${slug}" with a truncated copy of itself ` +
+      `(${nextBody.length} of ${existingBody.length} chars — ${kept}% kept, and no new content).`,
+    hint: BODY_REPLACE_HINT(
+      "append a line without rewriting the brief",
+      "an intentional audited shrink",
+    ),
+  });
+}
+
+/** Below this, an ordinary edit and a truncation are not distinguishable. */
+const TRUNCATED_ECHO_MIN_EXISTING_CHARS = 400;
+/** How much of the replacement's vocabulary must already exist in the old body. */
+const TRUNCATED_ECHO_MIN_OVERLAP = 0.8;
+
+/**
+ * Every refusal here names an escape hatch, so every refusal must name one the
+ * CALLER can actually reach. `mark` was a CLI-only command while the MCP server
+ * — the fleet's main surface — exposed only the destructive `fkanban_add`, so
+ * an agent that hit one of these guards was told to run something its transport
+ * did not have. Both names ship together now; keep them together.
+ */
+const BODY_REPLACE_HINT = (append: string, forced: string): string =>
+  `Use \`fkanban mark <slug> "…"\` (MCP: \`fkanban_mark\`) to ${append}, ` +
+  `pipe the full recovered body via stdin, or pass --force for ${forced}.`;
 
 export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBody?: string): void {
   if (force) return;
