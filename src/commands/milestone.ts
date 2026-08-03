@@ -599,16 +599,37 @@ export async function milestoneReconcileResult(opts: {
    * Normal reconcile/heal writes BoardCards and relies on protein fold.
    */
   directPayloadUpsert?: boolean;
-}): Promise<MilestoneReconcileResult & { text: string; repairs: MilestoneRepairPlan }> {
+}): Promise<MilestoneReconcileResult & { text: string; repairs: MilestoneRepairPlan; boards: Board[] }> {
   const apply = opts.apply ?? true;
   const budget = opts.maxRepairs === undefined ? DEFAULT_MILESTONE_REPAIR_BUDGET : opts.maxRepairs;
   const directPayloadUpsert = opts.directPayloadUpsert ?? false;
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
+  // ONE WAVE for everything keyed by the milestone alone.
+  //
+  // A request costs ~190ms on an idle node whatever it asks for, so this
+  // command's wall time is its serial round-trip DEPTH, not its request count
+  // (`scripts/probe-round-trip-depth.ts`). These four reads were four separate
+  // awaits and therefore four waves, and only the first two have any reason to
+  // be: `listBoards` needs nothing but the config, and the proof card is keyed
+  // by `milestone.proof_card`, which wave 1 already returned. Measured on the
+  // live board, `milestone detail` was 6 requests in 6 waves — the worst
+  // depth-per-request of any command on the board — and this is four of them.
+  //
+  // Kept as one `Promise.all` rather than promises awaited later so a throw in
+  // any branch cannot leave a sibling read dangling as an unhandled rejection.
+  //
   // Prefer keyed partitions, but union MilestoneCards with current board
   // membership so a lagging/missing milestone-keyed fold cannot hide a live
   // Card whose board row already carries the milestone link.
-  const fromIndex = await listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug);
-  const fromBoard = (await listCardsOnBoard(opts.node, opts.cfg, milestone.board)).filter((card) => card.milestone === milestone.slug);
+  const [fromIndex, boardCards, boards, proofCard] = await Promise.all([
+    listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug),
+    listCardsOnBoard(opts.node, opts.cfg, milestone.board),
+    listBoards(opts.node, opts.cfg),
+    milestone.proof_card
+      ? findProofCard(opts.node, opts.cfg, milestone.proof_card)
+      : Promise.resolve(null),
+  ]);
+  const fromBoard = boardCards.filter((card) => card.milestone === milestone.slug);
   const reconciled = fromIndex !== null
     ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, fromBoard, { apply, budget, directPayloadUpsert })
     : {
@@ -627,15 +648,19 @@ export async function milestoneReconcileResult(opts: {
       } satisfies MilestoneRepairPlan,
     };
   const children = reconciled.children;
-  const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children);
-  const boards = await listBoards(opts.node, opts.cfg);
-  const proofCard = milestone.proof_card ? await findProofCard(opts.node, opts.cfg, milestone.proof_card) : null;
+  // The whole board is already in hand from the wave above, so a dep edge
+  // pointing at a same-board card resolves locally instead of costing a point
+  // read — the same `knownCards` narrowing the portfolio path already uses.
+  const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children, boardCards);
   // Only pay for the extra key-only read when the wide read came back empty —
   // that is the only case where "absent" and "sparse" are in question.
   const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
     && (await cardExists(opts.node, opts.cfg, milestone.proof_card!));
   const result = milestoneReconcileFromSnapshot(milestone, children, statuses, boards, proofCard, proofCardSparse);
-  return { ...result, repairs: reconciled.repairs, text: renderMilestoneReconcile(result, reconciled.repairs) };
+  // `boards` travels out so a caller that needs the board list too — `detail`
+  // renders one column group per column — can thread it instead of paying the
+  // same read a second time in a wave of its own.
+  return { ...result, repairs: reconciled.repairs, boards, text: renderMilestoneReconcile(result, reconciled.repairs) };
 }
 
 export function milestoneReconcileFromSnapshot(
@@ -878,7 +903,10 @@ export async function milestonePortfolioResult(opts: { cfg: Config; node: NodeCl
  */
 export async function milestoneDetailResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{ detail: MilestoneReconcileResult & { columns: Record<string, MilestoneChildStatus[]> }; repairs: MilestoneRepairPlan; text: string }> {
   const result = await milestoneReconcileResult({ ...opts, apply: false });
-  const columns: Record<string, MilestoneChildStatus[]> = Object.fromEntries((await listBoards(opts.node, opts.cfg)).find((board) => board.slug === result.milestone.board)?.columns.map((column) => [column, result.children.filter((card) => card.column === column)]) ?? []);
+  // Reconcile already read the board list (it needs terminal columns to decide
+  // done-ness), so re-reading it here bought nothing and cost a whole extra
+  // wave — ~190ms on an idle node — for bytes that were already in memory.
+  const columns: Record<string, MilestoneChildStatus[]> = Object.fromEntries(result.boards.find((board) => board.slug === result.milestone.board)?.columns.map((column) => [column, result.children.filter((card) => card.column === column)]) ?? []);
   const detail = { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, columns };
   const columnText = Object.entries(columns).map(([column, cards]) => `${column.toUpperCase()} (${cards.length})\n${cards.length ? cards.map((card) => `  • ${card.blocked ? "🔒 " : ""}${card.title}  ${card.slug}`).join("\n") : "  —"}`).join("\n\n");
   return { detail, repairs: result.repairs, text: `${renderMilestone(result.milestone)}\n\n${columnText}\n\n${renderMilestoneReconcile(result, result.repairs)}` };
