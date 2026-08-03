@@ -153,13 +153,42 @@ ensure_board "$BOARD" "agent dogfood scratch" || {
 
 echo "kanban-stress run=$RUN board=$BOARD N=$N burst=$BURST"
 
+# Synthetic cards declare a NON-pr kind, and that is load-bearing rather than
+# cosmetic. `normalizeKind` maps any unset/unknown kind to "pr", so a card that
+# simply omits --kind IS a Kind:pr card — and the placement guards
+# (assertLivePrMilestone, assertPrWorkBrief, assertDefaultTodoPickupReady) all
+# reject a milestone-less, thin-bodied Kind:pr card entering todo/doing
+# (LIVE_PR_PICKUP_COLUMNS). Every add below that targets todo therefore used to
+# fail rc=1, and the harness reported each one as "did not ACK" — 19 phantom
+# consistency findings per run (8 create + 10 burst + 1 search) that named
+# LastDB for what was purely this client's own write guard.
+#
+# --kind validation rather than --force: these genuinely are not PR work cards,
+# so the honest fix is to stop claiming they are. --force would also switch off
+# assertBodyReplaceSafe, assertDepUnblocked and the Situations preflight — the
+# very consistency guards this harness exists to exercise — and would mask a
+# real regression in them instead of exposing it. It also keeps synthetic cards
+# out of the pickup funnel by construction (non-pr kinds classify as
+# parked/non-work), so a scratch card can never be claimed as real work.
+KSTRESS_KIND="validation"
+
 # 1. create -> read-back
 i=1
 while [ "$i" -le "$N" ]; do
   s="$RUN-c$i"; title="stress $RUN card $i"; body="body-$RUN-$i"
-  res=$("$FK" add "$s" --title "$title" --board "$BOARD" --column todo --tags kstress --repo EdgeVector/fold --body "$body" --json 2>/dev/null)
+  res=$("$FK" add "$s" --title "$title" --board "$BOARD" --column todo --kind "$KSTRESS_KIND" --tags kstress --repo EdgeVector/fold --body "$body" --json 2>/dev/null)
   if ! printf '%s' "$res" | jq -e '.slug' >/dev/null 2>&1; then
     errlog "add $s did not ACK: $(printf '%s' "$res" | tr '\n' ' ')"
+    # A FIRST-card failure is systematic, not a consistency event: the node is
+    # unreachable, or a write guard rejects the whole card shape. Reporting it
+    # once and stopping is the difference between one accurate ERROR and N
+    # identical ones that read like N independent LastDB losses. Later cards
+    # failing individually stay per-card, which is what a real flake looks like.
+    if [ "$i" -eq 1 ]; then
+      errlog "first stress add failed - aborting run (card shape rejected or node unreachable, NOT a consistency finding)"
+      echo "SUMMARY: findings=${#findings[@]} errors=${#errors[@]} board=$BOARD run=$RUN"
+      exit 0
+    fi
     i=$((i+1)); continue
   fi
   created+=("$s")
@@ -219,7 +248,7 @@ tmp=$(mktemp -d 2>/dev/null || echo "/tmp/kstress.$$"); mkdir -p "$tmp"
 i=1
 while [ "$i" -le "$BURST" ]; do
   s="$RUN-b$i"
-  ( "$FK" add "$s" --title "burst $i $RUN" --board "$BOARD" --column todo --tags kstress --repo EdgeVector/fold --json >"$tmp/b$i.out" 2>/dev/null; echo $? >"$tmp/b$i.rc" ) &
+  ( "$FK" add "$s" --title "burst $i $RUN" --board "$BOARD" --column todo --kind "$KSTRESS_KIND" --tags kstress --repo EdgeVector/fold --json >"$tmp/b$i.out" 2>/dev/null; echo $? >"$tmp/b$i.rc" ) &
   i=$((i+1))
 done
 wait
@@ -244,7 +273,7 @@ if [ "$N" -ge 2 ]; then
   u="$RUN-c2"; vals=""; i=1
   while [ "$i" -le "$BURST" ]; do
     v="v$i-$RUN"; vals="$vals|$v|"
-    ( "$FK" add "$u" --title "$v" --board "$BOARD" --repo EdgeVector/fold >/dev/null 2>&1 ) &
+    ( "$FK" add "$u" --title "$v" --board "$BOARD" --kind "$KSTRESS_KIND" --repo EdgeVector/fold >/dev/null 2>&1 ) &
     i=$((i+1))
   done
   wait
@@ -261,7 +290,7 @@ rm -rf "$tmp" 2>/dev/null || true
 if [ "$N" -ge 6 ]; then
   tok="kdogtok$(date +%s)"
   ss="$RUN-s1"
-  "$FK" add "$ss" --title "find me $tok" --board "$BOARD" --column todo --tags kstress --repo EdgeVector/fold >/dev/null 2>&1
+  "$FK" add "$ss" --title "find me $tok" --board "$BOARD" --column todo --kind "$KSTRESS_KIND" --tags kstress --repo EdgeVector/fold >/dev/null 2>&1
   created+=("$ss")
   if ! "$FK" search "$tok" --board "$BOARD" --json --all 2>/dev/null | grep -q "$ss"; then
     if [ -n "$(field "$ss" '.slug')" ]; then
