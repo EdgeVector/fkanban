@@ -1,6 +1,5 @@
 import { FkanbanError } from "./client.ts";
 import {
-  isWorkingColumn,
   parseBodyHeader,
   resolvePickupRepo,
   type Card,
@@ -175,7 +174,17 @@ export async function assertSituationPreflightAllowed(
   card: Card,
   preflight?: SituationPreflight,
 ): Promise<void> {
-  if (card.column !== "doing" || !isWorkingColumn(card.column)) return;
+  // `doing` ONLY, and deliberately so. The fence asks "may this card be picked
+  // up while a Situation is active" — `checkSituationFence`'s own refusal reads
+  // "do not pick up this card until the Situation allows it" — so it belongs on
+  // entering work, not on finishing it. Fencing a move to `done` would strand
+  // work an agent had already completed behind an unrelated incident.
+  //
+  // This used to read `card.column !== "doing" || !isWorkingColumn(card.column)`.
+  // `WORKING_COLUMNS` is `["doing", "done"]`, so the second test could never be
+  // true once the first had passed: dead, and it advertised a gate over both
+  // working columns that the first test had already narrowed to one.
+  if (card.column !== "doing") return;
   const result = await checkSituationFence(card, preflight);
   if (result.allowed) return;
   throw new FkanbanError({
