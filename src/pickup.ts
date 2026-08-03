@@ -401,13 +401,62 @@ export async function buildPickupStatusReportWithSituations(
   preflight?: SituationPreflight,
   depsContext?: { cfg: Config; node: NodeClient },
 ): Promise<PickupStatusReport> {
-  const withDeps = await withDependencyStatuses(depsContext, cards, boards);
   // Board lists are body-free by design. Fetch the handful of bodies the
   // verdict actually depends on before classifying, so `malformed-routing`
   // means "the card is malformed", not "we never looked".
-  const cardsWithDeps = depsContext
-    ? await hydrateForPickupClassification(depsContext.node, depsContext.cfg, withDeps, boards)
-    : withDeps;
+  //
+  // These two fan-outs are ISSUED TOGETHER, and that is the whole point.
+  // Measured on the live primary 2026-08-03
+  // (`probe-client-overhead-vs-node-time.ts`, `probe-where-the-194ms-goes.ts`):
+  // a Card point read costs the node **1.9ms** and the caller **~197ms**, and a
+  // bare `fetch` over the same socket costs the same ~190ms — so ~99% of a
+  // kanban read is per-request latency this process does not control. It also
+  // parallelizes completely: 10 sequential 404s took 1.90s, 10 concurrent took
+  // 0.177s. The unit of cost is therefore the SERIAL WAVE, not the request, not
+  // the row, and not the field. Awaiting these one after the other bought a
+  // second full wave for nothing.
+  //
+  // They are independent by inspection: `pickupClassificationNeedsBody` reads
+  // `block_status`, `kind`, `repo`, `base` and the body-omitted marker, and
+  // `listDependencyStatusesForCards` writes none of those — it only ADDS
+  // off-set dep targets to the set. So the hydrate's INPUT selection cannot
+  // depend on the dep step; only the extra cards it introduces can, and those
+  // are picked up by the second pass below.
+  const [withDeps, hydratedOriginals] = await Promise.all([
+    withDependencyStatuses(depsContext, cards, boards),
+    depsContext
+      ? hydrateForPickupClassification(depsContext.node, depsContext.cfg, cards, boards)
+      : Promise.resolve(cards),
+  ]);
+  // `listDependencyStatusesForCards` returns the UNION of the input and the dep
+  // targets it point-read, and an off-set target can itself be a live card on
+  // another board — which `buildPickupStatusReport` then classifies. Those cards
+  // were not in `cards`, so the overlapped hydrate above never saw them; they get
+  // a second, normally EMPTY wave rather than being silently classified from a
+  // body nobody fetched.
+  //
+  // Scoped to the INTRODUCED cards specifically, not re-run over everything:
+  // a card whose hydrate already failed still carries the body-omitted marker,
+  // so a second pass over the full set would retry it and buy back the very wave
+  // this overlap removes — on the failure path, which is where the command can
+  // least afford it. `activeCards` filters per card (column vs its own board's
+  // terminal), so judging a subset is identical to judging it in the whole.
+  const bodyBySlug = new Map(hydratedOriginals.map((card) => [card.slug, card]));
+  const originalSlugs = new Set(cards.map((card) => card.slug));
+  const merged = withDeps.map((card) => bodyBySlug.get(card.slug) ?? card);
+  const introduced = merged.filter((card) => !originalSlugs.has(card.slug));
+  let cardsWithDeps = merged;
+  if (depsContext && introduced.length > 0) {
+    const late = new Map(
+      (await hydrateForPickupClassification(
+        depsContext.node,
+        depsContext.cfg,
+        introduced,
+        boards,
+      )).map((card) => [card.slug, card]),
+    );
+    cardsWithDeps = merged.map((card) => late.get(card.slug) ?? card);
+  }
   const classifyOpts: ClassifyPickupCardOpts | undefined = depsContext
     ? { requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true }
     : undefined;
