@@ -17,6 +17,7 @@ import { describe, expect, test } from "bun:test";
 
 import { listAllBoardCards, boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import { listResult } from "../src/commands/list.ts";
+import { overlapResult } from "../src/commands/overlap.ts";
 import type { NodeClient, QueryFilter, QueryResponse } from "../src/client.ts";
 import { boardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
@@ -256,5 +257,50 @@ describe("list overlaps the board lookup with the board-list read", () => {
     await expect(listResult({ node, cfg, board: "nope", displayOnly: true })).rejects.toThrow(
       /nope/,
     );
+  });
+});
+
+describe("overlap reads the candidate and the board list in one wave", () => {
+  test("both reads are in flight at once", async () => {
+    // `overlap` is what `pickup claim` runs on every candidate it considers,
+    // and it awaited the candidate point-read before it even started the board
+    // list — two ~190ms round trips for two reads that share no input. The
+    // candidate is NOT taken from the list (it may sit in a column the list
+    // drops), so nothing sequenced them.
+    //
+    // Two readers must arrive: the Card point read and listBoards' scan. (The
+    // BoardCards partition genuinely waits on the board set, so it is a second
+    // wave inside `listCards` and not part of this gate.) Serial code parks the
+    // candidate read forever and never issues the second.
+    const gate = rendezvous(2);
+    const b = board();
+    const node = baseNode(async (q): Promise<QueryResponse> => {
+      await gate.wait();
+      if (q.schemaHash === "boardhash") {
+        return { ok: true, results: [{ fields: boardToFields(b), key: { hash: b.slug, range: null } }] };
+      }
+      if (q.schemaHash === "cardhash") {
+        const c = card({ slug: "candidate", repo: "EdgeVector/fkanban", surfaces: ["src/a.ts"] });
+        return { ok: true, results: [{ fields: { ...c, tags: c.tags, deps: c.deps }, key: { hash: c.slug, range: null } }] };
+      }
+      return { ok: true, results: [] };
+    });
+
+    const res = await overlapResult({ node, cfg, slug: "candidate" });
+    expect(gate.arrived).toBeGreaterThanOrEqual(2);
+    expect(res.slug).toBe("candidate");
+  });
+
+  test("a missing card still reports itself, not whatever the board list did", async () => {
+    // The precedence guard for the overlap above: with `Promise.all` the first
+    // rejection wins, so a flaky board read could mask "no such card" on a
+    // typo'd slug. `allSettled` keeps the candidate's error first.
+    const node = baseNode(async (q): Promise<QueryResponse> => {
+      if (q.schemaHash === "cardhash") return { ok: true, results: [] };
+      if (q.schemaHash === "boardhash") throw new Error("rollup read blew up");
+      return { ok: true, results: [] };
+    });
+
+    await expect(overlapResult({ node, cfg, slug: "nosuchcard" })).rejects.toThrow(/nosuchcard/);
   });
 });

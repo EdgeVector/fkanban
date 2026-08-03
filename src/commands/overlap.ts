@@ -250,9 +250,25 @@ export async function overlapResult(opts: {
   node: NodeClient;
   slug: string;
 }): Promise<OverlapResult> {
-  const candidate = await requireCard(opts.node, opts.cfg, opts.slug);
-  const cards = await hydrateOverlapPeers(opts.node, opts.cfg, await listCards(opts.node, opts.cfg));
-  return overlapAgainstCards(candidate, cards);
+  // The candidate point-read and the board list are independent: `listCards`
+  // is keyed by nothing the candidate returns, and the candidate is not read
+  // out of the list (it may be in a column the list drops). Awaiting them in
+  // sequence made this command pay two ~190ms round trips where one would do —
+  // and `pickup claim` runs it on every candidate it considers.
+  //
+  // `allSettled`, not `all`, so overlapping them cannot change WHICH error a
+  // caller sees. With `all` the first rejection wins, so a flaky board read
+  // would mask "no such card" on a typo'd slug — the one error the caller can
+  // act on. The candidate's failure keeps precedence, exactly as when the
+  // reads were serial.
+  const [candidate, cards] = await Promise.allSettled([
+    requireCard(opts.node, opts.cfg, opts.slug),
+    listCards(opts.node, opts.cfg),
+  ]);
+  if (candidate.status === "rejected") throw candidate.reason;
+  if (cards.status === "rejected") throw cards.reason;
+  const peers = await hydrateOverlapPeers(opts.node, opts.cfg, cards.value);
+  return overlapAgainstCards(candidate.value, peers);
 }
 
 export function formatOverlap(result: OverlapResult, json?: boolean): string {
