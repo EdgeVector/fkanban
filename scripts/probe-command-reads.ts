@@ -19,6 +19,10 @@ import { newNodeClient, type NodeClient } from "../src/client.ts";
 import { pickupStatusResult } from "../src/commands/pickup_status.ts";
 import { overlapResult } from "../src/commands/overlap.ts";
 import { listCmd } from "../src/commands/list.ts";
+import { searchResult } from "../src/commands/search.ts";
+import { showResult } from "../src/commands/show.ts";
+import { milestonePortfolioResult } from "../src/commands/milestone.ts";
+import { archiveDoneResult } from "../src/commands/archive_done.ts";
 
 const cfg = readConfig();
 const SCHEMA_NAME = new Map<string, string>(
@@ -81,6 +85,28 @@ function report(label: string, calls: Call[], totalMs: number): void {
   }
 }
 
+/**
+ * First todo slug, from `listCmd(--json)`'s ACTUAL shape.
+ *
+ * `list --json` renders a BARE ARRAY of cards. The overlap arm used to read
+ * `JSON.parse(todo).cards?.[0]?.slug`, which is `undefined` for an array — so
+ * on a board with 14 todo cards it took the else branch and printed "(no todo
+ * card to probe overlap with)". That arm had therefore never once run since it
+ * was written, and it announced the fact as a property of the BOARD rather than
+ * of the parse. A probe that cannot find its subject must not report an empty
+ * board; that is the failure mode this whole script exists to catch elsewhere.
+ *
+ * Accepts both shapes so a future move to `{cards: […]}` does not silently
+ * re-disarm the arm.
+ */
+function firstTodoSlug(json: string): string | undefined {
+  const parsed = JSON.parse(json) as unknown;
+  const cards = Array.isArray(parsed)
+    ? (parsed as Array<{ slug?: string }>)
+    : ((parsed as { cards?: Array<{ slug?: string }> }).cards ?? []);
+  return cards[0]?.slug;
+}
+
 const mk = () =>
   instrument(
     newNodeClient({
@@ -119,7 +145,7 @@ const mk = () =>
   const { node, calls } = mk();
   const t0 = performance.now();
   const todo = await listCmd({ cfg, node, column: "todo", json: true });
-  const first = (JSON.parse(todo) as { cards?: Array<{ slug: string }> }).cards?.[0]?.slug;
+  const first = firstTodoSlug(todo);
   calls.length = 0;
   if (first) {
     const t1 = performance.now();
@@ -129,4 +155,45 @@ const mk = () =>
     console.log("\n(no todo card to probe overlap with)");
   }
   void t0;
+}
+
+// --- search: the agent's "has this already been filed?" read, run before
+//     nearly every card write by the dedupe convention ---
+{
+  const { node, calls } = mk();
+  const t0 = performance.now();
+  await searchResult({ cfg, node, query: "lastdb" });
+  report('kanban search "lastdb"', calls, performance.now() - t0);
+}
+
+// --- show: the single-card read every agent makes before editing a body ---
+{
+  const { node, calls } = mk();
+  const todo = await listCmd({ cfg, node, column: "todo", json: true });
+  const first = firstTodoSlug(todo);
+  calls.length = 0;
+  if (first) {
+    const t0 = performance.now();
+    await showResult({ cfg, node, slug: first });
+    report(`kanban show ${first}`, calls, performance.now() - t0);
+  } else {
+    console.log("\n(no todo card to probe show with)");
+  }
+}
+
+// --- milestone portfolio: the rollup the milestone driver polls ---
+{
+  const { node, calls } = mk();
+  const t0 = performance.now();
+  await milestonePortfolioResult({ cfg, node });
+  report("kanban milestone portfolio", calls, performance.now() - t0);
+}
+
+// --- groom archive-done (DRY RUN, no writes): the scheduled sweep that reads
+//     every board's terminal column plus a dependency reach over live cards ---
+{
+  const { node, calls } = mk();
+  const t0 = performance.now();
+  await archiveDoneResult({ cfg, node });
+  report("kanban groom archive-done (dry-run)", calls, performance.now() - t0);
 }
