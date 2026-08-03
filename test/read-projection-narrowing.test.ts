@@ -34,6 +34,7 @@ import {
 import {
   BOARD_CARDS_DEP_SEED_FIELDS,
   boardCardsProjectionForCardFields,
+  boardCardsWireProjection,
   boardCardFieldsFromCard,
   boardCardSk,
 } from "../src/board-cards.ts";
@@ -175,7 +176,13 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
 
     const seed = prefixReads(node, "done");
     expect(seed).toHaveLength(1);
-    expect(seed[0]!.fields).toEqual([...BOARD_CARDS_DEP_SEED_FIELDS]);
+    // The WIRE shape, which is narrower than the want-list: `sk`/`slug`/`column`
+    // come off `QueryRow.key.range` instead of being fetched per row.
+    expect(seed[0]!.fields).toEqual(boardCardsWireProjection([...BOARD_CARDS_DEP_SEED_FIELDS]));
+    expect(seed[0]!.fields).not.toContain("sk");
+    // `position` is NOT key-derived — `parseBoardCardSk` un-pads it through
+    // `Number`, which turns a lexical position into "NaN".
+    expect(seed[0]!.fields).toContain("position");
     // The regression: 17 fields fetched off an append-only archive and dropped.
     expect(seed[0]!.fields.length).toBeLessThan(BOARD_CARDS_FIELDS.length);
   });
@@ -216,7 +223,9 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
     expect(listed).toHaveLength(1);
     // Product list (CARD_LIST_FIELDS → BoardCards), not the full write shape:
     // layout/db are write-only / rare; body is never on BoardCards.
-    expect(listed[0]!.fields).toEqual(boardCardsProjectionForCardFields(CARD_LIST_FIELDS));
+    expect(listed[0]!.fields).toEqual(
+      boardCardsWireProjection(boardCardsProjectionForCardFields(CARD_LIST_FIELDS)),
+    );
     expect(listed[0]!.fields).not.toContain("layout");
     expect(listed[0]!.fields.length).toBeLessThan(BOARD_CARDS_FIELDS.length);
   });

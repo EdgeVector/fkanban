@@ -226,8 +226,12 @@ describe("board-cards projection", () => {
     const proj = fieldsLog[0]!;
     expect(proj).not.toContain("layout");
     expect(proj).not.toContain("body");
-    expect(proj).toContain("slug");
     expect(proj).toContain("block_status");
+    // `slug` is no longer fetched — it is sliced off `QueryRow.key.range`.
+    // `board` stays because it LEADS, and the leading field gates the row set.
+    expect(proj).not.toContain("slug");
+    expect(proj[0]).toBe("board");
+    expect(proj).toContain("position");
   });
 });
 
