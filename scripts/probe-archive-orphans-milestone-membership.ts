@@ -31,6 +31,27 @@
  * Deletes nothing, writes nothing.
  *
  *   bun scripts/probe-archive-orphans-milestone-membership.ts
+ *
+ * ## THE DEFECT THIS WAS WRITTEN FOR IS FIXED — read section 1 accordingly
+ *
+ * `deleteCardRecord` no longer trusts the caller's object for membership keys:
+ * it re-reads them from the Card record (`readCardMembershipKeys`) and retires
+ * BOTH the recorded and the caller's milestone partition. Covered by
+ * `test/delete-card-membership-provenance.test.ts`. So a thin `ARCHIVE_AGE_FIELDS`
+ * row no longer orphans anything, and the header this probe still prints —
+ * `milestone projected? NO` — describes the CALLER'S projection, which is
+ * genuinely still narrow, not a live orphan path.
+ *
+ * Section 1 is therefore an EXPOSURE-IF-UNGUARDED figure, not a forecast. It
+ * counted 112 on 2026-08-03 while section 2 found exactly 1 orphan on a board
+ * that had been archiving for days — the two numbers disagreeing IS the fix
+ * working. Read section 2 (evidence) as the live signal; treat a rising
+ * section-2 count, not section 1, as a regression.
+ *
+ * Left in place because section 2 and the section-3 caller census are still the
+ * cheapest way to catch a NEW orphan source. Retitled rather than deleted
+ * because a run in this seam reached for it, believed section 1, and had to
+ * disprove it against the code.
  */
 import { readConfig, schemaHashFor } from "../src/config.ts";
 import { newNodeClient } from "../src/client.ts";
