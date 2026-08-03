@@ -17,7 +17,11 @@
 import type { Config } from "./config.ts";
 import { FkanbanError, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
-import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
+import {
+  mapWithConcurrency,
+  PARTITION_READ_CONCURRENCY,
+  POINT_READ_CONCURRENCY,
+} from "./concurrency.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 
@@ -1339,7 +1343,9 @@ function spineRowsFromQueryRows(
  * must fail.
  *
  * Cost is real and bounded: 24 single-field queries, six in flight
- * ({@link POINT_READ_CONCURRENCY}), measured 770-780ms on the 264-row live
+ * ({@link PARTITION_READ_CONCURRENCY} — these are whole-partition reads, one
+ * per field lead, so they belong to the heavy class even though each projects a
+ * single field), measured 770-780ms on the 264-row live
  * `default` partition against 166-292ms for the one-query spine — ~3x, not
  * ~24x, because the pool hides socket latency and a one-field projection is
  * the cheapest read the node serves. That is a heal / doctor price, not a list
@@ -1375,7 +1381,7 @@ export async function sweepBoardCardsPartition(
         failure: { field: lead, error: err instanceof Error ? err.message : String(err) },
       };
     }
-  }, POINT_READ_CONCURRENCY);
+  }, PARTITION_READ_CONCURRENCY);
 
   // Union by the REAL address. A row reached under several leads is one row.
   const bySk = new Map<string, BoardCardSpineRow>();
@@ -1433,9 +1439,17 @@ export function preferFresherBoardCard(a: Card, b: Card): Card {
  *
  * BOUNDED, not `Promise.all`. Mini sheds with "too many concurrent reads", and
  * a partition read is heavier than the point read {@link POINT_READ_CONCURRENCY}
- * was sized for. The width is reused rather than re-tuned because the bound
- * here is a LOAD GUARD, not an optimum: what was measured is 2-wide, and
- * widening past that is unmeasured on this path.
+ * was sized for. The bound here is a LOAD GUARD, not an optimum: what was
+ * measured is 2-wide, and widening past that is unmeasured on this path.
+ *
+ * It therefore reads {@link PARTITION_READ_CONCURRENCY}, which is its own
+ * constant rather than a borrowed one. This used to pass the point-read width,
+ * and that coupling was a latent hazard rather than a tidiness problem: when
+ * `POINT_READ_CONCURRENCY` was raised to 16 on the strength of a measurement
+ * taken against POINT reads (`probe-point-read-shed-threshold.ts` — 96
+ * concurrent, zero shed), this path would have silently widened too, on the
+ * heaviest read kanban issues and against a comment that says the evidence here
+ * only reaches 2. `test/concurrency.test.ts` pins the two apart.
  *
  * Ordering is unchanged. `mapWithConcurrency` lands each result at its input
  * index, so the dedupe below still walks boards in the caller's order and
@@ -1451,7 +1465,9 @@ export async function listAllBoardCards(
   if (!boardCardsHash(cfg)) return null;
   if (boards.length === 0) return [];
   const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
-  const parts = await mapWithConcurrency(boards, (b) =>
+  const parts = await mapWithConcurrency(
+    boards,
+    (b) =>
     listBoardCardsPartition(node, cfg, b.slug, {
       fields: projection,
       // Per BOARD, not a global constant: the terminal column is whatever that
@@ -1463,6 +1479,7 @@ export async function listAllBoardCards(
         ? { excludeColumn: b.columns[b.columns.length - 1] }
         : {}),
     }),
+    PARTITION_READ_CONCURRENCY,
   );
   const out: Card[] = [];
   const bySlug = new Map<string, Card>();
