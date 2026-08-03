@@ -57,7 +57,7 @@ export const MEMBERSHIP_KEY_EXPECTATIONS: MembershipKeyExpectation[] = [
   },
 ];
 
-export type ProjectionParityResult =
+type ProjectionParityResult =
   | { ok: true; rows: number }
   | { ok: false; rows: number; dropped: number; reason: string };
 
@@ -98,7 +98,7 @@ export function checkProjectionParity(
   };
 }
 
-export type MembershipKeyCheckResult =
+type MembershipKeyCheckResult =
   | { ok: true }
   | { ok: false; reason: string };
 
