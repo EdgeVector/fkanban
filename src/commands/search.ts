@@ -219,7 +219,6 @@ async function indexedSearchCards(
   const inScope = (c: Card): boolean =>
     (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column);
   const scopedDisplay = displayRead.cards.filter(inScope);
-  const statusCards = await listDependencyStatusesForCards(opts.node, opts.cfg, scopedDisplay);
 
   const bySlug = new Map<string, Card>();
   for (const card of scopedDisplay) {
@@ -274,6 +273,47 @@ async function indexedSearchCards(
     }
   }
 
+  const matches = sortCards([...bySlug.values()]);
+
+  // Dep status for the MATCHES, seeded with the board read — not for the whole
+  // board.
+  //
+  // `listDependencyStatusesForCards` point-reads every dep edge that points OFF
+  // its input set, so the scope of its first argument IS the read count. This
+  // used to pass `scopedDisplay` (the entire board), and the sole consumer of
+  // the result is `blockedSlugSet(matches, allCards, …)` in `searchResult`,
+  // which asks `depStatus` about the MATCHES alone. Every dep of a non-matching
+  // card was fetched, mapped into a `Map`, and dropped unread.
+  //
+  // Passing the board as `knownCards` keeps the answer identical rather than
+  // merely close: a dep already on the board still resolves from that set with
+  // no read, so the only edges that reach the node are the ones a printed
+  // verdict can actually depend on.
+  //
+  // Measured live, `scripts/probe-search-dep-scope-cost.ts`, 7 interleaved reps
+  // on a 191-card board (26 board-wide off-set deps):
+  //
+  // | query | matches | board-wide | match-scoped |
+  // |---|---|---|---|
+  // | `lastdb` | 127 | 932ms | **195ms** |
+  // | `milestone` | 82 | 969ms | **197ms** |
+  // | (no match) | 0 | 976ms | **0ms** |
+  //
+  // and `blockedSlugSet` returned the identical blocked set for every query.
+  // The no-match row is the one that names the old shape: a search that finds
+  // nothing spent a full second resolving dependencies for an empty answer.
+  //
+  // Issued AFTER the fallback block on purpose — cards recovered by the native
+  // path are matches too, and the old placement resolved deps before they
+  // existed, so their blocked status went unresolved in exactly the degraded
+  // configuration that path exists to serve.
+  const statusCards = await listDependencyStatusesForCards(
+    opts.node,
+    opts.cfg,
+    matches,
+    scopedDisplay,
+  );
+
   debugSearchPlan("indexed-candidates", {
     displayCards: scopedDisplay.length,
     displayIndexed: displayRead.indexed,
@@ -283,7 +323,7 @@ async function indexedSearchCards(
     fullBodyScan: false,
   });
   return {
-    cards: sortCards([...bySlug.values()]),
+    cards: matches,
     allCards: statusCards,
     // Only the degraded path can be incomplete now: with bodies AND a board
     // enumeration the scan matches every board card, so a saturated native cap
