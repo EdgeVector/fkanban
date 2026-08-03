@@ -202,13 +202,6 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     terminalColumn: terminalColumn(columns),
     force: opts.force,
   });
-  await checkpointCardCompletion({
-    cfg: opts.cfg,
-    node: opts.node,
-    card: updated,
-    boardColumns: columns,
-    reason: "done-transition",
-  });
   try {
     await updateCardRecord(
       opts,
@@ -232,6 +225,27 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     }
     throw err;
   }
+  // AFTER the write, never before. A completion checkpoint is a durable, one-way
+  // append into Brain that nothing in this codebase retracts, so ordering it
+  // ahead of the write means a refused write — a `service_timeout` on a busy
+  // node, or the CAS conflict the line above exists to catch — leaves Brain
+  // permanently claiming a completion the board never made, down to a
+  // "Candidate complete" line about the owning North Star.
+  //
+  // The reverse failure is bounded: this call never throws (it warns and skips
+  // when Brain is unreachable), and a card that reached the terminal column
+  // without a checkpoint is caught by the `delete-backstop` in `rm` / `board rm`
+  // before it can leave the board. Those two sites keep the opposite order on
+  // purpose — there the checkpoint MUST precede the delete.
+  //
+  // Pinned by `test/brain-checkpoint-write-ordering.test.ts`.
+  await checkpointCardCompletion({
+    cfg: opts.cfg,
+    node: opts.node,
+    card: updated,
+    boardColumns: columns,
+    reason: "done-transition",
+  });
   const promotedDependents =
     opts.column === terminalColumn(columns)
       ? await promoteUnblockedBacklogDependents({ cfg: opts.cfg, node: opts.node, dependency: updated })

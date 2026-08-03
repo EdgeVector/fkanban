@@ -429,6 +429,8 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     );
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
+    await updateCardRecord(opts, updated, undefined, existing);
+    // AFTER the write — see the note on the create path below.
     await checkpointCardCompletion({
       cfg: opts.cfg,
       node: opts.node,
@@ -436,7 +438,6 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       boardColumns: columns,
       reason: "done-transition",
     });
-    await updateCardRecord(opts, updated, undefined, existing);
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
 
@@ -488,6 +489,21 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertSituationPreflightAllowed(card, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
+  await createCardRecord(opts, card);
+  // AFTER the write, never before. A completion checkpoint is a durable, one-way
+  // append into Brain that nothing in this codebase retracts, so ordering it
+  // ahead of the write means a refused write — a `service_timeout` on a busy
+  // node is the ordinary case — leaves Brain permanently claiming a completion
+  // the board never made, down to a "Candidate complete" line about the owning
+  // North Star.
+  //
+  // The reverse failure is bounded: this call never throws (it warns and skips
+  // when Brain is unreachable), and a card that reached the terminal column
+  // without a checkpoint is caught by the `delete-backstop` in `rm` / `board rm`
+  // before it can leave the board. Those two sites keep the opposite order on
+  // purpose — there the checkpoint MUST precede the delete.
+  //
+  // Pinned by `test/brain-checkpoint-write-ordering.test.ts`.
   await checkpointCardCompletion({
     cfg: opts.cfg,
     node: opts.node,
@@ -495,6 +511,5 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     boardColumns: columns,
     reason: "done-transition",
   });
-  await createCardRecord(opts, card);
   return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };
 }
