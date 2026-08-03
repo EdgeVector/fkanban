@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   assertBodyReplaceSafe,
   assertDefaultTodoPickupReady,
+  assertNoExplicitTodoLaneMetadata,
   emptyStructuredFields,
   isDepEnforcedColumn,
   isSubstantiveCardBody,
@@ -40,9 +41,14 @@ describe("sanitizeDefaultTodoLaneMetadata", () => {
       branch: "kanban/fold-split-example",
       pr_url: "http://localhost:3300/EdgeVector/fold/pulls/1",
     });
-    expect(sanitizeDefaultTodoLaneMetadata(c)).toBe(true);
+    expect(sanitizeDefaultTodoLaneMetadata(c)).toEqual(["branch", "pr_url"]);
     expect(c.branch).toBe("");
     expect(c.pr_url).toBe("");
+  });
+
+  test("names only the field it actually cleared", () => {
+    const c = card({ slug: "only-pr", pr_url: "http://example/pr/2" });
+    expect(sanitizeDefaultTodoLaneMetadata(c)).toEqual(["pr_url"]);
   });
 
   test("no-op outside default/todo", () => {
@@ -52,7 +58,7 @@ describe("sanitizeDefaultTodoLaneMetadata", () => {
       branch: "kanban/in-doing",
       pr_url: "http://example/pr/1",
     });
-    expect(sanitizeDefaultTodoLaneMetadata(c)).toBe(false);
+    expect(sanitizeDefaultTodoLaneMetadata(c)).toEqual([]);
     expect(c.branch).toBe("kanban/in-doing");
     expect(c.pr_url).toBe("http://example/pr/1");
   });
@@ -144,5 +150,41 @@ describe("classifyPickupCard after lane policy", () => {
     });
     expect(result.category).toBe("pickup-ready");
     expect(result.ready).toBe(true);
+  });
+});
+
+describe("assertNoExplicitTodoLaneMetadata", () => {
+  const todo = { slug: "lane-card", board: "default", column: "todo" };
+
+  test("rejects an explicit --pr-url that default/todo would silently clear", () => {
+    expect(() =>
+      assertNoExplicitTodoLaneMetadata(todo, { prUrl: "http://example/pr/1" }),
+    ).toThrow(/cannot carry --pr-url in default\/todo/);
+  });
+
+  test("names both flags when both were passed", () => {
+    expect(() =>
+      assertNoExplicitTodoLaneMetadata(todo, { branch: "kanban/x", prUrl: "http://example/pr/1" }),
+    ).toThrow(/--branch \/ --pr-url/);
+  });
+
+  test("allows an explicit empty value — clearing is what the lane guarantees", () => {
+    expect(() => assertNoExplicitTodoLaneMetadata(todo, { branch: "", prUrl: "" })).not.toThrow();
+  });
+
+  test("silent when the flags were not passed at all", () => {
+    expect(() => assertNoExplicitTodoLaneMetadata(todo, {})).not.toThrow();
+  });
+
+  test("no-op outside default/todo — doing is where the fields belong", () => {
+    expect(() =>
+      assertNoExplicitTodoLaneMetadata({ ...todo, column: "doing" }, { prUrl: "http://example/pr/1" }),
+    ).not.toThrow();
+    expect(() =>
+      assertNoExplicitTodoLaneMetadata(
+        { ...todo, board: "agent-dogfood-scratch" },
+        { prUrl: "http://example/pr/1" },
+      ),
+    ).not.toThrow();
   });
 });
