@@ -202,15 +202,48 @@ function validateProofStatus(status: string): void {
   });
 }
 
+/**
+ * Validate the links THIS WRITE SUPPLIES — never the ones it merely inherited.
+ *
+ * `milestoneAddCmd` rebuilds the whole record on every write, inheriting each
+ * field the caller omitted. Validating that whole record made every write
+ * re-litigate `proof_card` and `deps` values the caller never mentioned, so a
+ * milestone whose proof card was later deleted became UNWRITABLE — not "cannot
+ * enter complete", but unwritable, rejected by an error naming a card the
+ * caller never supplied. `complete → active` is the only exit from `complete`,
+ * and it was refused too, so the record was frozen precisely when it most
+ * needed to be annotated as broken. Measured on the live primary 2026-08-03:
+ * **20 of 41 milestones could not be moved to `active`**
+ * (`scripts/probe-milestone-frozen-by-inherited-link.ts`, arm B).
+ *
+ * Skipping inherited links loses nothing, because a dangling link only MEANS
+ * anything at the transitions that claim proof, and those are gated separately
+ * and more strictly:
+ *
+ *   - `proofGate` runs on every `proving`/`complete` target and checks
+ *     existence, ownership, `kind=validation`, terminal column, and a
+ *     machine-readable `PROOF: PASS`. It is a superset of the check removed
+ *     here, so the "you cannot claim proof without proof" rule is untouched.
+ *   - Milestone `deps` gate no transition at all — they are validated on the
+ *     write that supplies them and otherwise only rendered.
+ *
+ * So an inherited dangling link can now ride along on a `blocked`/`abandoned`/
+ * `active` write, which is exactly right: those states claim no proof, and
+ * refusing them is what stranded the record.
+ */
 async function validateLinks(opts: MilestoneAddOptions, milestone: Milestone): Promise<void> {
-  for (const dep of milestone.deps) {
-    validateSlug(dep);
-    if (!(await findMilestone(opts.node, opts.cfg, dep))) {
-      throw new FkanbanError({
-        code: "milestone_dependency_not_found",
-        message: `Dependency milestone "${dep}" not found.`,
-        hint: "Create dependency milestones before linking them.",
-      });
+  // `undefined` means "caller omitted it, value inherited"; a supplied `[]` is a
+  // deliberate clear and still goes through the loop (which then does nothing).
+  if (opts.deps !== undefined) {
+    for (const dep of milestone.deps) {
+      validateSlug(dep);
+      if (!(await findMilestone(opts.node, opts.cfg, dep))) {
+        throw new FkanbanError({
+          code: "milestone_dependency_not_found",
+          message: `Dependency milestone "${dep}" not found.`,
+          hint: "Create dependency milestones before linking them.",
+        });
+      }
     }
   }
   // Existence is a KEY-ONLY question, so ask it with a key-only read. `findCard`
@@ -220,7 +253,11 @@ async function validateLinks(opts: MilestoneAddOptions, milestone: Milestone): P
   // false-negative made a live-but-sparse proof card unlinkable, with an error
   // sending the operator to look for a card sitting right there. `cardExists`
   // projects `slug` alone and cannot false-negative.
-  if (milestone.proof_card && !(await cardExists(opts.node, opts.cfg, milestone.proof_card))) {
+  //
+  // Still checked whenever the caller NAMES a proof card — linking a card that
+  // is not there is a typo worth catching at the moment it is made, and that is
+  // the error's actual audience.
+  if (opts.proofCard !== undefined && milestone.proof_card && !(await cardExists(opts.node, opts.cfg, milestone.proof_card))) {
     throw new FkanbanError({
       code: "milestone_proof_card_not_found",
       message: `Proof card "${milestone.proof_card}" not found.`,

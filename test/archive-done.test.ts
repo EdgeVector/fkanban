@@ -81,6 +81,9 @@ function fixture(byBoardColumn: Record<string, Record<string, Card[]>>) {
       remove: async (_o: unknown, c: Card) => {
         removed.push(c.slug);
       },
+      // No milestones by default, so these cases exercise the sweep itself. The
+      // proof-card hold has its own file: proof-card-delete-hold.test.ts.
+      milestonesFor: async () => [],
     },
   };
 }
