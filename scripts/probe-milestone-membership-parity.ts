@@ -11,48 +11,49 @@
  * a milestone that lost its row is simply absent from `milestone list`,
  * `milestone portfolio` and `groom`.
  *
- * This asks the fat `Milestone` schema (the truth) and the index (the view)
- * the same question and diffs them, addressing index rows by their RANGE KEY
- * rather than through the display read — the display read can deny a partial
- * row and would under-report the index, inventing drift that is not there.
- *
  * Read-only: queries only, no mutations.
  *
  *   bun scripts/probe-milestone-membership-parity.ts
  *
- * ## READ THIS BEFORE BELIEVING ITS "TRUTH" COLUMN (measured 2026-08-01)
+ * ## Truth is established by POINT READ, not by the fat scan
  *
- * The fat-`Milestone` `allowFullScan` below is NOT a reliable enumeration, and
- * the run that wrote this probe nearly reported its diff as drift.
+ * The index side (`view`) is read by RANGE KEY, which is sound — the display
+ * read can deny a partial row and would under-report the index, inventing
+ * drift that is not there.
  *
- * On the live primary it returned 64 key-hashes where the index holds 33 and
- * `kanban milestone list` reports 33. Both halves of the gap are artefacts:
+ * The truth side may NOT be read by `allowFullScan` over the fat `Milestone`
+ * schema. That scan lies in both directions
+ * (`papercut-kanban-milestone-full-scan-returns-husks-and-misses-live-rows`):
+ * it returns key-hash HUSKS of deleted milestones that `milestone show` cannot
+ * open, and it MISSES live rows the keyed partition query returns. A probe that
+ * diffs the index against it reports drift that does not exist.
  *
- *   - 45 of the 64 came back with NO atoms at all — no `slug`, `board`,
- *     `state` or `position`, only a key hash, which the code below then falls
- *     back to reading as the slug. Spot-checking three of them
- *     (`feature-fkanban-milestones`, `operation-trinity-proof-charter-terminal`,
- *     `routines-target-fleet-proof`) against `kanban milestone show` returns
- *     `Milestone not found`. They are husks of DELETED milestones, not
- *     invisible live ones.
- *   - 14 index rows had no counterpart in the scan at all, including
- *     `lastdb-0231-read-regression-fixes`, which is demonstrably live. So the
- *     scan also MISSES real rows.
+ * That is not hypothetical, and it is why this probe now point-reads. Run
+ * against the live primary on 2026-08-03 the scan-based version reported 35
+ * ORPHAN + 12 INVISIBLE + 2 STALE SK — **49 discrepancies, every one a
+ * phantom.** Each of the 35 "orphans" point-read fine, at exactly the state its
+ * index sk encoded; each of the 12 "invisible" milestones point-read as
+ * `Milestone not found`. The index was clean. The hazard the papercut names is
+ * a repair sweep deleting live index rows to match a phantom truth set, and the
+ * distance between this probe's old output and that sweep was one person
+ * believing the numbers.
  *
- * A scan that returns deleted husks and omits live rows cannot establish
- * truth, so this probe cannot establish drift against it. What it CAN do is
- * report the index side (`view`) and the duplicate/stale-sk checks, which are
- * addressed by range key and are sound. The `INVISIBLE`/`ORPHAN` columns need
- * a real enumeration — a per-slug point read via `findMilestone`, or the fat
- * scan cross-checked against `milestone list` — before they mean anything.
+ * The previous version carried all of that as a 30-line header warning above
+ * output that still printed 49 confident lines of drift. A caveat a reader must
+ * remember to apply is not a guard. So truth is now enumerated the way the
+ * papercut prescribes — a per-slug `findMilestone` point read, the same read
+ * `milestone show` trusts — over the UNION of the scan's slugs and the index's
+ * slugs, so neither source's blind spot can hide a milestone from the diff.
  *
- * Left in place because knowing the scan lies is worth more than deleting the
- * evidence. Filed as
- * `papercut-kanban-milestone-full-scan-returns-husks-and-misses-live-rows`.
+ * The scan is still issued, purely to keep measuring how badly it lies: the
+ * `scan fidelity` block below reports its husks and its misses. That evidence
+ * was worth keeping. It is no longer allowed to contaminate the verdicts.
  */
 import { readConfig } from "../src/config.ts";
 import { newNodeClient } from "../src/client.ts";
 import { parseBoardMilestoneSk } from "../src/board-milestones.ts";
+import { findMilestone } from "../src/record.ts";
+import { mapWithConcurrency } from "../src/concurrency.ts";
 
 const cfg = readConfig();
 const node = newNodeClient({
@@ -70,8 +71,10 @@ if (!bmHash || !msHash) {
 
 const boards = ["default", "agent-dogfood-scratch"];
 
-// ---- truth: the fat Milestone schema, one HashKey per milestone ------------
-const truth = new Map<string, { board: string; state: string; position: string }>();
+// ---- candidate slugs, source 1: the fat Milestone scan ---------------------
+// Not truth — a candidate list. A husk still names a slug worth point-reading,
+// and a point read is what decides whether anything is actually there.
+const scanned = new Set<string>();
 {
   const res = await node.queryAll({
     schemaHash: msHash,
@@ -85,12 +88,7 @@ const truth = new Map<string, { board: string; state: string; position: string }
       : typeof r.key?.hash === "string"
         ? r.key.hash
         : "";
-    if (!slug) continue;
-    truth.set(slug, {
-      board: (typeof f.board === "string" && f.board) || "default",
-      state: typeof f.state === "string" ? f.state : "",
-      position: typeof f.position === "string" ? f.position : "",
-    });
+    if (slug) scanned.add(slug);
   }
 }
 
@@ -118,24 +116,49 @@ for (const board of boards) {
   }
 }
 
-console.log(`fat Milestone rows : ${truth.size}`);
-console.log(`BoardMilestones slugs: ${view.size} (${[...view.values()].reduce((n, r) => n + r.length, 0)} rows)`);
+// ---- truth: one point read per candidate ----------------------------------
+// The union matters. Reading only the scan's slugs would miss a live milestone
+// the scan omits; reading only the index's slugs could never find a milestone
+// whose index row was dropped — which is the exact failure this probe exists to
+// detect. A milestone absent from BOTH is unreachable by any read kanban has,
+// so it is out of scope by construction, not by choice.
+const candidates = [...new Set([...scanned, ...view.keys()])].sort();
+const truth = new Map<string, { board: string; state: string; position: string }>();
+{
+  const found = await mapWithConcurrency(candidates, async (slug) => {
+    const m = await findMilestone(node, cfg, slug);
+    return m ? ([slug, m] as const) : null;
+  });
+  for (const hit of found) {
+    if (!hit) continue;
+    const [slug, m] = hit;
+    truth.set(slug, {
+      board: m.board || "default",
+      state: m.state ?? "",
+      position: String(m.position ?? ""),
+    });
+  }
+}
+
+console.log(`candidates point-read : ${candidates.length}  (scan ${scanned.size} ∪ index ${view.size})`);
+console.log(`live Milestone rows   : ${truth.size}`);
+console.log(`BoardMilestones slugs : ${view.size} (${[...view.values()].reduce((n, r) => n + r.length, 0)} rows)`);
 console.log("");
 
 const missing = [...truth.keys()].filter((s) => !view.has(s)).sort();
 const orphan = [...view.keys()].filter((s) => !truth.has(s)).sort();
 const dup = [...view.entries()].filter(([, rows]) => rows.length > 1).sort();
 
-console.log(`INVISIBLE  (in truth, no index row) : ${missing.length}`);
+console.log(`INVISIBLE  (live, no index row)  : ${missing.length}`);
 for (const s of missing) {
   const t = truth.get(s)!;
   console.log(`    ${s}  board=${t.board} state=${t.state} pos=${t.position}`);
 }
-console.log(`ORPHAN     (index row, no truth)    : ${orphan.length}`);
+console.log(`ORPHAN     (index row, not live) : ${orphan.length}`);
 for (const s of orphan) {
   for (const r of view.get(s)!) console.log(`    ${s}  board=${r.board} sk=${r.sk}`);
 }
-console.log(`DUPLICATE  (>1 index row for slug)  : ${dup.length}`);
+console.log(`DUPLICATE  (>1 index row/slug)   : ${dup.length}`);
 for (const [s, rows] of dup) {
   console.log(`    ${s}  ${rows.map((r) => `${r.board}/${r.sk}`).join("  ")}`);
 }
@@ -154,3 +177,22 @@ for (const [slug, t] of truth) {
   }
 }
 console.log(`stale-sk rows: ${stale}`);
+console.log("");
+
+// ---- scan fidelity: how badly did the full scan lie this run? --------------
+// Kept as MEASUREMENT, not as a verdict input. If husks and misses ever both
+// reach 0 the papercut's premise has changed on the node side and is worth
+// re-testing; until then this is the standing evidence that milestone
+// enumeration must not go through the scan.
+const husks = [...scanned].filter((s) => !truth.has(s)).sort();
+const missedByScan = [...truth.keys()].filter((s) => !scanned.has(s)).sort();
+console.log(
+  `scan fidelity: ${scanned.size} scanned, ${husks.length} husks (scanned but not live), ` +
+    `${missedByScan.length} live rows the scan missed`,
+);
+if (husks.length > 0 || missedByScan.length > 0) {
+  console.log(
+    "  → the fat Milestone allowFullScan is still unsound as an enumeration " +
+      "(papercut-kanban-milestone-full-scan-returns-husks-and-misses-live-rows).",
+  );
+}
