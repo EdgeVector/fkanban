@@ -10,6 +10,7 @@ import { z } from "zod";
 import { FkanbanError, newNodeClient, type NodeClient, type Verbose } from "../client.ts";
 import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
+import { markCmd } from "../commands/mark.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
 import { pickupStatusResult } from "../commands/pickup_status.ts";
@@ -56,6 +57,13 @@ export const FKANBAN_READ_TOOLS = [
 ] as const;
 export const FKANBAN_WRITE_TOOLS = [
   "fkanban_add",
+  // The NON-destructive body write. `fkanban_add`'s `body` replaces the whole
+  // body, so without this the only way to add a line over MCP was to re-send
+  // the entire brief — and the read tools hand back a 200-char preview by
+  // default. Three separate guards in `assertBodyReplaceSafe` already told
+  // callers to "use `fkanban mark`"; until this tool existed that hint named a
+  // CLI-only command an MCP agent could not run.
+  "fkanban_mark",
   "fkanban_move",
   "fkanban_rank",
   "fkanban_pickup_claim",
@@ -102,6 +110,9 @@ export const FKANBAN_MCP_INSTRUCTIONS = [
   "preview (`bodyTruncated`). Pass `full_body:true` for complete bodies, or call",
   "fkanban_show <slug> for one card's full body. Prefer fkanban_show over full_body when",
   "you only need one card — it's cheaper.",
+  "",
+  "Bodies: fkanban_add's `body` REPLACES the whole body — never write back a preview.",
+  "To append a line (HANDOFF/PROGRESS), use fkanban_mark.",
   "",
   "Health check: fkanban_ping (one cheap status read) — not fkanban_list.",
   "Discovery: if anything seems misconfigured, start with fkanban_doctor.",
@@ -810,7 +821,12 @@ export function createFkanbanMcpServer(
       inputSchema: {
         slug: z.string().optional().describe("Stable card id (lowercase [a-z0-9-_])."),
         title: z.string().optional().describe("Card title."),
-        body: z.string().optional().describe("Markdown description / notes."),
+        body: z
+          .string()
+          .optional()
+          .describe(
+            "Markdown brief. REPLACES the card's entire existing body — it does not append. To add a line, use `fkanban_mark`. Never pass back a `body` that came from `fkanban_list`/`fkanban_search` without `full_body:true`: those are ~200-char previews, and writing one back destroys the rest of the brief.",
+          ),
         board: z.string().optional().describe("Board slug (default: `default`)."),
         column: z.string().optional().describe("Column to place the card in."),
         assignee: z.string().optional().describe("Who owns the card."),
@@ -884,6 +900,37 @@ export function createFkanbanMcpServer(
         if (args.branch !== undefined) o.branch = args.branch;
         const res = await addCmd(o);
         return toolResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_mark",
+    {
+      title: "Append a line to a card body",
+      description:
+        "Append ONE line to an existing card's body, without touching the rest of it. This is the safe counterpart to `fkanban_add`'s `body`, which replaces the whole brief — use this for HANDOFF/PROGRESS/reap annotations. Idempotent: a line the body already contains is a no-op. Refuses to mark a card whose body is empty, annotation-only, or truncated, because appending to one would freeze that loss into a full-body write — recover the brief first.",
+      annotations: { title: "Append a line to a card body", idempotentHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        slug: z.string().optional().describe("The card to annotate."),
+        line: z.string().optional().describe("The single line to append. Appending a line already present is a no-op."),
+      },
+      outputSchema: {
+        slug: z.string(),
+        action: z.enum(["created", "updated"]),
+        board: z.string(),
+        column: z.string(),
+      },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
+        const line = requireArg(args.line, "marker line", 'Pass a non-empty `line`, e.g. "PROGRESS 2026-08-03: …".');
+        const { cfg, node } = requireConfig();
+        const res = await markCmd({ cfg, node, slug, line });
+        return toolResult(`marked ${res.slug} → ${res.board}/${res.column}`, res);
       } catch (err) {
         return errorResult(err);
       }
