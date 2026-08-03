@@ -38,7 +38,11 @@ import {
 import { boardCardsHealCmd } from "./commands/board_cards_heal.ts";
 import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
-import { milestoneIndexesHealResult } from "./commands/milestone_indexes_heal.ts";
+import {
+  milestoneIndexesHealResult,
+  DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_RATIO,
+  DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_FLOOR,
+} from "./commands/milestone_indexes_heal.ts";
 import { cardListIndexRetireCmd } from "./commands/card_list_index_retire.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
@@ -603,7 +607,7 @@ Usage:
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]...
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
   fkanban groom board-list-heal [--apply] [--json]
-  fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--force-milestone-card-payload-upsert]
+  fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--max-removals N|unlimited] [--force-milestone-card-payload-upsert]
   fkanban groom card-list-index-retire [--apply] [--json]
   fkanban groom archive-done [--apply] [--json] [--board SLUG] [--cutoff-hours N] [--max N]
 
@@ -658,6 +662,15 @@ Flags:
                        count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
   --max-repairs N      (milestone-indexes-heal) cap repair writes for one run,
                        default 25; "unlimited" opts out
+  --max-removals N     (milestone-indexes-heal) refuse the whole apply when a
+                       run classifies more removals than this. Unlike
+                       --max-repairs, which RATIONS deletions, this REFUSES
+                       them: an index far enough from truth is more likely
+                       misclassified than genuinely orphaned. Default scales
+                       with the rows examined (${Math.round(DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_RATIO * 100)}%, floor
+                       ${DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_FLOOR}); "unlimited" opts out. Upserts are
+                       deliberately unbounded here — a first heal of an empty
+                       index is all upserts and must not be refused.
   --force-milestone-card-payload-upsert
                        (milestone-indexes-heal) emergency direct payload repair
   --cutoff-hours N     (archive-done) minimum age in a terminal column, default
@@ -678,6 +691,7 @@ Examples:
   fkanban groom board-list-heal
   fkanban groom board-list-heal --apply
   fkanban groom milestone-indexes-heal --dry-run
+  fkanban groom milestone-indexes-heal --max-removals 3
   fkanban groom card-list-index-retire
   fkanban groom card-list-index-retire --apply
   fkanban groom archive-done
@@ -1031,7 +1045,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "cutoff-hours", "max", "force-milestone-card-payload-upsert"]),
+  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "max-removals", "cutoff-hours", "max", "force-milestone-card-payload-upsert"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -1243,6 +1257,7 @@ async function main(argv: string[]): Promise<number> {
         "pileup-threshold": { type: "string" },
         "max-drift": { type: "string" },
         "max-repairs": { type: "string" },
+        "max-removals": { type: "string" },
         "cutoff-hours": { type: "string" },
         max: { type: "string" },
         body: { type: "string" },
@@ -2082,12 +2097,19 @@ async function dispatch(
           : rawMax.trim() === "unlimited"
             ? null
             : parseIntFlag(rawMax, "max-repairs", "groom", { min: 0 });
+        const rawMaxRemovals = values["max-removals"] as string | undefined;
+        const maxRemovals = rawMaxRemovals === undefined
+          ? undefined
+          : rawMaxRemovals.trim() === "unlimited"
+            ? null
+            : parseIntFlag(rawMaxRemovals, "max-removals", "groom", { min: 0 });
         const healed = await milestoneIndexesHealResult({
           cfg: ctx.cfg,
           node: ctx.node,
           board: typeof values.board === "string" ? values.board : undefined,
           apply: !values["dry-run"],
           maxRepairs,
+          maxRemovals,
           directMilestoneCardPayloadUpsert: Boolean(values["force-milestone-card-payload-upsert"]),
         });
         console.log(values.json ? JSON.stringify(healed, null, 2) : healed.text);
