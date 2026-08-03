@@ -15,10 +15,16 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { listAllBoardCards, boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
+import {
+  listAllBoardCards,
+  sweepBoardCardsPartition,
+  boardCardFieldsFromCard,
+  boardCardSk,
+} from "../src/board-cards.ts";
 import { listResult } from "../src/commands/list.ts";
 import { overlapResult } from "../src/commands/overlap.ts";
 import type { NodeClient, QueryFilter, QueryResponse } from "../src/client.ts";
+import { PARTITION_READ_CONCURRENCY, POINT_READ_CONCURRENCY } from "../src/concurrency.ts";
 import { boardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
 
@@ -157,6 +163,70 @@ describe("listAllBoardCards reads board partitions concurrently", () => {
 
     expect(await readIn(["first", "second"])).toBe("first");
     expect(await readIn(["second", "first"])).toBe("second");
+  });
+});
+
+describe("partition fan-out is bounded by the PARTITION width, not the point-read one", () => {
+  // `listAllBoardCards` issues one PARTITION read per board — hundreds of rows
+  // each, and `lastdb ops` ranks this schema the node's #1 consumer of wall
+  // time system-wide. It used to pass POINT_READ_CONCURRENCY, so raising that
+  // constant on point-read evidence (zero shed at 96 concurrent,
+  // `scripts/probe-point-read-shed-threshold.ts`) would have silently widened
+  // THIS fan-out too — on the heaviest read kanban issues, and against a
+  // comment stating the evidence here only reaches 2-wide.
+  //
+  // Counted against the real function, not against `mapWithConcurrency`: the
+  // regression to catch is a call site dropping its explicit width argument,
+  // which a direct pool test cannot see.
+  test("more boards than the width still only opens PARTITION_READ_CONCURRENCY reads", async () => {
+    const boards = Array.from({ length: 24 }, (_, i) => ({ slug: `board-${i}` }));
+    let inFlight = 0;
+    let peak = 0;
+
+    const node = baseNode(async (): Promise<QueryResponse> => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      // Yield enough for every read the pool is willing to start to pile up.
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      return { ok: true, results: [] };
+    });
+
+    await listAllBoardCards(node, cfg, boards);
+
+    // The bound itself.
+    expect(peak).toBeLessThanOrEqual(PARTITION_READ_CONCURRENCY);
+    // And that it IS bounded rather than accidentally serial — a serial
+    // implementation would satisfy the line above trivially.
+    expect(peak).toBeGreaterThan(1);
+    // The assertion that fails if the call site reverts to the default: with
+    // POINT_READ_CONCURRENCY at 16 and 24 boards, an inherited width peaks at
+    // 16, which is > 6. Stated separately so the failure message names the
+    // cause rather than just a number.
+    expect(peak).toBeLessThan(POINT_READ_CONCURRENCY);
+  });
+
+  // The second partition-class fan-out, and the easier one to mistake for a
+  // point read: `sweepBoardCardsPartition` projects a SINGLE field per query,
+  // but each one still scans the whole partition. Cheap projection, expensive
+  // read — so it is bounded with the heavy width too.
+  test("the heal/doctor field sweep is bounded by the PARTITION width", async () => {
+    let inFlight = 0;
+    let peak = 0;
+
+    const node = baseNode(async (): Promise<QueryResponse> => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      return { ok: true, results: [] };
+    });
+
+    await sweepBoardCardsPartition(node, cfg, "default");
+
+    expect(peak).toBeLessThanOrEqual(PARTITION_READ_CONCURRENCY);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThan(POINT_READ_CONCURRENCY);
   });
 });
 
