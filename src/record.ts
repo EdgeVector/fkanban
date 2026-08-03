@@ -446,7 +446,7 @@ export function inferRepoFromTags(tags: string[]): string | null {
   return repos.size === 1 ? [...repos][0]! : null;
 }
 
-export type HeaderDerivation =
+type HeaderDerivation =
   | { kind: "present" } // already had Repo:/Base:
   | { kind: "skip-registry" } // recipe/registry card — never stamp
   | { kind: "conflict"; repos: string[] } // tags map to >1 repo — surface, don't guess
