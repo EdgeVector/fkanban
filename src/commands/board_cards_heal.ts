@@ -65,7 +65,71 @@ export type BoardCardsHealOptions = {
   board?: string;
   apply?: boolean;
   json?: boolean;
+  /**
+   * Refuse the whole apply when this run would delete more than N orphan rows.
+   * `null` disables the ceiling (`--max-removals unlimited`, matching
+   * milestone-indexes-heal); omitted uses {@link resolveRemovalCeiling}.
+   */
+  maxRemovals?: number | null;
 };
+
+/**
+ * Default orphan-removal ceiling: `max(25, 50% of rows examined)`.
+ *
+ * Sized from the production record, not from the sibling command's constant.
+ * `last-stack-fkanban-watch` has run `board-cards-heal --apply` hourly since
+ * 2026-07-30; across 617 runs that healed anything, the **largest repair was 13
+ * rows** (distribution: 1x259, 2x160, 5x66, 3x56, 4x29, 12x21, 13x9, 10x1),
+ * against a ~218-row board. So on today's board the default sits at 109 — about
+ * 8x the worst run ever observed, while a systemic miss (~100% of rows) is
+ * refused.
+ *
+ * The ratio is deliberately 50%, NOT the 25% used by
+ * `milestone-indexes-heal --max-removals`. Borrowing that number would have been
+ * the mistake it exists to prevent: this command's own comments record a
+ * legitimate one-time reap of **58 orphan rows** on 2026-07-30 (~27% of the
+ * board) — the backlog the heal was built to clear. A 25% ceiling refuses that
+ * run. A ceiling must clear the largest CORRECT case, and here the bootstrap
+ * case is an order of magnitude larger than steady state.
+ *
+ * The floor exists because a bare ratio is meaningless at small N: on a 4-row
+ * scratch board, 2 orphans are 50% and entirely ordinary.
+ */
+export const DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR = 25;
+export const DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO = 0.5;
+
+export function resolveRemovalCeiling(
+  maxRemovals: number | null | undefined,
+  rowsExamined: number,
+): number {
+  if (maxRemovals === null) return Number.POSITIVE_INFINITY;
+  if (typeof maxRemovals === "number") return maxRemovals;
+  return Math.max(
+    DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR,
+    Math.floor(rowsExamined * DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO),
+  );
+}
+
+/**
+ * Upper bound on `delete-orphan` rows this run could write, computed from state
+ * already in hand — the resolved truth map and the keyed partition rows — so the
+ * ceiling costs zero additional node reads.
+ *
+ * Keys with no rows are the synthetic "missing membership" candidates
+ * (`\0<slug>`); they are repaired by an upsert and can never delete anything.
+ */
+export function countPossibleOrphanRemovals(
+  byKey: Map<string, { column: string; position: string }[]>,
+  truthBySlug: Map<string, Card | null>,
+): number {
+  let possible = 0;
+  for (const [key, rows] of byKey) {
+    if (rows.length === 0) continue;
+    const slug = key.split("\0")[1] as string;
+    if (!truthBySlug.get(slug)) possible += rows.length;
+  }
+  return possible;
+}
 
 export type BoardCardsHealAction = {
   slug: string;
@@ -96,6 +160,10 @@ export type BoardCardsHealReport = {
    */
   incomplete_leads: string[];
   dryRun: boolean;
+  /** True when the removal ceiling refused the whole apply; nothing was written. */
+  blocked?: boolean;
+  removal_ceiling?: number;
+  removals_possible?: number;
   actions: BoardCardsHealAction[];
 };
 
@@ -460,6 +528,55 @@ export async function boardCardsHealResult(
     [...new Set([...byKey.keys()].map((key) => key.split("\0")[1] as string))],
   );
 
+  // SAFETY CEILING — read the run's removal intent before the first write.
+  //
+  // Every delete below is authorized per row by two reads (the wide point-read
+  // above, then `cardExists`, which projects the hash key alone and so cannot
+  // false-negative). That guard is sound against a WRONG row. It is no guard at
+  // all against a SYSTEMIC miss — a config aimed at the wrong node or an empty
+  // Card plane makes every point-read legitimately return nothing, `cardExists`
+  // agree, and the run reap the entire board's membership one correctly-reasoned
+  // row at a time. The ceiling is the only defense for that class, which is why
+  // it is sized to catch "most of the board" rather than "more than usual".
+  //
+  // Counted on `delete-orphan` ALONE. `delete-stale-and-upsert` and
+  // `retire-sparse-duplicate` also delete rows, but both leave the card membered
+  // — the write that replaces the row is part of the same repair. `delete-orphan`
+  // is the only action that ends with the card on no board, and nothing
+  // re-derives it (same rule as milestone-indexes-heal's `--max-removals`:
+  // the brake belongs on the operations whose damage is unbounded).
+  //
+  // The count is an UPPER BOUND: `cardExists` may still veto individual rows as
+  // sparse-not-orphan (line ~482), so actual removals can be fewer, never more.
+  // Bounding the safe direction is the point — and the slack is small in
+  // practice: 0 sparse-veto rows of 218 on the live board, 2026-08-03.
+  const removalCeiling = resolveRemovalCeiling(opts.maxRemovals, rawRows.length);
+  const removalsPossible = countPossibleOrphanRemovals(byKey, truthBySlug);
+  if (opts.apply && removalsPossible > removalCeiling) {
+    const blockedReport: BoardCardsHealReport = {
+      scanned_index_rows: rawRows.length,
+      drifted: 0,
+      healed: 0,
+      missing_card: 0,
+      incomplete_leads: incompleteLeads,
+      dryRun: false,
+      blocked: true,
+      removal_ceiling: removalCeiling,
+      removals_possible: removalsPossible,
+      actions: [],
+    };
+    // Exit 0 with `blocked: true` — a safety refusal is not an error, matching
+    // board-cards-heal-scheduled and milestone-indexes-heal.
+    const blockedText = [
+      `board-cards heal: scanned=${blockedReport.scanned_index_rows} BLOCKED — ` +
+      `${removalsPossible} orphan removal(s) exceed the ceiling of ${removalCeiling}`,
+      `  Nothing was written. An index this far from truth is exactly where the`,
+      `  classification itself is in doubt, so its upserts are not trusted either.`,
+      `  Inspect with a dry run, then re-run with --max-removals N|unlimited.`,
+    ].join("\n");
+    return { text: blockedText, report: blockedReport };
+  }
+
   for (const [key, rows] of byKey) {
     const [boardFromKey, slug] = key.split("\0") as [string, string];
     const board = boardFromKey || "default";
@@ -720,6 +837,13 @@ export async function boardCardsHealResult(
     missing_card,
     incomplete_leads: incompleteLeads,
     dryRun: !opts.apply,
+    blocked: false,
+    // Reported on EVERY run, not just refusals. A safety limit that is only
+    // visible in the report that announces its own failure gives an operator no
+    // way to see it approaching — the run before the one that blocks looks
+    // identical to a quiet one. These two numbers make the headroom readable.
+    removal_ceiling: removalCeiling,
+    removals_possible: removalsPossible,
     actions: opts.json ? actions : actions.filter((a) => a.action !== "noop-match"),
   };
 
