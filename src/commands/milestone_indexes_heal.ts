@@ -19,11 +19,67 @@ import {
 
 export const DEFAULT_MILESTONE_INDEXES_HEAL_BUDGET = 25;
 
+/**
+ * Removal ceiling: the fraction of the rows this run actually LOOKED AT that a
+ * plausible repair may delete, and the absolute floor below which the fraction
+ * is not allowed to bite.
+ *
+ * ## Why the brake is on removals, not on total drift
+ *
+ * The obvious guard — a `--max-drift` ceiling over every classified write, the
+ * shape `board-cards-heal-scheduled` uses — is wrong for THIS command, and the
+ * bootstrap path is why. On a first heal `BoardMilestones` is empty, so
+ * `classifyBoardMilestoneOps` classifies every live milestone as an upsert:
+ * a 38-milestone board is a 38-write run with 0 removals, and it is entirely
+ * correct. A flat drift ceiling low enough to catch the real incident (33 of 38
+ * rows proposed for deletion) would refuse that legitimate first heal.
+ *
+ * The two classes also differ in what a mistake COSTS. An upsert rewrites an
+ * index row from a HashKey point-read of truth; a wrong one is idempotent and
+ * the next heal corrects it. A removal destroys a row behind `milestone list`,
+ * `milestone portfolio`, and pickup's milestone-linkage gate, and nothing
+ * re-derives it until someone notices the milestone vanished. Removals are the
+ * unbounded-damage class, so removals are what gets the brake.
+ *
+ * Note this is NOT what the per-run write budget does. The budget caps how many
+ * deletions a bad classification lands per run; it never refuses one. At
+ * `DEFAULT_MILESTONE_INDEXES_HEAL_BUDGET` the measured 2026-08-03 incident
+ * (33 removals classified, all 33 point-read LIVE) would still have deleted 25
+ * live rows and exited 0. A ceiling refuses instead of rationing.
+ *
+ * ## Why a ratio AND a floor
+ *
+ * A bare count does not scale: 5 removals is most of a 38-row index and noise
+ * in a 500-row one. The signal in the incident was the PROPORTION — 87% of the
+ * index proposed for deletion is not a repair, whatever the absolute number.
+ * A bare ratio, though, is useless at small N (1 of 2 rows is 50% and is
+ * completely ordinary), so the floor keeps small honest cleanups from tripping
+ * a percentage.
+ */
+export const DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_RATIO = 0.25;
+export const DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_FLOOR = 5;
+
+/** The removal ceiling for a run that examined `rowsExamined` index rows. */
+export function milestoneIndexesHealRemovalCeiling(rowsExamined: number): number {
+  return Math.max(
+    DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_FLOOR,
+    Math.floor(DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_RATIO * rowsExamined),
+  );
+}
+
 export type MilestoneIndexesHealResult = {
   board_milestones_bound: boolean;
   milestone_cards_bound: boolean;
   applied: boolean;
   budget: number | null;
+  /** Index rows this run read and classified — the removal ceiling's denominator. */
+  rows_examined: number;
+  /** Removals classified this run (board-milestone + milestone-card). */
+  removals_classified: number;
+  /** Ceiling above which apply refuses outright; null when opted out. */
+  removal_ceiling: number | null;
+  /** True when the ceiling refused an apply this run — NOTHING was written. */
+  blocked: boolean;
   /** Slugs the full scan returned — mostly husks; NOT a count of live milestones. */
   milestones_enumerated: number;
   /** Enumerated slugs whose point-read found nothing (deleted husks). */
@@ -77,12 +133,19 @@ async function classifyBoardMilestoneOps(opts: {
   node: NodeClient;
   boards: Array<{ slug: string }>;
   milestones: Milestone[];
-}): Promise<BoardMilestoneOp[]> {
+}): Promise<{ ops: BoardMilestoneOp[]; indexRows: number }> {
   const bySlug = new Map(opts.milestones.map((milestone) => [milestone.slug, milestone]));
   const rowsByBoard = new Map<string, Milestone[] | null>();
   for (const board of opts.boards) {
     rowsByBoard.set(board.slug, await listBoardMilestonesPartition(opts.node, opts.cfg, board.slug));
   }
+  // The removal ceiling's denominator: index rows actually read. A board whose
+  // partition read FAILED (null) contributes nothing — counting its rows as 0
+  // is the conservative direction, since a smaller denominator means a tighter
+  // ceiling, and a run that could not read the index is exactly the run that
+  // should not be trusted to delete much of it.
+  let indexRows = 0;
+  for (const rows of rowsByBoard.values()) indexRows += rows?.length ?? 0;
 
   const ops: BoardMilestoneOp[] = [];
   for (const milestone of opts.milestones) {
@@ -122,7 +185,7 @@ async function classifyBoardMilestoneOps(opts: {
       }
     }
   }
-  return ops;
+  return { ops, indexRows };
 }
 
 function remainingBudget(budget: number | null, issued: number): number | null {
@@ -198,6 +261,12 @@ export async function milestoneIndexesHealResult(opts: {
   board?: string;
   apply?: boolean;
   maxRepairs?: number | null;
+  /**
+   * Removal ceiling. `undefined` derives it from the rows examined (see
+   * `milestoneIndexesHealRemovalCeiling`); `null` opts out entirely; a number
+   * pins it. Exceeding it refuses the whole apply — see the guard below.
+   */
+  maxRemovals?: number | null;
   directMilestoneCardPayloadUpsert?: boolean;
 }): Promise<MilestoneIndexesHealResult> {
   const apply = opts.apply ?? true;
@@ -219,6 +288,10 @@ export async function milestoneIndexesHealResult(opts: {
       board_milestone_removals: 0,
       milestone_card_upserts: 0,
       milestone_card_removals: 0,
+      rows_examined: 0,
+      removals_classified: 0,
+      removal_ceiling: opts.maxRemovals === undefined ? milestoneIndexesHealRemovalCeiling(0) : opts.maxRemovals,
+      blocked: false,
       issued: 0,
       deferred: 0,
       milestones_written: 0,
@@ -266,9 +339,10 @@ export async function milestoneIndexesHealResult(opts: {
   const boards = opts.board
     ? [{ slug: opts.board }]
     : await listBoards(opts.node, opts.cfg);
-  const boardOps = boardMsBound
+  const classification = boardMsBound
     ? await classifyBoardMilestoneOps({ cfg: opts.cfg, node: opts.node, boards, milestones })
-    : [];
+    : { ops: [] as BoardMilestoneOp[], indexRows: 0 };
+  const boardOps = classification.ops;
 
   const cardPlans = [];
   let milestoneCardChildrenScanned = 0;
@@ -292,10 +366,33 @@ export async function milestoneIndexesHealResult(opts: {
     }
   }
 
+  // THE REMOVAL CEILING, and note WHERE it sits: every write above is still
+  // only classified — `classifyBoardMilestoneOps` and the `cardPlans` loop both
+  // run `apply: false` — and the first mutation is issued below. So the ceiling
+  // reads a complete picture of what this run intends to delete and costs no
+  // additional node read to do it.
+  //
+  // Blocking refuses the ENTIRE apply rather than just dropping the removals.
+  // An index this far from truth is precisely the case where the classifier's
+  // judgement is the thing in doubt, so letting the run proceed with its
+  // upserts would be trusting the same classification that just failed a
+  // plausibility check. Refusing wholesale also keeps the report unambiguous:
+  // `blocked=true` means nothing was written, full stop.
+  const rowsExamined = classification.indexRows + milestoneCardChildrenScanned;
+  const removalsClassified =
+    boardOps.filter((op) => op.kind === "remove").length + milestoneCardRemovals;
+  const removalCeiling =
+    opts.maxRemovals === undefined
+      ? milestoneIndexesHealRemovalCeiling(rowsExamined)
+      : opts.maxRemovals;
+  const blocked =
+    apply && removalCeiling !== null && removalsClassified > removalCeiling;
+  const applying = apply && !blocked;
+
   let issued = 0;
   if (boardMsBound) {
     for (const op of boardOps) {
-      if (!apply || !budgetAllowsAnother(budget, issued)) break;
+      if (!applying || !budgetAllowsAnother(budget, issued)) break;
       if (op.kind === "upsert") {
         await upsertBoardMilestone(opts.node, opts.cfg, op.milestone, op.previous);
       } else {
@@ -305,7 +402,7 @@ export async function milestoneIndexesHealResult(opts: {
     }
   }
 
-  if (msCardsBound && apply) {
+  if (msCardsBound && applying) {
     for (const plan of cardPlans) {
       const remaining = remainingBudget(budget, issued);
       if (remaining !== null && remaining <= 0) break;
@@ -328,9 +425,20 @@ export async function milestoneIndexesHealResult(opts: {
   const classified =
     boardMilestoneUpserts + boardMilestoneRemovals + milestoneCardUpserts + milestoneCardRemovals;
   const deferred = classified - issued;
+  const ceilingLine = blocked
+    ? [
+        `  REFUSED: ${removalsClassified} removal(s) classified against ${rowsExamined} row(s) examined ` +
+          `exceeds the ceiling of ${removalCeiling} — NOTHING was written.`,
+        "  This is a plausibility refusal, not a repair failure: a run that wants to delete this much",
+        "  of the index is more likely misclassifying than finding real orphans. Re-run with --dry-run",
+        "  to read the classification, and only raise --max-removals once the removals are confirmed.",
+      ]
+    : [];
   const text = [
     "milestone indexes heal:",
-    `  applied=${apply} budget=${budget === null ? "unlimited" : budget}`,
+    ...ceilingLine,
+    `  applied=${applying} budget=${budget === null ? "unlimited" : budget}`,
+    `  rows_examined=${rowsExamined} removals_classified=${removalsClassified} removal_ceiling=${removalCeiling === null ? "unlimited" : removalCeiling} blocked=${blocked}`,
     `  board_milestones bound=${boardMsBound} scanned=${milestones.length} (enumerated=${slugs.length} husks_dropped=${husksDropped}) upserts=${boardMilestoneUpserts} removals=${boardMilestoneRemovals}`,
     `  milestone_cards bound=${msCardsBound} mode=${directMilestoneCardPayloadUpsert ? "direct-payload-upsert" : "protein-fold-request"} children_scanned=${milestoneCardChildrenScanned} upserts=${milestoneCardUpserts} removals=${milestoneCardRemovals}`,
     `  issued=${issued} deferred=${deferred}`,
@@ -339,8 +447,12 @@ export async function milestoneIndexesHealResult(opts: {
   return {
     board_milestones_bound: boardMsBound,
     milestone_cards_bound: msCardsBound,
-    applied: apply,
+    applied: applying,
     budget,
+    rows_examined: rowsExamined,
+    removals_classified: removalsClassified,
+    removal_ceiling: removalCeiling,
+    blocked,
     milestones_enumerated: slugs.length,
     milestone_husks_dropped: husksDropped,
     milestones_scanned: milestones.length,
