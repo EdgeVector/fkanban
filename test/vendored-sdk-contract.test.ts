@@ -5,7 +5,12 @@
 // over an unstable page cursor; both regressions show up only as LastDB load.
 
 import { describe, expect, test } from "bun:test";
-import { LastDbClient, QueryPaginationError, type Transport } from "@lastdb/app-sdk";
+import {
+  LastDbClient,
+  QueryPaginationError,
+  parseQueryResponse,
+  type Transport,
+} from "@lastdb/app-sdk";
 
 const SCHEMA = "fkanban/Card";
 
@@ -103,5 +108,54 @@ describe("vendored @lastdb/app-sdk", () => {
     await expect(
       client.queryAll(SCHEMA, { filter: { HashKey: "default" } }, { pageSize: 1 }),
     ).rejects.toBeInstanceOf(QueryPaginationError);
+  });
+
+  // The node stopped counting partitions it does not need to count (fold
+  // 800c03f3): for a key-restricted read with no cursor and no `Desc` sort —
+  // every fkanban product read — it answers `total_count: null` while
+  // `has_more` and `next_cursor` stay authoritative.
+  //
+  // A parser that demands a numeric `total_count` throws away the WHOLE page
+  // object for those reads, which is not a type error and not a crash: the
+  // drain quietly falls back to guessing "more rows?" from page width, and a
+  // page shortened by an unhydratable row ends it early. That is the exact
+  // failure mode this file exists to catch — a stale re-vendor that keeps
+  // callers type-correct and loses rows.
+  test("keeps page metadata when the node declines to count the partition", () => {
+    const parsed = parseQueryResponse({
+      ok: true,
+      schema: SCHEMA,
+      results: [],
+      returned_count: 0,
+      total_count: null,
+      limit: 1000,
+      offset: 0,
+      has_more: true,
+      next_cursor: { hash: "default", range: "todo#5" },
+      unresolved_rows: 2,
+    });
+
+    expect(parsed.page).not.toBeNull();
+    expect(parsed.page?.hasMore).toBe(true);
+    expect(parsed.page?.nextCursor).toEqual({ hash: "default", range: "todo#5" });
+    // Absent, not zero: a skipped count must never read as an empty partition.
+    expect(parsed.page?.totalCount).toBeUndefined();
+  });
+
+  // Version-neutrality: a node that DOES count must still report the number.
+  test("still surfaces an exact count when the node ran one", () => {
+    const parsed = parseQueryResponse({
+      ok: true,
+      schema: SCHEMA,
+      results: [],
+      returned_count: 0,
+      total_count: 42,
+      limit: 1000,
+      offset: 0,
+      has_more: false,
+      next_cursor: null,
+    });
+
+    expect(parsed.page?.totalCount).toBe(42);
   });
 });

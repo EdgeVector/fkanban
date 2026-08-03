@@ -358,12 +358,14 @@ export type SchemaResolver = (appSchemaName: string) => SchemaResolverResult | P
  */
 export interface QueryPage {
     /**
-     * Total records matching the query before `offset`/`limit` were applied.
+     * Total records matching the query before `offset`/`limit` were applied,
+     * when the node ran the count. `undefined` means the node intentionally
+     * reported pagination state but declined to compute the exact count.
      * Capped at the node's internal fetch cap (10k) for unfiltered queries —
      * when `hasMore` is true and `totalCount` equals that cap there may be
      * more records the node did not load.
      */
-    totalCount: number;
+    totalCount?: number;
     /** Number of records actually returned in this page (`rows.length`). */
     returnedCount: number;
     /** Page size the node applied (its default when the request sent none). */

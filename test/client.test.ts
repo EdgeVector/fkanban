@@ -47,6 +47,29 @@ const FULL_ROWS = Array.from({ length: 1251 }, (_, i) => ({
   key: { hash: `f${i}`, range: null },
 }));
 
+// COUNT-SKIP fixture — the node fkanban is about to be running.
+//
+// fold 800c03f3 ("Skip non-load-bearing query counts") stops counting the
+// partition when the count cannot change the node's own page selection:
+// `key_restricted_count_is_load_bearing` is `cursor.is_none() && sort_order ==
+// Desc`. fkanban sends NO sort_order on any read, so for every key-restricted
+// product read the node now answers `total_count: null`, derives `has_more`
+// from an over-fetch of `limit + 1`, and stamps a cursor it will honor.
+//
+// The rows it could not hydrate are reported separately as `unresolved_rows`
+// and added back before comparing against `limit` — precisely so a page
+// shortened by a dangling atom is not mistaken for the end of the partition.
+// That is not hypothetical: the live primary reports `Read integrity DEGRADED
+// — 5509 query row(s) dropped this process because their tip pointed at a
+// missing atom`.
+const SKIP_ROWS = Array.from({ length: 1500 }, (_, i) => ({
+  fields: { slug: `s${i}` },
+  key: { hash: `s${i}`, range: null },
+}));
+// Rows whose tip points at a missing atom: fetched and counted by the node,
+// never hydrated, so they shorten the page without ending the partition.
+const SKIP_DANGLING = new Set([10, 11]);
+
 // Stub node: records every request; /api/query echoes one card row when a
 // HashKey filter matches, an empty page otherwise; /slow never answers in time.
 const server = Bun.serve({
@@ -213,6 +236,36 @@ const server = Bun.serve({
       // A node that never advertises a cursor at all — pure offset paging.
       if (url.pathname === "/paging-offset-only/api/query") {
         return page(Number(b.offset ?? 0), null);
+      }
+
+      // The post-count-skip node, reproduced from `execute_query`'s
+      // key-restricted branch + `cursor_payload` (fold 800c03f3): over-fetch
+      // `limit + 1`, hydrate what it can, report the skips, infer `has_more`
+      // from fetched-vs-limit, and answer `total_count: null`.
+      if (url.pathname === "/paging-count-skipped/api/query") {
+        const limit = Number(b.limit ?? 1000);
+        const cur = b.cursor as { hash: string } | undefined;
+        const from = cur !== undefined
+          ? SKIP_ROWS.findIndex((r) => r.key.hash === cur.hash) + 1
+          : Number(b.offset ?? 0);
+        const window = SKIP_ROWS.slice(from, from + limit + 1);
+        const hydrated = window.filter((_, i) => !SKIP_DANGLING.has(from + i));
+        const unresolved = window.length - hydrated.length;
+        // The node's own accounting: skipped rows were fetched, so count them
+        // back in before deciding whether the partition is exhausted.
+        const hasMore = hydrated.length + unresolved > limit;
+        const rows = hydrated.slice(0, limit);
+        return Response.json({
+          ok: true,
+          results: rows,
+          returned_count: rows.length,
+          total_count: null,
+          offset: from,
+          limit,
+          has_more: hasMore,
+          next_cursor: hasMore ? rows[rows.length - 1]!.key : null,
+          unresolved_rows: unresolved,
+        });
       }
 
       // The live primary's FULL-SCAN offset paging, measured 2026-08-03 on the
@@ -433,6 +486,22 @@ describe("queryAll paging", () => {
     expect(reqs.length).toBe(3);
     expect((reqs[1]!.body as Record<string, unknown>).cursor).toEqual({ hash: "h", range: "2" });
     expect((reqs[2]!.body as Record<string, unknown>).cursor).toEqual({ hash: "h", range: "4" });
+  });
+
+  test("a node that skips the count still drains the whole partition", async () => {
+    // THE REGRESSION THIS PINS: `total_count: null` is not a signal about how
+    // many rows exist — it says the node declined to count. The drain has to
+    // keep using the pagination metadata that IS there (`has_more`, the
+    // honored `next_cursor`). A client that loses the page object falls back
+    // to inferring "more rows?" from page width, and a page shortened by two
+    // dangling atoms then reads as the end of the partition — 499 cards
+    // silently missing from a board that still answers 200.
+    const node = newNodeClient({ baseUrl: `${baseUrl}/paging-count-skipped`, userHash: "test-user" });
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+
+    expect(res.results).toHaveLength(SKIP_ROWS.length - SKIP_DANGLING.size);
+    expect(res.results[0]!.fields.slug).toBe("s0");
+    expect(res.results.at(-1)!.fields.slug).toBe("s1499");
   });
 
   test("a node that never advertises a cursor pages by offset", async () => {
