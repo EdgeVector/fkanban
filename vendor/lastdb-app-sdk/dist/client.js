@@ -827,15 +827,23 @@ function parseQueryPage(body, returnedRows) {
     const offset = body['offset'];
     const hasMore = body['has_more'];
     const nextCursor = parseKeyValue(body['next_cursor']);
-    if (typeof totalCount !== 'number' ||
-        typeof limit !== 'number' ||
+    if (typeof limit !== 'number' ||
         typeof offset !== 'number' ||
         typeof hasMore !== 'boolean') {
         return null;
     }
+    // `total_count: null` means the node PAGED but declined to count (it skips
+    // the count whenever the count cannot change its own page selection). That
+    // is not "no pagination metadata" — `has_more` and `next_cursor` are still
+    // authoritative. Requiring a number here threw the whole page object away
+    // and dropped the drain onto a page-width heuristic. Mirrors upstream
+    // lastdb_app_sdk 800c03f3.
+    if (totalCount !== null && totalCount !== undefined && typeof totalCount !== 'number') {
+        return null;
+    }
     const returnedCount = body['returned_count'];
     return {
-        totalCount,
+        totalCount: typeof totalCount === 'number' ? totalCount : undefined,
         returnedCount: typeof returnedCount === 'number' ? returnedCount : returnedRows,
         limit,
         offset,
