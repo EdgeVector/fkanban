@@ -405,8 +405,10 @@ Usage:
   fkanban pickup claim [options]
 
 status — Classifies every active (non-terminal) card as pickup-ready,
-blocked-on-dependency, human-gated, malformed-routing, parked/non-work,
-collision, or stale-metadata. Read-only hygiene report.
+blocked-on-dependency, human-gated, malformed-routing, unattached-outcome,
+parked/non-work, collision, or stale-metadata. Read-only hygiene report.
+malformed-routing is a card nothing can route (no Repo:/Base:);
+unattached-outcome is a well-formed card one --milestone from ready.
 
 explain — Full readiness path for ONE card: write-guard
 (assertDefaultTodoPickupReady), classify category, lane, surface-overlap vs

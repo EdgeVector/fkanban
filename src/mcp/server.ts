@@ -24,6 +24,7 @@ import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestone
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
+import { PICKUP_CATEGORIES } from "../pickup.ts";
 import { runPingStructured } from "../commands/ping.ts";
 import { CARD_KINDS, MILESTONE_PROOF_STATUSES, MILESTONE_STATES, PRIORITY_TIERS, hydrateCardBodies, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
@@ -214,16 +215,11 @@ const cardDetailSchema = cardSchema.extend({
   missingDeps: z.array(z.string()),
 });
 
-const pickupCategorySchema = z.enum([
-  "pickup-ready",
-  "blocked-on-dependency",
-  "human-gated",
-  "malformed-routing",
-  "parked/non-work",
-  "collision",
-  "stale-metadata",
-  "situation-fenced",
-]);
+// Derived from PICKUP_CATEGORIES, never re-typed. A hand-copied second list is
+// a silent drift: a category added to the classifier but missing here makes the
+// MCP surface reject a classification the CLI happily returns, and the failure
+// lands on the caller rather than on whoever added the category.
+const pickupCategorySchema = z.enum(PICKUP_CATEGORIES);
 const pickupClassificationSchema = z.object({
   slug: z.string(),
   title: z.string(),
@@ -477,7 +473,7 @@ export function createFkanbanMcpServer(
     {
       title: "Report pickup eligibility",
       description:
-        "Classify every active card as pickup-ready, blocked-on-dependency, human-gated, malformed-routing, parked/non-work, collision, or stale-metadata. Read-only: answers what can be picked up now and why other cards were skipped.",
+        "Classify every active card as pickup-ready, blocked-on-dependency, human-gated, malformed-routing, unattached-outcome, parked/non-work, collision, or stale-metadata. malformed-routing means nothing can route the card (no Repo:/Base:); unattached-outcome means it is well-formed but needs a --milestone. Read-only: answers what can be picked up now and why other cards were skipped.",
       annotations: { title: "Report pickup eligibility", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
       outputSchema: {

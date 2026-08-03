@@ -97,8 +97,27 @@ describe("classify live-milestone requirement", () => {
     const card = baseCard({ slug: "no-ms" });
     const c = classifyPickupCard(card, [card], dep, undefined, { requireLiveMilestone: true });
     expect(c.ready).toBe(false);
-    expect(c.category).toBe("malformed-routing");
+    expect(c.category).toBe("unattached-outcome");
     expect(c.reason).toBe("missing milestone linkage");
+  });
+
+  // The bucket split is the point, so assert the SEPARATION, not just the new
+  // name. A card missing only a milestone and a card nothing can route are two
+  // different operator actions; one assertion per name would still pass if both
+  // collapsed back into a single bucket under some later refactor.
+  test("well-formed-but-unattached is a different bucket from genuinely unroutable", () => {
+    const unattached = baseCard({ slug: "no-ms" });
+    const unroutable = baseCard({ slug: "no-repo", repo: "", body: "no routing headers here" });
+
+    const a = classifyPickupCard(unattached, [unattached], dep, undefined, { requireLiveMilestone: true });
+    const b = classifyPickupCard(unroutable, [unroutable], dep, undefined, { requireLiveMilestone: true });
+
+    expect(a.category).toBe("unattached-outcome");
+    expect(b.category).toBe("malformed-routing");
+    expect(a.category).not.toBe(b.category);
+    // Neither is pickup-ready — the split changes the diagnosis, not the gate.
+    expect(a.ready).toBe(false);
+    expect(b.ready).toBe(false);
   });
 
   test("a milestone-linked card stays ready under the same requirement", () => {
