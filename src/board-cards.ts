@@ -347,6 +347,105 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
   };
 }
 
+/**
+ * Spine fields a BoardCards read does not need to project, because the row's
+ * own range key carries them losslessly.
+ *
+ * `sk` IS `QueryRow.key.range`; `parseBoardCardSk` slices `column` off its head
+ * and `slug` off its tail, both exactly.
+ *
+ * `position` is deliberately NOT here. `boardCardSk` pads it
+ * (`String(position).padStart(8,"0")`) and `parseBoardCardSk` un-pads it with
+ * `String(Number(...))` — a round trip that only holds for NUMERIC positions.
+ * A lexical position (`"m"`) becomes `"0000000m"` in the key and parses back as
+ * `"NaN"`, so reconstructing it would silently corrupt the field that ORDERS
+ * the board. `board` is excluded too, but for a different reason: it leads the
+ * projection, and the leading field gates the row set.
+ */
+const BOARD_CARDS_KEY_DERIVED_FIELDS = ["sk", "slug", "column"] as const;
+
+/**
+ * The wire projection for a read whose spine will be recovered from the KEY.
+ *
+ * Three of the five spine fields — `sk`, `slug`, `column` — are payload copies
+ * of the range key, and {@link parseBoardCardSk} reproduces them exactly.
+ * `board` is the caller's own filter argument. So most of the spine is
+ * derivable without projecting any of it, which
+ * {@link spineRowsFromQueryRows} has relied on since 2026-08-01.
+ *
+ * What is NOT free is dropping the LEADING field. The row set is decided by
+ * whichever field leads the projection (see
+ * {@link listBoardCardsPartitionComplete}), so `fields[0]` is preserved
+ * verbatim even when it is a spine member — this narrows cost without touching
+ * the gate, and the row set is identical to the un-narrowed read by
+ * construction rather than by measurement.
+ *
+ * ## Why bother — measured, live primary `HashKey=default`, 186 rows, 2026-08-03
+ *
+ * (`scripts/probe-boardcards-per-field-cost.ts`,
+ * `scripts/probe-boardcards-spine-drop-cost.ts`, 7 interleaved reps)
+ *
+ * | projection | with spine | spine from key | |
+ * |---|---|---|---|
+ * | {@link BOARD_CARDS_LIST_FIELDS} | 496ms | **386ms** | -110ms |
+ * | {@link BOARD_CARDS_DISPLAY_FIELDS} | 335ms | 310ms | -25ms |
+ * | {@link BOARD_CARDS_DEP_SEED_FIELDS} | 366ms | **219ms** | -147ms |
+ *
+ * Row sets identical (186/186, zero extra, zero missing) and the reconstructed
+ * `slug`/`column`/`position` agreed with the projected copies on every shared
+ * row, which is what makes this a cost change and not a behaviour change.
+ *
+ * This also retires the "narrowing is not the lever" reading recorded on
+ * {@link listAllBoardCards}. That conclusion came from aggregate width probes
+ * where 7 fields measured SLOWER than 14 — impossible if cost tracked field
+ * COUNT, and the per-field probe says why: cost is per-field but wildly
+ * uneven, and the dep seed is 5/7 spine, so it paid almost pure overhead. The
+ * lever was never width. It was which fields.
+ */
+export function boardCardsWireProjection(fields: readonly string[]): string[] {
+  if (fields.length === 0) return [];
+  const lead = fields[0]!;
+  const out = [lead];
+  for (const f of fields.slice(1)) {
+    if (f === lead) continue;
+    if ((BOARD_CARDS_KEY_DERIVED_FIELDS as readonly string[]).includes(f)) continue;
+    out.push(f);
+  }
+  return out;
+}
+
+/**
+ * A `Card` from one BoardCards row, taking the spine from the row's REAL key
+ * and the payload from the projected fields.
+ *
+ * Same identity order as {@link spineRowsFromQueryRows}, for the same reason:
+ * the range key IS the address, a projected `sk`/`slug`/`column`/`position` is
+ * a copy, and on a partially-written row the copy is exactly what went missing.
+ * The payload copies remain as a fallback for a wire that carried no key.
+ */
+export function cardFromBoardCardRow(
+  row: { fields?: unknown; key?: { hash: string | null; range: string | null } },
+  board: string,
+): Card {
+  const fields = (row.fields ?? {}) as Record<string, unknown>;
+  const base = cardFromBoardCardFields(fields);
+  const sk = typeof row.key?.range === "string" && row.key.range.length > 0
+    ? row.key.range
+    : typeof fields.sk === "string"
+      ? fields.sk
+      : "";
+  const parsed = parseBoardCardSk(sk);
+  return {
+    ...base,
+    board: board || base.board,
+    slug: parsed?.slug ?? base.slug,
+    column: parsed?.column ?? base.column,
+    // `position` stays whatever the row projected — see
+    // BOARD_CARDS_KEY_DERIVED_FIELDS for why the key cannot supply it.
+    position: base.position,
+  };
+}
+
 async function deleteBoardCardSk(
   node: NodeClient,
   schemaHash: string,
@@ -985,7 +1084,7 @@ export async function listBoardCardsPartition(
     try {
       return await node.queryAll({
         schemaHash,
-        fields: [...(projection ?? BOARD_CARDS_FIELDS)],
+        fields: boardCardsWireProjection([...(projection ?? BOARD_CARDS_FIELDS)]),
         filter,
       });
     } catch (err) {
@@ -993,8 +1092,10 @@ export async function listBoardCardsPartition(
       if (!isCreatedByFieldMiss(err)) throw err;
       return await node.queryAll({
         schemaHash,
-        fields: [...(projection ?? LEGACY_BOARD_CARDS_FIELDS)].filter(
-          (field) => field !== "created_by",
+        fields: boardCardsWireProjection(
+          [...(projection ?? LEGACY_BOARD_CARDS_FIELDS)].filter(
+            (field) => field !== "created_by",
+          ),
         ),
         filter,
       });
@@ -1006,7 +1107,9 @@ export async function listBoardCardsPartition(
   const responses = await Promise.all(filters.map(readOne));
   return responses
     .flatMap((res) => res.results)
-    .map((r) => cardFromBoardCardFields(r.fields as Record<string, unknown>))
+    // `board` is the filter argument, not a payload copy — same choice, and the
+    // same reasoning, as `spineRowsFromQueryRows`.
+    .map((r) => cardFromBoardCardRow(r, board))
     .filter((c) => c.slug.length > 0)
     .filter((c) => !column || c.column === column)
     // Belt-and-braces against a node that widens a range bound: the caller

@@ -247,9 +247,10 @@ describe("list read amplification — cost must not scale with card count", () =
 
       const footerRead = boardCardQueries(node).find((q) => q.filter?.HashKey === "scratch");
       expect(footerRead).toBeDefined();
-      // Spine + tags. The wide read this replaced asked for all 24.
+      // Spine + tags, minus the three spine fields `QueryRow.key.range` carries
+      // (`sk`/`slug`/`column`). The wide read this replaced asked for all 24.
       expect(footerRead!.fields.slice().sort()).toEqual(
-        ["board", "column", "position", "sk", "slug", "tags"],
+        ["board", "position", "tags"],
       );
       // Card is never touched to render a count.
       expect(cardQueries(node)).toHaveLength(0);
