@@ -35,6 +35,7 @@ export const PICKUP_CATEGORIES = [
   "blocked-on-dependency",
   "human-gated",
   "malformed-routing",
+  "unattached-outcome",
   "parked/non-work",
   "collision",
   "stale-metadata",
@@ -309,8 +310,19 @@ export function classifyPickupCard(
     card.column === "todo" &&
     !(card.milestone ?? "").trim()
   ) {
+    // NOT `malformed-routing`. Everything routing needs is present and correct —
+    // repo, base, and kind all resolved above, or this line is unreachable. The
+    // card is well-formed and merely unattached to an outcome, which is one
+    // `--milestone` away and is a POLICY gate, not a defect in the card.
+    //
+    // Collapsing the two hid both. `malformed-routing` is where a genuinely
+    // broken card shows up — no `Repo:` header, nothing can route it — and on
+    // 2026-08-03 that bucket read 12 on the live board while every one of the 12
+    // was well-formed. A real routing bug would have been invisible in that
+    // count, and the reported remedy ("set a bare Repo: header") was wrong for
+    // all 12. Splitting the bucket is what makes each number actionable.
     return out(
-      "malformed-routing",
+      "unattached-outcome",
       "missing milestone linkage",
       "Attach an outcome with `fkanban add <slug> --milestone <slug>`; the claim write-guard (assertLivePrMilestone) rejects milestone-less Kind:pr claims.",
     );
