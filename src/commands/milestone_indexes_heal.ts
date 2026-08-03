@@ -93,7 +93,10 @@ async function classifyBoardMilestoneOps(opts: {
   for (const [board, rows] of rowsByBoard) {
     if (rows === null) continue;
     for (const row of rows) {
-      const truth = bySlug.get(row.slug);
+      // Absence from the full scan is NOT evidence that a milestone is gone —
+      // confirm by ADDRESS before deleting the row. See the removal-evidence
+      // note on `milestoneIndexesHealResult`.
+      const truth = bySlug.get(row.slug) ?? await findMilestone(opts.node, opts.cfg, row.slug);
       if (!truth || (truth.board || "default") !== board) {
         ops.push({ kind: "remove", milestone: row });
       }
@@ -118,6 +121,37 @@ function budgetAllowsAnother(budget: number | null, issued: number): boolean {
  * let a degraded index shrink its own repair set. It full-scans `Milestone`
  * directly, then point-reads each slug for truth, then upserts BoardMilestones
  * + MilestoneCards.
+ *
+ * ## Removal evidence: absence from the scan is not deletion
+ *
+ * That reasoning is right for UPSERTS and was wrong for REMOVALS. The scan it
+ * substitutes for the index is itself unreliable on the live primary: it
+ * returns husks of DELETED milestones and MISSES live ones (measured
+ * 2026-08-01, `scripts/probe-milestone-membership-parity.ts` preamble;
+ * `papercut-kanban-milestone-full-scan-returns-husks-and-misses-live-rows`).
+ * Under-enumerating only under-repairs an upsert, but it AUTHORIZED A DELETE:
+ * every index row whose slug the scan missed was classified `remove`.
+ *
+ * Measured on the primary 2026-08-03 (`scripts/probe-milestone-heal-truth-drop.ts`):
+ * 17 slugs scanned against 38 BoardMilestones rows -> 33 proposed removals, and
+ * a HashKey point-read confirmed **all 33 were live**, 0 genuinely gone. This
+ * command applies by default (`apply: !values["dry-run"]`) at a budget of 25, so
+ * one bare `groom milestone-indexes-heal` would have deleted 25 live rows from
+ * the index behind `milestone list`, `milestone portfolio`, and pickup's
+ * milestone-linkage gate.
+ *
+ * The gap is not projection width — `findMilestone` uses the same
+ * `fieldsFor("milestone")` set. It is full-scan ENUMERATION vs. HashKey
+ * ADDRESSING. So a removal now requires a point-read confirming the milestone
+ * is gone, the same refusal `deleteCardRecord` makes on the card side ("one
+ * narrow point-read is the cheapest honest answer available"). It costs at most
+ * one read per index row the scan could not account for, on a repair path that
+ * is already the slowest command here — and only for rows about to be deleted.
+ *
+ * A milestone the scan misses is still under-repaired: it lands in neither the
+ * upsert set nor the removal set, so a STALE row for it stays stale. That is
+ * the safe direction (a stale row beats a deleted one) and is deliberately left
+ * to a follow-up rather than widened here.
  */
 export async function milestoneIndexesHealResult(opts: {
   cfg: Config;
