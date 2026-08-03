@@ -72,30 +72,86 @@ export const POINT_READ_CONCURRENCY = 16;
 /**
  * Fan-out width for PARTITION-read pools (a whole board's rows, per board).
  *
- * Six, and separate from {@link POINT_READ_CONCURRENCY} on purpose.
+ * Twelve, and separate from {@link POINT_READ_CONCURRENCY} on purpose. The
+ * separation came first (the two used to be one constant, so tuning the cheap
+ * class silently re-tuned the expensive one); this number is what measuring the
+ * expensive class on its own terms produced.
  *
- * `listAllBoardCards` fans out one partition read per board and used to reuse
- * the point-read width, while its own comment admitted the reuse was not
- * justified: *"a partition read is heavier than the point read
- * POINT_READ_CONCURRENCY was sized for. The width is reused rather than
- * re-tuned because the bound here is a LOAD GUARD, not an optimum: what was
- * measured is 2-wide, and widening past that is unmeasured on this path."*
+ * ## Which call site this number is actually for
  *
- * That was survivable while the two numbers happened to agree. It stops being
- * survivable the moment either one moves — raising the point-read width to 16
- * on the strength of a POINT-read measurement would have silently widened
- * partition fan-out to 16 as well, on a path whose own documentation says the
- * evidence only reaches 2. One constant serving two cost classes means every
- * future tuning of the cheap class is an unmeasured change to the expensive
- * one.
+ * Two paths pass it, and only one has a fan-out wide enough to care:
  *
- * A partition read returns hundreds of rows and is the node's #1 consumer of
- * wall time system-wide (`lastdb ops`: `client=kanban kind=query
- * schema=board_cards`). It is the read that would find a shed threshold first.
- * So it keeps the conservative width until somebody measures THIS path, and
- * `POINT_READ_CONCURRENCY` can now move without dragging it along.
+ *   - `listAllBoardCards` — one partition read per BOARD. This node carries two
+ *     boards, so it runs 2-wide whatever the constant says. Inert today, and it
+ *     is the width's job to still be right if that grows.
+ *   - `sweepBoardCardsPartition` — 24 single-field partition queries over ONE
+ *     partition: the completeness enumeration behind `doctor` and the HOURLY
+ *     `groom board-cards-heal`. This is the live fan-out, and the width decides
+ *     how many serial waves it costs, every hour, per board.
+ *
+ * ## Measured, live primary, 2026-08-03
+ *
+ * `scripts/probe-partition-read-concurrency-width.ts` — the real 24-lead sweep
+ * of the live `default` partition, 3 interleaved reps, same leads at every
+ * width. A NEIGHBOUR reader (a cheap point read, the shape every other
+ * kanban/brain/lastgit process on this primary issues) ran continuously
+ * throughout, against a warm 197ms idle control:
+ *
+ * | width | median ms | waves | ms/wave | shed | neighbour median |
+ * |---|---|---|---|---|---|
+ * | 1 | 3923 | 24 | 163 | 0 | 166ms |
+ * | 2 | 2010 | 12 | 167 | 0 | 171ms |
+ * | 4 | 1168 | 6 | 195 | 0 | 182ms |
+ * | **6** (the old width) | **780** | **4** | 195 | 0 | 193ms |
+ * | 8 | 608 | 3 | 203 | 0 | 188ms |
+ * | **12** | **437** | **2** | 219 | 0 | 188ms |
+ * | 16 | 458 | 2 | 229 | 0 | 191ms |
+ * | 24 | 373 | 1 | 373 | 0 | 185ms |
+ *
+ * ## What this says that the point-read measurement did not
+ *
+ * The two cost classes are genuinely different, and the numbers say so rather
+ * than the folklore. On POINT reads ms/wave was FLAT across a 24x range of
+ * width (181 -> 214) — width bought waves and nothing else. Here ms/wave
+ * **grows 163 -> 373**: a partition read really is heavier, and widening it has
+ * a per-wave price that widening a point-read pool does not. Splitting the
+ * constant was not tidiness.
+ *
+ * ## Why twelve, and not six, sixteen, or twenty-four
+ *
+ * Twelve is where the curve stops paying. It halves the hourly sweep (780ms ->
+ * 437ms, 1.8x) by collapsing 4 waves into 2. **Sixteen is measurably WORSE than
+ * twelve** (458ms) — it buys no wave, only per-wave cost, which is the clearest
+ * possible evidence that the elbow is real and not noise. Twenty-four is 15%
+ * faster still, and is rejected on design rather than on time: 24 IS the lead
+ * count, so a width of 24 means "unbounded for this call site" on precisely the
+ * read that would find a shed threshold first — and `listAllBoardCards` would
+ * inherit it if this install ever grows past two boards.
+ *
+ * ## The bound's real justification, finally measured
+ *
+ * Both widths used to defend themselves with an unmeasured claim about Mini's
+ * "too many concurrent reads" shed threshold. On this path, at every width to
+ * 24: **zero shed** — no 503, no `service_timeout`. So shed is not the reason.
+ *
+ * The reason both constants actually gave was politeness to a shared node, and
+ * that was the part nobody had ever measured — the point-read probe explicitly
+ * said so ("the probe measured THIS client's shed rate, not the effect of a
+ * wide fan-out on lastgit and brain"). Measured now: the neighbour sits at
+ * **166-193ms across every width from 1 to 24, against a 197ms idle control**.
+ * Flat, and never worse than idle. A wide partition fan-out from one kanban
+ * process costs the primary's other clients nothing detectable.
+ *
+ * That is a real result and it is still a bounded one. It measures ONE process
+ * widening; a fleet of kanban processes each opening 24 sockets is a different
+ * experiment and nobody has run it. Twelve collapses the hourly sweep to two
+ * waves while leaving that experiment untaken — and, unlike six, it is a number
+ * this path's own evidence produced.
+ *
+ * Do not raise this to the lead count, and do not alias it to
+ * {@link POINT_READ_CONCURRENCY}. `test/concurrency.test.ts` pins both.
  */
-export const PARTITION_READ_CONCURRENCY = 6;
+export const PARTITION_READ_CONCURRENCY = 12;
 
 /**
  * Map `items` through `fn` with at most `limit` calls in flight.
