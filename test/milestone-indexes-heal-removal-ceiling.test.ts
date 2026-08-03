@@ -104,6 +104,38 @@ function seedOrphanIndexRow(node: FakeNode, slug: string, position: string): voi
   });
 }
 
+/**
+ * Fat Milestone only — deliberately NO BoardMilestones row.
+ *
+ * `milestoneAddCmd` now ensures BoardMilestones membership when protein fold
+ * misses (portfolio undercount fix). Heals still need to classify "live fat
+ * row, missing index" as an upsert; seed that state directly.
+ */
+async function seedFatMilestoneOnly(node: FakeNode, slug: string, title?: string): Promise<void> {
+  const now = nowIso();
+  node.seed({
+    schemaHash: cfg.schemaHashes.milestone!,
+    keyHash: slug,
+    fields: {
+      slug,
+      title: title ?? `Milestone ${slug}`,
+      body: "acceptance",
+      board: "default",
+      state: "active",
+      position: "10",
+      north_star: "north-star-heal",
+      driver: "last-stack-milestone-driver",
+      deps: [],
+      proof_card: "",
+      proof_status: "pending",
+      block_reason: "",
+      created_at: now,
+      updated_at: now,
+      completed_at: "",
+    },
+  });
+}
+
 const pad = (n: number): string => String(n).padStart(10, "0");
 
 function deletesTo(node: FakeNode, schemaHash: string): number {
@@ -150,15 +182,9 @@ describe("milestone-indexes-heal: the removal ceiling refuses implausible deleti
     // One live milestone with NO index row — a legitimate pending upsert — in a
     // run whose removals blow the ceiling. An implementation that dropped only
     // the removals would still issue this write.
-    await milestoneAddCmd({
-      cfg,
-      node,
-      slug: "ms-needs-upsert",
-      title: "Needs upsert",
-      state: "active",
-      northStar: "north-star-heal",
-      driver: "last-stack-milestone-driver",
-    });
+    // Seed fat-only (not milestoneAddCmd): the write path now ensures the index
+    // row itself when fold misses; heal still classifies pre-existing holes.
+    await seedFatMilestoneOnly(node, "ms-needs-upsert", "Needs upsert");
     for (let i = 0; i < 10; i++) seedOrphanIndexRow(node, `ms-orphan-${i}`, pad(100 + i));
 
     const before = node.writes.length;
@@ -175,16 +201,9 @@ describe("milestone-indexes-heal: the removal ceiling refuses implausible deleti
     await seedBoard(node);
     // Well past the removal ceiling in TOTAL writes: a flat drift ceiling would
     // refuse this, and refusing it would break first-run index construction.
+    // Fat-only seeds: BoardMilestones empty so the heal classifies pure upserts.
     for (let i = 0; i < 20; i++) {
-      await milestoneAddCmd({
-        cfg,
-        node,
-        slug: `ms-fresh-${i}`,
-        title: `Fresh ${i}`,
-        state: "active",
-        northStar: "north-star-heal",
-        driver: "last-stack-milestone-driver",
-      });
+      await seedFatMilestoneOnly(node, `ms-fresh-${i}`, `Fresh ${i}`);
     }
 
     const healed = await milestoneIndexesHealResult({ cfg, node, apply: true });
