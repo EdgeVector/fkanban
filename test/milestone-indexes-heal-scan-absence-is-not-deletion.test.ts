@@ -161,3 +161,83 @@ describe("milestone-indexes-heal: scan absence is not deletion evidence", () => 
     expect(healed.board_milestone_removals).toBe(1);
   });
 });
+
+// Refusing to delete on scan-absence stopped the damage, but left those rows
+// unreachable by REPAIR too: the upsert loop only ever walked the scan's own
+// results, so a STALE row for a milestone the scan misses stayed stale forever
+// while the command reported success. Measured on the primary 2026-08-03
+// (`scripts/probe-milestone-heal-hydrate-drop.ts`): the scan enumerated 21
+// slugs, 10 point-read back live and 11 were husks, against 38 live milestones
+// — ~26% recall, so ~74% of the index was outside the repair set.
+//
+// The removal loop was ALREADY point-reading each of those rows to prove it
+// must not delete them, then discarding the truth. Widening the upsert set from
+// that same read costs no additional node reads.
+describe("milestone-indexes-heal: a scan-invisible milestone is still repairable", () => {
+  test("a STALE row for a milestone the scan misses is upserted, not left stale", async () => {
+    const node = nodeWithScanBlindSpot("ms-scan-invisible");
+    await seedBoard(node);
+    await seedMilestoneWithIndexRow(node, "ms-visible");
+    await seedMilestoneWithIndexRow(node, "ms-scan-invisible");
+
+    // Make the index row DISAGREE with the fat record it mirrors. This is the
+    // drift a repair command exists to correct.
+    const truth = await findMilestone(node, cfg, "ms-scan-invisible");
+    if (!truth) throw new Error("seed missing");
+    node.seed({
+      schemaHash: cfg.schemaHashes.board_milestones!,
+      keyHash: truth.board || "default",
+      rangeKey: boardMilestoneSk(truth.state, truth.position, truth.slug),
+      fields: {
+        ...boardMilestoneFieldsFromMilestone(truth),
+        completed_at: truth.completed_at,
+        title: "STALE TITLE — drifted from the fat record",
+      },
+    });
+
+    // Precondition: invisible to the scan, addressable by point-read. Without
+    // this the test could pass for the wrong reason.
+    const scan = await node.queryAll({
+      schemaHash: cfg.schemaHashes.milestone!,
+      fields: ["slug"],
+      allowFullScan: true,
+    });
+    const scanned = scan.results.map((r) => String((r.fields as Record<string, unknown>).slug ?? ""));
+    expect(scanned).not.toContain("ms-scan-invisible");
+
+    const healed = await milestoneIndexesHealResult({ cfg, node, apply: false });
+
+    // Repaired, not deleted — and the row it could not see is the one repaired.
+    expect(healed.board_milestone_upserts).toBe(1);
+    expect(healed.board_milestone_removals).toBe(0);
+  });
+
+  test("an in-sync row the scan misses is left alone — no churn", async () => {
+    const node = nodeWithScanBlindSpot("ms-scan-invisible");
+    await seedBoard(node);
+    await seedMilestoneWithIndexRow(node, "ms-visible");
+    await seedMilestoneWithIndexRow(node, "ms-scan-invisible");
+
+    const healed = await milestoneIndexesHealResult({ cfg, node, apply: false });
+
+    // Recovering candidates from the index must not turn every unseen row into
+    // a write. Only genuine drift is repaired.
+    expect(healed.board_milestone_upserts).toBe(0);
+    expect(healed.board_milestone_removals).toBe(0);
+  });
+
+  test("husks dropped during hydration are counted, not silent", async () => {
+    const node = fakeNode({ dropIncompleteRows: false });
+    await seedBoard(node);
+    await seedMilestoneWithIndexRow(node, "ms-visible");
+
+    const healed = await milestoneIndexesHealResult({ cfg, node, apply: false });
+
+    // `scanned` is the count that point-read back to a live milestone; the
+    // enumeration it came from is reported separately so an operator can tell
+    // "the scan found 1" from "the scan found 20 and 19 were husks".
+    expect(healed.milestones_scanned).toBe(1);
+    expect(healed.milestones_enumerated).toBe(1);
+    expect(healed.milestone_husks_dropped).toBe(0);
+  });
+});
