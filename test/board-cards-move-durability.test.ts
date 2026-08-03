@@ -126,6 +126,68 @@ describe("BoardCards move durability", () => {
     expect(wroteDest).toBeLessThan(deletedSource);
   });
 
+  test("the source delete is not issued until the destination write has RESOLVED", async () => {
+    // The test above reads ISSUE order; the invariant is COMPLETION order, and
+    // the two come apart for exactly the change most likely to be made here.
+    //
+    // Overlapping the two with `Promise.all([write(...), retire(...)])` still
+    // issues the write first — an async function runs synchronously up to its
+    // first await, so `node.writes` records it ahead of the delete and the
+    // issue-order assertion above passes unchanged. Verified by patching
+    // `upsertBoardCard` to that shape: this file went 4 pass / 2 fail and the
+    // issue-order test was one of the four that PASSED. The durability tests
+    // caught it, but the test whose NAME is the ordering could not.
+    //
+    // It matters because the destination row is not merely un-acked during that
+    // window, it is unreadable: measured on the live primary
+    // (`scripts/probe-readback-lag-by-schema.ts`) a BoardCards write is invisible
+    // to a partition query for ~514ms after its own ack, 0 of 6 rows readable on
+    // the first read. Issuing the delete inside that window is what opens the
+    // hole where the card is on no board at all.
+    const node = fakeNode();
+    const prev = card({ column: "todo", position: "1" });
+    const next = card({ column: "doing", position: "2", updated_at: "2026-01-03T00:00:00.000Z" });
+    seedRow(node, prev);
+
+    const destSk = boardCardSk(next.column, next.position, next.slug);
+    const srcSk = boardCardSk(prev.column, prev.position, prev.slug);
+
+    // Hold the destination write open. Nothing resolves it until we say so, so
+    // "did the delete happen while the write was in flight?" is a deterministic
+    // question rather than a stopwatch.
+    let releaseWrite: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const realUpdate = node.updateRecord.bind(node);
+    node.updateRecord = (async (args: Parameters<FakeNode["updateRecord"]>[0]) => {
+      if (args.schemaHash === BC && args.rangeKey === destSk) {
+        await held;
+      }
+      return realUpdate(args);
+    }) as FakeNode["updateRecord"];
+
+    const inFlight = upsertBoardCard(node, cfg, next, prev);
+
+    // Give any overlapped delete every chance to land before we look.
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+
+    const deletedWhilePending = node.writes.some(
+      (w) => w.schemaHash === BC && w.op === "delete" && w.rangeKey === srcSk,
+    );
+    expect(deletedWhilePending).toBe(false);
+
+    releaseWrite();
+    await inFlight;
+
+    // ...and it still happens once the write is durable, so this pins the
+    // ordering rather than merely forbidding the delete.
+    const deletedAfter = node.writes.some(
+      (w) => w.schemaHash === BC && w.op === "delete" && w.rangeKey === srcSk,
+    );
+    expect(deletedAfter).toBe(true);
+  });
+
   test("a completed move still leaves exactly one row, at the destination", async () => {
     const node = fakeNode();
     const prev = card({ column: "todo", position: "1" });

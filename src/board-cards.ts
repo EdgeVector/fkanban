@@ -861,6 +861,40 @@ export async function upsertBoardCard(
   //
   // Both failures are recoverable. Only one of them is invisible while it
   // waits, so prefer the visible one.
+  //
+  // ## The premise that argument rests on, now measured
+  //
+  // Everything above assumes the destination row is READABLE once its write
+  // acks. It is not. On the live primary
+  // (`scripts/probe-readback-lag-by-schema.ts`, 2026-08-03):
+  //
+  //   | schema     | key shape           | readable on first read | lag  |
+  //   |------------|---------------------|------------------------|------|
+  //   | Card       | Hash, by hash       | **6/6**                | 104ms|
+  //   | BoardCards | HashRange partition | **0/6**                | 514ms|
+  //
+  // So a BoardCards write is durable but unreadable for ~half a second after
+  // its own ack, while a Card point read is read-your-write. The INDEX lags;
+  // the record does not. Nothing here polls, and it does not need to — but two
+  // consequences are load-bearing:
+  //
+  //   1. The delete below MUST NOT be issued until the write above has
+  //      resolved. Overlapping them (the `Promise.all` reflex) drops the source
+  //      row while the destination is still invisible, which is the "card on no
+  //      board" state this whole comment exists to prevent — and it would be a
+  //      real hole, not a theoretical one, for the length of the lag. Pinned by
+  //      `test/board-cards-move-durability.test.ts`, which asserts COMPLETION
+  //      order specifically because the issue-order assertion cannot see it.
+  //   2. Sequenced as written, the ordering holds: measured over 10 real moves
+  //      with a concurrent poller (`scripts/probe-move-visibility-hole.ts`),
+  //      **0 of 183 samples** saw the card on zero rows, and 78 saw the
+  //      intended transient duplicate. The trade documented above is the one
+  //      actually being made.
+  //
+  // Callers inherit this: any path that writes a BoardCards row and then reads
+  // a partition back to decide something is reading pre-write state. The
+  // production paths do not (`move` and `add` end at the write; `pickup claim`
+  // CAS-claims the Card rather than re-reading the board) — keep it that way.
   const retireSupersededRows = async () => {
     if (previous) {
       const prevBoard = previous.board || "default";
