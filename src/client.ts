@@ -29,6 +29,7 @@ import { basename, dirname, join } from "node:path";
 
 import {
   CapabilityDeniedError,
+  CasConflictError,
   LastDbClient,
   PermissionDeniedError,
   RequestRejectedError,
@@ -1822,6 +1823,42 @@ function mapSdkDataError(
   }
   if (err instanceof PermissionDeniedError) {
     return mapNodeError(403, { kind: "permission_denied", error: err.reason }, path);
+  }
+  // A contended write, NOT a failure — and the ONLY reason fkanban's CAS retry
+  // loops exist. The SDK models a 409 `cas_conflict` as its own class,
+  // deliberately not a `RequestRejectedError`/`UnexpectedResponseError`, so an
+  // app can branch on it; because of that it never reaches `mapNodeError`'s
+  // 409 branch below, and without this arm it fell through to the generic
+  // `sdk_error` catch-all. Both consumers of `code === "cas_conflict"` were
+  // therefore unreachable on the SDK transport — every write goes through it:
+  //
+  //   - `patchBoardListIndex` retries a losing `all_boards` patch 4 times.
+  //     Dead, so the FIRST conflict threw. Measured on an isolated node
+  //     2026-08-03 with `scripts/kanban-stress.sh`: a 4-way concurrent
+  //     `board create` burst lost 3 of 4 boards. A board missing from
+  //     `all_boards` makes every card on it invisible to `kanban list` while
+  //     `show <slug>` still works.
+  //   - `move`'s `--expect-column` guard turns a lost race into a
+  //     `ClaimConflictError` naming who holds the card. Dead, so two agents
+  //     racing for one card got an unmapped `sdk_error` instead.
+  //
+  // `cause` keeps the modeled fields on top of the verbatim body: `move` reads
+  // `cause.actual` to report the column that actually won. Typed fields are
+  // overlaid only when the SDK populated them, so a node that puts detail in
+  // the body and not the typed fields is not overwritten with nulls.
+  if (err instanceof CasConflictError) {
+    const body = typeof err.body === "object" && err.body !== null ? err.body : {};
+    const modeled: Record<string, unknown> = { ...body };
+    for (const [k, v] of Object.entries({
+      schema: err.schema,
+      field: err.field,
+      key: err.key,
+      expected: err.expected,
+      actual: err.actual,
+    })) {
+      if (v !== null && v !== undefined) modeled[k] = v;
+    }
+    return new FkanbanError({ code: "cas_conflict", message: err.message, cause: modeled });
   }
   if (err instanceof RequestRejectedError) {
     return mapNodeError(400, err.body ?? { kind: err.kind, error: err.message }, path);

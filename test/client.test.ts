@@ -89,6 +89,25 @@ const server = Bun.serve({
       await new Promise((r) => setTimeout(r, 5_000));
       return Response.json({ ok: true });
     }
+    // A contended write: the node's real 409 `cas_conflict` body, verbatim in
+    // the shape `lastdbd` sends (modeled fields + message). The SDK parses this
+    // into its own `CasConflictError` class rather than a RequestRejected /
+    // UnexpectedResponse, so this route is the ONLY way to reach the mapper arm
+    // that fkanban's CAS retry loops depend on.
+    if (url.pathname === "/cas-conflict/api/mutation") {
+      return Response.json(
+        {
+          error: "cas_conflict",
+          schema: "cardlistindexhash",
+          field: "payload_json",
+          key: '{"hash":"all_boards","range":null}',
+          expected: "[old]",
+          actual: "[new]",
+          message: "CAS conflict on field 'payload_json': the row changed",
+        },
+        { status: 409 },
+      );
+    }
     // Transient backpressure that clears: busy-503 (with the node's own
     // "retry after Ns" directive) on the first two hits, then a normal 200.
     if (url.pathname === "/busy-twice/api/query") {
@@ -424,6 +443,65 @@ describe("queryAll paging", () => {
     expect(slugs(res)).toEqual(["r0", "r1", "r2", "r3", "r4"]);
     const reqs = seen.slice(before).filter((r) => r.path.endsWith("/api/query"));
     expect(reqs.map((r) => (r.body as Record<string, unknown>).offset)).toEqual([0, 2, 4]);
+  });
+});
+
+// A 409 `cas_conflict` must arrive as `code: "cas_conflict"`, because that code
+// IS the retry contract — `patchBoardListIndex` re-reads and re-applies on it
+// (4 attempts) and `move --expect-column` turns it into a `ClaimConflictError`
+// naming the column that actually won. Both read `err.code`, so a conflict that
+// arrives under any other code is not "a worse message": it is a lost write and
+// a lost race guard.
+//
+// This is asserted THROUGH the real SDK on purpose. Every other cas_conflict
+// test in this repo fabricates `new FkanbanError({code:"cas_conflict"})` by
+// hand, which is precisely how a broken mapper survived: the retry logic was
+// well covered against a shape production never produced. The SDK models a 409
+// as its own `CasConflictError` class — deliberately NOT a RequestRejectedError
+// or UnexpectedResponseError, so apps can branch on it — so it never reached
+// `mapNodeError`'s 409 branch and fell through to the generic `sdk_error`
+// catch-all. Measured cost of that gap on an isolated node 2026-08-03: a 4-way
+// concurrent `board create` burst lost 3 of 4 boards.
+describe("CAS conflict mapping", () => {
+  test("a node 409 cas_conflict surfaces as code cas_conflict, not sdk_error", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/cas-conflict`, userHash: "test-user" });
+    const err = await node
+      .updateRecord({
+        schemaHash: "cardlistindexhash",
+        fields: { payload_json: "[new]" },
+        keyHash: "all_boards",
+        expected: { type: "value", field: "payload_json", value: "[old]" },
+      })
+      .then(() => null)
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("cas_conflict");
+  });
+
+  // `move` reads `cause.actual` to tell the loser which column actually won.
+  // Mapping the code correctly but dropping the modeled detail would report
+  // every lost claim as "unknown".
+  //
+  // The `code` assertion is repeated here deliberately. The raw SDK
+  // `CasConflictError` ALREADY carries `.actual`/`.field`, and the broken
+  // mapper put that object straight onto `cause` — so a detail-only assertion
+  // passes against the unfixed client and pins nothing. Verified: neutering the
+  // mapper arm leaves this test green unless `code` is checked with it.
+  test("carries the node's modeled actual value on cause", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/cas-conflict`, userHash: "test-user" });
+    const err = await node
+      .updateRecord({
+        schemaHash: "cardlistindexhash",
+        fields: { payload_json: "[new]" },
+        keyHash: "all_boards",
+        expected: { type: "value", field: "payload_json", value: "[old]" },
+      })
+      .then(() => null)
+      .catch((e) => e);
+    expect((err as FkanbanError).code).toBe("cas_conflict");
+    const cause = (err as FkanbanError).cause as Record<string, unknown>;
+    expect(cause.actual).toBe("[new]");
+    expect(cause.field).toBe("payload_json");
   });
 });
 
