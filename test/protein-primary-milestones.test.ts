@@ -144,4 +144,21 @@ describe("protein-primary milestone writes", () => {
     expect(rows).toHaveLength(1);
     expect(rows![0]!.state).toBe("active");
   });
+
+  test("when Mini fold does not land BoardMilestones, ensure dual-writes membership so list sees the slug", async () => {
+    // Production bug: protein-primary path retired index rows but never wrote
+    // them when fold was unbound — list/portfolio/gap-report undercounted while
+    // milestone show still worked (papercut-milestone-portfolio-list-undercount).
+    const node = fakeNode({ dropIncompleteRows: false });
+
+    await upsertMilestoneRecord(node, cfg, milestone(), false, null);
+
+    const boardMilestonePayloadWrites = node.writes.filter(
+      (w) => w.schemaHash === BOARD_MILESTONES && (w.op === "create" || w.op === "update"),
+    );
+    expect(boardMilestonePayloadWrites.length).toBeGreaterThanOrEqual(1);
+
+    const fromBoard = await listMilestones(node, cfg, { boards });
+    expect(fromBoard.map((m) => m.slug)).toEqual(["ms-protein"]);
+  });
 });

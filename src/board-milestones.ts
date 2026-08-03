@@ -146,6 +146,32 @@ export async function retireBoardMilestoneMembership(
 }
 
 /**
+ * Ensure a BoardMilestones membership tip exists for this milestone.
+ *
+ * Protein-primary writes rely on Mini fold to create the keyed tip. List /
+ * portfolio / gap-report are BoardMilestones-only: if fold never lands, the
+ * milestone disappears from factory inventory while remaining point-readable.
+ * When the partition is readable and the slug is absent, dual-write membership
+ * so drivers can see it. If the partition read fails, best-effort upsert
+ * (recoverable) rather than leave an invisible hole.
+ */
+export async function ensureBoardMilestoneMembership(
+  node: NodeClient,
+  cfg: Config,
+  milestone: Milestone,
+  previous?: Milestone | null,
+): Promise<"present" | "upserted" | "skipped"> {
+  if (!boardMilestonesHash(cfg) || !milestone.slug) return "skipped";
+  const board = milestone.board || "default";
+  const part = await listBoardMilestonesPartition(node, cfg, board);
+  if (part !== null && part.some((m) => m.slug === milestone.slug)) {
+    return "present";
+  }
+  await upsertBoardMilestone(node, cfg, milestone, previous ?? null);
+  return "upserted";
+}
+
+/**
  * Delete BoardMilestones rows for `slug` on `board` except optional keepSk.
  */
 export async function purgeOtherBoardMilestoneRows(
