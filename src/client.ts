@@ -772,6 +772,10 @@ export function newNodeClient(opts: {
     let offset = 0;
     let cursor: KeyValue | null = null;
     let cursorUnhonored = false;
+    // Row identities seen so far, for the OFFSET path's no-progress guard
+    // below. Same key function the final de-dup uses, so "new" here means
+    // exactly what "distinct" means in the returned result.
+    const seenRowKeys = new Set<string>();
 
     const sameCursor = (a: KeyValue | null, b: KeyValue | null): boolean =>
       a !== null && b !== null && JSON.stringify(a) === JSON.stringify(b);
@@ -821,9 +825,58 @@ export function newNodeClient(opts: {
         page = parsed.page;
         rows.push(...parsed.rows);
 
+        // How much of this page was information we did not already have.
+        // Counted per row rather than per page so duplicates WITHIN one page
+        // (measured at 164 of page 1's 537 rows) do not read as progress.
+        let freshRows = 0;
+        for (const row of parsed.rows) {
+          const key = recordDedupKey(queryRowFromSdk(row));
+          if (!seenRowKeys.has(key)) freshRows++;
+          seenRowKeys.add(key);
+        }
+
         if (!pageHasMore) break;
         if (rows.length >= QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT) break;
         if (parsed.rows.length === 0) break;
+
+        // OFFSET-PATH NO-PROGRESS GUARD.
+        //
+        // The cursor path above already refuses to trust a cursor the node
+        // hands back unadvanced. The offset path had no equivalent — and the
+        // offset path is the one EVERY product read takes, because
+        // `can_push_down` requires `filter.is_none()` so key-restricted reads
+        // never get a honored cursor.
+        //
+        // Measured on the live primary 2026-08-03, Card full scan, 194-card
+        // board (`scripts/probe-scan-duplicate-locus.ts`):
+        //
+        //   page 1   537 rows   373 distinct   164 duplicates WITHIN the page
+        //   pages 2-18  1002 rows   ZERO new slugs, all 17 of them
+        //
+        // `has_more` stayed true throughout and `total_count` claimed 1502, so
+        // the loop kept paying ~190ms per round trip for rows it already held:
+        // 17 of 18 requests and ~3.2s of `kanban search`'s 3.6s, for nothing.
+        //
+        // A non-empty page that adds no new row identity cannot be progress —
+        // row keys are unique, so "every row here is one I already have" means
+        // this page is a repeat, not a new window. Stopping is SET-PRESERVING,
+        // not merely close: the drain de-dups by this exact key on the way out
+        // (`queryResponseFromSdk`), so the rows dropped here are rows the
+        // caller was never going to see. `test/query-paging-no-progress.test.ts`
+        // pins that equality rather than the request count alone.
+        //
+        // Node-side this is fold's bug (a full scan should not serve duplicate
+        // rows in one page, nor advertise `has_more` past its last distinct
+        // row) — filed as papercut-lastdb-query-offset-paging-repeats-first-page.
+        // The guard is version-neutral: a node that pages correctly always
+        // yields fresh rows, so it never fires.
+        if (freshRows === 0) {
+          verbose(
+            `node: /api/query returned ${parsed.rows.length} row(s) at offset ${offset}, ` +
+              "none of them new — treating the offset drain as complete",
+          );
+          break;
+        }
 
         cursor = cursorUnhonored ? null : nextCursor;
         if (cursor === null) offset = rows.length;

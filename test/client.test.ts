@@ -35,7 +35,7 @@ const PAGE_ROWS = [0, 1, 2, 3, 4].map((i) => ({
 }));
 // The cursor the unhonored-cursor stub keeps handing back unchanged.
 const STUCK_CURSOR = { hash: "last-stack", range: "stuck" };
-const pagingHits = { unhonored: 0, full: 0 };
+const pagingHits = { unhonored: 0, full: 0, repeats: 0 };
 
 // Production-shaped fixture: full 1000-row pages, 1251 rows total — the exact
 // size of the LastgitCiStatus HashKey(last-stack) partition this was found on.
@@ -196,6 +196,48 @@ const server = Bun.serve({
         return page(Number(b.offset ?? 0), null);
       }
 
+      // The live primary's FULL-SCAN offset paging, measured 2026-08-03 on the
+      // Card schema (`scripts/probe-scan-duplicate-locus.ts`):
+      //
+      //   page 1      537 rows, 373 distinct — 164 duplicates INSIDE one page
+      //   pages 2-18  1002 rows, ZERO new slugs between them
+      //   has_more    true throughout; total_count claims 1502
+      //
+      // i.e. every page past the first re-serves rows already delivered, and
+      // the node keeps claiming there is more. Modelled here at test scale:
+      // page 1 carries the whole distinct set PLUS an in-page duplicate, and
+      // every later offset re-serves a slice of the same rows, forever.
+      if (url.pathname === "/paging-offset-repeats/api/query") {
+        pagingHits.repeats += 1;
+        // Backstop so a pre-fix client fails fast and deterministically rather
+        // than looping to its row cap and timing the suite out.
+        if (pagingHits.repeats > 40) {
+          return Response.json({
+            ok: true,
+            results: [],
+            returned_count: 0,
+            total_count: 99,
+            has_more: false,
+            next_cursor: null,
+          });
+        }
+        const results = pagingHits.repeats === 1
+          ? [...PAGE_ROWS, PAGE_ROWS[0]!] // 6 rows, 5 distinct
+          : PAGE_ROWS.slice(0, 2); // pure repeat: rows the client already has
+        return Response.json({
+          ok: true,
+          results,
+          returned_count: results.length,
+          // Claims far more rows than it will ever serve distinctly — the
+          // reason `has_more` alone can never terminate this drain.
+          total_count: 99,
+          offset: Number(b.offset ?? 0),
+          limit: b.limit,
+          has_more: true,
+          next_cursor: null,
+        });
+      }
+
       // Same unhonored-cursor behaviour, at the real node's page width.
       if (url.pathname === "/paging-unhonored-cursor-full/api/query") {
         pagingHits.full += 1;
@@ -303,6 +345,41 @@ describe("queryAll paging", () => {
       expect((r.body as Record<string, unknown>).cursor).toBeUndefined();
       expect((r.body as Record<string, unknown>).offset).toBeDefined();
     }
+  });
+
+  test("an offset page that adds no new row ends the drain, without changing the result", async () => {
+    const node = newNodeClient({ baseUrl: `${baseUrl}/paging-offset-repeats`, userHash: "test-user" });
+    const before = seen.length;
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+
+    // THE POINT OF THE TEST: the guard is set-preserving. The drain already
+    // de-dups on the way out, so every row the caller could ever have seen is
+    // still here — stopping early only stops paying for repeats. Asserting the
+    // rows, not just the request count, is what makes this a correctness test
+    // rather than a performance one.
+    expect(slugs(res)).toEqual(["r0", "r1", "r2", "r3", "r4"]);
+
+    // Page 1 carries the whole distinct set; page 2 is the first that adds
+    // nothing, so the drain stops there. Live, this is 18 requests -> 2.
+    const reqs = seen.slice(before).filter((r) => r.path.endsWith("/api/query"));
+    expect(reqs.length).toBe(2);
+
+    // Every request went by offset — this is the offset path, not the cursor
+    // path whose guard already existed.
+    for (const r of reqs) {
+      expect((r.body as Record<string, unknown>).offset).toBeDefined();
+      expect((r.body as Record<string, unknown>).cursor).toBeUndefined();
+    }
+  });
+
+  test("a node paging correctly never trips the no-progress guard", async () => {
+    // The guard must be version-neutral: against a node whose offsets advance,
+    // every page brings new rows, so nothing stops early. Without this, the
+    // guard could silently truncate a healthy drain and the test above would
+    // still pass.
+    const node = newNodeClient({ baseUrl: `${baseUrl}/paging-offset-only`, userHash: "test-user" });
+    const res = await node.queryAll({ schemaHash: "cardhash", fields: ["slug"] });
+    expect(slugs(res)).toEqual(["r0", "r1", "r2", "r3", "r4"]);
   });
 
   test("full-width pages: the drain terminates with every row, exactly once", async () => {
