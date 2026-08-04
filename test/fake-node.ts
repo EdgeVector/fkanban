@@ -184,17 +184,99 @@ const notImpl = (member: string) => async (): Promise<never> => {
   throw new Error(`fakeNode.${member} not implemented`);
 };
 
+/** The key-shaped filters fkanban sends, with the payload each one carries. */
+const KEY_SHAPES: Record<string, readonly string[]> = {
+  HashKey: [],
+  HashRangePrefix: ["hash", "prefix"],
+  HashRangeKey: ["hash", "range"],
+  HashRangeRange: ["hash", "start", "end"],
+};
+
+/**
+ * Rejects any filter this fake would otherwise MISREAD, rather than answering
+ * it wrongly.
+ *
+ * The node's wire types are `deny_unknown_fields`: a misspelled or extra key is
+ * a 400, not a dropped field. This fake used to be the opposite — it fell
+ * through to field equality for any shape it did not recognise, comparing a
+ * filter OBJECT against a stored string, matching nothing, and returning zero
+ * rows. Zero rows is the shape of a PASSING assertion for most of the things
+ * tests here check ("the terminal column was excluded", "the orphan is gone"),
+ * so a malformed filter did not fail a test, it satisfied one. With 29
+ * key-shaped filter constructions across `src/` and 14 unattributed production
+ * query 400s standing open, the one place that could have caught them was
+ * structurally unable to.
+ *
+ * Three ways to be wrong, all silent before, all loud now:
+ *
+ * 1. **Unknown key-shaped filter** — `{HashRangeSuffix: …}`. Key-shape names
+ *    are PascalCase and schema field names are lowercase snake_case (see
+ *    `src/schemas.ts`), so an uppercase-initial key is a key shape by
+ *    convention, and one not in {@link KEY_SHAPES} is one this fake cannot
+ *    honour.
+ * 2. **Malformed payload on a KNOWN shape** — `{HashRangePrefix: {hash, pfx}}`.
+ *    Previously indistinguishable from case 1: the typed read produced
+ *    `undefined` for the missing member and the row compared unequal.
+ * 3. **A non-string value under a lowercase key** — stored field values are
+ *    always strings (`QueryFilter = Record<string, string>`), so an object
+ *    there can never equal one, and every row would drop.
+ *
+ * A key shape must also be the SOLE key. All 29 key-shaped construction sites
+ * in `src/` write it that way, and the matcher below answers on the key alone —
+ * so a sibling field constraint would be silently IGNORED, the one failure in
+ * this family that over-returns rather than under-returning.
+ */
+function assertFilterShape(filter: QueryFilter): void {
+  const f = filter as Record<string, unknown>;
+  const keys = Object.keys(f);
+  const bad = (why: string): never => {
+    throw new Error(
+      `fakeNode: unsupported query filter ${JSON.stringify(filter)} — ${why}. ` +
+        `The node would reject this (deny_unknown_fields); the fake refuses to ` +
+        `answer it rather than silently matching zero rows. Add the shape to ` +
+        `KEY_SHAPES in test/fake-node.ts if the node really accepts it.`,
+    );
+  };
+
+  for (const key of keys) {
+    const value = f[key];
+    const members = KEY_SHAPES[key];
+
+    if (members === undefined) {
+      if (/^[A-Z]/.test(key)) bad(`unknown key-shaped filter ${JSON.stringify(key)}`);
+      if (typeof value !== "string") {
+        bad(`field ${JSON.stringify(key)} compares against a ${typeof value}, but stored field values are strings`);
+      }
+      continue;
+    }
+
+    if (keys.length > 1) {
+      bad(`key-shaped filter ${JSON.stringify(key)} must be the only key, got ${JSON.stringify(keys)}`);
+    }
+    if (members.length === 0) {
+      if (typeof value !== "string") bad(`${key} takes a string, got ${typeof value}`);
+      continue;
+    }
+    if (typeof value !== "object" || value === null) bad(`${key} takes an object, got ${typeof value}`);
+    const payload = value as Record<string, unknown>;
+    for (const member of members) {
+      if (typeof payload[member] !== "string") {
+        bad(`${key} requires a string ${JSON.stringify(member)}, got ${typeof payload[member]}`);
+      }
+    }
+    for (const member of Object.keys(payload)) {
+      if (!members.includes(member)) bad(`${key} has no member ${JSON.stringify(member)}`);
+    }
+  }
+}
+
 /**
  * Matches the five filter shapes fkanban actually sends: `HashKey`,
  * `HashRangePrefix`, `HashRangeKey`, `HashRangeRange`, and plain field
  * equality.
  *
- * Every one of them must be listed here, not just the ones a test happens to
- * exercise. An unknown key-shaped filter falls through to the field-equality
- * branch below, where it compares a filter OBJECT against a stored string and
- * matches nothing — so a new filter shape does not fail loudly, it silently
- * returns zero rows, and a test asserting "the terminal column was excluded"
- * passes because everything was.
+ * Shape validation is {@link assertFilterShape}'s job and has already run, so
+ * every read below is known well-formed — this function only decides matching.
  *
  * The key-shaped filters address the row; anything else compares against
  * stored field values, which is how callers like `findCard` look a card up by
@@ -305,6 +387,11 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
 
     async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
       reads.push({ schemaHash, fields, filter });
+      // BEFORE the loop, deliberately: a malformed filter has to fail on an
+      // EMPTY table too. Validating per-row would make the check dead in
+      // exactly the case it exists for — a schema with no seeded rows, where
+      // the wrong answer and the right answer are both zero rows.
+      if (filter) assertFilterShape(filter);
       const results: QueryRow[] = [];
       const hashField = node.hashFields[schemaHash];
       for (const rec of tableFor(schemaHash).values()) {

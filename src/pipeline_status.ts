@@ -484,13 +484,49 @@ async function querySchema(
       ...(filter ? { filter: filter as QueryFilter } : {}),
     });
     return res.results ?? [];
-  } catch {
+  } catch (err) {
     // Schema missing / permission / busy — treat as unavailable for best-effort paths.
     // Drop a bad cache entry so a later attempt can re-resolve via listSchemas.
     schemaHashCache.delete(logical);
     schemaLayoutCache.delete(schemaHash);
+    // ...but a 400 is NOT one of those causes. Every reason named above is the
+    // environment being unready; a 400 means the node UNDERSTOOD us and refused
+    // the query we built — a bug on this side, and the only one of these the
+    // caller can actually fix. Swallowing it identically is what made an entire
+    // class of client bugs permanently invisible: these reads are best-effort
+    // and cross-app (kanban projecting lastgit's schemas), so the node counts
+    // the error under `app=kanban` while no human ever sees it. As of
+    // 2026-08-04 the primary has carried 14 such unattributed query 400s across
+    // three chief-engineer runs that could not name a single one, because
+    // `lastdb ops` keeps only a 256-entry ring and this path left no other
+    // trace. Still best-effort — still returns [] — but no longer silent.
+    if (isMalformedQuery(err)) {
+      console.error(
+        `kanban: warning: the node REJECTED a ${logical} query as malformed — ` +
+          `${err instanceof Error ? err.message : String(err)} ` +
+          `[schema=${schemaHash} fields=${JSON.stringify([...fields])} ` +
+          `filter=${filter ? JSON.stringify(filter) : "none"}]. ` +
+          "This is a bug in the query fkanban built, not a missing schema; " +
+          "the read returned empty and the caller degraded silently.",
+      );
+    }
     return [];
   }
+}
+
+/**
+ * A 400 the node raised against a query we constructed — as opposed to the
+ * schema being absent, the caller lacking permission, or the node shedding load.
+ *
+ * `unknown_fields` is the projection naming a field the schema does not declare;
+ * a bare `node_http_400` is any other malformed-request rejection (the node's
+ * wire types are `deny_unknown_fields`, so a misspelled filter key lands here).
+ * Deliberately NOT matched: 403, 404, 503 and transport failures, all of which
+ * are the environment rather than the request.
+ */
+function isMalformedQuery(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "unknown_fields" || code === "node_http_400";
 }
 
 /**
