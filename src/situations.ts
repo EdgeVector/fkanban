@@ -1,5 +1,6 @@
 import { FkanbanError } from "./client.ts";
 import {
+  isBodyOmitted,
   parseBodyHeader,
   resolvePickupRepo,
   type Card,
@@ -53,13 +54,64 @@ function textMentionsFoldDbNodeWork(card: Card): boolean {
   ].some((needle) => haystack.includes(needle));
 }
 
+/**
+ * The one repo this fence has actions for.
+ *
+ * Named once because {@link inferSituationPreflightActions} and
+ * {@link situationFenceNeedsBody} must agree on which cards the fence can act
+ * on: the second exists to fetch the evidence the first needs, so a second copy
+ * of this string would let the fetch and the decision disagree about scope —
+ * and the fetch failing silently looks exactly like "no action inferred", which
+ * is the failure this whole area already had once.
+ */
+const FENCED_REPO = "EdgeVector/fold";
+
 export function inferSituationPreflightActions(card: Card): string[] {
   const repo = resolvePickupRepo(card);
   if (!repo.ok) return [];
-  if (repo.repo === "EdgeVector/fold" && textMentionsFoldDbNodeWork(card)) {
+  if (repo.repo === FENCED_REPO && textMentionsFoldDbNodeWork(card)) {
     return ["file-fold-db-node-feature-card", "modify-fold-db-node"];
   }
   return [];
+}
+
+/**
+ * Could reading this card's body change the fence's verdict?
+ *
+ * ## Why the fence needs to ask this at all
+ *
+ * `textMentionsFoldDbNodeWork` matches over title + body + tags + surfaces.
+ * Three of those four ride the thin BoardCards projection; `body` does not.
+ * `pickup status` classifies from that thin projection and hydrates only the
+ * cards `pickupClassificationNeedsBody` selects — a predicate about ROUTING that
+ * knows nothing about this fence. So a card whose only fold_db_node evidence is
+ * body prose reached `checkSituationFence` with `body: ""`, inferred no action,
+ * and was waived as pickup-ready.
+ *
+ * That is not a corner: real cards say `/api/` and `lastdb_node` in their briefs
+ * and carry no `fold_db_node` tag at all. Measured on the live primary
+ * 2026-08-04 (`scripts/probe-situation-fence-liveness.ts`), of the 6 active
+ * `EdgeVector/fold` cards whose full record infers a fence action, **6 of 6**
+ * were waived by the body-free record — a 100% false-waive rate against the
+ * fence's entire in-scope population, and zero preflight subprocesses ever
+ * started (`scripts/probe-pickup-fence-spawn-fanout.ts`).
+ *
+ * ## Why the selection is safe to make from the thin record
+ *
+ * Repo is a STRUCTURED field, so `resolvePickupRepo` answers correctly without a
+ * body for any card that carries one — and a fold card that names its repo only
+ * in body prose is already `malformed-routing`, never `pickup-ready`, so it does
+ * not reach the fence. That keeps the fetch bounded by the fold cards in the
+ * ready set (3 of 16 on the live board) rather than by the board.
+ *
+ * Ordered cheapest-first: a card that already infers an action needs no body,
+ * and a card whose body is in hand has nothing to fetch.
+ */
+export function situationFenceNeedsBody(card: Card): boolean {
+  if (!isBodyOmitted(card)) return false;
+  if (inferSituationPreflightActions(card).length > 0) return false;
+  const repo = resolvePickupRepo(card);
+  return repo.ok && repo.repo === FENCED_REPO;
 }
 
 export function inferSituationPreflightAction(card: Card): string | null {
