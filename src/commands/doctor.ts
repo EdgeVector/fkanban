@@ -670,7 +670,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
           false,
           "MilestoneCards projection parity",
           `${totalDropped} row(s) across ${bad.length} of ${measured.length} milestone partition(s) are invisible to the wide read ` +
-            `(no atom for \`milestone\`, the field that LEADS it) — e.g. ${
+            `(no atom for \`milestone\`, this index's HASH field — it gates the read from any position) — e.g. ${
               bad.slice(0, 3).map((r) => `${r.ms} (${r.wide} of ${r.spine})`).join(", ")
             } — run \`kanban milestone reconcile <slug>\` on each`,
         );

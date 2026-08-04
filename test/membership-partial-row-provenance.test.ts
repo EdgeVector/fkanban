@@ -210,19 +210,22 @@ describe("MilestoneCards: the purge deletes the row's real address", () => {
   });
 
   /**
-   * The measured drop, and the reason the purge needed its own read.
+   * The row shape that made the purge need its own read.
    *
    * On the live primary exactly ONE field drops rows from this index: the
    * partition key `milestone` (56 -> 49 in the probed partition, 2026-08-01).
-   * `listMilestoneCardsPartition` projects all 24 fields, `milestone` among
-   * them — so those 7 rows are invisible to it, and a purge routed through it
-   * cannot delete an orphan it cannot see. The spine read omits the partition
-   * key precisely so that it can.
+   * `listMilestoneCardsPartition` used to project all 24 fields, `milestone`
+   * among them — so those rows were invisible to it, and a purge routed through
+   * it could not delete an orphan it could not see. The spine read omits the
+   * partition key precisely so that it can.
    *
-   * Modelled here with `dropIncompleteRows: true`, the behaviour measured for
-   * that one field.
+   * Since 2026-08-04 the display read omits it too
+   * (`MILESTONE_CARDS_PAYLOAD_FIELDS`), so the row is visible to both and the
+   * precondition below asserts that rather than the old blindness. What the
+   * test is FOR is unchanged: the purge addresses rows by their real range key,
+   * and must delete this one whether or not any display read can see it.
    */
-  test("an orphan missing the partition-key atom is dropped by the display read and still purged", async () => {
+  test("an orphan missing the partition-key atom is visible to the display read and purged by address", async () => {
     const node = fakeNode({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash });
     const keepSk = milestoneCardSk("done", "90", "card-a");
     const staleSk = milestoneCardSk("backlog", "10", "card-a");
@@ -231,9 +234,11 @@ describe("MilestoneCards: the purge deletes the row's real address", () => {
     delete stale.milestone;
     seedMc(node, stale, staleSk);
 
-    // Precondition: the display read genuinely cannot see it.
+    // Precondition: the display read now reaches both rows, including the one
+    // whose partition-key copy is gone.
     const visible = await listMilestoneCardsPartition(node, cfg, "ms-a");
-    expect(visible!.length).toBe(1);
+    expect(visible!.length).toBe(2);
+    expect(visible!.every((c) => c.milestone === "ms-a")).toBe(true);
 
     const n = await purgeOtherMilestoneCardRows(node, cfg, "ms-a", "card-a", keepSk);
 

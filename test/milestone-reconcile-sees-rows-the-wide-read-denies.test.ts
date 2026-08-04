@@ -24,6 +24,24 @@
  * Neither is self-healing: every subsequent run re-derived the same blind
  * classification and re-issued the same non-repair.
  *
+ * ## 2026-08-04: the blindness itself was closed, and these tests changed shape
+ *
+ * The wide read no longer projects the partition key at all
+ * (`MILESTONE_CARDS_PAYLOAD_FIELDS`), so it is gated on `slug` — the same field
+ * the spine read is gated on — and the two can no longer disagree about which
+ * rows exist. The fixtures below therefore no longer produce a row that one
+ * read sees and the other does not; `seedInvisibleRow` seeds what is now a
+ * fully visible row, and the preconditions say so.
+ *
+ * They are kept, not deleted, and the reason is worth stating: what these tests
+ * assert is the OUTCOME — an orphan is retired, a sibling purge arms — and that
+ * outcome must survive whether or not the wide read can see the row. Deleting
+ * them once the blindness closed would remove the only coverage that reconcile
+ * retires an orphan whose payload copy of the key is gone, which is still a
+ * real row shape on the primary. The first test in the last block pins the
+ * shared gate directly, so if a future edit re-adds the hash field to the
+ * projection, that fails first and names the cause.
+ *
  * ## Why this file uses the generic fake and seeds rows directly
  *
  * `test/milestone-indexes.test.ts` has its own fake with a protein-fold
@@ -115,8 +133,11 @@ async function seedVisibleRow(node: FakeNode, milestone: string, slug: string): 
 }
 
 /**
- * A row the wide read cannot see: every field EXCEPT the partition-key copy.
- * Still addressable, still returned by the `slug`-only spine.
+ * A row missing the partition-key copy — every other field present.
+ *
+ * Named for what it used to be. Until 2026-08-04 the wide read projected the
+ * hash field and so could not see this row at all; it is now visible to both
+ * reads, and the name is kept because the row SHAPE is the thing under test.
  */
 function seedInvisibleRow(
   node: FakeNode,
@@ -135,6 +156,25 @@ const visibleSlugs = async (node: FakeNode, milestone: string): Promise<string[]
   ((await listMilestoneCardsPartition(node, cfg, milestone)) ?? []).map((c) => c.slug).sort();
 
 describe("reconcile classifies from addresses, not from the wide projection", () => {
+  test("the wide read and the address read agree on the row set", async () => {
+    // The invariant that replaced the blindness, pinned on the row shape that
+    // used to break it. If someone re-adds the hash field to the wide
+    // projection, the node gates that read on `milestone` again and THIS fails
+    // first — before the outcome tests below, and naming the cause.
+    const node = fakeNode();
+    await seed(node, "ms-agree", ["keep"]);
+    const keepSk = await seedVisibleRow(node, "ms-agree", "keep");
+    const keep = await findCard(node, cfg, "keep");
+    const template = { ...milestoneCardFieldsFromCard(keep!)! };
+    const noKeySk = "done#00000042#vanished";
+    seedInvisibleRow(node, "ms-agree", { ...template, slug: "vanished" }, noKeySk);
+
+    const wide = ((await listMilestoneCardsPartition(node, cfg, "ms-agree")) ?? []).length;
+
+    expect(wide).toBe((await addresses(node, "ms-agree")).length);
+    expect(await addresses(node, "ms-agree")).toEqual([noKeySk, keepSk].sort());
+  });
+
   test("retires an orphan row the wide read denies", async () => {
     const node = fakeNode();
     await seed(node, "ms-orphan", ["keep"]);
@@ -151,8 +191,9 @@ describe("reconcile classifies from addresses, not from the wide projection", ()
       orphanSk,
     );
 
-    // The setup is only interesting if the wide read really is blind to it.
-    expect(await visibleSlugs(node, "ms-orphan")).toEqual(["keep"]);
+    // Both reads now reach it — that is the fix, asserted where the old
+    // blindness used to be asserted, so a regression reads as a diff here.
+    expect(await visibleSlugs(node, "ms-orphan")).toEqual(["keep", "vanished"]);
     expect(await addresses(node, "ms-orphan")).toEqual([orphanSk, keepSk].sort());
 
     const rec = await milestoneReconcileResult({ cfg, node, slug: "ms-orphan" });
@@ -174,7 +215,10 @@ describe("reconcile classifies from addresses, not from the wide projection", ()
     seedInvisibleRow(node, "ms-dupes", { ...template, column: "backlog" }, "backlog#00000001#dup");
     seedInvisibleRow(node, "ms-dupes", { ...template, column: "done" }, "done#00000002#dup");
 
-    expect(await visibleSlugs(node, "ms-dupes")).toEqual(["dup"]);
+    // Three rows for one card, all three now visible to both reads. The
+    // duplicate COUNT is what arms the sibling purge, and it is the count the
+    // wide read used to get wrong.
+    expect(await visibleSlugs(node, "ms-dupes")).toEqual(["dup", "dup", "dup"]);
     expect((await addresses(node, "ms-dupes")).length).toBe(3);
 
     await milestoneReconcileResult({ cfg, node, slug: "ms-dupes" });

@@ -420,12 +420,33 @@ const BOARD_CARDS_KEY_DERIVED_FIELDS = ["sk", "slug", "column"] as const;
  * derivable without projecting any of it, which
  * {@link spineRowsFromQueryRows} has relied on since 2026-08-01.
  *
- * What is NOT free is dropping the LEADING field. The row set is decided by
- * whichever field leads the projection (see
- * {@link listBoardCardsPartitionComplete}), so `fields[0]` is preserved
- * verbatim even when it is a spine member — this narrows cost without touching
- * the gate, and the row set is identical to the un-narrowed read by
- * construction rather than by measurement.
+ * What is NOT free is dropping the field the row set is gated on. Measured on
+ * the live primary 2026-08-04 against constructed rows with known atom sets
+ * (`scripts/probe-projection-rule-constructed.ts`, 204 judgements, every other
+ * candidate falsified), the node applies **HASH-ELSE-LEAD**: the gate is the
+ * HASH field when the projection contains it, and the LEADING field otherwise.
+ *
+ * So preserving `fields[0]` verbatim, which this does, is necessary but is not
+ * by itself what keeps the row set identical. Two things do:
+ *
+ *  - `fields[0]` is preserved, which holds the gate steady in the no-hash case;
+ *  - `board` — this index's HASH field — is NOT in
+ *    {@link BOARD_CARDS_KEY_DERIVED_FIELDS}, so a projection that contained it
+ *    still contains it afterwards and one that did not still does not. The
+ *    narrowing therefore never moves a read across the hash/no-hash boundary,
+ *    which is the only way the gate could change identity.
+ *
+ * Both conditions are load-bearing; adding `board` to the key-derived list
+ * would satisfy the first and break the second. The row set is identical to the
+ * un-narrowed read by construction — but by that construction, not by the
+ * lead-only argument this comment carried until the rule was measured.
+ *
+ * Separately, and not a problem here: because `board` IS projected by these
+ * reads, they are gated on a payload COPY of the partition key. That is the
+ * shape that cost `listMilestoneCardsPartition` a live row
+ * (see `MILESTONE_CARDS_PAYLOAD_FIELDS`). On this index it is latent rather
+ * than live — all 124 rows in `HashKey=default` carry a `board` atom, so the
+ * gate cannot currently bite (`scripts/probe-boardcards-hash-gate.ts`).
  *
  * ## Why bother — measured, live primary `HashKey=default`, 186 rows, 2026-08-03
  *
