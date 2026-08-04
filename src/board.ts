@@ -32,7 +32,7 @@ export type RenderOptions = {
   invocation?: string;
 };
 
-export type MilestoneCardGroup<T extends Card = Card> = {
+type MilestoneCardGroup<T extends Card = Card> = {
   slug: string;
   title: string;
   state: string;
