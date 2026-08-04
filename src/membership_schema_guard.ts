@@ -99,7 +99,12 @@ export function checkProjectionParity(
     dropped,
     reason:
       `${dropped} of ${spineRows} rows are invisible to the wide projection ` +
-      `(no atom for the field that LEADS it)` +
+      // The gate is the HASH field when the projection contains it and the
+      // LEADING field otherwise (HASH-ELSE-LEAD, measured 2026-08-04 —
+      // `scripts/probe-projection-rule-constructed.ts`). Naming only the lead
+      // sent operators to reorder a projection, which cannot move the gate off
+      // the hash field; only removing it can.
+      `(no atom for the field the read is gated on — the hash field if it is projected, else the leading one)` +
       (sample.length > 0 ? ` — e.g. ${sample.join(", ")}` : "") +
       ` — ${remedy}`,
   };

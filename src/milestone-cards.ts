@@ -35,6 +35,59 @@ export type MilestoneCardRow = {
  */
 export const MILESTONE_CARDS_ADDRESS_FIELDS = ["slug"] as const;
 
+/**
+ * The payload projection for a read that already knows the partition it is in.
+ *
+ * `MILESTONE_CARDS_FIELDS` leads with `milestone`, the HASH field, and the node
+ * gates a row on the hash field whenever the hash field is projected — wherever
+ * it sits in the list. So the read that serves `milestone detail`,
+ * `milestone reconcile` and every milestone rollup was returning only the rows
+ * whose payload copy of the partition key had persisted, and a row that lost
+ * that one atom was invisible to all of them.
+ *
+ * ## The rule, measured rather than assumed
+ *
+ * The repo shipped three read paths on "a row is returned iff the field LEADING
+ * the projection has an atom on it". That is not the node's rule. Measured on
+ * the live primary 2026-08-04 against four constructed rows with known atom
+ * sets (`scripts/probe-projection-rule-constructed.ts`, 51 projections x 4
+ * rows, 95 rule-discriminating judgements):
+ *
+ *     LEAD            191 correct / 13 wrong
+ *     ANY             173 / 31
+ *     LEAD+KEY        193 / 11
+ *     HASH-ELSE-LEAD  204 / 0
+ *
+ * **HASH-ELSE-LEAD**: if the projection contains the hash field, the row is
+ * gated on the HASH field; otherwise it is gated on the LEADING field. Each of
+ * the other candidates dies on a concrete counterexample — `[slug,milestone]`
+ * dropped a row carrying `slug` (not LEAD), `[title,kind]` returned a row
+ * missing `kind` (not ANY), `[slug,sk]` returned a row missing `sk` (the
+ * range-key copy does not gate at all), and `[title,milestone]` returned a row
+ * missing `title` (an absent lead does not drop a row when the hash field is
+ * present to gate it instead).
+ *
+ * The practical consequence is the whole reason this constant exists: **the
+ * gate cannot be moved by reordering, only by removing.** An earlier attempt
+ * simply re-led the wide read with `slug` and recovered nothing
+ * (`scripts/probe-milestone-detail-lead-drop.ts`), because `milestone` was
+ * still in the list and still gating. Dropping it moves the gate to `slug` —
+ * the same field {@link listMilestoneCardsPartitionSpine} is gated on, so the
+ * wide read and the address read now agree on the row set by construction
+ * rather than by luck.
+ *
+ * Nothing is lost by removing it: the partition key is the caller's own filter
+ * argument, so it is stamped back on in
+ * {@link cardFromMilestoneCardFields}'s caller rather than read from a payload
+ * copy that may not have persisted. This is the same argument the spine read
+ * has made since 2026-08-01 — it is only now applied to the read that displays
+ * the rows as well as the one that addresses them.
+ */
+export const MILESTONE_CARDS_PAYLOAD_FIELDS = [
+  "slug",
+  ...MILESTONE_CARDS_FIELDS.filter((f) => f !== "slug" && f !== "milestone"),
+] as const;
+
 export function milestoneCardsHash(cfg: Config): string | null {
   const h = cfg.schemaHashes?.["milestone_cards"];
   return h && h.length > 0 ? h : null;
@@ -361,14 +414,18 @@ export async function listMilestoneCardsPartition(
   try {
     const res = await node.queryAll({
       schemaHash,
-      fields: [...MILESTONE_CARDS_FIELDS],
+      fields: [...MILESTONE_CARDS_PAYLOAD_FIELDS],
       filter: { HashKey: milestone },
     });
     const out: Card[] = [];
     for (const r of res.results) {
       const f = (r.fields ?? {}) as Record<string, unknown>;
       if (isForeignLayout(f.layout, MILESTONE_CARDS_LAYOUT)) continue;
-      const card = cardFromMilestoneCardFields(f);
+      // The partition key is deliberately not projected — see
+      // MILESTONE_CARDS_PAYLOAD_FIELDS — so it comes from the caller's own
+      // filter argument. That is the same value the payload copy would carry,
+      // without the failure mode that copy introduces.
+      const card = cardFromMilestoneCardFields({ ...f, milestone });
       // The range key IS the row's address; the copied scalars are just copies,
       // and this read has measured them going missing. Recover identity from
       // the address before falling back to a copy that may not have come back.
@@ -400,14 +457,17 @@ export async function findMilestoneCardBySk(
   try {
     const res = await node.queryAll({
       schemaHash,
-      fields: [...MILESTONE_CARDS_FIELDS],
+      fields: [...MILESTONE_CARDS_PAYLOAD_FIELDS],
       filter,
     });
     for (const r of res.results) {
       if (r.key?.range !== sk) continue;
       const f = (r.fields ?? {}) as Record<string, unknown>;
       if (isForeignLayout(f.layout, MILESTONE_CARDS_LAYOUT)) continue;
-      const card = cardFromMilestoneCardFields(f);
+      // Partition key from the filter argument, not from the payload — the
+      // reconcile path compares `summary.milestone` against truth, so a row
+      // whose copy did not persist would otherwise read as permanently stale.
+      const card = cardFromMilestoneCardFields({ ...f, milestone });
       const parsed = parseBoardCardSk(sk);
       if (parsed) {
         if (card.slug.length === 0) card.slug = parsed.slug;
@@ -574,9 +634,12 @@ export type MilestoneCardsPartitionSweep = {
  * field — the counterpart to `sweepBoardCardsPartition`, and the only baseline
  * here that is not itself a projection.
  *
- * A row is returned iff the field LEADING the projection has an atom on it, so
- * a row is visible iff SOME field leads it and nothing narrower than a full
- * sweep is complete. The `slug`-led spine this replaces as a parity baseline
+ * Every read here is single-field, and at that width the node's rule
+ * (HASH-ELSE-LEAD — see {@link MILESTONE_CARDS_PAYLOAD_FIELDS}) reduces to "the
+ * row has an atom for this field": the projection's only field is both its lead
+ * and, for `[milestone]`, its hash field. So the union over all fields is
+ * exactly the rows carrying ANY atom, and nothing narrower than a full sweep is
+ * complete. The `slug`-led spine this replaces as a parity baseline
  * catches every row carrying a `slug` atom and is blind to a row carrying
  * neither `slug` nor `milestone` — invisible to both sides of the subtraction,
  * which nets to zero and reads as clean.
