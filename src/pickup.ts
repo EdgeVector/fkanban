@@ -23,7 +23,13 @@ import {
   type DepStatus,
   TERMINAL_COLUMN,
 } from "./record.ts";
-import { checkSituationFence, type SituationFenceResult, type SituationPreflight } from "./situations.ts";
+import {
+  checkSituationFence,
+  situationFenceNeedsBody,
+  type SituationFenceResult,
+  type SituationPreflight,
+} from "./situations.ts";
+import { mapWithConcurrency } from "./concurrency.ts";
 
 export const HUMAN_BOARD_SLUG = "human";
 // Human boards use the same fixed column set as every other board.
@@ -466,15 +472,49 @@ export async function buildPickupStatusReportWithSituations(
     : undefined;
   const local = buildPickupStatusReport(cardsWithDeps, undefined, classifyOpts);
   const activeBySlug = new Map(activeCards(cardsWithDeps).map((card) => [card.slug, card]));
-  const fences = new Map<string, SituationFenceResult>();
-  await Promise.all(local.cards
+  const candidates = local.cards
     .filter((card) => card.category === "pickup-ready")
-    .map(async (classification) => {
-      const card = activeBySlug.get(classification.slug);
-      if (!card) return;
-      const result = await checkSituationFence(card, preflight);
-      if (!result.allowed) fences.set(card.slug, result);
-    }));
+    .map((classification) => activeBySlug.get(classification.slug))
+    .filter((card): card is Card => card !== undefined);
+
+  // The fence reads BODY prose, and everything above this line is body-free by
+  // design. `hydrateForPickupClassification` does not cover it: its predicate
+  // asks whether ROUTING is guessable, and a fold card with clean structured
+  // repo+base never matches — which is precisely the card the fence exists for.
+  //
+  // So this fetch is not an optimisation, it is the fence's input. Without it
+  // `checkSituationFence` inferred no action for 6 of 6 in-scope cards on the
+  // live board and waived every one. See `situationFenceNeedsBody`.
+  //
+  // Scoped to the READY set, not the board: a card that is dependency-blocked,
+  // human-gated or malformed is not going to be picked up regardless of what a
+  // Situation says, so buying its body would repeat the archive-sized mistake
+  // the hydrate docstring above records.
+  const needBody = candidates.filter(situationFenceNeedsBody);
+  if (depsContext && needBody.length > 0) {
+    for (const card of await hydrateCardBodies(depsContext.node, depsContext.cfg, needBody)) {
+      activeBySlug.set(card.slug, card);
+    }
+  }
+
+  const fences = new Map<string, SituationFenceResult>();
+  // BOUNDED, and this is the run that made the bound load-bearing. Each fence
+  // call is not a node read — it is `Bun.spawn` of the fsituations CLI, once per
+  // inferred action, and on a PATH miss it retries as `bun --cwd <checkout>
+  // src/cli.ts`, i.e. a second TypeScript CLI started from source. A bare
+  // `Promise.all` over the ready set therefore started one process per ready
+  // card at once. That was latent only because the fence never fired; the
+  // hydrate above is what turns it on, so leaving it unbounded would ship a
+  // process storm as the side effect of fixing a gate.
+  //
+  // The width is INHERITED from the point-read pool, not measured for process
+  // spawns — a spawn is far heavier than a socket read, so 16 is an upper bound
+  // borrowed for politeness rather than an elbow anyone has found. Filed for
+  // measurement as `papercut-kanban-situation-fence-spawns-a-process-per-ready-card`.
+  await mapWithConcurrency(candidates, async (card) => {
+    const result = await checkSituationFence(activeBySlug.get(card.slug) ?? card, preflight);
+    if (!result.allowed) fences.set(card.slug, result);
+  });
   return fences.size > 0 ? buildPickupStatusReport(cardsWithDeps, fences, classifyOpts) : local;
 }
 

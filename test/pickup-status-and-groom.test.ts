@@ -367,6 +367,79 @@ describe("pickup-status", () => {
     expect(eligible?.ready).toBe(true);
   });
 
+  // Every OTHER fence test above seeds `tags: ["fold_db_node"]`, and one of them
+  // says why in an aside: "Tag is on the thin BoardCards projection; body alone
+  // is not (list is body-free)." That aside describes the bug and then routes
+  // around it. `textMentionsFoldDbNodeWork` matches title+body+tags+surfaces, and
+  // three of those four survive the thin projection — so a suite that always
+  // plants its needle in `tags` proves only that the fence works on the ONE input
+  // `pickup status` never fails to supply. It cannot read its own failure.
+  //
+  // Live on the primary 2026-08-04 (`scripts/probe-situation-fence-liveness.ts`):
+  // 0 of 16 pickup-ready cards carried a body when fenced, and of the 6 active
+  // `EdgeVector/fold` cards whose FULL record infers a fence action, **6 of 6**
+  // were waived because the record handed to the fence had none. Real cards match
+  // on body prose ("/api/", "lastdb_node"), not on a tag nobody sets. So the
+  // fence's false-waive rate against its own in-scope population was 100%, and
+  // `probe-pickup-fence-spawn-fanout.ts` measured the consequence directly: zero
+  // preflight subprocesses started by a command whose whole job is to start them.
+  //
+  // This test therefore puts the needle where real cards put it — the body, and
+  // ONLY the body — which is the one place the old suite never put it.
+  test("fences a fold card whose only fold_db_node evidence is in its body", async () => {
+    // Allows the first action and blocks the second, so a pass proves BOTH were
+    // reached: `checkSituationFence` short-circuits on the first block, and a
+    // fence that blocked action one would prove only that one call was made.
+    const checkedActions: string[] = [];
+    const recordingFence: SituationPreflight = async ({ action }) => {
+      checkedActions.push(action);
+      if (action === "modify-fold-db-node") return { ok: false, blocks: [modifyFoldDbNodeFence] };
+      return { ok: true, checked: { action } };
+    };
+    await seedCard(node, card({
+      slug: "body-only-node-work",
+      repo: "EdgeVector/fold",
+      base: "main",
+      tags: [],
+      surfaces: [],
+      title: "Return actionable errors",
+      body: "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nHarden /api/query error handling.\n\n## END STATE\ndone\n",
+    }));
+
+    const { report } = await pickupStatusResult({ cfg, node, situationPreflight: recordingFence });
+    const fenced = report.cards.find((c) => c.slug === "body-only-node-work");
+
+    expect(checkedActions).toContain("modify-fold-db-node");
+    expect(fenced?.category).toBe("situation-fenced");
+    expect(fenced?.ready).toBe(false);
+  });
+
+  // The asymmetry that decides how bad the bug above is, pinned so it cannot
+  // quietly close. The SAME fence is called from three places, and only the
+  // reporting path was blind: `move` (write) and `pickup explain` both point-read
+  // the subject card, so both see the body and both fence correctly. That is why
+  // this was a misleading board rather than an escaped write — `pickup claim`
+  // selects the card through the blind path and is then refused by `moveCmd`.
+  test("the write path fences the same body-only card the report must not miss", async () => {
+    await seedCard(node, card({
+      slug: "body-only-write",
+      repo: "EdgeVector/fold",
+      base: "main",
+      tags: [],
+      surfaces: [],
+      body: "Repo: EdgeVector/fold\nBase: main\n\n## GOAL\nTouch lastdb_node internals.\n\n## END STATE\ndone\n",
+    }));
+
+    await expect(moveCmd({
+      cfg,
+      node,
+      slug: "body-only-write",
+      column: "doing",
+      situationPreflight: foldDbNodeFencePreflight,
+    })).rejects.toMatchObject({ code: "situation_fenced" });
+    expect((await findCard(node, cfg, "body-only-write"))?.column).toBe("todo");
+  });
+
   test("refuses moving a Situation-fenced candidate to doing without writing", async () => {
     await seedCard(node, card({
       slug: "org-invite",
