@@ -26,7 +26,6 @@ import {
 import { checkSituationFence, type SituationFenceResult, type SituationPreflight } from "./situations.ts";
 
 export const HUMAN_BOARD_SLUG = "human";
-export const HUMAN_BOARD_TITLE = "Human / parked work";
 // Human boards use the same fixed column set as every other board.
 export const HUMAN_BOARD_COLUMNS = ["backlog", "todo", "doing", "done"] as const;
 
