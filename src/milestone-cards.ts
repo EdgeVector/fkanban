@@ -5,7 +5,8 @@
 // Empty milestone field → no row (remove prior if cleared).
 
 import type { Config } from "./config.ts";
-import type { NodeClient, QueryFilter } from "./client.ts";
+import type { NodeClient, QueryFilter, QueryRow } from "./client.ts";
+import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
 import { MILESTONE_CARDS_FIELDS, MILESTONE_CARDS_LAYOUT } from "./schemas.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
@@ -462,23 +463,158 @@ export async function listMilestoneCardsPartitionSpine(
   }
   const out: MilestoneCardRow[] = [];
   for (const r of res.results) {
-    const f = (r.fields ?? {}) as Record<string, unknown>;
-    const sk = typeof r.key?.range === "string" && r.key.range.length > 0
-      ? r.key.range
-      : typeof f.sk === "string"
-        ? f.sk
-        : "";
-    if (sk.length === 0) continue;
-    const parsed = parseBoardCardSk(sk);
-    const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
-    if (slug.length === 0) continue;
-    out.push({
-      milestone,
-      sk,
-      slug,
-      column: parsed?.column ?? "",
-      position: parsed?.position ?? "",
-    });
+    const row = milestoneCardRowFromQueryRow(r, milestone);
+    if (row !== null) out.push(row);
   }
   return out;
+}
+
+/**
+ * One MilestoneCards query row reduced to its address, or `null` if this
+ * partition read returned something that is not a card row of this index.
+ *
+ * Shared by {@link listMilestoneCardsPartitionSpine} and
+ * {@link sweepMilestoneCardsPartition} so the two cannot disagree about what a
+ * row IS. They differ only in which fields lead — that is the whole point of
+ * comparing them, and any other difference would be noise the parity check
+ * would report as drift.
+ *
+ * ## The empty range key is not a damaged card. It is the Milestone itself.
+ *
+ * `Milestone` is `Hash(slug)`; `MilestoneCards` is `HashRange(milestone, sk)`.
+ * A milestone's own record therefore lives at hash `<milestone-slug>` — the
+ * same hash as its cards partition — and Mini's multi-key expand puts both on
+ * one product. Querying the cards partition returns the Milestone record too,
+ * with its absent range coerced to `""`. Measured on the live primary
+ * 2026-08-04 (`scripts/probe-milestone-cards-keyless-row.ts`), partition
+ * `ms-backup-status-truthful`:
+ *
+ *     lead=slug   → key={"hash":"ms-backup-status-truthful","range":""}
+ *                   fields={"slug":"ms-backup-status-truthful"}
+ *     lead=title  → …{"title":"Backup status tells the truth about …"}
+ *
+ * It appears under 9 of the 24 leads — exactly the fields `MilestoneCards`
+ * shares with `BoardMilestones` — and under none of the other 15, so which
+ * field leads decides whether a caller sees it. The wide display read leads
+ * with `milestone`, which the Milestone record has no atom for, so the product
+ * has never seen it. Every read that leads with `slug` does.
+ *
+ * Dropping it is therefore REQUIRED, not defensive:
+ *
+ *  - as a baseline row it is a permanent phantom drop — the sweep would reach
+ *    it and the wide read never can, so parity would report one invisible row
+ *    on every milestone partition, forever, with nothing to repair.
+ *  - as a deletable row it is far worse. Its address is
+ *    `(milestone_cards, hash=<milestone>, range="")`, and the one thing
+ *    `purgeOtherMilestoneCardRows` does with a spine row is delete it.
+ *
+ * The guard was already here, written for partially-written CARD rows whose
+ * `sk` copy did not come back. It happens to catch this too. Naming what it
+ * actually excludes is the point — a guard held in place by a coincidence is
+ * one the next simplification removes.
+ */
+function milestoneCardRowFromQueryRow(
+  r: QueryRow,
+  milestone: string,
+): MilestoneCardRow | null {
+  const f = (r.fields ?? {}) as Record<string, unknown>;
+  const sk = typeof r.key?.range === "string" && r.key.range.length > 0
+    ? r.key.range
+    : typeof f.sk === "string"
+      ? f.sk
+      : "";
+  if (sk.length === 0) return null;
+  const parsed = parseBoardCardSk(sk);
+  const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
+  if (slug.length === 0) return null;
+  return {
+    milestone,
+    sk,
+    slug,
+    column: parsed?.column ?? "",
+    position: parsed?.position ?? "",
+  };
+}
+
+/** The result of {@link sweepMilestoneCardsPartition}: rows reached, and gaps. */
+export type MilestoneCardsPartitionSweep = {
+  /** Every row reachable under some leading field, deduped by range key. */
+  rows: MilestoneCardRow[];
+  /**
+   * Leads the node refused. Non-empty means `rows` is a LOWER BOUND, and a
+   * caller asserting completeness must fail rather than report a clean result.
+   */
+  failedLeads: Array<{ field: string; error: string }>;
+};
+
+/**
+ * Every row in a milestone's cards partition, reached under EVERY leading
+ * field — the counterpart to `sweepBoardCardsPartition`, and the only baseline
+ * here that is not itself a projection.
+ *
+ * A row is returned iff the field LEADING the projection has an atom on it, so
+ * a row is visible iff SOME field leads it and nothing narrower than a full
+ * sweep is complete. The `slug`-led spine this replaces as a parity baseline
+ * catches every row carrying a `slug` atom and is blind to a row carrying
+ * neither `slug` nor `milestone` — invisible to both sides of the subtraction,
+ * which nets to zero and reads as clean.
+ *
+ * ## Cost, measured rather than assumed
+ *
+ * This baseline was declined for four runs on a recorded estimate — "~780ms per
+ * partition … would turn an 8s doctor into a 40s one" — carried over from the
+ * BoardCards `default` partition (123 rows, 24 leads) and never measured on the
+ * index it was being used to decide about. Measured on the live primary
+ * 2026-08-04 across all 19 live milestone partitions
+ * (`scripts/probe-milestone-parity-baseline-cost.ts`):
+ *
+ *     slug spine (1 lead)   554ms    52 rows
+ *     sweep    (24 leads)  1787ms    52 rows      3.2x, +1.2s total
+ *
+ * Not 24x, and not per-partition: the leads run pooled at
+ * {@link PARTITION_READ_CONCURRENCY} and a one-field projection is the cheapest
+ * read the node serves. The real bill for both milestone indexes together is
+ * ~1.8s on an 8s doctor.
+ *
+ * Doctor / heal price, not a list price. No product read path may call this.
+ */
+export async function sweepMilestoneCardsPartition(
+  node: NodeClient,
+  cfg: Config,
+  milestone: string,
+): Promise<MilestoneCardsPartitionSweep | null> {
+  const schemaHash = milestoneCardsHash(cfg);
+  if (!schemaHash || !milestone.trim()) return null;
+  const filter = { HashKey: milestone } as QueryFilter;
+
+  const perLead = await mapWithConcurrency(MILESTONE_CARDS_FIELDS, async (lead) => {
+    try {
+      const res = await node.queryAll({ schemaHash, fields: [lead], filter });
+      const rows: MilestoneCardRow[] = [];
+      for (const r of res.results) {
+        const row = milestoneCardRowFromQueryRow(r, milestone);
+        if (row !== null) rows.push(row);
+      }
+      return { rows, failure: null };
+    } catch (err) {
+      // Reported, not swallowed and not thrown — the same contract
+      // `sweepBoardCardsPartition` documents at length. Swallowing hands back a
+      // short enumeration labelled complete, which is the failure this exists
+      // to remove; throwing lets one bad lead on one milestone disable the
+      // check for every milestone.
+      return {
+        rows: [] as MilestoneCardRow[],
+        failure: { field: lead, error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  }, PARTITION_READ_CONCURRENCY);
+
+  // Union by the REAL address. A row reached under several leads is one row.
+  const bySk = new Map<string, MilestoneCardRow>();
+  const failedLeads: MilestoneCardsPartitionSweep["failedLeads"] = [];
+  for (const lead of perLead) {
+    if (lead.failure) failedLeads.push(lead.failure);
+    for (const r of lead.rows) if (!bySk.has(r.sk)) bySk.set(r.sk, r);
+  }
+  return { rows: [...bySk.values()], failedLeads };
 }

@@ -20,11 +20,11 @@ import {
 } from "../board-cards.ts";
 import {
   listBoardMilestonesPartition,
-  listBoardMilestonesPartitionSpine,
+  sweepBoardMilestonesPartition,
 } from "../board-milestones.ts";
 import {
   listMilestoneCardsPartition,
-  listMilestoneCardsPartitionSpine,
+  sweepMilestoneCardsPartition,
 } from "../milestone-cards.ts";
 import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveLoadedSchema } from "../schemas.ts";
@@ -430,22 +430,49 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // partition `lastdb-0231-read-regression-fixes` held 7 rows under a full
   // per-lead sweep and returned 4 under the wide read.
   //
-  // ## This is a LOWER BOUND, and the wording says so
+  // ## The baseline is the full sweep here too, because the cost objection was
+  //    measured on the wrong index
   //
-  // The honest baseline is the 17/24-lead sweep `sweepBoardCardsPartition`
-  // uses, because a row is visible iff SOME field leads it. That costs ~780ms
-  // per partition; across the milestone partitions on this board it would turn
-  // an 8s doctor into a 40s one. So the baseline here is the one-field spine,
-  // which catches every row that has a `slug` atom and misses a row that has
-  // neither `slug` nor the hash field. A drop reported here is real; a clean
-  // result is "no drop THIS check can see", which is why the passing line says
-  // `slug-lead baseline` rather than claiming parity outright.
+  // This check spent four runs on a one-field `slug` spine, with a recorded
+  // justification: the honest baseline is the per-lead sweep, but it "costs
+  // ~780ms per partition; across the milestone partitions on this board it
+  // would turn an 8s doctor into a 40s one." That number came from BoardCards'
+  // 123-row `default` partition and was never measured on either milestone
+  // index. Measured on the live primary 2026-08-04
+  // (`scripts/probe-milestone-parity-baseline-cost.ts`):
+  //
+  //   BoardMilestones  2 partitions, 17 leads:   201ms →  584ms   (2.9x)
+  //   MilestoneCards  19 partitions, 24 leads:   554ms → 1787ms   (3.2x)
+  //
+  // ~1.8s total, not 32s — the leads run pooled, and a one-field projection is
+  // the cheapest read the node serves. The estimate was wrong by an order of
+  // magnitude and it was blocking a correctness fix, which is the argument for
+  // measuring a constant before letting it decide something.
+  //
+  // What the sweep buys: the spine is blind to a row carrying neither `slug`
+  // nor the hash field — missing from BOTH sides of the subtraction, netting to
+  // zero, reported as clean. That is the same shape as the BoardCards bug this
+  // whole block was written for. The passing line can now say `every lead
+  // agrees` and mean it.
   try {
     const boards = boardSet ?? (await listBoards(node, cfg));
     for (const b of boards) {
-      const spine = await listBoardMilestonesPartitionSpine(node, cfg, b.slug);
-      if (spine === null) {
+      const sweep = await sweepBoardMilestonesPartition(node, cfg, b.slug);
+      if (sweep === null) {
         info(`BoardMilestones projection parity (${b.slug})`, "board_milestones not bound or partition unreadable — skipped");
+        continue;
+      }
+      // A refused lead means the enumeration is short by exactly that lead, so
+      // parity below would compare the wide read against an incomplete
+      // baseline — the blind check this block replaced. Report the gap.
+      if (sweep.failedLeads.length > 0) {
+        check(
+          false,
+          `BoardMilestones projection parity (${b.slug})`,
+          `enumeration incomplete — node refused lead(s) ${
+            sweep.failedLeads.map((f) => f.field).join(", ")
+          }: ${sweep.failedLeads[0]!.error}`,
+        );
         continue;
       }
       const wide = await listBoardMilestonesPartition(node, cfg, b.slug);
@@ -454,9 +481,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         continue;
       }
       const wideSlugs = new Set(wide.map((m) => m.slug));
-      const dropped = spine.map((r) => r.slug).filter((s) => !wideSlugs.has(s));
+      const dropped = [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
       const parity = checkProjectionParity(
-        spine.length,
+        sweep.rows.length,
         wide.length,
         dropped,
         `run \`kanban milestone reconcile <slug>\` for the affected milestone(s)`,
@@ -464,7 +491,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       check(
         parity.ok,
         `BoardMilestones projection parity (${b.slug})`,
-        parity.ok ? `${parity.rows} rows, slug-lead baseline agrees` : parity.reason,
+        parity.ok ? `${parity.rows} rows, every lead agrees` : parity.reason,
       );
     }
   } catch (err) {
@@ -484,21 +511,30 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       const results = await mapWithConcurrency(
         candidates,
         async (ms) => {
-          const spine = await listMilestoneCardsPartitionSpine(node, cfg, ms);
-          if (spine === null) return { ms, skipped: true as const };
+          const sweep = await sweepMilestoneCardsPartition(node, cfg, ms);
+          if (sweep === null) return { ms, skipped: true as const };
+          // Short by exactly the refused lead(s) — not a baseline anything may
+          // be compared against, and not a clean result either.
+          if (sweep.failedLeads.length > 0) {
+            return { ms, refused: sweep.failedLeads };
+          }
           const wide = await listMilestoneCardsPartition(node, cfg, ms);
           if (wide === null) return { ms, unreadable: true as const };
           const wideSlugs = new Set(wide.map((c) => c.slug));
           return {
             ms,
-            spine: spine.length,
+            spine: sweep.rows.length,
             wide: wide.length,
-            dropped: spine.map((r) => r.slug).filter((s) => !wideSlugs.has(s)),
+            dropped: [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s)),
           };
         },
         PARTITION_READ_CONCURRENCY,
       );
 
+      const refused = results.filter((r) => "refused" in r) as Array<{
+        ms: string;
+        refused: ReadonlyArray<{ field: string; error: string }>;
+      }>;
       const unreadable = results.filter((r) => "unreadable" in r).map((r) => r.ms);
       const measured = results.filter(
         (r): r is { ms: string; spine: number; wide: number; dropped: string[] } => "spine" in r,
@@ -510,7 +546,15 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       // A partition nobody could read is not a partition with no drift. Report
       // it as a failure rather than letting the readable majority vouch for it
       // — the same rule `listAllBoardMilestones` had to learn.
-      if (unreadable.length > 0) {
+      if (refused.length > 0) {
+        check(
+          false,
+          "MilestoneCards projection parity",
+          `${refused.length} partition(s) could not be fully enumerated — node refused lead(s) ${
+            refused[0]!.refused.map((f) => f.field).join(", ")
+          } on ${refused[0]!.ms}: ${refused[0]!.refused[0]!.error}`,
+        );
+      } else if (unreadable.length > 0) {
         check(
           false,
           "MilestoneCards projection parity",
@@ -536,7 +580,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         check(
           true,
           "MilestoneCards projection parity",
-          `${rows} rows across ${measured.length} milestone partition(s), slug-lead baseline agrees`,
+          `${rows} rows across ${measured.length} milestone partition(s), every lead agrees`,
         );
       }
     }
