@@ -28,6 +28,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
+import { isMalformedQuery } from "./diagnostics.ts";
 import {
   FORCE_IS_UNSCOPED,
   forcedGuardWaiverWarning,
@@ -514,20 +515,11 @@ async function querySchema(
   }
 }
 
-/**
- * A 400 the node raised against a query we constructed — as opposed to the
- * schema being absent, the caller lacking permission, or the node shedding load.
- *
- * `unknown_fields` is the projection naming a field the schema does not declare;
- * a bare `node_http_400` is any other malformed-request rejection (the node's
- * wire types are `deny_unknown_fields`, so a misspelled filter key lands here).
- * Deliberately NOT matched: 403, 404, 503 and transport failures, all of which
- * are the environment rather than the request.
- */
-function isMalformedQuery(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  return code === "unknown_fields" || code === "node_http_400";
-}
+// `isMalformedQuery` now lives in `src/diagnostics.ts`, next to the recorder
+// that also uses it. Two copies of the predicate would be two chances to widen
+// one and not the other — and the console line here and the durable record in
+// `client.queryAll` must agree on what counts as "our bug", or a 400 that
+// prints will not be in the file the next investigator reads.
 
 /**
  * Resolve the commit oid for a card.

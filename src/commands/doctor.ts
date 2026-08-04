@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
 import { FkanbanError, isLoopbackNodeUrl, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
+import { readRecentRejections, rejectionsPath } from "../diagnostics.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
 import { listBoards, listCards, findCard, probeSchemaWritable, WRITE_PROBE_SLUG, type Board, type Card } from "../record.ts";
 import {
@@ -821,7 +822,49 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // missing/odd entrypoint is advisory, not a failure.
   reportMcpEntrypoint(print, onCheck);
 
+  // Recent node rejections, from the durable sink. Advisory, never flips `ok`:
+  // the sink records deliberate probe failures alongside real client bugs (the
+  // BoardCards lead sweep a few checks above provokes some of them on purpose),
+  // so a count is a prompt to look, not a verdict.
+  //
+  // Printed HERE, at the end of the one command every operator and every
+  // chief-engineer run already types, because a durable record nothing surfaces
+  // is the same dead end as a stderr line nobody reads — which is exactly how
+  // the previous witness for these 400s went four hours without being found.
+  reportRecentRejections(print, onCheck);
+
   return ok;
+}
+
+/**
+ * How many rejections doctor prints. Small on purpose: the file is a tail, and
+ * a doctor run that dumps hundreds of lines is one whose real ✗ scrolls away.
+ */
+const REJECTION_REPORT_LIMIT = 5;
+
+function reportRecentRejections(
+  print: (line: string) => void,
+  onCheck?: (check: DoctorCheck) => void,
+): void {
+  const name = "node rejections (recent)";
+  const recent = readRecentRejections(REJECTION_REPORT_LIMIT);
+  if (recent.length === 0) {
+    print(`✓ no node rejections recorded — ${rejectionsPath()}`);
+    onCheck?.({ name, status: "info", detail: `none recorded at ${rejectionsPath()}` });
+    return;
+  }
+  print(`· ${recent.length} recent node rejection(s) — ${rejectionsPath()}`);
+  for (const r of recent) {
+    // argv is what separates "doctor swept a lead it expected to fail" from
+    // "a list on the default board 400s", so it leads the line.
+    print(`    ${r.ts} [${r.argv}] ${r.code} — ${r.message}`);
+    if (r.schema) print(`      schema=${r.schema} fields=${(r.fields ?? []).length} filter=${JSON.stringify(r.filter ?? null)}`);
+  }
+  onCheck?.({
+    name,
+    status: "info",
+    detail: `${recent.length} recorded — newest ${recent[recent.length - 1]!.code} from \`${recent[recent.length - 1]!.argv}\``,
+  });
 }
 
 function formatDoctorError(err: unknown): string {

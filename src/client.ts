@@ -46,6 +46,8 @@ import {
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
 
+import { isMalformedQuery, recordNodeRejection } from "./diagnostics.ts";
+
 export type Verbose = (msg: string) => void;
 const noopVerbose: Verbose = () => {};
 
@@ -1172,7 +1174,31 @@ export function newNodeClient(opts: {
     // BoardCards `HashKey(default)`, the board-wide list every surface uses.
     // The guard lives in one place rather than being re-derived per caller.
     async queryAll({ schemaHash, fields, filter, allowFullScan }) {
-      return queryAllPaged({ schemaHash, fields, filter, allowFullScan });
+      try {
+        return await queryAllPaged({ schemaHash, fields, filter, allowFullScan });
+      } catch (err) {
+        // The ONE place every kanban read can be seen refused. A 400 here means
+        // the node understood us and rejected the query WE built — the only
+        // failure class in this file that is a bug on this side — and it is
+        // recorded with the request shape before the error continues on
+        // untouched. Recording at the funnel rather than per call site is the
+        // whole point: the previous witness covered a single caller and missed
+        // the `board_cards` 400 the node was actually counting.
+        //
+        // `await` above is load-bearing. Returning the promise would settle it
+        // in the caller's frame, where this catch is not on the stack, and the
+        // recorder would see nothing while looking correct.
+        if (isMalformedQuery(err)) {
+          recordNodeRejection({
+            code: String((err as { code?: unknown }).code),
+            message: err instanceof Error ? err.message : String(err),
+            schema: schemaHash,
+            fields: [...fields],
+            ...(filter !== undefined ? { filter } : {}),
+          });
+        }
+        throw err;
+      }
     },
     search: appSearch,
     rawCall: rawCallImpl,
