@@ -78,7 +78,7 @@ export const MEMBERSHIP_KEY_EXPECTATIONS: MembershipKeyExpectation[] = [
   },
 ];
 
-type ProjectionParityResult =
+export type ProjectionParityResult =
   | { ok: true; rows: number }
   | { ok: false; rows: number; dropped: number; reason: string };
 
@@ -129,6 +129,61 @@ export function checkProjectionParity(
       (sample.length > 0 ? ` — e.g. ${sample.join(", ")}` : "") +
       ` — ${remedy}`,
   };
+}
+
+/**
+ * The same verdict, decided on the SLUG SET instead of two totals.
+ *
+ * {@link checkProjectionParity} subtracts `spineRows - wideRows`, so a
+ * partition that gains one row and drops another between the two reads nets to
+ * zero and reports green — while holding the dropped slug in the argument it
+ * was just handed. On a live board that mixture is ordinary: `rank` is
+ * write-new-sk + delete-old-sk, and the board showed it directly on 2026-08-04
+ * (132 rows / 5 flagged, one slug under two sks).
+ *
+ * The unit the board serves is the slug, so count slugs. Rows are reported
+ * against the STABLE population — what the wide read returned plus what it
+ * provably should have — because rows that arrived after the sweep belong to
+ * neither side of the subtraction.
+ */
+export function checkProjectionParityBySlugs(
+  droppedSlugs: readonly string[],
+  wideRows: number,
+  remedy?: string,
+): ProjectionParityResult {
+  const dropped = [...new Set(droppedSlugs)];
+  const spine = wideRows + dropped.length;
+  // `undefined` must fall through to the parameter's default remedy rather than
+  // be passed as a value, or a BoardCards verdict loses its repair command.
+  return remedy === undefined
+    ? checkProjectionParity(spine, wideRows, dropped)
+    : checkProjectionParity(spine, wideRows, dropped, remedy);
+}
+
+/**
+ * Which field a projection is gated on, under the rule the node was measured to
+ * apply: HASH-ELSE-LEAD — the hash field when the projection contains it, the
+ * leading field otherwise (`scripts/probe-projection-rule-constructed.ts`,
+ * 2026-08-04).
+ *
+ * This exists because a parity verdict that names the wrong field is worse than
+ * one that names none: it sends the operator to repair an atom that was never
+ * the gate. Doctor's MilestoneCards verdict said the casualties lacked
+ * `milestone`, "this index's HASH field — it gates the read from any position",
+ * while `MILESTONE_CARDS_PAYLOAD_FIELDS` deliberately EXCLUDES `milestone` and
+ * leads with `slug`. Under the measured rule that moves the gate to `slug`, so
+ * the message named a field whose absence the read does not mind, about rows
+ * that went missing for a different reason.
+ *
+ * Deriving it from the same field list the read passes is the only way this
+ * stays true the next time a projection is edited to dodge a gate.
+ */
+export function projectionGateField(
+  projectedFields: readonly string[],
+  hashField: string | null,
+): string | undefined {
+  if (hashField && projectedFields.includes(hashField)) return hashField;
+  return projectedFields[0];
 }
 
 /** The two ways a row can be in the sweep and not in the wide read. */
@@ -195,6 +250,73 @@ export function confirmParityDrop(
   // cannot serve it. Whichever way the race went, the card is missing.
   for (const s of drift) moved.delete(s);
   return { drift: [...drift], moved: [...moved] };
+}
+
+/** What a sweep of one partition returns, from the parity check's point of view. */
+type ParitySweep<T> = { rows: readonly T[]; failedLeads: readonly { field: string }[] };
+
+export type ConfirmedParity = {
+  parity: ProjectionParityResult;
+  /** Slugs that entered or left mid-check. Reportable as churn; never a repair. */
+  moved: string[];
+  /**
+   * Whether a second sweep actually ran and was complete. `false` means the
+   * verdict stands on the first pass alone — a RED here is UNCONFIRMED, not
+   * disproven.
+   */
+  confirmed: boolean;
+};
+
+/**
+ * The confirm-before-accusing dance, as one thing every parity check calls.
+ *
+ * {@link confirmParityDrop} shipped index-agnostic and pure, but only the
+ * BoardCards call site was wired to it — so the delete-race that made BoardCards
+ * cry wolf twice on 2026-08-04 stayed live on BoardMilestones and
+ * MilestoneCards, both of which print a WRITE remedy when they fire.
+ *
+ * The re-sweep is the expensive half (24 partition queries for BoardCards, 19
+ * partitions for MilestoneCards, ~1.8s measured across both milestone indexes
+ * in `scripts/probe-milestone-parity-baseline-cost.ts`), so it runs ONLY when
+ * the first pass flagged something. A healthy board pays nothing.
+ *
+ * A re-sweep that could not run, or came back short a lead, leaves the verdict
+ * RED and `confirmed: false`. Calling a stable row "moved" because the re-read
+ * could not see it would launder real drift into a race, which is the one
+ * direction this must never fail in.
+ *
+ * `resweep` is injected rather than taken as a node handle: a verdict that
+ * prescribes a write repair to an operator should be testable without live
+ * infrastructure, and this module stays import-free.
+ */
+export async function parityWithConfirmation<T extends { sk: string; slug: string }>(args: {
+  firstSweep: readonly T[];
+  wideSlugs: ReadonlySet<string>;
+  wideRows: number;
+  resweep: () => Promise<ParitySweep<T> | null>;
+  remedy?: string;
+}): Promise<ConfirmedParity> {
+  const { firstSweep, wideSlugs, wideRows, resweep, remedy } = args;
+  const droppedSlugs = [...new Set(firstSweep.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
+  if (droppedSlugs.length === 0) {
+    return { parity: { ok: true, rows: wideRows }, moved: [], confirmed: true };
+  }
+
+  const second = await resweep();
+  if (second === null || second.failedLeads.length > 0) {
+    return {
+      parity: checkProjectionParityBySlugs(droppedSlugs, wideRows, remedy),
+      moved: [],
+      confirmed: false,
+    };
+  }
+
+  const { drift, moved } = confirmParityDrop(firstSweep, second.rows, wideSlugs);
+  return {
+    parity: checkProjectionParityBySlugs(drift, wideRows, remedy),
+    moved,
+    confirmed: true,
+  };
 }
 
 type MembershipKeyCheckResult =

@@ -12,8 +12,9 @@ import { listBoards, listCards, findCard, probeSchemaWritable, WRITE_PROBE_SLUG,
 import {
   MEMBERSHIP_KEY_EXPECTATIONS,
   checkMembershipKeyLayout,
-  checkProjectionParity,
-  confirmParityDrop,
+  parityWithConfirmation,
+  projectionGateField,
+  type ProjectionParityResult,
 } from "../membership_schema_guard.ts";
 import {
   listBoardCardsPartition,
@@ -26,6 +27,7 @@ import {
 import {
   listMilestoneCardsPartition,
   sweepMilestoneCardsPartition,
+  MILESTONE_CARDS_PAYLOAD_FIELDS,
 } from "../milestone-cards.ts";
 import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
 import {
@@ -60,6 +62,34 @@ export type DoctorOptions = {
 // ✓/✗ output) for callers that also want the text (the MCP tool surfaces it as
 // `content`).
 export type DoctorReport = { ok: boolean; version: string; checks: DoctorCheck[]; lines: string[] };
+
+// Rows that entered or left a partition while a parity check ran are not
+// evidence of anything, and specifically not grounds for the WRITE repair these
+// checks prescribe. They still get a line: silently discarding them is how a
+// check that fires on churn looks like a check that fires on drift.
+function reportPartitionChurn(
+  info: (label: string, detail?: string) => void,
+  index: string,
+  partition: string,
+  moved: readonly string[],
+): void {
+  if (moved.length === 0) return;
+  info(
+    `${index} partition churn (${partition})`,
+    `${moved.length} row(s) entered or left while the check ran (concurrent writes) — ` +
+      `excluded from the parity verdict: ${moved.slice(0, 3).join(", ")}`,
+  );
+}
+
+// A RED that could not be re-checked still stands, but the operator is about to
+// run a write repair on its say-so, so the verdict must not present a
+// first-pass suspicion as a confirmed finding.
+function unconfirmedSuffix(reason: string, confirmed: boolean): string {
+  return confirmed
+    ? reason
+    : `${reason} — UNCONFIRMED: the second sweep did not complete, so a row deleted mid-check ` +
+      `cannot be ruled out; re-run doctor before repairing`;
+}
 
 // Run doctor while collecting the structured `{ ok, version, checks }` report
 // and the human lines, without printing anything. Both the CLI `--json` flag and
@@ -506,9 +536,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         const ms = c.milestone ?? "";
         if (ms.length > 0) milestonesNamedByCards.add(ms);
       }
-      const wideSlugs = new Set(wide.map((c) => c.slug));
-      const droppedSlugs = [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
-
       // A flagged row is not yet a finding. The sweep and the wide read above
       // straddle live traffic — pickup, groom and the papercut routines write
       // continuously, and `rank` is write-new-sk + delete-old-sk — so a row
@@ -519,38 +546,22 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       // after this check fired twice unprompted on the live board that morning
       // and was green four minutes later.
       //
-      // So look again, and only accuse rows that held still. The second sweep
-      // is 24 more partition queries, which is why it runs ONLY when the first
-      // pass flagged something: a healthy board — the overwhelmingly common
-      // case — pays nothing for it.
-      let parity = checkProjectionParity(sweep.rows.length, wide.length, droppedSlugs);
-      if (droppedSlugs.length > 0) {
-        const second = await sweepBoardCardsPartition(node, cfg, b.slug);
-        // A second sweep with a refused lead is a short baseline, and calling a
-        // row "moved" because the re-read could not see it would launder real
-        // drift into a race — the one direction this must never fail in. Keep
-        // the unconfirmed verdict instead.
-        if (second !== null && second.failedLeads.length === 0) {
-          const { drift, moved } = confirmParityDrop(sweep.rows, second.rows, wideSlugs);
-          // Report against the STABLE population: the rows the wide read
-          // returned plus the ones it provably should have. Rows that entered
-          // or left mid-check belong to neither side of that subtraction.
-          parity = checkProjectionParity(wide.length + drift.length, wide.length, drift);
-          if (moved.length > 0) {
-            info(
-              `BoardCards partition churn (${b.slug})`,
-              `${moved.length} row(s) entered or left while the check ran (concurrent writes) — ` +
-                `excluded from the parity verdict: ${moved.slice(0, 3).join(", ")}`,
-            );
-          }
-        }
-      }
+      // `parityWithConfirmation` looks again and accuses only rows that held
+      // still, on the slug set rather than a difference of totals. The second
+      // sweep runs only when the first pass flagged something.
+      const { parity, moved, confirmed } = await parityWithConfirmation({
+        firstSweep: sweep.rows,
+        wideSlugs: new Set(wide.map((c) => c.slug)),
+        wideRows: wide.length,
+        resweep: () => sweepBoardCardsPartition(node, cfg, b.slug),
+      });
+      reportPartitionChurn(info, "BoardCards", b.slug, moved);
       check(
         parity.ok,
         `BoardCards projection parity (${b.slug})`,
         parity.ok
           ? `${parity.rows} rows, every lead agrees`
-          : parity.reason,
+          : unconfirmedSuffix(parity.reason, confirmed),
       );
     }
   } catch (err) {
@@ -628,18 +639,23 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         check(false, `BoardMilestones projection parity (${b.slug})`, "wide partition read returned no result");
         continue;
       }
-      const wideSlugs = new Set(wide.map((m) => m.slug));
-      const dropped = [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
-      const parity = checkProjectionParity(
-        sweep.rows.length,
-        wide.length,
-        dropped,
-        `run \`kanban milestone reconcile <slug>\` for the affected milestone(s)`,
-      );
+      // Same delete-race, same remedy-that-writes. This index sweeps 17 leads
+      // across 2 partitions (~584ms measured), so the confirmation re-sweep is
+      // the cheapest of the three — and it only runs on a flagged pass.
+      const { parity, moved, confirmed } = await parityWithConfirmation({
+        firstSweep: sweep.rows,
+        wideSlugs: new Set(wide.map((m) => m.slug)),
+        wideRows: wide.length,
+        resweep: () => sweepBoardMilestonesPartition(node, cfg, b.slug),
+        remedy: `run \`kanban milestone reconcile <slug>\` for the affected milestone(s)`,
+      });
+      reportPartitionChurn(info, "BoardMilestones", b.slug, moved);
       check(
         parity.ok,
         `BoardMilestones projection parity (${b.slug})`,
-        parity.ok ? `${parity.rows} rows, every lead agrees` : parity.reason,
+        parity.ok
+          ? `${parity.rows} rows, every lead agrees`
+          : unconfirmedSuffix(parity.reason, confirmed),
       );
     }
   } catch (err) {
@@ -668,12 +684,22 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
           }
           const wide = await listMilestoneCardsPartition(node, cfg, ms);
           if (wide === null) return { ms, unreadable: true as const };
-          const wideSlugs = new Set(wide.map((c) => c.slug));
+          // Confirmation happens per partition, inside the fan-out, so the
+          // re-sweeps run at the same concurrency as the first pass and only
+          // for the partitions that flagged. A board with no drift adds nothing.
+          const confirmation = await parityWithConfirmation({
+            firstSweep: sweep.rows,
+            wideSlugs: new Set(wide.map((c) => c.slug)),
+            wideRows: wide.length,
+            resweep: () => sweepMilestoneCardsPartition(node, cfg, ms),
+          });
           return {
             ms,
-            spine: sweep.rows.length,
+            spine: wide.length + (confirmation.parity.ok ? 0 : confirmation.parity.dropped),
             wide: wide.length,
-            dropped: [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s)),
+            parity: confirmation.parity,
+            moved: confirmation.moved,
+            confirmed: confirmation.confirmed,
           };
         },
         PARTITION_READ_CONCURRENCY,
@@ -685,11 +711,17 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       }>;
       const unreadable = results.filter((r) => "unreadable" in r).map((r) => r.ms);
       const measured = results.filter(
-        (r): r is { ms: string; spine: number; wide: number; dropped: string[] } => "spine" in r,
+        (r): r is {
+          ms: string;
+          spine: number;
+          wide: number;
+          parity: ProjectionParityResult;
+          moved: string[];
+          confirmed: boolean;
+        } => "parity" in r,
       );
-      const bad = measured
-        .map((r) => ({ ...r, parity: checkProjectionParity(r.spine, r.wide, r.dropped) }))
-        .filter((r) => !r.parity.ok);
+      for (const r of measured) reportPartitionChurn(info, "MilestoneCards", r.ms, r.moved);
+      const bad = measured.filter((r) => !r.parity.ok);
 
       // A partition nobody could read is not a partition with no drift. Report
       // it as a failure rather than letting the readable majority vouch for it
@@ -718,10 +750,23 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         check(
           false,
           "MilestoneCards projection parity",
-          `${totalDropped} row(s) across ${bad.length} of ${measured.length} milestone partition(s) are invisible to the wide read ` +
-            `(no atom for \`milestone\`, this index's HASH field — it gates the read from any position) — e.g. ${
-              bad.slice(0, 3).map((r) => `${r.ms} (${r.wide} of ${r.spine})`).join(", ")
-            } — run \`kanban milestone reconcile <slug>\` on each`,
+          unconfirmedSuffix(
+            `${totalDropped} row(s) across ${bad.length} of ${measured.length} milestone partition(s) are invisible to the wide read ` +
+              // Named from the field list the read actually passes, not from
+              // this index's hash field: `MILESTONE_CARDS_PAYLOAD_FIELDS`
+              // deliberately excludes `milestone`, which under HASH-ELSE-LEAD
+              // moves the gate to the leading field. Saying `milestone` here
+              // sent operators after an atom the read does not mind.
+              `(no atom for \`${
+                projectionGateField([...MILESTONE_CARDS_PAYLOAD_FIELDS], "milestone") ?? "?"
+              }\`, the field this read is gated on) — e.g. ${
+                bad.slice(0, 3).map((r) => `${r.ms} (${r.wide} of ${r.spine})`).join(", ")
+              } — run \`kanban milestone reconcile <slug>\` on each`,
+            // Confirmed only if EVERY flagged partition got a complete second
+            // sweep. One partition that could not be re-read makes the
+            // aggregate a suspicion, and the aggregate is what the operator acts on.
+            bad.every((r) => r.confirmed),
+          ),
         );
       } else {
         const rows = measured.reduce((n, r) => n + r.wide, 0);
