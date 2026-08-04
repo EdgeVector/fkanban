@@ -2,7 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
-import { POINT_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
+import {
+  PARTITION_READ_CONCURRENCY,
+  POINT_READ_CONCURRENCY,
+  mapWithConcurrency,
+} from "../concurrency.ts";
 import { doneWhenPredicate } from "../pickup.ts";
 import {
   MILESTONE_PROOF_STATUSES,
@@ -893,8 +897,27 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   // issue. With `--board` there is no speculation at all.
   const boards = await listBoards(opts.node, opts.cfg);
   const boardSlugs = opts.board ? [opts.board] : boards.map((board) => board.slug);
-  const boardCardsPending = Promise.all(boardSlugs.map(async (slug): Promise<[string, Card[]]> =>
-    [slug, await listCardsOnBoard(opts.node, opts.cfg, slug)]));
+  //
+  // POOLED, not `Promise.all`. Each of these is a whole-partition read — the
+  // heavy class — and this is the one board fan-out in the codebase that had no
+  // width at all: `listAllBoardCards` pools the identical shape at
+  // `PARTITION_READ_CONCURRENCY` precisely because Mini sheds with "too many
+  // concurrent reads". Inert at the two boards this node carries today, which is
+  // exactly why it survived; the comment above already contemplates reading
+  // "the card partition of every board", and `board-cards.ts` records this node
+  // having carried 34 Board slugs at once. A width's job is to still be right
+  // when that count grows, and here there was none.
+  //
+  // Started-not-awaited is preserved deliberately: `mapWithConcurrency` runs
+  // synchronously up to its internal `await`, so the first `width` reads are
+  // already in flight when this returns. Wrapping it in a lazy thunk would put
+  // the board read back on the critical path the comment above took it off.
+  const boardCardsPending = mapWithConcurrency(
+    boardSlugs,
+    async (slug): Promise<[string, Card[]]> =>
+      [slug, await listCardsOnBoard(opts.node, opts.cfg, slug)],
+    PARTITION_READ_CONCURRENCY,
+  );
 
   const milestones = opts.board
     ? await listMilestonesOnBoard(opts.node, opts.cfg, opts.board)
@@ -935,8 +958,18 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   // membership. Left sequential, the board read would simply be added to the
   // command's critical path.
   const proofSlugs = [...new Set(milestones.map((milestone) => milestone.proof_card).filter((slug) => slug))];
-  const proofsPending = Promise.all(proofSlugs.map(async (slug): Promise<[string, Card | null]> =>
-    [slug, await findProofCard(opts.node, opts.cfg, slug)]));
+  //
+  // Pooled for the same reason, at the POINT width rather than the partition
+  // one: these are keyed single-row reads. Width buys little now that the
+  // per-request floor has collapsed (see `POINT_READ_CONCURRENCY` — ~6ms across
+  // an 18-slug fan-out), so this is a shed guard, not a speedup. 28 distinct
+  // proof slugs are live on this board today and nothing bounds that number.
+  const proofsPending = mapWithConcurrency(
+    proofSlugs,
+    async (slug): Promise<[string, Card | null]> =>
+      [slug, await findProofCard(opts.node, opts.cfg, slug)],
+    POINT_READ_CONCURRENCY,
+  );
 
   const boardCards = new Map<string, Card[]>(await boardCardsPending);
   const childLists = milestones.map((milestone) =>
@@ -950,9 +983,17 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   // Slugs whose wide read missed but whose key-only read found them: sparse, not
   // absent. The key-only read is only issued for the slugs actually in question.
   const sparseProofs = new Set<string>();
-  await Promise.all([...proofs.entries()].map(async ([slug, card]) => {
-    if (!card && (await cardExists(opts.node, opts.cfg, slug))) sparseProofs.add(slug);
-  }));
+  // Pooled: worst case this is one `cardExists` per proof slug — the whole map,
+  // when every wide read missed, which is the live shape on this board (19 of 22
+  // proof refs dangle). So the unbounded arm was widest exactly when the board
+  // was in its worst state.
+  await mapWithConcurrency(
+    [...proofs.entries()],
+    async ([slug, card]) => {
+      if (!card && (await cardExists(opts.node, opts.cfg, slug))) sparseProofs.add(slug);
+    },
+    POINT_READ_CONCURRENCY,
+  );
   return {
     milestones,
     cards,
