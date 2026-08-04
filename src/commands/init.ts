@@ -61,6 +61,8 @@ export type InitOptions = {
   bootstrapName?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
+  /** Operator's explicit yes to changing an existing schema pin. */
+  acceptSchemaRepin?: boolean;
 };
 
 export type InitResult = { config: Config; bootstrapped: boolean };
@@ -205,6 +207,27 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     });
   }
 
+  // A resolved hash that differs from the incumbent is an ADDRESS CHANGE, not a
+  // config refresh, and the write probe above cannot stand in for this check: it
+  // asks only "will the node accept a write here?", which a brand-new EMPTY
+  // identity answers `yes` just as readily as the one holding every row.
+  //
+  // It runs AFTER the probe rather than before because both guards refuse and
+  // both leave config untouched, so ordering decides only which diagnosis the
+  // operator reads — and when the resolved hash is BOTH a move and unwritable
+  // (fkanban #94: declare hands back a stale narrower Card), "the node will not
+  // accept these fields, here are the missing ones" is the more actionable of
+  // the two. Ordering against `writeConfig` is the part that is load-bearing.
+  const pinMoves = schemaPinMoves(existing, schemaHashes);
+  for (const m of pinMoves) {
+    print(`        ** ${m.key} pin would MOVE: ${m.from.slice(0, 16)}… → ${m.to.slice(0, 16)}… **`);
+  }
+  assertNoSilentSchemaRepin({
+    moves: pinMoves,
+    accepted: opts.acceptSchemaRepin === true,
+    configPath,
+  });
+
   // Step 4: persist config — only now that every resolved hash write-probed OK.
   print(`[4/${STEPS}] writing config to ${configPath}`);
   const config: Config = {
@@ -249,6 +272,81 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   printNextSteps(print, bootstrapped || freshFkanbanConfig);
 
   return { config, bootstrapped };
+}
+
+/** One schema pin `init` would change: `from` is what config holds today. */
+export type SchemaPinMove = { key: string; from: string; to: string };
+
+/**
+ * Which pins would this init MOVE?
+ *
+ * A pin move is not a config edit. A schema hash IS the address of a record
+ * type: every row fkanban has ever written under `from` lives under `from`, and
+ * a config pointing at `to` cannot see any of them. Re-pointing an index is
+ * therefore indistinguishable, from every read path, from that index being
+ * empty — and `init` is the one command an operator runs when something already
+ * looks wrong.
+ */
+export function schemaPinMoves(
+  existing: Config | null,
+  resolved: Record<string, string>,
+): SchemaPinMove[] {
+  if (!existing) return [];
+  const moves: SchemaPinMove[] = [];
+  for (const [key, to] of Object.entries(resolved)) {
+    const from = (existing.schemaHashes as Record<string, string | undefined>)[key];
+    // No incumbent is not a move — that is a first declaration, which is the
+    // normal path on a fresh node and on a newly added catalog entry.
+    if (!from || from.length === 0) continue;
+    if (from === to) continue;
+    moves.push({ key, from, to });
+  }
+  return moves;
+}
+
+/**
+ * Refuse to silently re-point an existing config at different schema identities.
+ *
+ * Measured on an isolated node 2026-08-04: with `milestone_cards` pinned to a
+ * hash other than the one Mini resolves, `kanban init` rewrote the pin and its
+ * output said nothing about the change — it prints the resolved hash, never the
+ * incumbent, so the one line that would reveal a move looks identical to the
+ * line printed when nothing moved.
+ *
+ * That is a live landmine rather than a hypothetical. On the primary,
+ * `milestone_cards` is pinned to `69e76079…`, which the node has registered
+ * under `descriptive_name: "Milestone"`; the catalog's declared name
+ * `MilestoneCards_hashrange_v1_children_20260723` resolves to ZERO loaded
+ * schemas there. The next unguarded `init` on that node would adopt a freshly
+ * registered identity and orphan every live MilestoneCards row.
+ *
+ * Refusing rather than warning, because the failure is silent by nature: a
+ * re-pointed index reads as an empty index, so nothing downstream errors and no
+ * later run can tell the difference. `--accept-schema-repin` is the operator's
+ * yes — a red that an operator CAN clear, which is the only kind worth printing.
+ */
+export function assertNoSilentSchemaRepin(args: {
+  moves: SchemaPinMove[];
+  accepted: boolean;
+  configPath: string;
+}): void {
+  const { moves, accepted, configPath } = args;
+  if (moves.length === 0 || accepted) return;
+
+  const lines = moves.map((m) => `  ${m.key}: ${m.from} → ${m.to}`);
+  throw new FkanbanError({
+    code: "schema_pin_would_move",
+    message:
+      `Refusing to re-point ${moves.length} schema ${moves.length === 1 ? "pin" : "pins"} in ` +
+      `${configPath}. A schema hash is the ADDRESS of a record type — rows written under the ` +
+      `old hash are invisible to a config holding the new one, and an index re-pointed this way ` +
+      `reads exactly like an empty index:\n${lines.join("\n")}`,
+    hint:
+      "Your config was left untouched — current reads and writes keep working. If the node " +
+      "genuinely holds no rows under the old hashes (a fresh node, or an index you have already " +
+      "migrated), re-run with `--accept-schema-repin`. Otherwise the rows must be migrated to " +
+      "the new identity FIRST; adopting the pin does not move them.",
+  });
 }
 
 export function assertSafePrimaryConfigRepoint(args: {
