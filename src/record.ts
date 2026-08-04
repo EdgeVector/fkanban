@@ -48,7 +48,7 @@ import {
   fixedColumns,
   isDefaultColumn,
   resolveColumns,
-  schemaFor,
+  type AddSchemaRequest,
   type Column,
   type RecordType,
 } from "./schemas.ts";
@@ -4483,18 +4483,25 @@ async function readCardMembershipKeys(
 
 // The outcome of probing whether a schema hash actually accepts a write of
 // EVERY field the app emits. `writable` means a create carrying all local
-// fields succeeded (and the throwaway record was cleaned up). `not_writable`
-// carries the node's rejection so the caller can refuse to adopt the hash and
-// tell the user exactly which fields the node won't take.
+// fields succeeded. `not_writable` carries the node's rejection so the caller
+// can refuse to adopt the hash and tell the user exactly which fields the node
+// won't take.
+//
+// `leaked` is set when the create succeeded but the cleanup delete did not. It
+// does NOT flip the verdict — the write path is proven either way — but it is
+// carried rather than swallowed, because for the four index schemas a leaked
+// probe row is unreachable: every BoardCards / MilestoneCards / BoardMilestones
+// / CardListIndex read is keyed or partition-scoped (see `probeSchemaWritable`),
+// so nothing, including heal, will ever revisit the probe partition to reap it.
 export type WriteProbeResult =
-  | { writable: true }
+  | { writable: true; leaked?: string }
   | { writable: false; reason: string };
 
-// Verify the node ACCEPTS a write carrying every field the app emits for `type`
-// against `schemaHash`, by creating a throwaway record with all fields set to a
-// probe value and then deleting it. Returns `{ writable: true }` on success, or
-// `{ writable: false, reason }` carrying the node's rejection (e.g. the #94
-// `unknown_fields` 400) on failure.
+// Verify the node ACCEPTS a write carrying every field the app emits for
+// `entry`'s schema against `schemaHash`, by creating a throwaway record with all
+// fields set to a probe value and then deleting it. Returns `{ writable: true }`
+// on success, or `{ writable: false, reason }` carrying the node's rejection
+// (e.g. the #94 `unknown_fields` 400) on failure.
 //
 // This is the guard that closes the #94 footgun: `init` resolves a Card hash and
 // `doctor` reads the configured one, but the node can have a stale, narrower
@@ -4503,29 +4510,58 @@ export type WriteProbeResult =
 // probe is the runtime backstop that catches it regardless — a hash is only
 // adopted/declared healthy once a real write of all fields round-trips.
 //
-// Best-effort cleanup: if the create succeeds but the delete fails, the probe
-// still reports `writable: true` (the write path works). Card reads filter this
-// reserved slug, so a leaked probe never surfaces on a board.
+// ## Why it takes the catalog ENTRY, not a `RecordType`
+//
+// It used to read `schemaFor(type)` / `fieldsFor(type)` / `keyFieldFor(type)`,
+// all of which index `RECORDS[type]` — which holds only card/board/milestone. So
+// it could not be CALLED for the four `EXTRA_SCHEMAS`; passing one threw
+// `TypeError: undefined is not an object`. Nobody scoped those four out, the
+// check was un-writable for them (see
+// `checkPinnedSchemaIdentity`, which was made callable the same way). Reading
+// the DECLARED definition off the entry makes one probe serve all seven pinned
+// keys, and there is no second definition of "which fields does this schema
+// take" that can drift from the first.
+//
+// ## Why the throwaway row cannot land in a live partition
+//
+// The concern that deferred this fix was that a HashRange probe row would be
+// deposited in a partition real reads serve — `board_cards` `hash=default` is
+// the partition behind every `kanban list`. It cannot, because the probe writes
+// its OWN partition: the hash field is set to `WRITE_PROBE_SLUG`, not to a real
+// board or milestone slug. Every read of all four indexes is keyed
+// (`HashKey: <board|milestone|key>`) or range-scoped within one such partition,
+// and heal enumerates the LIVE board list — so no product read, and no repair
+// pass, addresses the probe partition at all.
+//
+// That isolation is also why a failed cleanup is REPORTED rather than shrugged
+// off: for `card`, reads filter `WRITE_PROBE_SLUG` and heal would eventually
+// reap a leak, but an index leak is inert AND permanent. Doctor says so.
 export async function probeSchemaWritable(
   node: NodeClient,
   schemaHash: string,
-  type: RecordType,
+  entry: { key: string; schema: AddSchemaRequest },
 ): Promise<WriteProbeResult> {
   const fields: Record<string, unknown> = {};
-  const schema = schemaFor(type).schema;
-  const optionalFields = type === "card" ? new Set<string>(CARD_OPTIONAL_SCHEMA_FIELDS) : new Set<string>();
-  for (const f of fieldsFor(type).filter((field) => !optionalFields.has(field))) {
+  const schema = entry.schema.schema;
+  const optionalFields =
+    entry.key === "card" ? new Set<string>(CARD_OPTIONAL_SCHEMA_FIELDS) : new Set<string>();
+  for (const f of schema.fields.filter((field) => !optionalFields.has(field))) {
     // A non-empty probe value per field exercises the write of EVERY field (an
     // all-empty write could be silently accepted by a node that drops unknown
     // empties), which is exactly the #94 failure we must catch.
     fields[f] = typeof schema.field_types[f] === "object" ? ["probe"] : `probe`;
   }
-  // The key field must equal the key hash so the record is addressable for the
-  // cleanup delete.
-  fields[keyFieldFor(type)] = WRITE_PROBE_SLUG;
+  // The key fields must equal the key so the record is addressable for the
+  // cleanup delete — and, for a HashRange schema, so the probe row is confined
+  // to its own partition. Written AFTER the field loop so an optional-field
+  // filter can never drop the address.
+  fields[schema.key.hash_field] = WRITE_PROBE_SLUG;
+  const rangeField = schema.key.range_field;
+  const rangeKey = rangeField ? WRITE_PROBE_SLUG : undefined;
+  if (rangeField) fields[rangeField] = WRITE_PROBE_SLUG;
 
   try {
-    await node.createRecord({ schemaHash, fields, keyHash: WRITE_PROBE_SLUG });
+    await node.createRecord({ schemaHash, fields, keyHash: WRITE_PROBE_SLUG, rangeKey });
   } catch (err) {
     return {
       writable: false,
@@ -4533,19 +4569,14 @@ export async function probeSchemaWritable(
     };
   }
   // Clean up the throwaway. A delete failure does not flip the result — the
-  // write path is proven writable, which is all the probe asserts.
+  // write path is proven writable, which is all the probe asserts — but it is
+  // reported, because an index leak is unreachable by every later read.
   try {
-    await node.deleteRecord({ schemaHash, keyHash: WRITE_PROBE_SLUG });
-  } catch {
-    // best-effort
+    await node.deleteRecord({ schemaHash, keyHash: WRITE_PROBE_SLUG, rangeKey });
+  } catch (err) {
+    return { writable: true, leaked: err instanceof Error ? err.message : String(err) };
   }
   return { writable: true };
-}
-
-// The hash_field (key) name for a record type, read from the schema definition
-// so the probe never drifts if a key field is ever renamed.
-function keyFieldFor(type: RecordType): string {
-  return schemaFor(type).schema.key.hash_field;
 }
 
 export function boardToFields(b: Board): Record<string, unknown> {
