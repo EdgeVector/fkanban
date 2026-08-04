@@ -502,11 +502,31 @@ export async function listAllBoardMilestones(
 ): Promise<Milestone[] | null> {
   if (!boardMilestonesHash(cfg)) return null;
   if (boards.length === 0) return [];
+  // Read the partitions TOGETHER, matching `listAllBoardCards`. These are
+  // independent partition reads and a read is almost entirely per-request
+  // latency, so the unit of cost is the serial wave (`concurrency.ts`:
+  // ceil(N/width) x ~190ms). Read one board after another this cost one wave
+  // per board on `list`, `milestone portfolio` and `groom`, for reads that
+  // never needed to wait on each other.
+  //
+  // Ordering is preserved — `mapWithConcurrency` lands each result at its input
+  // index — so the dedupe below still walks boards in the caller's order and
+  // resolves a cross-board duplicate exactly as it did when the reads were
+  // serial.
+  const parts = await mapWithConcurrency(
+    boards,
+    (b) => listBoardMilestonesPartition(node, cfg, b.slug),
+    PARTITION_READ_CONCURRENCY,
+  );
   const out: Milestone[] = [];
-  for (const b of boards) {
-    const part = await listBoardMilestonesPartition(node, cfg, b.slug);
+  for (const part of parts) {
     // The unbound-index case is already handled above, so null here means the
     // query threw. Fail closed and let the caller fall back.
+    //
+    // Every partition is now READ before this check, where the serial loop
+    // stopped at the first failure. That is the same trade `listAllBoardCards`
+    // already makes: these are reads, so the extra work is wasted effort on a
+    // failing call rather than a side effect, and the verdict is unchanged.
     if (part === null) return null;
     out.push(...part);
   }

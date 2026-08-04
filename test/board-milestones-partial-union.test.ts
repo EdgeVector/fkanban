@@ -191,4 +191,38 @@ describe("BoardMilestones union: a failed partition is not an empty one", () => 
     );
     expect(scanned).toBe(false);
   });
+
+  // These are independent partition reads, and a read is almost entirely
+  // per-request latency, so what this costs is serial WAVES (`concurrency.ts`)
+  // — one per board on `list`, `milestone portfolio` and `groom`.
+  // `listAllBoardCards` reads its partitions together; this one did not.
+  //
+  // Every other test in this file asserts WHICH partitions were read and what
+  // came back, and a serial and a concurrent union are identical on both. So
+  // this asserts the property they cannot: that the reads OVERLAP. It fails
+  // against the serial version with maxInFlight = 1.
+  test("partitions are read together, not one wave per board", async () => {
+    const node = await seededNode(["ms-alpha", "ms-beta"]);
+    const base = node.queryAll.bind(node);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    node.queryAll = async (req) => {
+      const filter = req.filter as QueryFilter & { HashKey?: string };
+      if (req.schemaHash === cfg.schemaHashes.board_milestones && filter?.HashKey) {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // A real partition read is a socket round trip; yield so the overlap
+        // between boards is observable.
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight -= 1;
+      }
+      return base(req);
+    };
+
+    const got = await listAllBoardMilestones(node, cfg, BOARDS);
+
+    expect(maxInFlight).toBeGreaterThan(1);
+    // And overlapping them changed nothing about the answer.
+    expect(got?.map((m) => m.slug).sort()).toEqual(["ms-alpha", "ms-beta"]);
+  });
 });
