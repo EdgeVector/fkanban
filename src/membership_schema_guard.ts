@@ -82,6 +82,13 @@ export function checkProjectionParity(
   spineRows: number,
   wideRows: number,
   sampleDroppedSlugs: string[] = [],
+  // The command that repairs THIS index. Defaults to the BoardCards remedy
+  // because that was this check's only caller for its first two months, but a
+  // verdict about MilestoneCards that tells the operator to run
+  // `board-cards-heal` sends them to a sweep that cannot touch the rows just
+  // reported — a wrong remedy is worse than none, because it looks actionable
+  // and then reports success.
+  remedy = "run `kanban groom board-cards-heal --apply`",
 ): ProjectionParityResult {
   const dropped = spineRows - wideRows;
   if (dropped <= 0) return { ok: true, rows: wideRows };
@@ -94,7 +101,7 @@ export function checkProjectionParity(
       `${dropped} of ${spineRows} rows are invisible to the wide projection ` +
       `(no atom for the field that LEADS it)` +
       (sample.length > 0 ? ` — e.g. ${sample.join(", ")}` : "") +
-      ` — run \`kanban groom board-cards-heal --apply\``,
+      ` — ${remedy}`,
   };
 }
 

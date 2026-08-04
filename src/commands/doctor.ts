@@ -18,6 +18,15 @@ import {
   listBoardCardsPartition,
   sweepBoardCardsPartition,
 } from "../board-cards.ts";
+import {
+  listBoardMilestonesPartition,
+  listBoardMilestonesPartitionSpine,
+} from "../board-milestones.ts";
+import {
+  listMilestoneCardsPartition,
+  listMilestoneCardsPartitionSpine,
+} from "../milestone-cards.ts";
+import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveLoadedSchema } from "../schemas.ts";
 
 // A single machine-readable health check. `pass`/`fail` checks flip `ok`;
@@ -341,6 +350,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // under a green "spine agrees". A check whose two inputs share the blind spot
   // it is looking for cannot report the failure; the union over leading fields
   // is the only input here that is not itself a projection.
+  const milestonesNamedByCards = new Set<string>();
   try {
     const boards = boardSet ?? (await listBoards(node, cfg));
     for (const b of boards) {
@@ -374,6 +384,16 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         check(false, `BoardCards partition probe (${b.slug})`, "wide partition read returned no result");
         continue;
       }
+      // Free candidate list for the MilestoneCards parity check below: these
+      // Cards are already in hand, and every one that names a milestone names a
+      // partition worth checking. It is a CANDIDATE list, not truth — this read
+      // is itself the lossy one under test, so a milestone only reachable
+      // through a dropped row will not appear here. That gap is the reason the
+      // check below reports a lower bound and says so.
+      for (const c of wide) {
+        const ms = c.milestone ?? "";
+        if (ms.length > 0) milestonesNamedByCards.add(ms);
+      }
       const wideSlugs = new Set(wide.map((c) => c.slug));
       const droppedSlugs = [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
       const parity = checkProjectionParity(sweep.rows.length, wide.length, droppedSlugs);
@@ -387,6 +407,141 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     }
   } catch (err) {
     check(false, "BoardCards projection parity", formatDoctorError(err));
+  }
+
+  // ---- the SAME failure, on the two indexes that had no parity check --------
+  //
+  // `checkProjectionParity` existed for two months with exactly one call site
+  // (BoardCards, above). `BoardMilestones` and `MilestoneCards` got a key-layout
+  // check — metadata — and nothing that reads a row. So the one failure mode
+  // that produces NO error, on the two indexes whose loss is hardest to notice,
+  // was unmeasured.
+  //
+  // Both display reads lead with their own partition key: `board` for
+  // BoardMilestones, `milestone` for MilestoneCards. That field is a payload
+  // COPY of the key, not the key — a row whose copy did not persist is still
+  // addressable, still returned under every other lead, and invisible to the
+  // read the product actually serves from. The spine reads deliberately lead
+  // with `slug` instead, and `listMilestoneCardsPartitionSpine`'s own doc
+  // already recorded the effect (56 rows -> 49 when `milestone` is projected).
+  // Nothing asserted it, so it stayed a comment while the drift ran.
+  //
+  // Measured live 2026-08-03, before this check existed: MilestoneCards
+  // partition `lastdb-0231-read-regression-fixes` held 7 rows under a full
+  // per-lead sweep and returned 4 under the wide read.
+  //
+  // ## This is a LOWER BOUND, and the wording says so
+  //
+  // The honest baseline is the 17/24-lead sweep `sweepBoardCardsPartition`
+  // uses, because a row is visible iff SOME field leads it. That costs ~780ms
+  // per partition; across the milestone partitions on this board it would turn
+  // an 8s doctor into a 40s one. So the baseline here is the one-field spine,
+  // which catches every row that has a `slug` atom and misses a row that has
+  // neither `slug` nor the hash field. A drop reported here is real; a clean
+  // result is "no drop THIS check can see", which is why the passing line says
+  // `slug-lead baseline` rather than claiming parity outright.
+  try {
+    const boards = boardSet ?? (await listBoards(node, cfg));
+    for (const b of boards) {
+      const spine = await listBoardMilestonesPartitionSpine(node, cfg, b.slug);
+      if (spine === null) {
+        info(`BoardMilestones projection parity (${b.slug})`, "board_milestones not bound or partition unreadable — skipped");
+        continue;
+      }
+      const wide = await listBoardMilestonesPartition(node, cfg, b.slug);
+      if (wide === null) {
+        check(false, `BoardMilestones projection parity (${b.slug})`, "wide partition read returned no result");
+        continue;
+      }
+      const wideSlugs = new Set(wide.map((m) => m.slug));
+      const dropped = spine.map((r) => r.slug).filter((s) => !wideSlugs.has(s));
+      const parity = checkProjectionParity(
+        spine.length,
+        wide.length,
+        dropped,
+        `run \`kanban milestone reconcile <slug>\` for the affected milestone(s)`,
+      );
+      check(
+        parity.ok,
+        `BoardMilestones projection parity (${b.slug})`,
+        parity.ok ? `${parity.rows} rows, slug-lead baseline agrees` : parity.reason,
+      );
+    }
+  } catch (err) {
+    check(false, "BoardMilestones projection parity", formatDoctorError(err));
+  }
+
+  // MilestoneCards: one partition per milestone, so this is checked only for
+  // milestones some card actually names — a partition nothing points at has no
+  // row for the product to lose. The candidate set came free from the board
+  // reads above; the cost here is 2 keyed partition reads per candidate, fanned
+  // out at the partition width, not a sweep and not a scan.
+  try {
+    const candidates = [...milestonesNamedByCards].sort();
+    if (candidates.length === 0) {
+      info("MilestoneCards projection parity", "no card names a milestone — nothing to check");
+    } else {
+      const results = await mapWithConcurrency(
+        candidates,
+        async (ms) => {
+          const spine = await listMilestoneCardsPartitionSpine(node, cfg, ms);
+          if (spine === null) return { ms, skipped: true as const };
+          const wide = await listMilestoneCardsPartition(node, cfg, ms);
+          if (wide === null) return { ms, unreadable: true as const };
+          const wideSlugs = new Set(wide.map((c) => c.slug));
+          return {
+            ms,
+            spine: spine.length,
+            wide: wide.length,
+            dropped: spine.map((r) => r.slug).filter((s) => !wideSlugs.has(s)),
+          };
+        },
+        PARTITION_READ_CONCURRENCY,
+      );
+
+      const unreadable = results.filter((r) => "unreadable" in r).map((r) => r.ms);
+      const measured = results.filter(
+        (r): r is { ms: string; spine: number; wide: number; dropped: string[] } => "spine" in r,
+      );
+      const bad = measured
+        .map((r) => ({ ...r, parity: checkProjectionParity(r.spine, r.wide, r.dropped) }))
+        .filter((r) => !r.parity.ok);
+
+      // A partition nobody could read is not a partition with no drift. Report
+      // it as a failure rather than letting the readable majority vouch for it
+      // — the same rule `listAllBoardMilestones` had to learn.
+      if (unreadable.length > 0) {
+        check(
+          false,
+          "MilestoneCards projection parity",
+          `${unreadable.length} partition(s) could not be read, so their row sets are unknown: ${
+            unreadable.slice(0, 3).join(", ")
+          }`,
+        );
+      } else if (bad.length > 0) {
+        const totalDropped = bad.reduce(
+          (n, r) => n + (r.parity.ok ? 0 : r.parity.dropped),
+          0,
+        );
+        check(
+          false,
+          "MilestoneCards projection parity",
+          `${totalDropped} row(s) across ${bad.length} of ${measured.length} milestone partition(s) are invisible to the wide read ` +
+            `(no atom for \`milestone\`, the field that LEADS it) — e.g. ${
+              bad.slice(0, 3).map((r) => `${r.ms} (${r.wide} of ${r.spine})`).join(", ")
+            } — run \`kanban milestone reconcile <slug>\` on each`,
+        );
+      } else {
+        const rows = measured.reduce((n, r) => n + r.wide, 0);
+        check(
+          true,
+          "MilestoneCards projection parity",
+          `${rows} rows across ${measured.length} milestone partition(s), slug-lead baseline agrees`,
+        );
+      }
+    }
+  } catch (err) {
+    check(false, "MilestoneCards projection parity", formatDoctorError(err));
   }
 
   // Multi-field Card smoke: point-read one live card and require more than slug.
