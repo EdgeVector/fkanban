@@ -124,6 +124,18 @@ export type AppSchemaDeclaration = {
 export const QUERY_PAGE_SIZE = 1000;
 const QUERY_PAGE_LIMIT = 1000;
 
+// `X-LastDB-Client` ops-attribution labels. Real board work carries the plain
+// label; each DIAGNOSTIC entrypoint carries its own so `lastdb ops` can rank
+// them separately. See nodeHeaders() for the measurement that made this a
+// correctness concern for the instrument rather than a cosmetic one.
+export const DEFAULT_OPS_LABEL = "kanban";
+// `kanban doctor` — write-probes five schemas (create+delete of one slug) and
+// runs the projection parity sweeps. Both are synthetic.
+export const DOCTOR_OPS_LABEL = "kanban-doctor";
+// `kanban groom parity-check` — read-only, but 24 partition queries per board
+// per index, and it runs daily from a routine.
+export const PARITY_OPS_LABEL = "kanban-parity";
+
 // fold's /api/query `filter` — exact field filters. `HashKey` is the special
 // primary-key point read; schema fields such as `column` may be backed by node
 // secondary indexes on newer nodes. Callers that need HashRangePrefix /
@@ -448,6 +460,11 @@ export type AttestationOutcome =
 export async function attestOwnerSessionDetailed(
   socketPath: string,
   verbose: Verbose = noopVerbose,
+  // Ops attribution for the two control-socket calls below. Without it they go
+  // out bare and `lastdb ops` files them under `unknown`, which is how a
+  // diagnostic command can end up only PARTLY attributable — the pattern this
+  // header exists to prevent.
+  opsLabel: string = DEFAULT_OPS_LABEL,
 ): Promise<AttestationOutcome> {
   const socketExists = existsSync(socketPath);
   const fail = (reason: string): AttestationOutcome => ({ ok: false, socketPath, socketExists, reason });
@@ -460,6 +477,7 @@ export async function attestOwnerSessionDetailed(
       const mintRes = await fetch("http://localhost/control/browser-pairing-code", {
         method: "POST",
         unix: socketPath,
+        headers: { "X-LastDB-Client": opsLabel },
         signal: AbortSignal.timeout(5_000),
       });
       if (!mintRes.ok) {
@@ -503,7 +521,7 @@ export async function attestOwnerSessionDetailed(
     const exchangeRes = await fetch("http://localhost/api/session/browser-pair", {
       method: "POST",
       unix: socketPath,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-LastDB-Client": opsLabel },
       body: JSON.stringify({ code: pairingCode }),
       signal: AbortSignal.timeout(5_000),
     });
@@ -545,6 +563,11 @@ export function newNodeClient(opts: {
   // envelope for this app id so the node applies per-app schema LINK mappings.
   appId?: string;
   appCapability?: string;
+  // The `X-LastDB-Client` ops-attribution label. Defaults to DEFAULT_OPS_LABEL.
+  // Diagnostic commands override it so their synthetic traffic is not pooled
+  // with real board work in `lastdb ops` — see nodeHeaders() for why that
+  // distinction is load-bearing rather than cosmetic.
+  opsLabel?: string;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
@@ -554,6 +577,7 @@ export function newNodeClient(opts: {
   const socketPath = opts.socketPath;
   const appId = opts.appId;
   const appCapability = opts.appCapability;
+  const opsLabel = opts.opsLabel ?? DEFAULT_OPS_LABEL;
 
   // Owner-session token, established lazily on the first request and shared
   // across every subsequent call. `attesting` dedupes concurrent first-hits so
@@ -576,7 +600,7 @@ export function newNodeClient(opts: {
     }
     if (attesting === null) {
       attesting = (async () => {
-        const outcome = await attestOwnerSessionDetailed(socketPath, verbose);
+        const outcome = await attestOwnerSessionDetailed(socketPath, verbose, opsLabel);
         if (outcome.ok) {
           sessionToken = outcome.token;
           lastAttestFailure = null;
@@ -635,9 +659,25 @@ export function newNodeClient(opts: {
   const nodeHeaders = (): Record<string, string> => {
     // X-LastDB-Client is a best-effort ops label (not a security boundary).
     // Mini request telemetry ranks worst offenders by this header.
+    //
+    // It must distinguish REAL board work from DIAGNOSTIC traffic, because
+    // `lastdb ops` aggregates per label and those two populations have wildly
+    // different shapes. Measured on the live primary 2026-08-04: a real board
+    // write (`add`/`mark`/`move`) costs ~200-350ms with `molecule_gate` ~0,
+    // while doctor's write-probe — which creates and then IMMEDIATELY deletes
+    // one slug — pays ~2.2s of `molecule_gate` on the delete, because a delete
+    // issued inside the slot's ~2.2s deferred-put window blocks until that put
+    // fires. (Updates to the same slot do not; the penalty is delete-specific,
+    // and a >=2s gap removes it entirely.)
+    //
+    // Pooled under one label, ~10 probe writes made `client=kanban` mutation
+    // averages read as "95% of every board write is the molecule gate". Two
+    // chief-engineer runs took that as the board's write-path frontier. It was
+    // the probe measuring its own cleanup. Keeping the labels separate is what
+    // stops that misreading from being re-derivable.
     const h: Record<string, string> = {
       "X-User-Hash": userHash,
-      "X-LastDB-Client": "kanban",
+      "X-LastDB-Client": opsLabel,
     };
     if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
     if (appId !== undefined && appId.length > 0) {

@@ -5,7 +5,13 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
-import { FkanbanError, isLoopbackNodeUrl, newNodeClient, type Verbose } from "../client.ts";
+import {
+  DOCTOR_OPS_LABEL,
+  FkanbanError,
+  isLoopbackNodeUrl,
+  newNodeClient,
+  type Verbose,
+} from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { readRecentRejections, rejectionsPath } from "../diagnostics.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
@@ -132,7 +138,17 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   if (!cfg) return false;
 
   const socketPath = resolveSocketPath(cfg);
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath });
+  // DOCTOR_OPS_LABEL, not the plain board label: doctor's write-probes and
+  // parity sweeps are synthetic, and pooling them with real board traffic in
+  // `lastdb ops` has already produced two wrong verdicts about the board's
+  // write path. See nodeHeaders() in client.ts.
+  const node = newNodeClient({
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+    verbose: opts.verbose,
+    socketPath,
+    opsLabel: DOCTOR_OPS_LABEL,
+  });
 
   // Which transport the node calls take. Local nodes are socket-only (the
   // loopback TCP control plane was retired), so the socket carries the board
