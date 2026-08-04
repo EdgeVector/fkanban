@@ -25,28 +25,28 @@
  *    partial row a data-loss path: the row it creates is one no wide reader can
  *    see.
  *
- *    **The default here is NOT the node's rule, and is wrong in both
- *    directions.** `any_missing` drops a row when ANY projected field lacks an
- *    atom. The node was measured on 2026-08-04 to apply **HASH-ELSE-LEAD**
- *    instead: one gate, which is the HASH field when the projection contains
- *    it and the LEADING field otherwise
+ *    The rule is **HASH-ELSE-LEAD**, measured 2026-08-04, and it is the
+ *    DEFAULT here since that date: one gate, which is the HASH field when the
+ *    projection contains it and the LEADING field otherwise
  *    (`scripts/probe-projection-rule-constructed.ts`, four constructed rows
  *    with verified atom sets, 51 projections, 204 judgements — LEAD 191/13,
  *    ANY 173/31, LEAD+KEY 193/11, HASH-ELSE-LEAD 204/0).
  *
- *    So `any_missing` is not merely "stricter". It drops rows the node returns
- *    (`[title,kind]` returns a row missing `kind`) and it is silent about the
- *    one thing that really does gate (`[slug,milestone]` drops a row carrying
- *    `slug`, because `milestone` is the hash field). The earlier
+ *    The superseded `any_missing` was not merely "stricter". It drops rows the
+ *    node returns (`[title,kind]` returns a row missing `kind`) and it is
+ *    silent about the one thing that really does gate (`[slug,milestone]` drops
+ *    a row carrying `slug`, because `milestone` is the hash field). The earlier
  *    order-dependence reading — `[title,board]` returns a witness that
  *    `[board,title]` does not — is the same fact seen through the LEAD model:
- *    `board` is BoardCards' hash field, so it gates from either position, and
- *    the order was a coincidence of where it sat.
+ *    the hash field gates from either position, and the order was a coincidence
+ *    of where it sat.
  *
- *    Pass `projectionRule: "hash_else_lead"` (with `hashFields`) for the
- *    measured rule. It is not the default only because flipping it rewrites
- *    expectations across ~40 tests. Do not cite the default as evidence for
- *    what the node does.
+ *    **Declare `hashFields` whenever the test is about the projection.** With
+ *    no entry for a schema the gate falls back to the LEADING field, which is
+ *    the right default for the many tests that seed complete rows and are not
+ *    about projection at all — but it is NOT the node's answer for the
+ *    membership indexes, whose gate is a field the declared layout does not
+ *    name. See {@link FakeNodeOptions.hashFields}.
  *
  * A fake that ignores the projection cannot reproduce either bug, and cannot
  * prove that the guards against them work. Faithful is the default here.
@@ -146,19 +146,33 @@ export type FakeNode = NodeClient & {
 export type FakeNodeOptions = {
   baseUrl?: string;
   userHash?: string;
-  /** Only for proving a guard is independent of the node's drop rule. */
+  /**
+   * Only for proving a guard is independent of the node's drop rule. `false`
+   * means DROP NOTHING and is honoured under both projection rules — see the
+   * note in `queryAll` for the 2026-08-04 bug where it was not.
+   */
   dropIncompleteRows?: boolean;
   /**
-   * Which projection rule to apply. Default `any_missing` — the historical
-   * model, now known to be wrong in BOTH directions (see the file header).
+   * Which projection rule to apply. Default `hash_else_lead` — the rule the
+   * node was measured to apply (see the file header).
    *
-   * `hash_else_lead` is the rule the node was measured to apply. Reach for it
-   * when the test is ABOUT the projection; `any_missing` remains the default
-   * only because flipping it rewrites expectations across ~40 tests, and that
-   * is its own change.
+   * `any_missing` is the superseded historical model, kept only so a test can
+   * state that a guard holds even under a drop rule stricter than the node's.
+   * Do not reach for it to describe what the node does.
    */
   projectionRule?: "any_missing" | "hash_else_lead";
-  /** Hash field name per schema hash. Required by `hash_else_lead`. */
+  /**
+   * Hash field name per schema hash — the gate `hash_else_lead` applies when
+   * the projection contains it. Omit and the gate is the LEADING field.
+   *
+   * **This is the LIVE catalog `hash_field`, which for the membership indexes
+   * is NOT the one `src/schemas.ts` declares.** After the 2026-07-23 multi-key
+   * expand, BoardCards' catalog `hash_field` reads `milestone` even though its
+   * declared layout says `board` (`src/membership_schema_guard.ts`), so every
+   * BoardCards read that projects `milestone` is gated on `milestone` and a row
+   * with no `milestone` atom is silently absent. Deriving these from the
+   * declared schema would therefore model the wrong gate — state the live one.
+   */
   hashFields?: Record<string, string>;
   /** Partial overrides for the rarely-used members (rawCall, listSchemas, …). */
   overrides?: Partial<NodeClient>;
@@ -229,7 +243,7 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
     baseUrl: opts.baseUrl ?? "http://unused.invalid",
     userHash: opts.userHash ?? "test-user",
     dropIncompleteRows: opts.dropIncompleteRows ?? true,
-    projectionRule: opts.projectionRule ?? "any_missing",
+    projectionRule: opts.projectionRule ?? "hash_else_lead",
     hashFields: opts.hashFields ?? {},
     writes,
     batches,
@@ -295,16 +309,26 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
       const hashField = node.hashFields[schemaHash];
       for (const rec of tableFor(schemaHash).values()) {
         if (!matchesFilter(rec, filter)) continue;
-        if (node.projectionRule === "hash_else_lead") {
-          // The MEASURED rule. One gate, not a conjunction: the hash field when
-          // it is projected, the leading field otherwise. A row missing some
-          // other projected field is returned WITHOUT that field — which is why
-          // this is not simply a weaker `any_missing`.
-          const gate = hashField && fields.includes(hashField) ? hashField : fields[0];
-          if (gate !== undefined && !(gate in rec.fields)) continue;
-        } else if (node.dropIncompleteRows && fields.some((name) => !(name in rec.fields))) {
-          // The historical model: any projected field with no atom drops the row.
-          continue;
+        // `dropIncompleteRows: false` means DROP NOTHING, and it has to mean
+        // that under BOTH rules. It is the opt-out for tests proving a guard
+        // holds independently of the node's drop rule, so a rule that gates
+        // anyway makes those tests measure the opposite of what they claim.
+        // Until 2026-08-04 the `hash_else_lead` branch ran ahead of this check
+        // and gated regardless; three tests that had opted out were silently
+        // still being filtered, and said so only when the default changed
+        // underneath them.
+        if (node.dropIncompleteRows) {
+          if (node.projectionRule === "hash_else_lead") {
+            // The MEASURED rule. One gate, not a conjunction: the hash field when
+            // it is projected, the leading field otherwise. A row missing some
+            // other projected field is returned WITHOUT that field — which is why
+            // this is not simply a weaker `any_missing`.
+            const gate = hashField && fields.includes(hashField) ? hashField : fields[0];
+            if (gate !== undefined && !(gate in rec.fields)) continue;
+          } else if (fields.some((name) => !(name in rec.fields))) {
+            // The historical model: any projected field with no atom drops the row.
+            continue;
+          }
         }
         const projected: Record<string, unknown> = {};
         // Absent is ABSENT — not a key holding `undefined`. The node omits it.
