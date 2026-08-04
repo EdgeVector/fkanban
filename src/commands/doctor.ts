@@ -13,6 +13,7 @@ import {
   MEMBERSHIP_KEY_EXPECTATIONS,
   checkMembershipKeyLayout,
   checkProjectionParity,
+  confirmParityDrop,
 } from "../membership_schema_guard.ts";
 import {
   listBoardCardsPartition,
@@ -507,7 +508,43 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       }
       const wideSlugs = new Set(wide.map((c) => c.slug));
       const droppedSlugs = [...new Set(sweep.rows.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
-      const parity = checkProjectionParity(sweep.rows.length, wide.length, droppedSlugs);
+
+      // A flagged row is not yet a finding. The sweep and the wide read above
+      // straddle live traffic — pickup, groom and the papercut routines write
+      // continuously, and `rank` is write-new-sk + delete-old-sk — so a row
+      // deleted between them is in the sweep and absent from the wide read,
+      // which is exactly the shape of a row the gate denied. Confirmed
+      // 2026-08-04 on rows that CANNOT be gated (all 24 fields written, one
+      // deleted mid-check, `scripts/probe-parity-delete-race-constructed.ts`),
+      // after this check fired twice unprompted on the live board that morning
+      // and was green four minutes later.
+      //
+      // So look again, and only accuse rows that held still. The second sweep
+      // is 24 more partition queries, which is why it runs ONLY when the first
+      // pass flagged something: a healthy board — the overwhelmingly common
+      // case — pays nothing for it.
+      let parity = checkProjectionParity(sweep.rows.length, wide.length, droppedSlugs);
+      if (droppedSlugs.length > 0) {
+        const second = await sweepBoardCardsPartition(node, cfg, b.slug);
+        // A second sweep with a refused lead is a short baseline, and calling a
+        // row "moved" because the re-read could not see it would launder real
+        // drift into a race — the one direction this must never fail in. Keep
+        // the unconfirmed verdict instead.
+        if (second !== null && second.failedLeads.length === 0) {
+          const { drift, moved } = confirmParityDrop(sweep.rows, second.rows, wideSlugs);
+          // Report against the STABLE population: the rows the wide read
+          // returned plus the ones it provably should have. Rows that entered
+          // or left mid-check belong to neither side of that subtraction.
+          parity = checkProjectionParity(wide.length + drift.length, wide.length, drift);
+          if (moved.length > 0) {
+            info(
+              `BoardCards partition churn (${b.slug})`,
+              `${moved.length} row(s) entered or left while the check ran (concurrent writes) — ` +
+                `excluded from the parity verdict: ${moved.slice(0, 3).join(", ")}`,
+            );
+          }
+        }
+      }
       check(
         parity.ok,
         `BoardCards projection parity (${b.slug})`,

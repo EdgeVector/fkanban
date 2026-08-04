@@ -131,6 +131,72 @@ export function checkProjectionParity(
   };
 }
 
+/** The two ways a row can be in the sweep and not in the wide read. */
+export type ParityDropConfirmation = {
+  /**
+   * Slugs present in BOTH sweeps — stably in the partition for the whole
+   * check — that the wide read still could not see. This is the real thing:
+   * a row whose gating field carries no atom.
+   */
+  drift: string[];
+  /**
+   * Slugs that entered or left the partition while the check ran. Not
+   * evidence of anything, and specifically not grounds for a repair.
+   */
+  moved: string[];
+};
+
+/**
+ * Decide whether a parity RED is drift or a race, by looking twice.
+ *
+ * {@link checkProjectionParity} compares an all-leads sweep against a wide read
+ * taken after it. Those two reads straddle live traffic: the pickup, groom and
+ * papercut routines write continuously, and `rank` is write-new-sk +
+ * delete-old-sk. A row deleted in that window is in the sweep and absent from
+ * the wide read — byte-for-byte the shape of a row the projection gate denied.
+ *
+ * The shipped check could not tell them apart, and the remedy it prints is
+ * `groom board-cards-heal --apply`: a WRITE repair pointed at a healthy
+ * partition. Measured 2026-08-04 with rows that cannot be gated at all — all 24
+ * fields written, one deleted mid-check — in
+ * `scripts/probe-parity-delete-race-constructed.ts`, and seen twice unprompted
+ * on the live board the same morning (129 rows/1 flagged, then 132/5 with two
+ * sks for one slug), green four minutes later.
+ *
+ * So the sweep is taken again AFTER the wide read. A row in both sweeps was
+ * stably present across the whole window, so the wide read missing it is drift.
+ * A row in only one moved, and proves nothing.
+ *
+ * Comparison is on SLUG, not sk, because that is the unit the board serves and
+ * the unit `checkProjectionParity` reports: a re-ranked card changes sk while
+ * never leaving the board, and must show up on neither channel. The flip side —
+ * a slug whose sks are partly stable and partly moving — is drift whenever the
+ * wide read cannot see the slug at all, so the race on one sk cannot launder a
+ * genuinely invisible card into `moved`.
+ *
+ * Pure by design: this module is import-free, and a verdict this consequential
+ * should be testable without a node.
+ */
+export function confirmParityDrop(
+  firstSweep: readonly { sk: string; slug: string }[],
+  secondSweep: readonly { sk: string; slug: string }[],
+  wideSlugs: ReadonlySet<string>,
+): ParityDropConfirmation {
+  const secondSks = new Set(secondSweep.map((r) => r.sk));
+  const drift = new Set<string>();
+  const moved = new Set<string>();
+  for (const r of firstSweep) {
+    // Only rows the wide read could not account for are in question at all.
+    if (wideSlugs.has(r.slug)) continue;
+    if (secondSks.has(r.sk)) drift.add(r.slug);
+    else moved.add(r.slug);
+  }
+  // A slug with one stable sk and one that moved is drift: the board still
+  // cannot serve it. Whichever way the race went, the card is missing.
+  for (const s of drift) moved.delete(s);
+  return { drift: [...drift], moved: [...moved] };
+}
+
 type MembershipKeyCheckResult =
   // `note` is set ONLY when the layout was admitted through `alsoAccepts` — an
   // accepted state that changes how every read of this index behaves. A plain
