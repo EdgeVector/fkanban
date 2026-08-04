@@ -285,7 +285,7 @@ describe("pickup classification hydrates only cards it will classify", () => {
     const cards = [needy("todo-a", "todo"), needy("done-a", "done"), needy("done-b", "done")];
     const node = fakeNode(cards);
 
-    await hydrateForPickupClassification(node, cfg, cards, [DEFAULT_BOARD]);
+    await hydrateForPickupClassification(node, cfg, cards);
 
     const hydrated = node.queries
       .filter((q) => q.schemaHash === "cardhash" && q.filter?.HashKey)
@@ -299,11 +299,11 @@ describe("pickup classification hydrates only cards it will classify", () => {
 
     const small = [needy("todo-a", "todo"), ...archive(3)];
     const smallNode = fakeNode(small);
-    await hydrateForPickupClassification(smallNode, cfg, small, [DEFAULT_BOARD]);
+    await hydrateForPickupClassification(smallNode, cfg, small);
 
     const large = [needy("todo-a", "todo"), ...archive(300)];
     const largeNode = fakeNode(large);
-    await hydrateForPickupClassification(largeNode, cfg, large, [DEFAULT_BOARD]);
+    await hydrateForPickupClassification(largeNode, cfg, large);
 
     expect(largeNode.queries.length).toBe(smallNode.queries.length);
   });
@@ -312,7 +312,7 @@ describe("pickup classification hydrates only cards it will classify", () => {
     const cards = [needy("todo-a", "todo"), needy("backlog-a", "backlog"), needy("done-a", "done")];
     const node = fakeNode(cards);
 
-    const out = await hydrateForPickupClassification(node, cfg, cards, [DEFAULT_BOARD]);
+    const out = await hydrateForPickupClassification(node, cfg, cards);
 
     const hydrated = node.queries
       .filter((q) => q.schemaHash === "cardhash" && q.filter?.HashKey)
@@ -322,19 +322,31 @@ describe("pickup classification hydrates only cards it will classify", () => {
     expect(out).toHaveLength(3);
   });
 
-  test("a board with a custom terminal column is respected, not a hardcoded `done`", async () => {
+  // This used to assert the OPPOSITE: that a board whose `columns` record ended
+  // in `ship` made `ship` terminal here. It passed because `activeCards` read
+  // `b.columns[b.columns.length - 1]` raw, while dep enforcement resolved the
+  // terminal through `resolveColumns` — which ignores board columns — and got
+  // `done`. The two halves of the same board disagreed about which column meant
+  // "finished", and only a hand-built fixture could tell: `board create` refuses
+  // a non-fixed column list, and `add`/`move` refuse to put a card in `spec` at
+  // all, so no live card could ever sit in the columns this test invented.
+  //
+  // Resolved toward the fixed-columns decision (Tom, 2026-07-16). A stale board
+  // record no longer moves the finish line for anyone.
+  test("a stale custom-columns board record does not move the terminal column", async () => {
     const custom: Board = { ...DEFAULT_BOARD, slug: "ship-board", columns: ["spec", "build", "ship"] };
     const cards = [
-      { ...needy("spec-a", "spec"), board: "ship-board" },
-      { ...needy("ship-a", "ship"), board: "ship-board" },
+      { ...needy("todo-a", "todo"), board: "ship-board" },
+      { ...needy("done-a", "done"), board: "ship-board" },
     ];
     const node = fakeNode(cards, [custom]);
 
-    await hydrateForPickupClassification(node, cfg, cards, [custom]);
+    await hydrateForPickupClassification(node, cfg, cards);
 
+    // `done` is terminal even here, so only the todo card is active and hydrated.
     const hydrated = node.queries
       .filter((q) => q.schemaHash === "cardhash" && q.filter?.HashKey)
       .map((q) => q.filter!.HashKey);
-    expect(hydrated).toEqual(["spec-a"]);
+    expect(hydrated).toEqual(["todo-a"]);
   });
 });

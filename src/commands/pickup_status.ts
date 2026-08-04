@@ -28,7 +28,7 @@ export async function pickupStatusResult(opts: PickupStatusOptions): Promise<{
   // that was 141 of 170 rows. See `BoardListOpt.activeOnly` for why this is a
   // read narrowing rather than a filter, and why it must not spread to `list`.
   const cards = await listCards(opts.node, opts.cfg, { boards, activeOnly: true });
-  const report = await buildPickupStatusReportWithSituations(cards, boards, opts.situationPreflight, {
+  const report = await buildPickupStatusReportWithSituations(cards, opts.situationPreflight, {
     cfg: opts.cfg,
     node: opts.node,
   });

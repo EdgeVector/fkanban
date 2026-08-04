@@ -156,17 +156,27 @@ describe("the cost of speaking, and the cost of not being able to", () => {
   test("a forced write on a DEP-FREE card pays no extra read", async () => {
     // The reads that describe the waiver are only worth paying when there is a
     // verdict to describe. `depStatus` iterates `card.deps` and nothing else, so
-    // a dep-free card cannot be blocked and must short-circuit BEFORE the board
+    // a dep-free card cannot be blocked and must short-circuit BEFORE the dep
     // read — otherwise every forced write on the hot path funds a lookup whose
     // answer is knowable for free.
     const node = fakeNode();
     await seedBoard(node, "default");
     await addCmd({ cfg, node, slug: "solo", title: "Solo" });
 
-    // The board-LIST scan (no HashKey) is the read `assertDepUnblocked` adds;
-    // the HashKey point-read of the card's own board is `moveCmd`'s and predates
-    // this change. Counting the scan specifically is what makes this an absolute
-    // claim about the gate rather than a claim about total traffic.
+    // The dep point-reads are the reads `assertDepUnblocked` adds. This used to
+    // count the board-LIST scan instead: the gate read the board list to build a
+    // board→terminal-column map, and that read is GONE — the terminal column is
+    // the fixed `TERMINAL_COLUMN`, so the gate check is now pure. Counting the
+    // dep reads specifically keeps this an absolute claim about the gate rather
+    // than a claim about total traffic.
+    // A card point-read for a slug OTHER than the one being moved can only be
+    // the gate resolving a dependency — `moveCmd`'s own reads are all for the
+    // moved card.
+    const depReads = (from: number, moved: string) =>
+      node.reads.slice(from).filter(
+        (r) => r.schemaHash === cfg.schemaHashes.card &&
+          typeof r.filter?.HashKey === "string" && r.filter.HashKey !== moved,
+      ).length;
     const boardScans = (from: number) =>
       node.reads.slice(from).filter(
         (r) => r.schemaHash === cfg.schemaHashes.board && r.filter?.HashKey === undefined,
@@ -174,6 +184,9 @@ describe("the cost of speaking, and the cost of not being able to", () => {
 
     const before = node.reads.length;
     await moveCmd({ cfg, node, slug: "solo", column: "doing", force: true });
+    expect(depReads(before, "solo")).toBe(0);
+    // The gate no longer scans the board list here — that is the read this
+    // change removed, on the write path.
     expect(boardScans(before)).toBe(0);
 
     // And the same move on a card that DOES have deps is allowed to read — the
@@ -183,7 +196,9 @@ describe("the cost of speaking, and the cost of not being able to", () => {
     await addCmd({ cfg, node, slug: "work5", title: "Work", deps: ["dep5"] });
     const beforeDeps = node.reads.length;
     await moveCmd({ cfg, node, slug: "work5", column: "doing", force: true });
-    expect(boardScans(beforeDeps)).toBeGreaterThan(0);
+    expect(depReads(beforeDeps, "work5")).toBeGreaterThan(0);
+    // ...and not in the dep-carrying case either.
+    expect(boardScans(beforeDeps)).toBe(0);
   });
 
   test("a node that cannot answer does not turn an override into a refusal", async () => {
@@ -195,13 +210,15 @@ describe("the cost of speaking, and the cost of not being able to", () => {
     await addCmd({ cfg, node, slug: "dep6", title: "Dep" });
     await addCmd({ cfg, node, slug: "work6", title: "Work", deps: ["dep6"] });
 
-    // Fail ONLY the board-list scan that `assertDepUnblocked` issues, not the
-    // HashKey point-read `moveCmd` already does to resolve the card's board —
-    // breaking that one would prove nothing about this gate.
+    // Fail ONLY the dep point-read that `assertDepUnblocked` issues, not the
+    // reads `moveCmd` already does to resolve the card and its board — breaking
+    // those would prove nothing about this gate. (This used to fail the board
+    // -list scan; the gate no longer issues one, so the dep read is the only
+    // read left that can degrade.)
     const failing: NodeClient = {
       ...node,
       queryAll: (opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse> => {
-        if (opts.schemaHash === cfg.schemaHashes.board && opts.filter?.HashKey === undefined) {
+        if (opts.schemaHash === cfg.schemaHashes.card && opts.filter?.HashKey === "dep6") {
           return Promise.reject(new Error("service_timeout: node did not respond"));
         }
         return node.queryAll(opts);

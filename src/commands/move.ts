@@ -15,7 +15,6 @@ import {
   sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
   assertDbLocatorMatchesCard,
-  boardTerminalMap,
   depStatus,
   doneAtForColumnTransition,
   ensureBoardRecord,
@@ -79,7 +78,6 @@ async function promoteUnblockedBacklogDependents(opts: {
   const dependencySlug = opts.dependency.slug;
   const boards = await listBoards(opts.node, opts.cfg);
   const cards = await listCards(opts.node, opts.cfg, { boards });
-  const boardTerminal = boardTerminalMap(boards);
   const cardsWithMovedDependency = cards.map((c) => c.slug === dependencySlug ? opts.dependency : c);
   const candidates = cardsWithMovedDependency.filter((c) =>
     c.slug !== dependencySlug &&
@@ -94,7 +92,7 @@ async function promoteUnblockedBacklogDependents(opts: {
   const promoted: string[] = [];
 
   for (const thin of candidates) {
-    if (depStatus(thin, cardsWithMovedDependency, boardTerminal).blocked) continue;
+    if (depStatus(thin, cardsWithMovedDependency).blocked) continue;
 
     // `candidates` come from the body-free board list, and everything below
     // this line needs the body: the pickup-readiness gate reads the brief, and

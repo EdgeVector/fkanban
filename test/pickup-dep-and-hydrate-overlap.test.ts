@@ -16,7 +16,7 @@ import { describe, expect, test } from "bun:test";
 import type { Config } from "../src/config.ts";
 import type { NodeClient, QueryFilter } from "../src/client.ts";
 import { buildPickupStatusReportWithSituations } from "../src/pickup.ts";
-import { BODY_OMITTED, type Board, type Card } from "../src/record.ts";
+import { BODY_OMITTED, type Card } from "../src/record.ts";
 
 const cfg = {
   configVersion: 1,
@@ -25,17 +25,6 @@ const cfg = {
   schemaServiceUrl: "http://127.0.0.1:9",
   schemaHashes: { card: "card-hash" },
 } as unknown as Config;
-
-const boards: Board[] = [
-  {
-    slug: "default",
-    title: "default",
-    body: "",
-    columns: ["backlog", "todo", "doing", "done"],
-    created_at: "",
-    updated_at: "",
-  } as Board,
-];
 
 function card(partial: Partial<Card> & { slug: string }): Card {
   return {
@@ -117,7 +106,7 @@ describe("pickup status overlaps the dep fan-out with the body hydrate", () => {
     const cards = [needsBodyCard("needs-body"), card({ slug: "has-dep", deps: ["off-set-dep"] })];
     const { node, issued, release, gateReached } = gatedNode(["off-set-dep"]);
 
-    const pending = buildPickupStatusReportWithSituations(cards, boards, undefined, { cfg, node });
+    const pending = buildPickupStatusReportWithSituations(cards, undefined, { cfg, node });
 
     // Wait until the dep read has actually been issued and is parked on the gate.
     await gateReached;
@@ -138,7 +127,7 @@ describe("pickup status overlaps the dep fan-out with the body hydrate", () => {
     const { node, issued, release } = gatedNode([]);
     release();
 
-    await buildPickupStatusReportWithSituations(cards, boards, undefined, { cfg, node });
+    await buildPickupStatusReportWithSituations(cards, undefined, { cfg, node });
 
     expect(issued.filter((s) => s === "off-set-dep")).toHaveLength(1);
     expect(issued.filter((s) => s === "needs-body")).toHaveLength(1);
@@ -163,7 +152,7 @@ describe("pickup status overlaps the dep fan-out with the body hydrate", () => {
     const issuedSlugs: string[] = [];
 
     const cards = [card({ slug: "has-dep", deps: ["off-set-dep"] })];
-    await buildPickupStatusReportWithSituations(cards, boards, undefined, { cfg, node });
+    await buildPickupStatusReportWithSituations(cards, undefined, { cfg, node });
 
     // Read twice on purpose: once by the dep fan-out (status fields), once by the
     // late hydrate (body). The point is that the SECOND one happens at all.

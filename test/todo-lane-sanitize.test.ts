@@ -131,9 +131,9 @@ describe("card body substance + destructive replace", () => {
 
 describe("default/todo dep enforcement", () => {
   test("todo is not dep-enforced on the default board", () => {
-    expect(isDepEnforcedColumn("todo", "default")).toBe(false);
-    expect(isDepEnforcedColumn("backlog", "default")).toBe(false);
-    expect(isDepEnforcedColumn("doing", "default")).toBe(true);
+    expect(isDepEnforcedColumn("todo")).toBe(false);
+    expect(isDepEnforcedColumn("backlog")).toBe(false);
+    expect(isDepEnforcedColumn("doing")).toBe(true);
   });
 });
 

@@ -19,9 +19,9 @@ import {
   sanitizeRepoValue,
   sortCards,
   updateCardRecord,
-  type Board,
   type Card,
   type DepStatus,
+  TERMINAL_COLUMN,
 } from "./record.ts";
 import { checkSituationFence, type SituationFenceResult, type SituationPreflight } from "./situations.ts";
 
@@ -75,9 +75,8 @@ const GENERATED_REASON_PREFIXES = [
   "fkanban-pickup cannot pick up",
 ];
 
-function activeCards(cards: Card[], boards: Board[]): Card[] {
-  const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
-  return cards.filter((c) => c.column !== (terminalByBoard.get(c.board) ?? "done"));
+function activeCards(cards: Card[]): Card[] {
+  return cards.filter((c) => c.column !== TERMINAL_COLUMN);
 }
 
 function generatedReason(reason: string): boolean {
@@ -143,9 +142,8 @@ export async function hydrateForPickupClassification(
   node: NodeClient,
   cfg: Config,
   cards: Card[],
-  boards: Board[],
 ): Promise<Card[]> {
-  const classified = new Set(activeCards(cards, boards).map((card) => card.slug));
+  const classified = new Set(activeCards(cards).map((card) => card.slug));
   const needsBody = cards.filter(
     (card) => classified.has(card.slug) && pickupClassificationNeedsBody(card),
   );
@@ -356,14 +354,12 @@ export function classifyPickupCard(
 
 export function buildPickupStatusReport(
   cards: Card[],
-  boards: Board[],
   situationFences: Map<string, SituationFenceResult> = new Map(),
   classifyOpts?: ClassifyPickupCardOpts,
 ): PickupStatusReport {
-  const active = sortCards(activeCards(cards, boards));
-  const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
+  const active = sortCards(activeCards(cards));
   const classifications = active.map((card) =>
-    classifyPickupCard(card, cards, depStatus(card, cards, terminalByBoard), situationFences.get(card.slug), classifyOpts),
+    classifyPickupCard(card, cards, depStatus(card, cards), situationFences.get(card.slug), classifyOpts),
   );
   const counts = Object.fromEntries(PICKUP_CATEGORIES.map((category) => [category, 0])) as Record<PickupCategory, number>;
   for (const c of classifications) counts[c.category] += 1;
@@ -399,16 +395,14 @@ export function buildPickupStatusReport(
 async function withDependencyStatuses(
   opts: { cfg: Config; node: NodeClient } | undefined,
   cards: Card[],
-  boards: Board[],
 ): Promise<Card[]> {
   return opts
-    ? listDependencyStatusesForCards(opts.node, opts.cfg, activeCards(cards, boards), cards)
+    ? listDependencyStatusesForCards(opts.node, opts.cfg, activeCards(cards), cards)
     : cards;
 }
 
 export async function buildPickupStatusReportWithSituations(
   cards: Card[],
-  boards: Board[],
   preflight?: SituationPreflight,
   depsContext?: { cfg: Config; node: NodeClient },
 ): Promise<PickupStatusReport> {
@@ -434,9 +428,9 @@ export async function buildPickupStatusReportWithSituations(
   // depend on the dep step; only the extra cards it introduces can, and those
   // are picked up by the second pass below.
   const [withDeps, hydratedOriginals] = await Promise.all([
-    withDependencyStatuses(depsContext, cards, boards),
+    withDependencyStatuses(depsContext, cards),
     depsContext
-      ? hydrateForPickupClassification(depsContext.node, depsContext.cfg, cards, boards)
+      ? hydrateForPickupClassification(depsContext.node, depsContext.cfg, cards)
       : Promise.resolve(cards),
   ]);
   // `listDependencyStatusesForCards` returns the UNION of the input and the dep
@@ -450,7 +444,7 @@ export async function buildPickupStatusReportWithSituations(
   // a card whose hydrate already failed still carries the body-omitted marker,
   // so a second pass over the full set would retry it and buy back the very wave
   // this overlap removes — on the failure path, which is where the command can
-  // least afford it. `activeCards` filters per card (column vs its own board's
+  // least afford it. `activeCards` filters per card (column vs the fixed
   // terminal), so judging a subset is identical to judging it in the whole.
   const bodyBySlug = new Map(hydratedOriginals.map((card) => [card.slug, card]));
   const originalSlugs = new Set(cards.map((card) => card.slug));
@@ -463,7 +457,6 @@ export async function buildPickupStatusReportWithSituations(
         depsContext.node,
         depsContext.cfg,
         introduced,
-        boards,
       )).map((card) => [card.slug, card]),
     );
     cardsWithDeps = merged.map((card) => late.get(card.slug) ?? card);
@@ -471,8 +464,8 @@ export async function buildPickupStatusReportWithSituations(
   const classifyOpts: ClassifyPickupCardOpts | undefined = depsContext
     ? { requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true }
     : undefined;
-  const local = buildPickupStatusReport(cardsWithDeps, boards, undefined, classifyOpts);
-  const activeBySlug = new Map(activeCards(cardsWithDeps, boards).map((card) => [card.slug, card]));
+  const local = buildPickupStatusReport(cardsWithDeps, undefined, classifyOpts);
+  const activeBySlug = new Map(activeCards(cardsWithDeps).map((card) => [card.slug, card]));
   const fences = new Map<string, SituationFenceResult>();
   await Promise.all(local.cards
     .filter((card) => card.category === "pickup-ready")
@@ -482,7 +475,7 @@ export async function buildPickupStatusReportWithSituations(
       const result = await checkSituationFence(card, preflight);
       if (!result.allowed) fences.set(card.slug, result);
     }));
-  return fences.size > 0 ? buildPickupStatusReport(cardsWithDeps, boards, fences, classifyOpts) : local;
+  return fences.size > 0 ? buildPickupStatusReport(cardsWithDeps, fences, classifyOpts) : local;
 }
 
 export function renderPickupStatus(report: PickupStatusReport): string {

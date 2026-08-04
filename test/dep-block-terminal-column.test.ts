@@ -1,21 +1,22 @@
-// The dependency soft-block must actually enforce on a custom-columns board:
-// a card blocked by an undone dep can't be moved/placed into its board's
-// TERMINAL (completion) column without --force. Before #87 the enforcement gate
-// was the hardcoded WORKING_COLUMNS (doing/done), so a board whose
-// columns are e.g. `spec,build,ship` had NO enforced column — a blocked card
-// could be moved all the way into `ship`, defeating `--deps` on custom boards.
-// PR #84 had already generalized dep DONE-ness to the board's terminal column;
-// this exercises that the ENFORCEMENT path now consults it too.
+// The dependency soft-block must enforce on the TERMINAL (completion) column,
+// not only on `doing`: a card blocked by an undone dep can't be moved or placed
+// into `done` without --force, on any board.
 //
-// Backed by the same in-memory fake NodeClient used in add-update-board.test.ts
-// — exercises the real addCmd/moveCmd with no live node.
+// This file was written for custom-columns boards (#87 — a board with
+// `spec,build,ship` had no enforced column, so a blocked card could be moved
+// all the way into `ship`). Columns became fixed in 2026-07 and `board create`
+// now refuses any other list, so what remains is the SAME gate with one
+// terminal column everywhere. The invariant that makes that safe to assume is
+// pinned in `terminal-column-is-fixed.test.ts`; what this file still earns is
+// the end-to-end exercise through the real addCmd/moveCmd, on the same
+// in-memory fake NodeClient used in add-update-board.test.ts.
 
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import type { NodeClient } from "../src/client.ts";
 import { fakeNode } from "./fake-node.ts";
 import type { Config } from "../src/config.ts";
-import { boardToFields, findCard, isDepEnforcedColumn, boardTerminalMap, nowIso } from "../src/record.ts";
+import { boardToFields, findCard, isDepEnforcedColumn, nowIso } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
@@ -46,33 +47,21 @@ function seedBoard(node: NodeClient, slug: string, columns: string[]) {
 }
 
 describe("isDepEnforcedColumn", () => {
-  const terminal = boardTerminalMap([
-    { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-    { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-  ]);
-
-  test("default board: gated set is only working columns (backlog/todo are not)", () => {
+  test("the gated set is doing + the terminal column; backlog/todo are not", () => {
     // Todo is a queue lane. Unfinished deps are refused only when work starts
     // or completes, so blocked cards can still be represented before pickup.
-    expect(isDepEnforcedColumn("backlog", "default", terminal)).toBe(false);
-    expect(isDepEnforcedColumn("todo", "default", terminal)).toBe(false);
-    expect(isDepEnforcedColumn("doing", "default", terminal)).toBe(true);
-    expect(isDepEnforcedColumn("review", "default", terminal)).toBe(false);
-    expect(isDepEnforcedColumn("done", "default", terminal)).toBe(true);
+    expect(isDepEnforcedColumn("backlog")).toBe(false);
+    expect(isDepEnforcedColumn("todo")).toBe(false);
+    expect(isDepEnforcedColumn("doing")).toBe(true);
+    expect(isDepEnforcedColumn("done")).toBe(true);
   });
 
-  test("non-default board: working columns + terminal are gated", () => {
-    // Fixed columns everywhere; todo remains an intake/queue lane.
-    expect(isDepEnforcedColumn("backlog", "zz", terminal)).toBe(false);
-    expect(isDepEnforcedColumn("todo", "zz", terminal)).toBe(false);
-    expect(isDepEnforcedColumn("doing", "zz", terminal)).toBe(true);
-    expect(isDepEnforcedColumn("done", "zz", terminal)).toBe(true);
-  });
-
-  test("unresolvable board falls back to literal `done` as the terminal gate", () => {
-    const empty = new Map<string, string>();
-    expect(isDepEnforcedColumn("ship", "gone", empty)).toBe(false); // unknown name not working
-    expect(isDepEnforcedColumn("done", "gone", empty)).toBe(true);
+  test("a name no board can declare is not gated", () => {
+    // `review` and `ship` are not columns any longer — never gates, never
+    // terminal. Board-independence itself is pinned in
+    // `terminal-column-is-fixed.test.ts`.
+    expect(isDepEnforcedColumn("review")).toBe(false);
+    expect(isDepEnforcedColumn("ship")).toBe(false);
   });
 });
 

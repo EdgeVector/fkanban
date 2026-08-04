@@ -7,7 +7,7 @@ import {
   CARD_DISPLAY_FIELDS,
   CARD_LIST_FIELDS,
   blockedSlugSet,
-  boardTerminalMap,
+  TERMINAL_COLUMN,
   depStatus,
   ensureColumn,
   findBoard,
@@ -285,8 +285,7 @@ export async function listResult(
   // `visibleFields` is declared above the settle — the BoardCards read needs it.
   //
   // `allBoards` was read above, overlapped with the board lookup.
-  const boardTerminal = boardTerminalMap(allBoards);
-  const terminalCol = boardTerminal.get(boardSlug) ?? "done";
+  const terminalCol = TERMINAL_COLUMN;
 
   // Rethrown here rather than beside the two board reads: a BoardCards failure
   // used to surface only after both of those had succeeded, and `ensureColumn`
@@ -373,7 +372,7 @@ export async function listResult(
   // (the fresh-clone default). Mirrors how init injects its Next-steps
   // invocation (PR #69); board.ts stays pure and defaults to bare `fkanban`.
   const renderOpts: RenderOptions = {
-    blocked: blockedSlugSet(cards, allCards, boardTerminal),
+    blocked: blockedSlugSet(cards, allCards),
     limit: textLimit,
     invocation: fkanbanInvocation(),
   };
@@ -381,7 +380,7 @@ export async function listResult(
   // Enrich each filtered card with its dependency status (resolved against ALL
   // live cards so cross-board deps count), matching show's CardDetail shape.
   const enriched: CardDetail[] = cards.map((c) => {
-    const status = depStatus(c, allCards, boardTerminal);
+    const status = depStatus(c, allCards);
     return { ...c, blocked: status.blocked, blockedBy: status.blockedBy, missingDeps: status.missing };
   });
   // `jsonLimit` only reflects an explicit `--limit`; the CLI broad-JSON default

@@ -20,10 +20,9 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
-  boardTerminalMap,
+  TERMINAL_COLUMN,
   findCard,
   isPickupAreaTag,
-  listBoards,
   listBoardCardsWithBodies,
   nowIso,
   scanCardSummariesForReconcile,
@@ -33,8 +32,6 @@ import {
 } from "../record.ts";
 import { resolveColumns } from "../schemas.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
-
-const FALLBACK_TERMINAL_COLUMN = "done";
 
 export type MigratedCard = {
   slug: string;
@@ -71,7 +68,6 @@ export async function migrateAreaTagsCmd(
   // Area:` BODY headers, and each retagged card is written back whole. On the
   // body-free list this stripped body-declared area tags and blanked briefs.
   const cards = await listBoardCardsWithBodies(opts.node, opts.cfg);
-  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
 
   const result: MigrateAreaTagsResult = {
     scanned: 0,
@@ -82,7 +78,7 @@ export async function migrateAreaTagsCmd(
   };
 
   for (const card of cards) {
-    const terminal = boardTerminal.get(card.board) ?? FALLBACK_TERMINAL_COLUMN;
+    const terminal = TERMINAL_COLUMN;
     // Skip terminal-column (done) cards — a completed card is never picked up,
     // so its area tags have no effect and we don't want to churn its updated_at.
     if (card.column === terminal) {

@@ -4,9 +4,7 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   assertDbLocatorMatchesCard,
-  boardTerminalMap,
   depStatus,
-  listBoards,
   listDependencyStatusesForCards,
   requireCard,
   type Card,
@@ -42,18 +40,20 @@ export async function showResult(opts: {
   // `depStatus` only consults `card.deps`, so fetching all ~1000s of cards here
   // was a full-collection scan (the dominant per-`show` cost) for no benefit.
   //
-  // These three only need `card`, and every node query pays a flat ~120ms
-  // regardless of rows, so serializing them made `show` the sum of four
+  // These two only need `card`, and every node query pays a flat ~120ms
+  // regardless of rows, so serializing them made `show` the sum of three
   // round-trips. Run them concurrently: wall ≈ card read + slowest branch.
   // The pipeline join stays best-effort — never fail show if lastgit schemas
   // are absent or the node is busy on that partition.
-  const [boards, relevant, pipeline] = await Promise.all([
-    listBoards(opts.node, opts.cfg),
+  //
+  // The board list used to be a third leg here, read only to build a
+  // board→terminal-column map that was `done` for every board. `TERMINAL_COLUMN`
+  // says that without a read.
+  const [relevant, pipeline] = await Promise.all([
     listDependencyStatusesForCards(opts.node, opts.cfg, [card]),
     attachPipelineStatus(opts.node, card).catch((): PipelineAttachResult | undefined => undefined),
   ]);
-  const boardTerminal = boardTerminalMap(boards);
-  const status = depStatus(card, relevant, boardTerminal);
+  const status = depStatus(card, relevant);
   const detail: CardDetail = {
     ...card,
     blocked: status.blocked,
