@@ -189,14 +189,24 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // response is the source of truth for the canonical identity; the probe is
   // the runtime backstop that proves the node will accept fkanban's full field
   // set before config is updated.
+  // ALL SEVEN pinned keys, not just the three RecordTypes. The four membership
+  // indexes were never scoped out of this step — `probeSchemaWritable` read
+  // `RECORDS[type]` and so could not be CALLED for them. init adopted whatever
+  // hash Mini handed back for `board_cards` / `milestone_cards` /
+  // `board_milestones` / `card_list_index` with no proof the node would take a
+  // write there, and the first evidence was a runtime failure on a board whose
+  // init printed clean.
   print(`[3/${STEPS}] write-probing declared schema hashes`);
   const notWritable: string[] = [];
-  for (const entry of UNIQUE_SCHEMAS) {
+  for (const entry of allPinnedSchemas()) {
     const hash = schemaHashes[entry.key];
     if (!hash) continue;
-    const probe = await probeSchemaWritable(node, hash, entry.key);
+    const probe = await probeSchemaWritable(node, hash, entry);
     if (probe.writable) {
-      print(`        ${entry.key.padEnd(6)} writable ✓`);
+      print(
+        `        ${entry.key.padEnd(16)} writable ✓` +
+          (probe.leaked ? ` (probe row NOT cleaned up: ${probe.leaked})` : ""),
+      );
     } else {
       notWritable.push(`${entry.key} (${hash}): ${probe.reason}`);
     }

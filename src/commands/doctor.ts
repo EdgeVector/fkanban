@@ -8,7 +8,7 @@ import pkg from "../../package.json" with { type: "json" };
 import { FkanbanError, isLoopbackNodeUrl, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
-import { listBoards, listCards, findCard, probeSchemaWritable, type Board, type Card } from "../record.ts";
+import { listBoards, listCards, findCard, probeSchemaWritable, WRITE_PROBE_SLUG, type Board, type Card } from "../record.ts";
 import {
   MEMBERSHIP_KEY_EXPECTATIONS,
   checkMembershipKeyLayout,
@@ -251,6 +251,43 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         // already written into the resolution check below).
         info(`${entry.key} not pinned`, "index unused — reads fall back to the unindexed path");
       }
+
+      // WRITE-PROBE the four index pins. Deliberately OUTSIDE the if/else chain
+      // above: the first cut of this sat inside one of its arms, which put it on
+      // the `not_loaded` branch — a branch that by definition never runs for a
+      // pin that IS loaded — so doctor printed three write-probes and no index
+      // ones, exactly the shape of coverage-that-never-fires this seat keeps
+      // finding. `doctor-index-write-probe-wiring.test.ts` is the guard.
+      //
+      // `!reportedBelow` is COMPUTED from `UNIQUE_SCHEMAS` (not hard-coded), so
+      // each key is probed exactly once and moving a key between the two lists
+      // can neither drop nor double its coverage.
+      //
+      // Only when identity is `ok`: probing a pin that addresses a DIFFERENT
+      // record type answers a question nobody asked. A membership index is a
+      // field superset of the entity it indexes by construction, so a crossed
+      // pin accepts the write happily and would print a green write-probe
+      // directly under the red that matters.
+      if (identity.kind === "ok" && !reportedBelow) {
+        const probe = await probeSchemaWritable(node, configHash!, entry);
+        check(
+          probe.writable,
+          `${entry.key} write-probe`,
+          probe.writable
+            ? "create+delete of an all-fields record round-tripped" +
+                (probe.leaked ? ` — but the probe row LEAKED: ${probe.leaked}` : "")
+            : `node rejected a write of all fields — ${probe.reason}`,
+        );
+        if (probe.writable && probe.leaked) {
+          // Not a failure of the thing being checked, and not silent either: the
+          // probe writes its own partition, which every read of these four
+          // indexes is scoped away from, so nothing will ever reap it.
+          info(
+            `${entry.key} probe row left behind`,
+            `key ${WRITE_PROBE_SLUG} in schema ${configHash} — inert (no read addresses that partition) but not self-healing`,
+          );
+        }
+      }
     }
 
     for (const entry of UNIQUE_SCHEMAS) {
@@ -312,12 +349,13 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       // FALSE resolution failure silently disabled the real #94 detector for
       // that schema. The configured hash is what every write actually targets,
       // so probing it is most valuable precisely when resolution is in doubt.
-      const probe = await probeSchemaWritable(node, configHash!, entry.key);
+      const probe = await probeSchemaWritable(node, configHash!, entry);
       check(
         probe.writable,
         `${OWNER_APP_ID}/${descriptive} write-probe`,
         probe.writable
-          ? "create+delete of an all-fields record round-tripped"
+          ? "create+delete of an all-fields record round-tripped" +
+              (probe.leaked ? ` — but the probe row LEAKED: ${probe.leaked}` : "")
           : `node rejected a write of all fields — ${probe.reason}`,
       );
     }

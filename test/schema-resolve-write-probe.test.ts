@@ -18,7 +18,11 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { FkanbanError, newNodeClient, type LoadedSchema } from "../src/client.ts";
 import { listCards, probeSchemaWritable, WRITE_PROBE_SLUG } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
-import { CARD_OPTIONAL_SCHEMA_FIELDS, fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
+import { CARD_OPTIONAL_SCHEMA_FIELDS, UNIQUE_SCHEMAS, fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
+
+// The catalog entry the probe now takes (it reads the DECLARED definition, so it
+// is callable for the four index schemas too — see `probeSchemaWritable`).
+const CARD_ENTRY = UNIQUE_SCHEMAS.find((e) => e.key === "card")!;
 
 // The current full Card hash (writable) and a stale 10-field duplicate.
 const FULL_CARD_HASH = "fullcardhash";
@@ -315,7 +319,7 @@ const baseUrl = `http://127.0.0.1:${server.port}`;
 describe("probeSchemaWritable", () => {
   test("returns writable + cleans up when the node accepts all fields", async () => {
     const node = newNodeClient({ baseUrl, userHash: "u" });
-    const r = await probeSchemaWritable(node, FULL_CARD_HASH, "card");
+    const r = await probeSchemaWritable(node, FULL_CARD_HASH, CARD_ENTRY);
     expect(r.writable).toBe(true);
     // The throwaway probe record was deleted (store has no FULL_CARD_HASH key).
     expect([...store.keys()].some((key) => key.startsWith(`${FULL_CARD_HASH}::`))).toBe(false);
@@ -323,7 +327,7 @@ describe("probeSchemaWritable", () => {
 
   test("returns not-writable carrying the node's reason on a #94-style 400", async () => {
     const node = newNodeClient({ baseUrl, userHash: "u" });
-    const r = await probeSchemaWritable(node, STALE_CARD_HASH, "card");
+    const r = await probeSchemaWritable(node, STALE_CARD_HASH, CARD_ENTRY);
     expect(r.writable).toBe(false);
     if (!r.writable) {
       expect(r.reason).toContain("not writable on schema");
@@ -349,7 +353,7 @@ describe("probeSchemaWritable", () => {
       schemaHashes: { card: schemaHash, board: "unusedboardhash" },
     };
 
-    const r = await probeSchemaWritable(leakyNode, schemaHash, "card");
+    const r = await probeSchemaWritable(leakyNode, schemaHash, CARD_ENTRY);
     expect(r.writable).toBe(true);
     expect([...store.keys()].some((key) => key === `${schemaHash}::${WRITE_PROBE_SLUG}`)).toBe(true);
 
