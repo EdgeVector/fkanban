@@ -273,8 +273,34 @@ export function blockedByMessage(slug: string, blockedBy: string[]): string {
   return `Card "${slug}" is blocked by ${blockedBy.map((d) => `"${d}"`).join(", ")} (not yet done).`;
 }
 
+/**
+ * The closing sentence on every hint that offers `--force`.
+ *
+ * The trap it closes is a global flag recommended per-gate: `move` and `add`
+ * run six guards `--force` clears in one keystroke, and each of their hints
+ * ends by offering it. An operator following THIS sentence past THIS rule
+ * clears the other five too, and until now nothing said so.
+ *
+ * The promise it makes — that every waiver announces itself — is held by
+ * `test/forced-guard-waivers-are-all-voiced.test.ts`, not by convention. A new
+ * `--force`-waived guard that returns silently fails that test, because a hint
+ * promising warnings nobody prints is worse than making no promise.
+ *
+ * It deliberately does NOT enumerate the guards. `assertNoExplicitTodoLaneMetadata`
+ * and the Situations preflight are write guards `--force` does NOT clear, so a
+ * list here would have to stay right about a distinction the flag itself does
+ * not draw. The warnings name themselves as they print; a list would only rot.
+ */
+export const FORCE_IS_UNSCOPED =
+  " Note that --force is not scoped to this gate — it waives several independent " +
+  "guards at once, and each one it waives prints its own `warning: --force …` line.";
+
 export function blockedByHint(): string {
-  return "Finish its dependencies first (move them to their board's final column), keep the dependent in default/backlog until then, or pass --force to override.";
+  return (
+    "Finish its dependencies first (move them to their board's final column), " +
+    "keep the dependent in default/backlog until then, or pass --force to override." +
+    FORCE_IS_UNSCOPED
+  );
 }
 
 // The columns at which dependencies actually gate work. A dependency is
@@ -1368,7 +1394,9 @@ function captureFkanbanError(fn: () => void): FkanbanError | null {
  *   mid-flight metadata updates keep working.
  * - backlog: write allowed; groom flags hollow PR briefs.
  *
- * Non-pr kinds and --force are exempt.
+ * Non-pr kinds are exempt, and --force waives — out loud (see
+ * {@link forcedGuardWaiverWarning}). Free to voice: every input is already in
+ * hand, there is no read and nothing to mutate.
  */
 export function assertPrWorkBrief(
   slug: string,
@@ -1377,7 +1405,23 @@ export function assertPrWorkBrief(
   force?: boolean,
   opts?: { board?: string; column?: string },
 ): void {
-  if (force) return;
+  if (!force) {
+    prWorkBriefGate(slug, kind, body, opts);
+    return;
+  }
+  const waived = captureFkanbanError(() => prWorkBriefGate(slug, kind, body, opts));
+  if (waived) {
+    console.error(forcedGuardWaiverWarning(slug, "Kind:pr work-brief", waived.message));
+  }
+}
+
+/** The verdict half of {@link assertPrWorkBrief} — see `livePrMilestoneGate`. */
+function prWorkBriefGate(
+  slug: string,
+  kind: string,
+  body: string,
+  opts?: { board?: string; column?: string },
+): void {
   if (normalizeKind(kind) !== "pr") return;
   const board = opts?.board ?? "default";
   const column = opts?.column ?? "";
@@ -1387,7 +1431,8 @@ export function assertPrWorkBrief(
     throw new FkanbanError({
       code: "pr_body_missing_work_brief",
       message: `Card "${slug}" cannot enter default/${column} with an empty or annotation-only Kind: pr body.`,
-      hint: "Pipe a real work brief with `## GOAL` and `## END STATE`. Do not bulk-scaffold empty PR shells into the pickup lane — use north-star-driver + milestone-driver. Pass --force only for an intentional exception.",
+      hint: "Pipe a real work brief with `## GOAL` and `## END STATE`. Do not bulk-scaffold empty PR shells into the pickup lane — use north-star-driver + milestone-driver. Pass --force only for an intentional exception." +
+        FORCE_IS_UNSCOPED,
     });
   }
 }
@@ -1458,7 +1503,9 @@ function livePrMilestoneGate(
     throw new FkanbanError({
       code: "live_pr_milestone_required",
       message: `Kind:pr card "${card.slug}" cannot enter ${card.column} without a milestone.`,
-      hint: "Pass --milestone <slug> to attach a real outcome, or --force for an intentional Unassigned/Operational exception.",
+      hint:
+        "Pass --milestone <slug> to attach a real outcome, or --force for an intentional Unassigned/Operational exception." +
+        FORCE_IS_UNSCOPED,
     });
   }
   const state = (opts?.milestoneState ?? "").trim();
@@ -1466,7 +1513,9 @@ function livePrMilestoneGate(
     throw new FkanbanError({
       code: "live_pr_milestone_abandoned",
       message: `Kind:pr card "${card.slug}" cannot use abandoned milestone "${milestone}".`,
-      hint: "Pick an active/planned milestone, reopen the outcome, or pass --force for an intentional exception.",
+      hint:
+        "Pick an active/planned milestone, reopen the outcome, or pass --force for an intentional exception." +
+        FORCE_IS_UNSCOPED,
     });
   }
 }
@@ -1504,7 +1553,8 @@ export function resolveMilestoneDriver(
 /**
  * Refuse full-body replaces that would destroy a real brief with only a
  * HANDOFF/reap/provenance stub. Recovery of an empty body is allowed; intentional
- * shrinks require `--force`.
+ * shrinks require `--force` — which now names the brief it just let go, because
+ * "audited shrink" and "clobber I did not notice" reach this line identically.
  */
 export function assertBodyReplaceSafe(
   slug: string,
@@ -1512,7 +1562,18 @@ export function assertBodyReplaceSafe(
   nextBody: string,
   force?: boolean,
 ): void {
-  if (force) return;
+  if (!force) {
+    bodyReplaceSafeGate(slug, existingBody, nextBody);
+    return;
+  }
+  const waived = captureFkanbanError(() => bodyReplaceSafeGate(slug, existingBody, nextBody));
+  if (waived) {
+    console.error(forcedGuardWaiverWarning(slug, "destructive body-replace", waived.message));
+  }
+}
+
+/** The verdict half of {@link assertBodyReplaceSafe} — see `livePrMilestoneGate`. */
+function bodyReplaceSafeGate(slug: string, existingBody: string, nextBody: string): void {
   if (existingBody === nextBody) return;
   if (!isSubstantiveCardBody(existingBody)) return;
   if (nextBody.includes(existingBody.trim())) return;
@@ -1622,22 +1683,74 @@ const TRUNCATED_ECHO_MIN_OVERLAP = 0.8;
  */
 const BODY_REPLACE_HINT = (append: string, forced: string): string =>
   `Use \`fkanban mark <slug> "…"\` (MCP: \`fkanban_mark\`) to ${append}, ` +
-  `pipe the full recovered body via stdin, or pass --force for ${forced}.`;
+  `pipe the full recovered body via stdin, or pass --force for ${forced}.` + FORCE_IS_UNSCOPED;
 
+/**
+ * Refuse a card that is not pickup-ready into default/todo — and under
+ * `--force`, SAY which verdict was waived instead of waiving in silence.
+ *
+ * This was the last silent gate of the four `--force` clears in `move`, and it
+ * was silent on purpose: the two reasons are recorded on {@link assertDepUnblocked}
+ * and both are structural, so voicing it needed the split below rather than a
+ * copy of the milestone gate's shape.
+ *
+ *   - **The mutation stays unforced.** `sanitizeDefaultTodoLaneMetadata` clears
+ *     `branch`/`pr_url`, so running it to DESCRIBE a waiver would change what
+ *     the forced write persists. It is defense-in-depth for a caller that
+ *     forgot it (all three production call sites already sanitize first), so it
+ *     belongs on the enforcing path only — a reporting path that alters the
+ *     record is not reporting.
+ *   - **A missing body is an instrument failure, not a verdict.** Unforced, a
+ *     body-free projection gets `assertBodyLoaded`'s loud "hydrate first".
+ *     Forced, there is nothing to hydrate for and nothing to refuse, so the
+ *     warning says the check DID NOT RUN. Reporting "empty body" about a body
+ *     nobody fetched would be the lying-instrument failure this project keeps
+ *     getting bitten by.
+ */
 export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBody?: string): void {
-  if (force) return;
   if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "todo") return;
 
-  // The brief checks below read the body. A caller that passes a body-free
-  // projection gets a loud "hydrate first" instead of a confident "this card
-  // is empty" about a body nobody fetched. `rawBody` only overrides when it
-  // is a real body — the pre-derive text of a card being written — not the
-  // same "" the projection already handed us.
-  if (rawBody === undefined || rawBody === "") assertBodyLoaded(card, "pickup-readiness check");
+  if (!force) {
+    // The brief checks below read the body. A caller that passes a body-free
+    // projection gets a loud "hydrate first" instead of a confident "this card
+    // is empty" about a body nobody fetched. `rawBody` only overrides when it
+    // is a real body — the pre-derive text of a card being written — not the
+    // same "" the projection already handed us.
+    if (rawBody === undefined || rawBody === "") assertBodyLoaded(card, "pickup-readiness check");
+    // Defense in depth if a caller forgot sanitizeDefaultTodoLaneMetadata.
+    sanitizeDefaultTodoLaneMetadata(card);
+    defaultTodoPickupGate(card, rawBody);
+    return;
+  }
 
-  // Defense in depth if a caller forgot sanitizeDefaultTodoLaneMetadata.
-  sanitizeDefaultTodoLaneMetadata(card);
+  // Forced: the gate is being ASKED, not obeyed. Without a body there is no
+  // verdict to report — say the check did not run, the same way the dep waiver
+  // reports a board it could not read.
+  if ((rawBody === undefined || rawBody === "") && isBodyOmitted(card)) {
+    console.error(
+      `warning: --force placed "${card.slug}" in default/todo without checking pickup ` +
+        "readiness — the card was read through a body-free projection.",
+    );
+    return;
+  }
+  const waived = captureFkanbanError(() => defaultTodoPickupGate(card, rawBody));
+  if (waived) {
+    console.error(
+      forcedGuardWaiverWarning(card.slug, "default/todo pickup-readiness", waived.message),
+    );
+  }
+}
 
+/**
+ * The verdict half of {@link assertDefaultTodoPickupReady}: pure, and it throws
+ * rather than returning a verdict object so the forced and unforced readings
+ * cannot drift into disagreeing about what the gate decided.
+ *
+ * Purity is the load-bearing property here, not a style preference — it is what
+ * makes the forced path safe to run. Keep it free of mutation and of
+ * precondition throws; both belong to the caller above.
+ */
+function defaultTodoPickupGate(card: Card, rawBody?: string): void {
   const blockStatus = normalizeBlockStatus(card.block_status);
   const generatedPickupAreaHold =
     blockStatus === "needs_human" && card.block_reason.startsWith(PICKUP_AREA_BLOCK_PREFIX);
@@ -1645,7 +1758,8 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
     throw new FkanbanError({
       code: "default_todo_not_pickup_ready",
       message: `Card "${card.slug}" cannot be placed in default/todo with block_status=${blockStatus}.`,
-      hint: "Default todo is the pickup lane. Move human-gated or deferred work to another board/column, clear the hold once runnable, or pass --force for an explicit operator override.",
+      hint: "Default todo is the pickup lane. Move human-gated or deferred work to another board/column, clear the hold once runnable, or pass --force for an explicit operator override." +
+        FORCE_IS_UNSCOPED,
     });
   }
 
@@ -1654,7 +1768,8 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
     throw new FkanbanError({
       code: "default_todo_not_pickup_ready",
       message: `Card "${card.slug}" cannot be placed in default/todo with non-pickup kind=${kind}.`,
-      hint: "Use default/backlog or a parking board for tracker/program/capstone/validation work; split a concrete --kind pr card when code is ready, or pass --force.",
+      hint: "Use default/backlog or a parking board for tracker/program/capstone/validation work; split a concrete --kind pr card when code is ready, or pass --force." +
+        FORCE_IS_UNSCOPED,
     });
   }
   // The registry/recipe classifier is a belt-and-suspenders FALLBACK for cards
@@ -1671,7 +1786,8 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
     throw new FkanbanError({
       code: "default_todo_not_pickup_ready",
       message: `Card "${card.slug}" cannot be placed in default/todo: it is classified as a registry/recipe card (targets an fbrain record, not a repo PR).`,
-      hint: "Registry/recipe cards never enter the pickup flow. Use default/backlog or a parking board; if this really is a concrete code PR, file it with an explicit --kind pr, or pass --force.",
+      hint: "Registry/recipe cards never enter the pickup flow. Use default/backlog or a parking board; if this really is a concrete code PR, file it with an explicit --kind pr, or pass --force." +
+        FORCE_IS_UNSCOPED,
     });
   }
 
@@ -1680,7 +1796,9 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
     throw new FkanbanError({
       code: "default_todo_not_pickup_ready",
       message: `Card "${card.slug}" cannot be placed in default/todo with an empty or annotation-only body.`,
-      hint: "Pipe a real work brief (GOAL/CONTEXT/STEPS/VERIFY/DONE WHEN, or ≥12 chars of prose beyond Repo/Base headers). Use `fkanban mark` for HANDOFF lines; pass --force only for an intentional exception.",
+      hint:
+        "Pipe a real work brief (GOAL/CONTEXT/STEPS/VERIFY/DONE WHEN, or ≥12 chars of prose beyond Repo/Base headers). Use `fkanban mark` for HANDOFF lines; pass --force only for an intentional exception." +
+        FORCE_IS_UNSCOPED,
     });
   }
 
@@ -1689,7 +1807,8 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
     throw new FkanbanError({
       code: "default_todo_not_pickup_ready",
       message: `Card "${card.slug}" is not pickup-ready: ${repoProblem}`,
-      hint: "Set a clean standalone `Repo: owner/name` line or pass `--repo owner/name`; use another board/column for non-pickup work, or pass --force.",
+      hint: "Set a clean standalone `Repo: owner/name` line or pass `--repo owner/name`; use another board/column for non-pickup work, or pass --force." +
+        FORCE_IS_UNSCOPED,
     });
   }
 
@@ -1698,7 +1817,8 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
     throw new FkanbanError({
       code: "default_todo_not_pickup_ready",
       message: `Card "${card.slug}" is not pickup-ready: ${baseProblem}`,
-      hint: "Set a clean standalone `Base: branch` line or pass `--base branch`; use another board/column for non-pickup work, or pass --force.",
+      hint: "Set a clean standalone `Base: branch` line or pass `--base branch`; use another board/column for non-pickup work, or pass --force." +
+        FORCE_IS_UNSCOPED,
     });
   }
 }

@@ -18,17 +18,24 @@
 // What is deliberately NOT asserted anywhere below: that `--force` stops
 // working. It still overrides — it just says so.
 //
-// `assertDefaultTodoPickupReady` is deliberately absent. It mutates the card
-// (`sanitizeDefaultTodoLaneMetadata` clears branch/pr_url) and throws
-// `card_body_not_loaded` on a body-free projection, so running it to DESCRIBE a
-// waiver would change the write and invent verdicts. See the note on
-// `assertDepUnblocked` in src/record.ts.
+// `assertDefaultTodoPickupReady`, `assertPrWorkBrief` and `assertBodyReplaceSafe`
+// joined them on 2026-08-04, which is what lets the CLI hints promise that every
+// waiver announces itself (`FORCE_IS_UNSCOPED`). The pickup gate needed a split
+// first — its mutation and its hydration precondition had to come off the
+// verdict — and the last section here is what holds that promise for guards
+// nobody has written yet.
+
+import { readFileSync } from "node:fs";
 
 import { describe, expect, test } from "bun:test";
 
 import { FkanbanError, type NodeClient } from "../src/client.ts";
 import {
+  BODY_OMITTED,
+  assertBodyReplaceSafe,
+  assertDefaultTodoPickupReady,
   assertLivePrMilestone,
+  assertPrWorkBrief,
   forcedGuardWaiverWarning,
   type Card,
 } from "../src/record.ts";
@@ -300,6 +307,170 @@ describe("--force waives the lifecycle pipeline-status gate out loud", () => {
     );
     expect(reads).toBe(0);
     expect(warnings).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+const READY_BODY =
+  "## GOAL\nship the thing\n\n## END STATE\nit ships\n\nRepo: EdgeVector/fkanban\nBase: main\n";
+
+const todoCard = (over: Partial<Card> = {}): Card =>
+  lifecycleCard({ column: "todo", body: READY_BODY, branch: "", ...over });
+
+describe("--force waives the default/todo pickup-readiness gate out loud", () => {
+  test("each of the gate's verdicts is named, not just the first", async () => {
+    // Six independent rules share one gate and one code. Voicing only the arm
+    // that happens to run first would leave the others exactly as silent as
+    // they were, which is the shape of the bug this closes rather than a fix.
+    const cases: Array<[string, Card, string]> = [
+      ["block_status", todoCard({ block_status: "needs_human", block_reason: "waiting" }), "needs_human"],
+      ["kind", todoCard({ kind: "tracker" }), "kind=tracker"],
+      ["empty body", todoCard({ body: "" }), "empty or annotation-only body"],
+      ["repo", todoCard({ repo: "", body: READY_BODY.replace("Repo: EdgeVector/fkanban\n", "") }), "Repo"],
+      ["base", todoCard({ base: "", body: READY_BODY.replace("Base: main\n", "") }), "Base"],
+    ];
+
+    for (const [why, card, expected] of cases) {
+      // Prove the fixture is a REAL violation before believing the warning
+      // means anything. Without this half a gate that never fired would pass
+      // silently — the "check that can never read failure" this codebase keeps
+      // finding in its own guards.
+      expect(() => assertDefaultTodoPickupReady({ ...card }, false), why).toThrow();
+
+      const { warnings } = await captureWarnings(() =>
+        assertDefaultTodoPickupReady({ ...card }, true),
+      );
+      const waiver = warnings.find((w) => w.includes("--force"));
+      expect(waiver, why).toBeDefined();
+      expect(waiver, why).toContain(expected);
+      expect(waiver, why).toContain("overridden, not satisfied");
+    }
+  });
+
+  test("the forced path does not touch branch/pr_url", async () => {
+    // The reason this gate stayed silent for two runs. `sanitizeDefaultTodoLaneMetadata`
+    // CLEARS these fields, so running it to describe a waiver would change what
+    // the forced write persists — and the forced write is the one nobody is
+    // checking. Reporting that edits the record is not reporting.
+    const card = todoCard({ kind: "tracker", branch: "feat/keep-me", pr_url: "https://x/1" });
+    await captureWarnings(() => assertDefaultTodoPickupReady(card, true));
+    expect(card.branch).toBe("feat/keep-me");
+    expect(card.pr_url).toBe("https://x/1");
+  });
+
+  test("a body-free projection says the check did not run, not that the card is empty", async () => {
+    // The other reason. `assertBodyLoaded` throwing is an INSTRUMENT failure,
+    // and "empty or annotation-only body" about a body nobody fetched is the
+    // lying-instrument mode this project keeps getting bitten by.
+    const card = todoCard({ body: "" });
+    card[BODY_OMITTED] = true;
+
+    const { warnings } = await captureWarnings(() => assertDefaultTodoPickupReady(card, true));
+    const waiver = warnings.find((w) => w.includes("--force"));
+    expect(waiver).toBeDefined();
+    expect(waiver).toContain("body-free projection");
+    expect(waiver).not.toContain("annotation-only");
+
+    // Unforced, the same card still gets the loud hydrate-first refusal — the
+    // waiver work must not have downgraded a precondition into a shrug.
+    expect(() => assertDefaultTodoPickupReady(card, false)).toThrow();
+  });
+
+  test("nothing is said when --force did not actually waive this gate", async () => {
+    const cases: Array<[string, Card]> = [
+      ["card is pickup-ready", todoCard()],
+      ["card is not on the default board", todoCard({ board: "other", kind: "tracker" })],
+      ["card is not in todo", todoCard({ column: "backlog", kind: "tracker" })],
+    ];
+    for (const [why, card] of cases) {
+      const { warnings } = await captureWarnings(() => assertDefaultTodoPickupReady(card, true));
+      expect(warnings.filter((w) => w.includes("--force")), why).toEqual([]);
+    }
+  });
+
+  test("the unforced gate still sanitizes, and still refuses", async () => {
+    // Defense-in-depth for a caller that forgot to sanitize lives on the
+    // ENFORCING path now. Pinned so the split above cannot quietly drop it.
+    const card = todoCard({ branch: "feat/x", pr_url: "https://x/1" });
+    assertDefaultTodoPickupReady(card, false);
+    expect(card.branch).toBe("");
+    expect(card.pr_url).toBe("");
+    expect(() => assertDefaultTodoPickupReady(todoCard({ kind: "tracker" }), false)).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("--force waives the work-brief and body-replace guards out loud", () => {
+  test("an empty Kind:pr shell forced into the pickup lane says so", async () => {
+    expect(() =>
+      assertPrWorkBrief("shell", "pr", "", false, { board: "default", column: "todo" }),
+    ).toThrow();
+
+    const { warnings } = await captureWarnings(() =>
+      assertPrWorkBrief("shell", "pr", "", true, { board: "default", column: "todo" }),
+    );
+    const waiver = warnings.find((w) => w.includes("--force"));
+    expect(waiver).toBeDefined();
+    expect(waiver).toContain("shell");
+    expect(waiver).toContain("work-brief");
+    expect(waiver).toContain("overridden, not satisfied");
+  });
+
+  test("a forced brief-destroying body replace names the brief it let go", async () => {
+    // "Intentional audited shrink" and "clobber I did not notice" reach this
+    // line as the same keystroke. The warning is the only thing that tells
+    // them apart afterwards.
+    const full = READY_BODY + "\n".repeat(3) + "lots of real brief text here to exceed the floor.";
+    expect(() => assertBodyReplaceSafe("wipe-me", full, "HANDOFF: reaped", false)).toThrow();
+
+    const { warnings } = await captureWarnings(() =>
+      assertBodyReplaceSafe("wipe-me", full, "HANDOFF: reaped", true),
+    );
+    const waiver = warnings.find((w) => w.includes("--force"));
+    expect(waiver).toBeDefined();
+    expect(waiver).toContain("wipe-me");
+    expect(waiver).toContain("body-replace");
+  });
+
+  test("an ordinary append under --force is silent", async () => {
+    const full = READY_BODY + "lots of real brief text here to exceed the floor.";
+    const { warnings } = await captureWarnings(() =>
+      assertBodyReplaceSafe("keep-me", full, full + "\nHANDOFF: ok", true),
+    );
+    expect(warnings.filter((w) => w.includes("--force"))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("every --force-waived guard announces itself", () => {
+  // This is what makes `FORCE_IS_UNSCOPED` a promise rather than a hope. The
+  // hint now tells operators that each guard the flag clears prints its own
+  // warning; a guard added later that returns silently would make that sentence
+  // a lie in exactly the direction the sentence exists to prevent.
+  //
+  // A behavioural sweep cannot see a guard that does not exist yet, so this
+  // reads the source for the SHAPE: an unconditional bail on the flag, with no
+  // console.error between the test and the return. A voiced waiver runs its
+  // verdict through `captureFkanbanError` and prints instead.
+  const SILENT_BAIL = /if\s*\(\s*(?:opts\.)?force\s*\)\s*return\s*;/g;
+  const GATE_FILES = ["src/record.ts", "src/pipeline_status.ts"];
+
+  test("the pattern this test hunts for can actually match", () => {
+    // Guard against the guard: a regex that matches nothing would let this
+    // whole file pass while the invariant rotted. Four of the six gates below
+    // shipped in exactly this shape before 2026-08-04.
+    expect("  if (force) return;\n".match(SILENT_BAIL)).toHaveLength(1);
+    expect("  if (opts.force) return;\n".match(SILENT_BAIL)).toHaveLength(1);
+  });
+
+  test("no gate bails on --force in silence", () => {
+    for (const file of GATE_FILES) {
+      const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+      expect(src.match(SILENT_BAIL) ?? [], file).toEqual([]);
+    }
   });
 });
 

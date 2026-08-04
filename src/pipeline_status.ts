@@ -29,6 +29,7 @@ import { join } from "node:path";
 
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import {
+  FORCE_IS_UNSCOPED,
   forcedGuardWaiverWarning,
   parseBodyHeader,
   parseBodyListHeader,
@@ -833,7 +834,8 @@ export async function assertLifecycleMoveAllowed(opts: {
     message,
     hint:
       "Wait for LastgitCiStatus success, fix the failing context, set Head-Oid/branch " +
-      "so kanban can resolve the commit, or pass --force to bypass the opt-in gate.",
+      "so kanban can resolve the commit, or pass --force to bypass the opt-in gate." +
+      FORCE_IS_UNSCOPED,
   });
 }
 
