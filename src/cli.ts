@@ -30,6 +30,7 @@ import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import { groomBodyClobberScanCmd, groomStaleBlockersCmd, groomStructuredRoutingCmd } from "./commands/groom.ts";
+import { parityCheckCmd } from "./commands/parity_check.ts";
 import {
   archiveDoneResult,
   DEFAULT_ARCHIVE_CUTOFF_HOURS,
@@ -102,6 +103,7 @@ Commands:
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
   groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
+  groom parity-check   READ-ONLY: is any row invisible to the reads the board serves? (--json)
   groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
                        and missing boards (live board whose cards list can't see)
   groom card-list-index-retire dry-run/apply clear the superseded all_cards rollup
@@ -618,6 +620,7 @@ Usage:
   fkanban groom stale-blockers [--apply] [--json]
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]... [--max-removals N|unlimited]
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
+  fkanban groom parity-check [--json] [--board SLUG]
   fkanban groom board-list-heal [--apply] [--json]
   fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--max-removals N|unlimited] [--force-milestone-card-payload-upsert]
   fkanban groom card-list-index-retire [--apply] [--json]
@@ -2025,10 +2028,11 @@ async function dispatch(
         sub !== "board-list-heal" &&
         sub !== "milestone-indexes-heal" &&
         sub !== "archive-done" &&
-        sub !== "card-list-index-retire"
+        sub !== "card-list-index-retire" &&
+        sub !== "parity-check"
       ) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom body-clobber-scan | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom archive-done | groom card-list-index-retire`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom body-clobber-scan | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom archive-done | groom card-list-index-retire | groom parity-check`,
         );
         return 2;
       }
@@ -2056,6 +2060,23 @@ async function dispatch(
         // launchd logged 8 days of green while the archive grew unbounded.
         return report.report.failed > 0 ? 1 : 0;
       }
+      if (sub === "parity-check") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom parity-check");
+        if (extra !== undefined) return extra;
+        const res = await parityCheckCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          json: values.json as boolean | undefined,
+          board: values.board as string | undefined,
+        });
+        console.log(res.text);
+        // Nonzero ONLY on confirmed drift, an incomplete enumeration, or a
+        // flagged partition that could not be re-checked. Ordinary board churn
+        // exits 0: a gate that pages on normal traffic gets muted, and then the
+        // one detector for silent row loss is unstaffed again.
+        return res.ok ? 0 : 1;
+      }
+
       if (sub === "board-list-heal") {
         const extra = rejectExtraPositionals(positionals, 2, "groom board-list-heal");
         if (extra !== undefined) return extra;
