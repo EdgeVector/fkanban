@@ -407,7 +407,9 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
  * the derivation against — dropping the field IS giving up the only witness. So
  * the field stays projected and the key-derived value stays a cross-check, not
  * a source. `board` is excluded too, but for a different reason: it leads the
- * projection, and the leading field gates the row set.
+ * projection, and the leading field gates the row set when the hash field is
+ * absent — which on this index means when `milestone` is absent, NOT `board`.
+ * See {@link boardCardsWireProjection}.
  */
 const BOARD_CARDS_KEY_DERIVED_FIELDS = ["sk", "slug", "column"] as const;
 
@@ -426,27 +428,57 @@ const BOARD_CARDS_KEY_DERIVED_FIELDS = ["sk", "slug", "column"] as const;
  * candidate falsified), the node applies **HASH-ELSE-LEAD**: the gate is the
  * HASH field when the projection contains it, and the LEADING field otherwise.
  *
+ * **The hash field of this schema is `milestone`, not `board`.** That is not a
+ * typo and not a bug to fix: the 2026-07-23 multi-key expand bound BoardCards
+ * and MilestoneCards to one schema, and the node's catalog reports
+ * `key: {hash_field: "milestone", range_field: "sk"}` for the hash this config
+ * pins as `board_cards` (`GET /api/schema/{hash}`, primary, 2026-08-04). Rows
+ * are still KEYED by board slug and `HashKey=<board>` still answers — the
+ * declared partition works. It is the projection GATE that follows the catalog.
+ *
+ * Measured here rather than inferred from the sibling index
+ * (`scripts/probe-boardcards-hash-gate-constructed.ts`, four constructed rows
+ * with known atom sets):
+ *
+ * | projection | rows returned |
+ * |---|---|
+ * | `[board,title]` | only rows WITH a `board` atom |
+ * | `[title,board]` | **all four** — `board` does not gate off-lead |
+ * | `[milestone,title]` | only rows with a `milestone` atom |
+ * | `[title,milestone]` | **same** — `milestone` gates from any position |
+ * | `[board,milestone]` | the `milestone` set, not the `board` set |
+ *
+ * So `board` is an ordinary field that gates only when it LEADS, and
+ * `milestone` gates from anywhere. That is HASH-ELSE-LEAD
+ * ([[lastdb-projection-rule-is-hash-else-lead-not-lead]]) with `milestone` as
+ * the hash — the rule generalises; only which field it names had to be looked up.
+ *
  * So preserving `fields[0]` verbatim, which this does, is necessary but is not
  * by itself what keeps the row set identical. Two things do:
  *
  *  - `fields[0]` is preserved, which holds the gate steady in the no-hash case;
- *  - `board` — this index's HASH field — is NOT in
+ *  - `milestone` — this schema's catalog HASH field — is NOT in
  *    {@link BOARD_CARDS_KEY_DERIVED_FIELDS}, so a projection that contained it
  *    still contains it afterwards and one that did not still does not. The
  *    narrowing therefore never moves a read across the hash/no-hash boundary,
  *    which is the only way the gate could change identity.
  *
- * Both conditions are load-bearing; adding `board` to the key-derived list
- * would satisfy the first and break the second. The row set is identical to the
- * un-narrowed read by construction — but by that construction, not by the
- * lead-only argument this comment carried until the rule was measured.
+ * Both conditions are load-bearing; adding `milestone` to the key-derived list
+ * would satisfy the first and break the second. (Adding `board` would be safe
+ * on the second count and is still wrong on the first, since it leads.) The row
+ * set is identical to the un-narrowed read by construction — but by that
+ * construction, not by the lead-only argument this comment carried until the
+ * rule was measured.
  *
- * Separately, and not a problem here: because `board` IS projected by these
- * reads, they are gated on a payload COPY of the partition key. That is the
- * shape that cost `listMilestoneCardsPartition` a live row
- * (see `MILESTONE_CARDS_PAYLOAD_FIELDS`). On this index it is latent rather
- * than live — all 124 rows in `HashKey=default` carry a `board` atom, so the
- * gate cannot currently bite (`scripts/probe-boardcards-hash-gate.ts`).
+ * The consequence for these reads: {@link BOARD_CARDS_LIST_FIELDS} and
+ * {@link BOARD_CARDS_DISPLAY_FIELDS} both project `milestone`, so both are
+ * gated on it and a row carrying no `milestone` atom is silently absent from
+ * the product board. Not live today — all 127 rows in `HashKey=default` carry
+ * one, and `doctor`'s projection-parity check compares against an all-leads
+ * sweep and is green (`scripts/probe-boardcards-hash-gate.ts`). It was live on
+ * 2026-08-01, when the expand had added the field and nothing had backfilled
+ * it. `board` was never the exposure: dropping it from these projections
+ * recovers nothing, which the constructed probe shows directly (2/4 either way).
  *
  * ## Why bother — measured, live primary `HashKey=default`, 186 rows, 2026-08-03
  *

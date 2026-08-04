@@ -406,13 +406,25 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
           exp.expected,
           exp.alsoAccepts ?? [],
         );
-        check(
-          result.ok,
-          `${exp.label} key layout (hash_field=${exp.expected.hash_field})`,
-          result.ok
-            ? `${detail.schema_type} key=${detail.key.hash_field}/${detail.key.range_field ?? "—"}`
-            : result.reason,
-        );
+        const live = `${detail.schema_type} key=${detail.key.hash_field}/${
+          detail.key.range_field ?? "—"
+        }`;
+        if (result.ok && result.note) {
+          // Accepted, but NOT as a plain pass. This used to render
+          //   ✓ BoardCards key layout (hash_field=board) — HashRange key=milestone/sk
+          // a green line naming one hash field in its title and a different one
+          // in its detail, which reads as "layout is board" to anyone skimming.
+          // The disagreement is designed (multi-key expand) and it decides which
+          // rows every read of this index returns, so it gets its own voice
+          // rather than being hidden inside a ✓.
+          info(`${exp.label} key layout — ${live}`, result.note);
+        } else {
+          check(
+            result.ok,
+            `${exp.label} key layout (hash_field=${exp.expected.hash_field})`,
+            result.ok ? live : result.reason,
+          );
+        }
       } catch (err) {
         check(
           false,

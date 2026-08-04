@@ -49,13 +49,18 @@ describe("membership key layout guard", () => {
   test("a sibling hash field from a multi-key expand is accepted, not a poisoning", () => {
     const exp = MEMBERSHIP_KEY_EXPECTATIONS.find((e) => e.configKey === "board_cards")!;
     expect(exp.alsoAccepts).toContain("milestone");
+    // `ok`, not the whole object: the acceptance now also carries a `note`
+    // naming the gate it accepted (see the test below). This assertion is about
+    // the verdict — that the designed multi-key state is not reported as a
+    // poisoning — and pinning the exact shape here would make it fail for the
+    // one reason it does not care about.
     expect(
       checkMembershipKeyLayout(
         { schema_type: "HashRange", hash_field: "milestone", range_field: "sk" },
         exp.expected,
         exp.alsoAccepts,
-      ),
-    ).toEqual({ ok: true });
+      ).ok,
+    ).toBe(true);
   });
 
   test("a hash field belonging to NEITHER lookup still fails", () => {
@@ -67,6 +72,49 @@ describe("membership key layout guard", () => {
     );
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.reason).toContain("hash_field=slug");
+  });
+
+  // The sibling-hash acceptance above is correct and stays. What it must NOT do
+  // is pass SILENTLY, which is what it did until 2026-08-04: doctor rendered
+  //
+  //     ✓ BoardCards key layout (hash_field=board) — HashRange key=milestone/sk
+  //
+  // a green line whose title and detail state different hash fields, on the
+  // strength of a comment claiming "key layout is metadata; whether the
+  // partition actually answers is behaviour".
+  //
+  // That claim is false, and the node settled it: the catalog `hash_field` IS
+  // the projection gate (HASH-ELSE-LEAD). Because BoardCards' catalog
+  // hash_field reads `milestone`, every BoardCards read that PROJECTS
+  // `milestone` is gated on `milestone` — a row with no `milestone` atom is
+  // silently absent from it, wherever in the list the field sits. Measured on
+  // constructed rows with known atom sets:
+  // `scripts/probe-boardcards-hash-gate-constructed.ts`.
+  //
+  // So the accepted state carries a consequence the operator has to be told,
+  // and a pass that cannot say anything is a check that cannot be read.
+  test("the multi-key acceptance reports the gate it just accepted", () => {
+    const exp = MEMBERSHIP_KEY_EXPECTATIONS.find((e) => e.configKey === "board_cards")!;
+    const res = checkMembershipKeyLayout(
+      { schema_type: "HashRange", hash_field: "milestone", range_field: "sk" },
+      exp.expected,
+      exp.alsoAccepts,
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      // Names the field that actually gates, not the one we declared.
+      expect(res.note).toBeDefined();
+      expect(res.note).toContain("milestone");
+      // And names the CONSEQUENCE, so the line is actionable rather than trivia.
+      expect(res.note).toContain("project");
+    }
+  });
+
+  test("an exact layout match carries no note — the caveat is not boilerplate", () => {
+    const exp = MEMBERSHIP_KEY_EXPECTATIONS.find((e) => e.configKey === "board_milestones")!;
+    const res = checkMembershipKeyLayout(exp.expected, exp.expected, exp.alsoAccepts);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.note).toBeUndefined();
   });
 });
 

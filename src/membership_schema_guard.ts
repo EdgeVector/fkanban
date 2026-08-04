@@ -29,10 +29,31 @@ export type MembershipKeyExpectation = {
    * measured 2026-07-30). Per the standing multi-key-expand rule, keeping BOTH
    * indexes is correct and must not be "fixed" by rewriting the key.
    *
-   * Key layout is metadata; whether the partition actually answers is
-   * behaviour. Doctor asserts the second directly — see the partition probe —
-   * so this check exists only to catch a hash field that belongs to NEITHER
-   * lookup.
+   * This acceptance is correct and must not be "fixed" by rewriting the key.
+   * What it is NOT is consequence-free, which this block claimed until
+   * 2026-08-04: *"Key layout is metadata; whether the partition actually
+   * answers is behaviour."*
+   *
+   * The catalog `hash_field` IS behaviour — it is the projection gate. LastDB
+   * returns a row iff it has an atom for the HASH field when the projection
+   * contains it, and for the LEADING field otherwise
+   * ([[lastdb-projection-rule-is-hash-else-lead-not-lead]]). So BoardCards
+   * reading `milestone` in the catalog means every BoardCards read that
+   * PROJECTS `milestone` is gated on `milestone`, from any position in the
+   * list — and a row carrying no `milestone` atom is silently absent from it.
+   *
+   * Measured on this index with constructed rows of known atom sets
+   * (`scripts/probe-boardcards-hash-gate-constructed.ts`): a row written with
+   * `slug`/`title`/`column`/`position` and no `milestone` is returned by
+   * `["slug"]` and dropped by the shipped list projection, while a row missing
+   * `board` is returned by both. `board` gates only when it LEADS; `milestone`
+   * gates from anywhere. The partition still answers on `HashKey=<board>` —
+   * that part of the old comment holds — but which ROWS it answers with is
+   * decided by a field the declared layout never mentions.
+   *
+   * So the acceptance now carries a note rather than passing silently: the
+   * state is designed, its consequence is not obvious, and completeness reads
+   * ({@link BOARD_CARDS_ADDRESS_FIELDS}) must keep `milestone` out.
    */
   alsoAccepts?: string[];
 };
@@ -111,7 +132,11 @@ export function checkProjectionParity(
 }
 
 type MembershipKeyCheckResult =
-  | { ok: true }
+  // `note` is set ONLY when the layout was admitted through `alsoAccepts` — an
+  // accepted state that changes how every read of this index behaves. A plain
+  // match carries no note, so the caveat stays information rather than becoming
+  // boilerplate an operator learns to skip.
+  | { ok: true; note?: string }
   | { ok: false; reason: string };
 
 /** Compare live schema key layout to the app's hard expectation. */
@@ -142,10 +167,25 @@ export function checkMembershipKeyLayout(
       }) — catalog expand may have rewritten this membership index`,
     };
   }
+  // Admitted through `alsoAccepts`: designed, and load-bearing. Carried out to
+  // the caller so the operator-facing line states the field that actually gates
+  // reads instead of the field we declared — see `alsoAccepts`.
+  const siblingHash = hf !== expected.hash_field ? hf : null;
   if (rf !== expRf) {
     return {
       ok: false,
       reason: `range_field=${rf ?? "(null)"} (want ${expRf ?? "(null)"})`,
+    };
+  }
+  if (siblingHash) {
+    return {
+      ok: true,
+      note:
+        `multi-key expand — catalog hash_field is \`${siblingHash}\`, not the declared ` +
+        `\`${expected.hash_field}\`. The partition still answers on the declared key, but ` +
+        `\`${siblingHash}\` is the projection GATE: any read that projects \`${siblingHash}\` ` +
+        `drops every row with no \`${siblingHash}\` atom, from any position in the field list. ` +
+        `Completeness reads must not project it.`,
     };
   }
   return { ok: true };
