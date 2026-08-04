@@ -16,7 +16,49 @@
 /**
  * Fan-out width for POINT-read pools (one row, by key).
  *
- * ## The cost model this number is derived from
+ * ## READ THIS FIRST: the cost model below no longer holds (2026-08-04)
+ *
+ * Everything from "The cost model this number is derived from" down to the end
+ * of this docstring was derived from a **~190ms per-request floor that does not
+ * reproduce on the current stack**. Re-measured 2026-08-04 on lastdbd
+ * `0.23.2-409-gee967a073`, by re-running the very probes that produced the
+ * tables below, unmodified:
+ *
+ * | probe | documented 2026-08-03 | measured 2026-08-04 |
+ * |---|---|---|
+ * | `probe-point-read-concurrency-width.ts`, 18 slugs, width 1 | 3251ms | **8ms** |
+ * | same, width 24 | 214ms | **2ms** |
+ * | `probe-where-the-194ms-goes.ts`, bare `fetch` POST /api/query | ~194ms | **0.6ms** |
+ *
+ * Confirmed served, not short-circuited: an `lastdb ops` count delta across one
+ * probe run shows the node accepting **440 real queries in 52ms** of node time
+ * (0.12ms each), and the reads return rows.
+ *
+ * The ~190ms was per-PROCESS, not per-request — connection setup and the first
+ * attestation, amortized to nothing by any client that reuses its socket. A
+ * fresh in-process read now costs ~15ms and every subsequent one ~0.5-1.0ms.
+ * That is why a per-request floor showed up in probes that spawn a CLI (a
+ * `brain get` still costs ~180ms wall) and vanishes inside a long-lived one.
+ *
+ * The upgrade at 18:16Z the same day is the obvious suspect; that is a
+ * correlation and nobody has A/B'd the old binary, so treat the CAUSE as
+ * unproven and the MEASUREMENT as solid.
+ *
+ * ### What that means for this constant
+ *
+ * Sixteen is now nearly inert: it saves ~6ms on the 18-slug `pickup status`
+ * fan-out (8ms serial vs 2ms at width 24). It is kept because it costs nothing
+ * and the politeness bound is still worth having, NOT because the wave model
+ * justifies it. **Do not derive any new design from "the unit of cost is the
+ * serial wave"** — that rule is retired for point reads. A round trip is no
+ * longer expensive enough to reshape a read path around, which also makes the
+ * N+1 fan-out findings recorded against this repo far less severe than they
+ * were when filed.
+ *
+ * The historical derivation is kept below because several decisions elsewhere
+ * cite it, and a reader needs to see what those decisions were reasoning from.
+ *
+ * ## SUPERSEDED — the cost model this number was derived from
  *
  * A point read costs the node ~1.9ms and the caller ~190ms; a bare `fetch` over
  * the same socket costs the same ~190ms. So a read is almost entirely
@@ -24,7 +66,7 @@
  * request, the row, or the field (`pickup.ts` states the same rule). Total cost
  * is therefore `ceil(N / width) x ~190ms` — width buys waves, and nothing else.
  *
- * ## Measured, live primary, 2026-08-03
+ * ## Measured, live primary, 2026-08-03 (superseded — see the table above)
  *
  * `scripts/probe-point-read-concurrency-width.ts` — 18 slugs (what
  * `pickup status` actually fans out over), 3 interleaved reps:
@@ -89,7 +131,30 @@ export const POINT_READ_CONCURRENCY = 16;
  *     `groom board-cards-heal`. This is the live fan-out, and the width decides
  *     how many serial waves it costs, every hour, per board.
  *
- * ## Measured, live primary, 2026-08-03
+ * ## Re-measured 2026-08-04: the shape holds, the numbers fell ~5x
+ *
+ * Unlike the point-read class, this one did NOT collapse — re-running
+ * `scripts/probe-partition-read-concurrency-width.ts` unmodified on lastdbd
+ * `0.23.2-409-gee967a073`, same board, same 24 leads:
+ *
+ * | width | 2026-08-03 | 2026-08-04 | ms/wave now |
+ * |---|---|---|---|
+ * | 1 | 3923ms | **780ms** | 33 |
+ * | 6 | 780ms | **147ms** | 37 |
+ * | **12** | 437ms | **98ms** | 49 |
+ * | 16 | 458ms | **93ms** | 47 |
+ * | 24 | 373ms | **139ms** | 139 |
+ *
+ * Every conclusion below survives: ms/wave still GROWS with width (33 -> 139),
+ * twelve is still the elbow, and twenty-four is still measurably worse than
+ * twelve rather than better. A partition read is real work, not just latency,
+ * which is exactly why this class kept its shape while the point-read class
+ * lost its. Splitting the constant was not tidiness — and this is the run that
+ * proves it, because the two classes moved by 5x and 400x respectively.
+ *
+ * Shed is still zero at every width to 24, and the neighbour is still flat.
+ *
+ * ## Measured, live primary, 2026-08-03 (absolute values superseded above)
  *
  * `scripts/probe-partition-read-concurrency-width.ts` — the real 24-lead sweep
  * of the live `default` partition, 3 interleaved reps, same leads at every
