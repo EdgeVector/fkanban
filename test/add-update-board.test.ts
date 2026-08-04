@@ -19,7 +19,14 @@ import { FkanbanError } from "../src/client.ts";
 import { fakeNode } from "./fake-node.ts";
 import type { NodeClient } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { boardToFields, cardToFields, findCard, nowIso } from "../src/record.ts";
+import {
+  blockedByHint,
+  blockedByMessage,
+  boardToFields,
+  cardToFields,
+  findCard,
+  nowIso,
+} from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { markCmd } from "../src/commands/mark.ts";
@@ -988,10 +995,13 @@ describe("add enforces the dependency soft-block into working columns", () => {
       expect(err).toBeInstanceOf(FkanbanError);
       const e = err as FkanbanError;
       expect(e.code).toBe("card_blocked");
-      expect(e.message).toBe('Card "blk" is blocked by "dep" (not yet done).');
-      expect(e.hint).toBe(
-        "Finish its dependencies first (move them to their board's final column), keep the dependent in default/backlog until then, or pass --force to override.",
-      );
+      expect(e.message).toBe(blockedByMessage("blk", ["dep"]));
+      // Against the shared builders `move` also calls, not against a copy of
+      // their output. The alignment being tested is "both commands voice the
+      // same refusal"; a pasted literal tests the wording instead, and goes red
+      // on any edit to it — which is what happened when the hint learned to say
+      // that --force is not scoped to this gate.
+      expect(e.hint).toBe(blockedByHint());
     }
   });
 
