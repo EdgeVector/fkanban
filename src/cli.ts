@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import pkg from "../package.json" with { type: "json" };
-import { FkanbanError, type Verbose } from "./client.ts";
+import { FkanbanError, PARITY_OPS_LABEL, type Verbose } from "./client.ts";
 import { ConfigMissingError, ConfigInvalidError } from "./config.ts";
 import { loadAppCtx, loadCtx } from "./context.ts";
 import { runInit } from "./commands/init.ts";
@@ -2036,7 +2036,15 @@ async function dispatch(
         );
         return 2;
       }
-      const ctx = loadCtx({ verbose });
+      // `parity-check` is a diagnostic, not board work: read-only, but 24
+      // partition queries per board per index, and a routine runs it daily.
+      // Labelling it separately keeps `client=kanban` in `lastdb ops` meaning
+      // traffic a user actually caused. Every other groom subcommand repairs
+      // real board state and keeps the plain label.
+      const ctx = loadCtx({
+        verbose,
+        opsLabel: sub === "parity-check" ? PARITY_OPS_LABEL : undefined,
+      });
       if (sub === "archive-done") {
         const extra = rejectExtraPositionals(positionals, 2, "groom archive-done");
         if (extra !== undefined) return extra;

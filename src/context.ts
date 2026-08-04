@@ -8,13 +8,18 @@ export type Ctx = {
   node: NodeClient;
 };
 
-export function loadCtx(opts: { configPath?: string; verbose?: Verbose } = {}): Ctx {
+export function loadCtx(
+  opts: { configPath?: string; verbose?: Verbose; opsLabel?: string } = {},
+): Ctx {
   const cfg = readConfig(opts.configPath);
   const node = newNodeClient({
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
     verbose: opts.verbose,
     socketPath: resolveSocketPath(cfg),
+    // Omitted for ordinary commands, so they keep the plain board label.
+    // Diagnostic entrypoints pass their own — see client.ts DEFAULT_OPS_LABEL.
+    opsLabel: opts.opsLabel,
   });
   return { cfg, node };
 }
