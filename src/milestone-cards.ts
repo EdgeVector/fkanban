@@ -499,14 +499,36 @@ export async function listMilestoneCardsPartitionSpine(
  * with `milestone`, which the Milestone record has no atom for, so the product
  * has never seen it. Every read that leads with `slug` does.
  *
- * Dropping it is therefore REQUIRED, not defensive:
+ * Dropping it is REQUIRED as a baseline row: it is a permanent phantom drop —
+ * the sweep would reach it and the wide read never can, so parity would report
+ * one invisible row on every milestone partition, forever, with nothing to
+ * repair.
  *
- *  - as a baseline row it is a permanent phantom drop — the sweep would reach
- *    it and the wide read never can, so parity would report one invisible row
- *    on every milestone partition, forever, with nothing to repair.
- *  - as a deletable row it is far worse. Its address is
- *    `(milestone_cards, hash=<milestone>, range="")`, and the one thing
- *    `purgeOtherMilestoneCardRows` does with a spine row is delete it.
+ * ## It is NOT a data-loss risk, and that was measured rather than assumed
+ *
+ * The worry on record was the delete: its address is
+ * `(milestone_cards, hash=<milestone>, range="")`, and the one thing
+ * `purgeOtherMilestoneCardRows` does with a spine row is delete it. Tested on an
+ * isolated node 2026-08-04 by reproducing the mispinned shape and issuing that
+ * exact call (`scripts/probe-milestone-keyless-row-delete-blast-radius.ts`):
+ *
+ *     delete → HTTP 400 "HashRange schema '…' mutation … requires both hash"
+ *     Milestone record: intact, byte-identical. Keyless row: still present.
+ *
+ * An empty range key is not a valid HashRange address, so the delete cannot
+ * reach the Milestone record — it is rejected, not silently applied. The guard
+ * prevents a call that would have been a loud no-op. (Loud at the node; muted
+ * here, since `deleteMilestoneCardSk` swallows errors by design.)
+ *
+ * ## And on a correctly-pinned node the row does not exist at all
+ *
+ * The bleed is not intrinsic to Mini. It is a consequence of WHICH schema this
+ * config pins: on the primary, `milestone_cards` points at a hash the node
+ * registered under `descriptive_name: "Milestone"` — the entity's own identity —
+ * so the multi-key expand puts entity and index on one product. A node pinned to
+ * the catalog's declared `MilestoneCards_hashrange_v1_children_20260723` returns
+ * zero keyless rows (measured, same run). See
+ * `scripts/probe-extra-schema-resolution-blindspot.ts`.
  *
  * The guard was already here, written for partially-written CARD rows whose
  * `sk` copy did not come back. It happens to catch this too. Naming what it

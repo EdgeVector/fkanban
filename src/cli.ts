@@ -171,6 +171,12 @@ Options:
   --schema-service-url <url>  schema_service URL recorded in config for diagnostics
   --node-socket-path <path>   unix socket of the node, instead of --node-url
   --name <name>               display name to seed the default board with
+  --accept-schema-repin       adopt resolved schema hashes even when they differ
+                              from the ones config already pins. A schema hash is
+                              the ADDRESS of a record type: rows written under the
+                              old hash are invisible under the new one, and a
+                              re-pointed index reads exactly like an empty index.
+                              Without this flag init refuses and changes nothing.
 
 Schema setup is orchestrated by the NODE through Mini's
 /api/apps/declare-schema route. The CLI does not contact --schema-service-url
@@ -1036,7 +1042,7 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "db"]);
 // flags its dispatch branch actually reads. Commands absent here (e.g. `mark`, `show`,
 // `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
-  init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
+  init: new Set(["node-url", "schema-service-url", "node-socket-path", "name", "accept-schema-repin"]),
   add: new Set([
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
@@ -1288,6 +1294,7 @@ async function main(argv: string[]): Promise<number> {
         "node-url": { type: "string" },
         "schema-service-url": { type: "string" },
         "node-socket-path": { type: "string" },
+        "accept-schema-repin": { type: "boolean" },
         "declare-link": { type: "boolean" },
         name: { type: "string" },
         worker: { type: "string" },
@@ -1397,6 +1404,7 @@ async function dispatch(
         schemaServiceUrl: values["schema-service-url"] as string | undefined,
         nodeSocketPath: values["node-socket-path"] as string | undefined,
         bootstrapName: values.name as string | undefined,
+        acceptSchemaRepin: values["accept-schema-repin"] === true,
         verbose,
       });
       return 0;
