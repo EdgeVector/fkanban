@@ -58,17 +58,28 @@ const cfg: Config = {
 /**
  * A node that drops rows the way LastDB does.
  *
- * The ONE rule that matters — a row is returned only if every requested field
- * is present on it; absent is absent, not empty string, not null — now lives
- * in the shared fake (`test/fake-node.ts`) and is the default for every test
- * in the suite. This is a thin seeding wrapper over it, kept because these
- * tests are written in terms of "cards and boardCards as stored".
+ * The rule — one gate, the HASH field when the projection contains it and the
+ * LEADING field otherwise; absent is absent, not empty string, not null — lives
+ * in the shared fake (`test/fake-node.ts`) and is its default. This is a thin
+ * seeding wrapper over it, kept because these tests are written in terms of
+ * "cards and boardCards as stored".
+ *
+ * `board_cards` states `milestone`, NOT the `board` its declared layout names.
+ * That is the live catalog `hash_field` after the 2026-07-23 multi-key expand
+ * (`src/membership_schema_guard.ts`), and it is the whole mechanism these tests
+ * exercise: the sparse row below is dropped because it has no `milestone` atom
+ * and the shipped list projection asks for `milestone`. Declaring `board` here
+ * would return that row and quietly turn this file into a test of nothing.
  */
 function projectionFaithfulNode(seed: {
   cards: Array<Record<string, unknown>>;
   boardCards: Array<Record<string, unknown>>;
 }): FakeNode {
-  const node = fakeNode({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash });
+  const node = fakeNode({
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+    hashFields: { [BOARD_CARDS_HASH]: "milestone", [BOARD_HASH]: "slug", [CARD_HASH]: "slug" },
+  });
 
   for (const c of seed.cards) {
     node.seed({ schemaHash: CARD_HASH, keyHash: String(c.slug), fields: c });
