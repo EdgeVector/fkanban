@@ -19,6 +19,8 @@ import {
   assertUnlessAlreadyViolating,
   sanitizeDefaultTodoLaneMetadata,
   applyDbLocatorForWrite,
+  captureFkanbanError,
+  forcedGuardWaiverWarning,
   isScriptLikeCardBody,
   BLOCK_STATUSES,
   CARD_KINDS,
@@ -224,9 +226,46 @@ async function assertBodyIsNotExistingSlugList(opts: AddOptions): Promise<void> 
   }
 }
 
+/**
+ * Refuse an `add --body` that is source code rather than a card brief — and
+ * under `--force`, SAY SO instead of waiving in silence.
+ *
+ * This was the seventh gate `--force` clears and the last one that cleared in
+ * silence, which made {@link FORCE_IS_UNSCOPED}'s promise — that every guard the
+ * flag waives prints its own `warning: --force …` line — false at the moment it
+ * was written. Two things hid it from the sweep that closed the other six:
+ * it lives in `src/commands/add.ts`, which the source scan did not read, and it
+ * bails as `if (opts.force || opts.body === undefined) return`, which the
+ * scan's pattern did not match. Both are fixed in
+ * `forced-guard-waivers-are-voiced.test.ts`.
+ *
+ * The trap runs in BOTH directions here, which is why silence cost the most on
+ * this one. Its own hint sends operators to the flag ("or pass --force for an
+ * intentional source-code body"), and the flag then clears five other gates.
+ * Coming the other way — an operator forced past the milestone or dependency
+ * gate — `--force` silently accepts a body that is source code, and the card
+ * that gets written is the unreadable brief this tripwire exists to prevent.
+ * Nothing downstream re-checks it.
+ */
 function assertBodyIsNotSourceCode(opts: AddOptions): void {
-  if (opts.force || opts.body === undefined) return;
-  const normalized = opts.body.replace(/\r\n/g, "\n");
+  if (opts.body === undefined) return;
+  if (!opts.force) {
+    bodySourceGate(opts.body);
+    return;
+  }
+  const waived = captureFkanbanError(() => bodySourceGate(opts.body!));
+  if (waived) {
+    console.error(forcedGuardWaiverWarning(opts.slug, "source-code body", waived.message));
+  }
+}
+
+/**
+ * The verdict half of {@link assertBodyIsNotSourceCode}: pure, and it throws
+ * rather than returning a verdict object so the forced and unforced readings of
+ * this gate cannot drift into disagreeing about the same body.
+ */
+function bodySourceGate(body: string): void {
+  const normalized = body.replace(/\r\n/g, "\n");
 
   const hasMarkdownSection = /^##\s+\S/m.test(normalized);
   if (hasMarkdownSection) return;

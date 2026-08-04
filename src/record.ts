@@ -1373,7 +1373,7 @@ export function assertUnlessAlreadyViolating(
 // Run `fn` and return the FkanbanError it raised, or null when it passed.
 // Anything that is not an FkanbanError is a real fault (node, transport, bug)
 // and propagates untouched rather than being read as a policy rejection.
-function captureFkanbanError(fn: () => void): FkanbanError | null {
+export function captureFkanbanError(fn: () => void): FkanbanError | null {
   try {
     fn();
     return null;
@@ -2145,36 +2145,27 @@ export function forcedGuardWaiverWarning(slug: string, gate: string, verdict: st
  *
  * This project already treats that overload as a hazard — `kanban-stress-script`
  * has a dedicated test forbidding `--force` in the stress harness precisely
- * because it "would also disable assertBodyReplaceSafe, assertDepUnblocked and
- * the Situations preflight". The hazard was banned in the harness and
- * recommended in the error message; this closes that gap from the other side.
+ * because it would also disable `assertBodyReplaceSafe` and this gate. The
+ * hazard was banned in the harness and recommended in the error message; this
+ * closes that gap from the other side.
  *
  * The waiver still waives — agents and operators depend on it, and a blocked
  * card in `doing` is a legitimate thing to ask for. It just stops being invisible.
  *
- * ## Which of those four now speak, and which does not
+ * ## All seven now speak
  *
- * This gate spoke first (2026-08-03). `assertLivePrMilestone` and
- * `assertLifecycleMoveAllowed` followed, both through
- * {@link forcedGuardWaiverWarning} — the milestone gate because its own hint is
- * what sends operators to the flag, the lifecycle gate because its silent
- * waiver lands a card in the TERMINAL column with failing CI, which every
- * downstream rollup then reads as shipped.
+ * This gate spoke first (2026-08-03), then `assertLivePrMilestone` and
+ * `assertLifecycleMoveAllowed`, then `assertDefaultTodoPickupReady`,
+ * `assertPrWorkBrief` and `assertBodyReplaceSafe` (2026-08-04) — all through
+ * {@link forcedGuardWaiverWarning}. `assertBodyIsNotSourceCode` was the seventh
+ * and last, found on 2026-08-04 only because the source scan that certified the
+ * other six neither read its file nor matched its bail shape.
  *
- * `assertDefaultTodoPickupReady` is deliberately still silent, and copying the
- * shape above into it is a REGRESSION, not the obvious next step:
- *
- *   - It calls `sanitizeDefaultTodoLaneMetadata(card)`, which MUTATES the card
- *     (clearing `branch` and `pr_url`). Running the gate to describe a waiver
- *     would silently change what the forced write persists — a reporting path
- *     that alters the record is not reporting.
- *   - It calls `assertBodyLoaded`, which throws `card_body_not_loaded` on a
- *     body-free projection. That is an INSTRUMENT failure, not a verdict about
- *     the card, and voicing it as a waiver would put a sentence about a rule
- *     nobody broke in front of the operator.
- *
- * Voicing it therefore needs its verdict split from its mutation and its
- * hydration precondition first. Until then, silence is the honest option.
+ * Do NOT re-enumerate that list in prose. Three passages across `src/` and
+ * `test/` used to end it with "and the Situations preflight", which has never
+ * taken a `force` parameter — the enumeration had been copied between files
+ * often enough that no copy was checkable. It is derived from the source and
+ * asserted in `forced-guard-waivers-are-voiced.test.ts` now.
  *
  * ## Two constraints the shape here exists to honor
  *

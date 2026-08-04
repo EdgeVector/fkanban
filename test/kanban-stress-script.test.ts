@@ -54,8 +54,12 @@ describe("kanban-stress harness schema drift guards", () => {
 
   test("synthetic adds do not reach for --force instead of an honest kind", () => {
     // --force would also disable assertBodyReplaceSafe, assertDepUnblocked and
-    // the Situations preflight — the consistency guards the harness exists to
-    // exercise — so it must not be the lever used to get past placement.
+    // the source-code body tripwire — the consistency guards the harness exists
+    // to exercise — so it must not be the lever used to get past placement.
+    // (It does NOT disable the Situations preflight, which this comment claimed
+    // until 2026-08-04; `assertSituationPreflightAllowed` takes no `force`.
+    // Which gates the flag really clears is pinned in
+    // `forced-guard-waivers-are-voiced.test.ts` rather than restated here.)
     for (const line of addLines) {
       expect(line).not.toMatch(/--force/);
     }
