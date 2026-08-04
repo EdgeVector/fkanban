@@ -44,6 +44,7 @@ import {
   type Milestone,
 } from "../record.ts";
 import { proofCardRefsFrom, proofHoldReason, readProofCardRefs } from "../proof_card_refs.ts";
+import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "../concurrency.ts";
 
 const terminalFor = (board: string, terminals: Map<string, string>): string =>
   terminals.get(board) ?? FALLBACK_TERMINAL_COLUMN;
@@ -211,9 +212,25 @@ export async function archiveDoneResult(
   // drains the coldest end of the archive rather than an arbitrary board's.
   const eligible: Array<{ card: Card; ageHours: number }> = [];
 
-  for (const b of boards) {
+  // One terminal-column read per board, CONCURRENTLY. These are independent
+  // partition reads and a read is almost entirely per-request latency, so the
+  // unit of cost is the serial wave (`concurrency.ts`: ceil(N/width) x ~190ms).
+  // Read one board after another this loop cost one wave per board — 34 waves
+  // on an install that has carried 34 board slugs, for reads that never needed
+  // to wait on each other.
+  //
+  // `mapWithConcurrency` lands each result at its input index, so `boardReports`
+  // and `eligible` are still built in board order below and the report is
+  // byte-identical to the serial version.
+  const terminalRowsByBoard = await mapWithConcurrency(
+    boards,
+    (b) => cardsIn(opts.node, opts.cfg, terminalFor(b.slug, terminals), b.slug),
+    PARTITION_READ_CONCURRENCY,
+  );
+
+  for (const [i, b] of boards.entries()) {
     const terminal = terminalFor(b.slug, terminals);
-    const rows = await cardsIn(opts.node, opts.cfg, terminal, b.slug);
+    const rows = terminalRowsByBoard[i]!;
     let unparsable = 0;
     let count = 0;
     for (const card of rows) {
@@ -244,13 +261,27 @@ export async function archiveDoneResult(
   const stillDependedOn = new Set<string>();
   {
     const depTargets = new Set<string>();
-    for (const b of allBoards) {
+    // Flattened to (board, column) pairs and read CONCURRENTLY. Nested and
+    // serial, this was the most expensive read in the sweep and the one that
+    // scaled worst: boards x non-terminal columns waves, i.e. 6 on this node
+    // but 102 on a 34-board install — ~19s of round trips to collect a set of
+    // dep slugs, none of which depends on any other read.
+    //
+    // Which columns are read is unchanged: still every non-terminal column of
+    // every board, with the terminal resolved by the same `terminalFor` used
+    // above. Only the order and overlap of the reads differ, and `depTargets`
+    // is a Set, so result order cannot affect the outcome.
+    const depScanTargets = allBoards.flatMap((b) => {
       const terminal = terminalFor(b.slug, terminals);
-      for (const col of b.columns) {
-        if (col === terminal) continue;
-        const rows = await cardsIn(opts.node, opts.cfg, col, b.slug);
-        for (const c of rows) for (const d of c.deps ?? []) depTargets.add(d);
-      }
+      return b.columns.filter((col) => col !== terminal).map((col) => ({ board: b.slug, col }));
+    });
+    const depScanRows = await mapWithConcurrency(
+      depScanTargets,
+      (t) => cardsIn(opts.node, opts.cfg, t.col, t.board),
+      PARTITION_READ_CONCURRENCY,
+    );
+    for (const rows of depScanRows) {
+      for (const c of rows) for (const d of c.deps ?? []) depTargets.add(d);
     }
     for (const { card } of eligible) if (depTargets.has(card.slug)) stillDependedOn.add(card.slug);
   }
