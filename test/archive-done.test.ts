@@ -361,4 +361,45 @@ describe("groom archive-done", () => {
       "todo",
     ]);
   });
+
+  // The sweep's reads are independent partition reads, and a read is almost
+  // entirely per-request latency, so what it costs is serial WAVES
+  // (`concurrency.ts`). Both fan-outs here — one terminal read per board, and
+  // boards x non-terminal columns for the dependency guard — used to run one
+  // after another, which is invisible to every other test in this file: they
+  // assert WHICH columns were read, and a serial and a concurrent sweep read
+  // exactly the same ones.
+  //
+  // So this asserts the property those cannot: that the reads OVERLAP. It fails
+  // against the serial version with maxInFlight = 1.
+  test("board reads are issued concurrently, not one wave per board", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const boards = ["b1", "b2", "b3", "b4"];
+    const { report } = await archiveDoneResult({
+      cfg,
+      node,
+      now: NOW,
+      boardsFor: async () => boards.map(board),
+      cardsIn: async (_n: NodeClient, _c: Config, column: string, b: string) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // A real read is a socket round trip; yield so overlap is observable.
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight -= 1;
+        return column === "done" && b === "b1"
+          ? [card({ slug: "old-1", board: b, updated_at: hoursAgo(100) })]
+          : [];
+      },
+      remove: async () => {},
+      milestonesFor: async () => [],
+    });
+
+    // 4 boards x 3 non-terminal columns = 12 dep-guard reads, plus 4 terminal
+    // reads. Serial would be 16 waves of 1.
+    expect(maxInFlight).toBeGreaterThan(1);
+    // And the result is unchanged by the overlap.
+    expect(report.eligible).toBe(1);
+    expect(report.actions.map((a) => a.slug)).toEqual(["old-1"]);
+  });
 });
