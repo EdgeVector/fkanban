@@ -40,7 +40,8 @@ import {
   sweepMilestoneCardsPartition,
 } from "../milestone-cards.ts";
 import { parityWithConfirmation } from "../membership_schema_guard.ts";
-import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
+// No pool imported on purpose: every fan-out this file needs already happens
+// one level down, inside the per-partition sweeps. See the milestone loop.
 
 export type ParityCheckOptions = {
   cfg: Config;
@@ -181,37 +182,81 @@ export async function parityCheckResult(
     });
   }
 
-  const mcResults = await mapWithConcurrency(
-    [...milestoneCandidates].sort(),
-    async (ms): Promise<ParityPartitionResult | null> => {
-      const sweep = await sweepMilestoneCardsPartition(node, cfg, ms);
-      if (sweep === null) return null;
-      if (sweep.failedLeads.length > 0) {
-        return { ...empty("MilestoneCards", ms), incomplete: sweep.failedLeads.map((f) => f.field) };
-      }
-      const wide = await listMilestoneCardsPartition(node, cfg, ms);
-      if (wide === null) {
-        return { ...empty("MilestoneCards", ms), incomplete: ["<wide read returned nothing>"] };
-      }
-      const conf = await parityWithConfirmation({
-        firstSweep: sweep.rows,
-        wideSlugs: new Set(wide.map((c) => c.slug)),
-        wideRows: wide.length,
-        resweep: () => sweepMilestoneCardsPartition(node, cfg, ms),
+  // SERIAL over milestone partitions, like the two board loops above — and for
+  // a reason that is easy to lose: `sweepMilestoneCardsPartition` ALREADY pools
+  // its 24 leads at `PARTITION_READ_CONCURRENCY`. Pooling the partitions at the
+  // same width on the outside does not run at that width, it MULTIPLIES —
+  // 12 partitions x 12 leads = 144 reads in flight from one process, on the one
+  // path `concurrency.ts` is most explicit about bounding (it rejects a width of
+  // 24 there as "unbounded for this call site").
+  //
+  // Measured on the live primary 2026-08-04, total in-flight capped by a
+  // semaphore so one knob covers the whole nested tree
+  // (`scripts/probe-parity-ceiling-vs-neighbour.ts`, 637 node reads, 26
+  // partitions, 3 reps):
+  //
+  //   | ceiling | wall  |
+  //   |---------|-------|
+  //   | 12      | 506ms |
+  //   | 24      | 513ms |
+  //   | 48      | 504ms |
+  //   | 96      | 523ms |
+  //   | 144     | 654ms |   <- what the nested pools were actually doing
+  //
+  // Flat to 96 and then WORSE. The 144 the nesting produced was not buying
+  // speed, it was paying contention for it: this check is throughput-bound on
+  // ~0.6ms reads, not latency-bound on waves (see `concurrency.ts` — the
+  // ~190ms-per-read floor those pool widths were derived from no longer
+  // reproduces).
+  //
+  // What SHIPPED here is a serial outer loop, not that semaphore, so quote its
+  // own number rather than the table's best row: 5 reps of the real check on the
+  // live primary, `scripts/probe-parity-nested-pool-width.ts`, same 637 reads
+  // and 26 partitions —
+  //
+  //   nested (ceiling 144)   575ms, and 654ms median under the semaphore probe
+  //   serial outer (this)    638ms median (626 / 636 / 638 / 655 / 820)
+  //
+  // A wash, for a 12x cut in in-flight reads. It is ~130ms above the
+  // semaphore-12 arm because a serial outer loop cannot refill a slot freed by
+  // partition N with a lead from partition N+1. Buying that back means plumbing
+  // a shared limiter through every sweep signature; at 130ms on a check that
+  // runs at most daily, it is not worth the API surface. Revisit only if the
+  // partition count grows by an order of magnitude.
+  //
+  // `test/parity-check-concurrency.test.ts` pins the ceiling by counting real
+  // in-flight reads, not by reading this constant back.
+  for (const ms of [...milestoneCandidates].sort()) {
+    const sweep = await sweepMilestoneCardsPartition(node, cfg, ms);
+    if (sweep === null) continue;
+    if (sweep.failedLeads.length > 0) {
+      results.push({
+        ...empty("MilestoneCards", ms),
+        incomplete: sweep.failedLeads.map((f) => f.field),
       });
-      return {
-        index: "MilestoneCards",
-        partition: ms,
-        rows: wide.length,
-        drift: conf.drift,
-        moved: conf.moved,
-        confirmed: conf.confirmed,
-        incomplete: [],
-      };
-    },
-    PARTITION_READ_CONCURRENCY,
-  );
-  for (const r of mcResults) if (r !== null) results.push(r);
+      continue;
+    }
+    const wide = await listMilestoneCardsPartition(node, cfg, ms);
+    if (wide === null) {
+      results.push({ ...empty("MilestoneCards", ms), incomplete: ["<wide read returned nothing>"] });
+      continue;
+    }
+    const conf = await parityWithConfirmation({
+      firstSweep: sweep.rows,
+      wideSlugs: new Set(wide.map((c) => c.slug)),
+      wideRows: wide.length,
+      resweep: () => sweepMilestoneCardsPartition(node, cfg, ms),
+    });
+    results.push({
+      index: "MilestoneCards",
+      partition: ms,
+      rows: wide.length,
+      drift: conf.drift,
+      moved: conf.moved,
+      confirmed: conf.confirmed,
+      incomplete: [],
+    });
+  }
 
   const drift = results.filter((r) => r.confirmed && r.drift.length > 0);
   const unconfirmed = results.filter((r) => !r.confirmed && r.drift.length > 0);
