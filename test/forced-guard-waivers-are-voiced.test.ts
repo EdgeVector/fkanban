@@ -24,21 +24,38 @@
 // first — its mutation and its hydration precondition had to come off the
 // verdict — and the last section here is what holds that promise for guards
 // nobody has written yet.
+//
+// That promise was still false when it shipped. A SEVENTH gate,
+// `assertBodyIsNotSourceCode`, waived in silence in `src/commands/add.ts` — a
+// file the source scan did not read, behind `if (opts.force || opts.body ===
+// undefined) return;`, a shape its pattern did not match. Missing on both axes
+// at once is the point: a scan reports "all clear" identically whether it looked
+// and found nothing or never looked. So the last two sections here check the
+// scan's own reach — the file list, and the gate enumeration — instead of only
+// what it finds.
 
-import { readFileSync } from "node:fs";
 
-import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import { FkanbanError, type NodeClient } from "../src/client.ts";
+import { fakeNode } from "./fake-node.ts";
+import type { Config } from "../src/config.ts";
 import {
   BODY_OMITTED,
   assertBodyReplaceSafe,
   assertDefaultTodoPickupReady,
   assertLivePrMilestone,
   assertPrWorkBrief,
+  boardToFields,
+  findCard,
   forcedGuardWaiverWarning,
+  nowIso,
   type Card,
 } from "../src/record.ts";
+import { DEFAULT_COLUMNS } from "../src/schemas.ts";
+import { addCmd } from "../src/commands/add.ts";
 import { assertLifecycleMoveAllowed } from "../src/pipeline_status.ts";
 
 /** Capture stderr warnings for the duration of one action. */
@@ -445,6 +462,104 @@ describe("--force waives the work-brief and body-replace guards out loud", () =>
 
 // ---------------------------------------------------------------------------
 
+describe("--force waives the source-code body tripwire out loud", () => {
+  const cfg: Config = {
+    configVersion: 1,
+    nodeUrl: "http://unused.invalid",
+    schemaServiceUrl: "http://unused.invalid",
+    userHash: "test-user",
+    schemaHashes: { card: "cardhash", board: "boardhash" },
+  };
+
+  const SCRIPT_BODY = [
+    "import json, subprocess, sys",
+    "from collections import defaultdict",
+    "",
+    "def run(*args):",
+    "    return subprocess.check_output(args, text=True)",
+    "",
+  ].join("\n");
+
+  let node: NodeClient;
+
+  beforeEach(async () => {
+    node = fakeNode();
+    const now = nowIso();
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.board!,
+      keyHash: "default",
+      fields: boardToFields({
+        slug: "default",
+        title: "default",
+        body: "",
+        columns: [...DEFAULT_COLUMNS],
+        created_at: now,
+        updated_at: now,
+      }),
+    });
+  });
+
+  test("a forced source-code body says so instead of landing in silence", async () => {
+    // Prove the fixture is a REAL violation before believing the warning means
+    // anything — the half whose absence lets a gate that never fires pass green.
+    await expect(
+      addCmd({ cfg, node, slug: "script-card", title: "Script", column: "backlog", body: SCRIPT_BODY }),
+    ).rejects.toMatchObject({ code: "body_source_tripwire" });
+
+    const { warnings } = await captureWarnings(() =>
+      addCmd({
+        cfg,
+        node,
+        slug: "script-card",
+        title: "Script",
+        column: "backlog",
+        body: SCRIPT_BODY,
+        force: true,
+      }),
+    );
+
+    const waiver = warnings.find((w) => w.includes("--force"));
+    expect(waiver).toBeDefined();
+    expect(waiver).toContain("script-card");
+    expect(waiver).toContain("source-code body");
+    expect(waiver).toContain("overridden, not satisfied");
+  });
+
+  test("the forced and unforced readings are the same verdict", async () => {
+    let refusal: FkanbanError | null = null;
+    try {
+      await addCmd({ cfg, node, slug: "s2", title: "S", column: "backlog", body: SCRIPT_BODY });
+    } catch (err) {
+      refusal = err as FkanbanError;
+    }
+    expect(refusal).not.toBeNull();
+
+    const { warnings } = await captureWarnings(() =>
+      addCmd({ cfg, node, slug: "s2", title: "S", column: "backlog", body: SCRIPT_BODY, force: true }),
+    );
+    expect(warnings.find((w) => w.includes("--force"))).toContain(refusal!.message);
+  });
+
+  test("an ordinary brief under --force is silent", async () => {
+    // Noise on every forced write is how a warning stops being read.
+    const brief = "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nReal work.\n\n## END STATE\nDone.";
+    const { warnings } = await captureWarnings(() =>
+      addCmd({ cfg, node, slug: "ok-card", title: "OK", column: "backlog", body: brief, force: true }),
+    );
+    expect(warnings.filter((w) => w.includes("source-code body"))).toEqual([]);
+  });
+
+  test("the forced write still lands the body it was asked to land", async () => {
+    // The waiver reports; it must not have quietly become a refusal.
+    await captureWarnings(() =>
+      addCmd({ cfg, node, slug: "s3", title: "S", column: "backlog", body: SCRIPT_BODY, force: true }),
+    );
+    expect((await findCard(node, cfg, "s3"))?.body).toBe(SCRIPT_BODY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
 describe("every --force-waived guard announces itself", () => {
   // This is what makes `FORCE_IS_UNSCOPED` a promise rather than a hope. The
   // hint now tells operators that each guard the flag clears prints its own
@@ -455,21 +570,177 @@ describe("every --force-waived guard announces itself", () => {
   // reads the source for the SHAPE: an unconditional bail on the flag, with no
   // console.error between the test and the return. A voiced waiver runs its
   // verdict through `captureFkanbanError` and prints instead.
-  const SILENT_BAIL = /if\s*\(\s*(?:opts\.)?force\s*\)\s*return\s*;/g;
-  const GATE_FILES = ["src/record.ts", "src/pipeline_status.ts"];
+  // A bail on the flag, with or without other disjuncts in the same condition.
+  // The `(?:\s*\|\|[^)]*)?` arm is not hypothetical tidiness: the SEVENTH gate,
+  // `assertBodyIsNotSourceCode`, hid behind `if (opts.force || opts.body ===
+  // undefined) return;` and the original pattern — which required the flag to be
+  // the WHOLE condition — read straight past it for a full day while this file
+  // reported that every waiver spoke.
+  const SILENT_BAIL = /if\s*\(\s*(?:opts\.)?force\s*(?:\|\|[^)]*)?\)\s*return\s*;/g;
+  // Every file that holds a gate `--force` clears. `src/commands/add.ts` was the
+  // other half of the same miss: the scan can only be as complete as this list,
+  // so a gate written into an unlisted file is invisible no matter how good the
+  // pattern is. Adding a force-clearable gate elsewhere means adding it here.
+  const GATE_FILES = ["src/record.ts", "src/pipeline_status.ts", "src/commands/add.ts"];
 
   test("the pattern this test hunts for can actually match", () => {
     // Guard against the guard: a regex that matches nothing would let this
-    // whole file pass while the invariant rotted. Four of the six gates below
+    // whole file pass while the invariant rotted. Four of the seven gates below
     // shipped in exactly this shape before 2026-08-04.
     expect("  if (force) return;\n".match(SILENT_BAIL)).toHaveLength(1);
     expect("  if (opts.force) return;\n".match(SILENT_BAIL)).toHaveLength(1);
+    // The disjunct shape, verbatim as it shipped in add.ts.
+    expect("  if (opts.force || opts.body === undefined) return;\n".match(SILENT_BAIL))
+      .toHaveLength(1);
+    // …and the pattern must still be specific enough to leave an unrelated
+    // early return alone, or "no matches" would stop meaning anything.
+    expect("  if (opts.body === undefined) return;\n".match(SILENT_BAIL)).toBeNull();
+  });
+
+  test("every file that reads the flag is either scanned or a declared non-gate", () => {
+    // The pattern being right is worthless if the file list is short — the
+    // seventh gate was missed on BOTH counts at once, and a correct pattern over
+    // two files would still have reported all-clear. So the file list itself has
+    // to be checked: any source file that reads `force` as a VALUE must be
+    // scanned above or be named here with a reason.
+    const NON_GATE_FILES = new Map([
+      ["src/cli.ts", "argv parsing and help text; forwards the flag, decides nothing"],
+      ["src/client.ts", "session-token refresh — an unrelated `force` parameter"],
+      ["src/mcp/server.ts", "option plumbing: copies `force` into command opts"],
+      ["src/commands/move.ts", "passes the flag to gates in record.ts/pipeline_status.ts; holds none"],
+      ["src/commands/board.ts", "`board rm --force`, a different flag with its own delete semantics"],
+    ]);
+
+    // Comments are stripped first: `doctor.ts`, `milestone.ts` and `search.ts`
+    // contain "in force" / "does not force" in ENGLISH, and an allowlist padded
+    // with files that merely use the word is one nobody can audit.
+    const stripComments = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+    const files = readdirSync(new URL("../src", import.meta.url), { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => `src/${f}`)
+      .sort();
+    const readsForce = files.filter((f) =>
+      /(^|[^\w.])force\b|\.force\b/.test(
+        stripComments(readFileSync(new URL(`../${f}`, import.meta.url), "utf8")),
+      ),
+    );
+
+    // Both halves must be non-empty, or the difference below is vacuously clean.
+    expect(files.length).toBeGreaterThan(5);
+    expect(readsForce).toContain("src/commands/add.ts");
+
+    const unaccounted = readsForce.filter(
+      (f) => !GATE_FILES.includes(f) && !NON_GATE_FILES.has(f),
+    );
+    expect(unaccounted).toEqual([]);
   });
 
   test("no gate bails on --force in silence", () => {
     for (const file of GATE_FILES) {
       const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
       expect(src.match(SILENT_BAIL) ?? [], file).toEqual([]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("which guards --force actually clears is a fact, not a claim in prose", () => {
+  // Five separate passages across `src/` and `test/` enumerate the gates
+  // `--force` waives. On 2026-08-04 three of them named the Situations
+  // preflight, which has never taken a `force` parameter at all — the
+  // enumeration had been copied between files often enough that no copy was
+  // checkable against the code.
+  //
+  // A gate is force-clearable iff its BODY reads the flag — deliberately not
+  // "iff its signature declares it". Writing the signature version first got
+  // this wrong in the same direction as the prose: `assertBodyIsNotSourceCode`
+  // takes `opts: AddOptions` and reaches the flag through `opts.force`, so a
+  // signature scan called the seventh gate un-forceable. What makes a gate
+  // waivable is that it BRANCHES on the flag, and that is what to read.
+  const FORCE_CLEARABLE = [
+    "assertPrWorkBrief",
+    "assertLivePrMilestone",
+    "assertBodyReplaceSafe",
+    "assertDefaultTodoPickupReady",
+    "assertDepUnblocked",
+    "assertLifecycleMoveAllowed",
+    "assertBodyIsNotSourceCode",
+  ];
+  // Named because they are the ones prose has actually gotten wrong. Both sit
+  // directly beside force-clearing gates on the same write paths.
+  const NOT_FORCE_CLEARABLE = ["assertSituationPreflightAllowed", "assertNoExplicitTodoLaneMetadata"];
+
+  const GATE_SOURCES = [
+    "src/record.ts",
+    "src/pipeline_status.ts",
+    "src/situations.ts",
+    "src/commands/add.ts",
+  ];
+
+  /**
+   * `force` read as an IDENTIFIER — bare, or as `.force`.
+   *
+   * The leading `-` exclusion is load-bearing rather than cosmetic. Gate hints
+   * discuss the CLI flag in prose, and `assertNoExplicitTodoLaneMetadata`'s hint
+   * says "--force cannot preserve branch/pr_url either" — a sentence that is
+   * TRUE precisely because that gate does not read the flag. Counting it as a
+   * read would have made this check assert the opposite of the fact it exists
+   * to pin.
+   */
+  const READS_FORCE = /(^|[^\w.\-])force\b|\.force\b/;
+
+  /**
+   * True when `name`'s declaration-through-body reads the flag.
+   *
+   * The body runs from the declaration to the next line-start `}`, which is
+   * exactly the shape of a top-level function in these four files. Signature and
+   * body are read together on purpose: `force?: boolean` in the parameter list
+   * and `opts.force` in the body are the same fact.
+   */
+  function readsForce(name: string): boolean {
+    for (const file of GATE_SOURCES) {
+      const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+      const start = new RegExp(`^(?:export )?(?:async )?function ${name}\\b`, "m").exec(src);
+      if (!start) continue;
+      const rest = src.slice(start.index);
+      const end = rest.indexOf("\n}");
+      expect(end, `${name}: could not find the end of the function body`).toBeGreaterThan(0);
+      return READS_FORCE.test(rest.slice(0, end));
+    }
+    throw new Error(`${name} was not found in any scanned file — the check cannot read failure`);
+  }
+
+  test("the extractor can tell the two apart", () => {
+    // Without this, an extractor that returned `false` for everything would
+    // pass the NOT_FORCE_CLEARABLE block and fail nothing that mattered — and
+    // one that returned `true` for everything would pass FORCE_CLEARABLE.
+    expect(readsForce("assertDepUnblocked")).toBe(true);
+    expect(readsForce("assertSituationPreflightAllowed")).toBe(false);
+    // The opts-object style specifically, since the first version of this
+    // extractor read only parameter lists and missed exactly this one.
+    expect(readsForce("assertBodyIsNotSourceCode")).toBe(true);
+    // A gate that only MENTIONS the flag in a hint string is not a reader. The
+    // second version of this extractor got this one wrong in the other
+    // direction, which is why both poles are pinned here.
+    expect(readsForce("assertNoExplicitTodoLaneMetadata")).toBe(false);
+  });
+
+  test("every gate the prose calls force-clearable really reads the flag", () => {
+    for (const name of FORCE_CLEARABLE) {
+      expect(readsForce(name), name).toBe(true);
+    }
+  });
+
+  test("--force does NOT clear the Situations preflight", () => {
+    // The exact false claim, pinned. It stood in three files because it was
+    // plausible: the preflight is called from `move` and both `add` paths,
+    // in between gates that DO take the flag.
+    for (const name of NOT_FORCE_CLEARABLE) {
+      expect(readsForce(name), name).toBe(false);
     }
   });
 });

@@ -10,10 +10,15 @@
 // immediately rendered the same card `🔒 blocked` sitting in `doing`.
 //
 // This project already calls that overload a hazard from the other direction:
-// `kanban-stress-script.test.ts` forbids `--force` in the stress harness because
-// it "would also disable assertBodyReplaceSafe, assertDepUnblocked and the
-// Situations preflight". Banned in the harness, recommended in the error
-// message — these tests close the gap by requiring the waiver to be VOICED.
+// `kanban-stress-script.test.ts` forbids `--force` in the stress harness
+// because it would also disable assertBodyReplaceSafe and assertDepUnblocked.
+// Banned in the harness, recommended in the error message — these tests close
+// the gap by requiring the waiver to be VOICED.
+//
+// Both copies of that sentence used to end "and the Situations preflight",
+// which was never true — `assertSituationPreflightAllowed` takes no `force`.
+// The enumeration is machine-checked in
+// `forced-guard-waivers-are-voiced.test.ts` now; don't restate it here.
 //
 // What is deliberately NOT asserted: that `--force` stops working. It still
 // overrides (pinned by dep-block-terminal-column.test.ts); it just says so.
