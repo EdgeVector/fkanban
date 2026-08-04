@@ -6,7 +6,8 @@
 // Never product full-scan the Milestone schema when this index is bound.
 
 import type { Config } from "./config.ts";
-import type { NodeClient } from "./client.ts";
+import type { NodeClient, QueryFilter, QueryRow } from "./client.ts";
+import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
 import { BOARD_MILESTONES_FIELDS, BOARD_MILESTONES_LAYOUT } from "./schemas.ts";
 import type { Milestone } from "./record.ts";
 
@@ -369,25 +370,110 @@ export async function listBoardMilestonesPartitionSpine(
   }
   const out: BoardMilestoneRow[] = [];
   for (const r of res.results) {
-    const f = (r.fields ?? {}) as Record<string, unknown>;
-    const sk = typeof r.key?.range === "string" && r.key.range.length > 0
-      ? r.key.range
-      : typeof f.sk === "string"
-        ? f.sk
-        : "";
-    if (sk.length === 0) continue;
-    const parsed = parseBoardMilestoneSk(sk);
-    const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
-    if (slug.length === 0) continue;
-    out.push({
-      board,
-      sk,
-      slug,
-      state: parsed?.state ?? "",
-      position: parsed?.position ?? "",
-    });
+    const row = boardMilestoneRowFromQueryRow(r, board);
+    if (row !== null) out.push(row);
   }
   return out;
+}
+
+/**
+ * One BoardMilestones query row reduced to its address, or `null` if the row
+ * cannot be addressed at all.
+ *
+ * Shared by {@link listBoardMilestonesPartitionSpine} and
+ * {@link sweepBoardMilestonesPartition} so the two cannot disagree about what a
+ * row IS — they must differ only in which field leads, since that difference is
+ * exactly what the parity check measures.
+ *
+ * A row with no resolvable range key is skipped rather than addressed by a
+ * guess: the one thing `purgeOtherBoardMilestoneRows` does with a spine row is
+ * delete it, and a guessed key either deletes nothing (and counts it) or
+ * deletes the wrong thing. See `milestoneCardRowFromQueryRow` for the sibling
+ * index, where the empty-range row has a known identity.
+ */
+function boardMilestoneRowFromQueryRow(
+  r: QueryRow,
+  board: string,
+): BoardMilestoneRow | null {
+  const f = (r.fields ?? {}) as Record<string, unknown>;
+  const sk = typeof r.key?.range === "string" && r.key.range.length > 0
+    ? r.key.range
+    : typeof f.sk === "string"
+      ? f.sk
+      : "";
+  if (sk.length === 0) return null;
+  const parsed = parseBoardMilestoneSk(sk);
+  const slug = parsed?.slug ?? (typeof f.slug === "string" ? f.slug : "");
+  if (slug.length === 0) return null;
+  return {
+    board,
+    sk,
+    slug,
+    state: parsed?.state ?? "",
+    position: parsed?.position ?? "",
+  };
+}
+
+/** The result of {@link sweepBoardMilestonesPartition}: rows reached, and gaps. */
+export type BoardMilestonesPartitionSweep = {
+  /** Every row reachable under some leading field, deduped by range key. */
+  rows: BoardMilestoneRow[];
+  /**
+   * Leads the node refused. Non-empty means `rows` is a LOWER BOUND, and a
+   * caller asserting completeness must fail rather than report a clean result.
+   */
+  failedLeads: Array<{ field: string; error: string }>;
+};
+
+/**
+ * Every row in a board's milestone partition, reached under EVERY leading
+ * field — the complete baseline, as `sweepBoardCardsPartition` is for cards.
+ *
+ * The `slug`-led spine it replaces as a parity baseline is blind to a row
+ * carrying neither `slug` nor `board`: such a row is missing from both sides of
+ * the parity subtraction, nets to zero, and reads as clean. That blind spot is
+ * the one this check exists to find.
+ *
+ * Measured on the live primary 2026-08-04, both boards, 40 rows
+ * (`scripts/probe-milestone-parity-baseline-cost.ts`): 201ms for the one-lead
+ * spine against 584ms for the 17-lead sweep — 2.9x, +0.4s. Doctor / heal price,
+ * not a list price.
+ */
+export async function sweepBoardMilestonesPartition(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+): Promise<BoardMilestonesPartitionSweep | null> {
+  const schemaHash = boardMilestonesHash(cfg);
+  if (!schemaHash) return null;
+  const filter = { HashKey: board } as QueryFilter;
+
+  const perLead = await mapWithConcurrency(BOARD_MILESTONES_FIELDS, async (lead) => {
+    try {
+      const res = await node.queryAll({ schemaHash, fields: [lead], filter });
+      const rows: BoardMilestoneRow[] = [];
+      for (const r of res.results) {
+        const row = boardMilestoneRowFromQueryRow(r, board);
+        if (row !== null) rows.push(row);
+      }
+      return { rows, failure: null };
+    } catch (err) {
+      // Reported, never swallowed — a swallowed lead hands back a short
+      // enumeration labelled complete, which is the failure this removes.
+      return {
+        rows: [] as BoardMilestoneRow[],
+        failure: { field: lead, error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  }, PARTITION_READ_CONCURRENCY);
+
+  const bySk = new Map<string, BoardMilestoneRow>();
+  const failedLeads: BoardMilestonesPartitionSweep["failedLeads"] = [];
+  for (const lead of perLead) {
+    if (lead.failure) failedLeads.push(lead.failure);
+    for (const r of lead.rows) if (!bySk.has(r.sk)) bySk.set(r.sk, r);
+  }
+  return { rows: [...bySk.values()], failedLeads };
 }
 
 /**
