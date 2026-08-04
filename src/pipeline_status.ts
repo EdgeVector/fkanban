@@ -29,6 +29,7 @@ import { join } from "node:path";
 
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import {
+  forcedGuardWaiverWarning,
   parseBodyHeader,
   parseBodyListHeader,
   type Card,
@@ -761,7 +762,34 @@ export function evaluateLifecycleGate(opts: {
 /**
  * Opt-in gate for moving into a board's terminal column.
  * No-op when the card has no Requires-Status / Requires-Deploy headers.
- * `--force` bypasses (caller passes force=true).
+ * `--force` bypasses — out loud (caller passes force=true).
+ *
+ * ## Why this one had to start speaking too
+ *
+ * Of the guards `--force` clears in one keystroke, this is the one whose silent
+ * waiver is worst: it puts a card in the board's TERMINAL column while its
+ * required CI contexts are failing or missing. `done` is what the rollups,
+ * the milestone proof state and every "is it shipped?" read key off, so a
+ * silently forced terminal move does not just mislead the operator who typed
+ * the flag — it makes the board assert something untrue to everyone else.
+ *
+ * The shape follows {@link assertDepUnblocked}, whose two constraints apply
+ * here unchanged and for the same reasons:
+ *
+ *   1. **The fast path stays free.** `parseLifecycleRequirements` is a pure
+ *      body parse, so a card with no `Requires-Status`/`Requires-Deploy` header
+ *      is knowably ungated with no read at all. That check moves ABOVE the
+ *      force short-circuit; the node read below is paid only when there is a
+ *      real verdict to report.
+ *   2. **Reporting must never gate.** Already structural here, and worth
+ *      recording so nobody adds a defensive `try` that can never fire:
+ *      `attachPipelineStatus` is best-effort and NEVER THROWS — it catches at
+ *      both the OID resolution and the per-context fetch, and reports a
+ *      degraded node as `state: "unavailable"` / `"missing"` rather than an
+ *      exception. So a forced move cannot be converted into a refusal by a read
+ *      failure; it is voiced as an unmet context, which is the honest reading.
+ *      (Unforced, that same degraded read still REFUSES — that is this opt-in
+ *      gate's pre-existing fail-closed stance, not something the waiver changed.)
  */
 export async function assertLifecycleMoveAllowed(opts: {
   node: NodeClient;
@@ -770,7 +798,6 @@ export async function assertLifecycleMoveAllowed(opts: {
   terminalColumn: string;
   force?: boolean;
 }): Promise<void> {
-  if (opts.force) return;
   if (opts.targetColumn !== opts.terminalColumn) return;
 
   const requirements = parseLifecycleRequirements(opts.card.body);
@@ -794,11 +821,16 @@ export async function assertLifecycleMoveAllowed(opts: {
   const detail = verdict.violations
     .map((v) => `${v.kind}:${v.context}=${v.state}`)
     .join(", ");
+  const message =
+    `lifecycle_status_blocked: Card "${opts.card.slug}" cannot move to ` +
+    `"${opts.targetColumn}" until required pipeline contexts succeed (${detail}).`;
+  if (opts.force) {
+    console.error(forcedGuardWaiverWarning(opts.card.slug, "lifecycle pipeline-status", message));
+    return;
+  }
   throw new FkanbanError({
     code: "lifecycle_status_blocked",
-    message:
-      `lifecycle_status_blocked: Card "${opts.card.slug}" cannot move to ` +
-      `"${opts.targetColumn}" until required pipeline contexts succeed (${detail}).`,
+    message,
     hint:
       "Wait for LastgitCiStatus success, fix the failing context, set Head-Oid/branch " +
       "so kanban can resolve the commit, or pass --force to bypass the opt-in gate.",

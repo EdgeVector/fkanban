@@ -1405,15 +1405,51 @@ export const LIVE_PR_PICKUP_COLUMNS = new Set(["todo", "doing"]);
  * Escape with --force for intentional Unassigned/Operational exceptions.
  * Callers that already resolved a milestone should also pass its state so
  * abandoned milestones cannot anchor live PR work.
+ *
+ * Under `--force` the gate still waives — and now SAYS which verdict it waived.
+ * This is the gate whose own hint recommends the flag ("or --force for an
+ * intentional Unassigned/Operational exception"), so it is the most common
+ * entry point into the one-flag-many-guards overload that
+ * {@link assertDepUnblocked} documents at length. An operator who follows that
+ * sentence to get past a MILESTONE requirement should not have to infer that
+ * the same keystroke also cleared the dependency block, the pickup-readiness
+ * gate and the lifecycle CI gate.
+ *
+ * Cheap by construction: every input this reads (`kind`, `column`, `milestone`,
+ * and the caller-resolved `milestoneState`) is already in hand. There is no
+ * read to pay for and nothing to mutate, so unlike the dep waiver this needs no
+ * short-circuit and no best-effort fallback — the verdict is free.
  */
 export function assertLivePrMilestone(
   card: Pick<Card, "slug" | "kind" | "column" | "milestone">,
   force?: boolean,
   opts?: { milestoneState?: string; enforce?: boolean },
 ): void {
-  if (force) return;
+  if (!force) {
+    livePrMilestoneGate(card, opts);
+    return;
+  }
+  const waived = captureFkanbanError(() => livePrMilestoneGate(card, opts));
+  if (waived) {
+    console.error(forcedGuardWaiverWarning(card.slug, "live-PR milestone", waived.message));
+  }
+}
+
+/**
+ * The verdict half of {@link assertLivePrMilestone}, split out so `--force` can
+ * ASK for it without obeying it. Keeping the throw here (rather than returning
+ * a verdict object) means the forced and unforced paths cannot drift into
+ * disagreeing about what the gate decided — same code, same message, one of
+ * them printed instead of raised.
+ */
+function livePrMilestoneGate(
+  card: Pick<Card, "slug" | "kind" | "column" | "milestone">,
+  opts?: { milestoneState?: string; enforce?: boolean },
+): void {
   // Production loadConfig sets enforceLivePrMilestone: true. Unit-test Config
   // objects leave it undefined — pass enforce:false (or omit) to skip.
+  // A gate that is switched OFF waived nothing, so `--force` must stay silent
+  // here: a warning naming a rule that was not in effect is noise.
   if (opts?.enforce !== true) return;
   if (normalizeKind(card.kind) !== "pr") return;
   if (!LIVE_PR_PICKUP_COLUMNS.has(card.column)) return;
@@ -1949,6 +1985,25 @@ export function forcedDepWaiverWarning(slug: string, column: string, blockedBy: 
 }
 
 /**
+ * The same sentence for every OTHER gate `--force` clears.
+ *
+ * `verdict` is the message the gate would have thrown, verbatim. Passing the
+ * real message rather than re-describing the rule is the point: the forced and
+ * unforced readings of one gate stay byte-identical, so an operator who sees
+ * the warning and an operator who saw the refusal are looking at the same
+ * verdict about the same card. The trailing sentence is what distinguishes
+ * them — "overridden, not satisfied" is the whole reason this prints.
+ *
+ * `gate` names WHICH guard waived, because the trap being closed is that one
+ * flag clears several independent ones. A warning that said only "--force
+ * waived a gate" would reproduce the ambiguity it exists to remove.
+ */
+export function forcedGuardWaiverWarning(slug: string, gate: string, verdict: string): string {
+  return `warning: --force waived the ${gate} gate on "${slug}" — ` +
+    `${verdict} The gate was overridden, not satisfied.`;
+}
+
+/**
  * Refuse to place a card into a dep-enforced column while a dependency is
  * unfinished — and under `--force`, SAY SO instead of waiving in silence.
  *
@@ -1976,6 +2031,30 @@ export function forcedDepWaiverWarning(slug: string, column: string, blockedBy: 
  *
  * The waiver still waives — agents and operators depend on it, and a blocked
  * card in `doing` is a legitimate thing to ask for. It just stops being invisible.
+ *
+ * ## Which of those four now speak, and which does not
+ *
+ * This gate spoke first (2026-08-03). `assertLivePrMilestone` and
+ * `assertLifecycleMoveAllowed` followed, both through
+ * {@link forcedGuardWaiverWarning} — the milestone gate because its own hint is
+ * what sends operators to the flag, the lifecycle gate because its silent
+ * waiver lands a card in the TERMINAL column with failing CI, which every
+ * downstream rollup then reads as shipped.
+ *
+ * `assertDefaultTodoPickupReady` is deliberately still silent, and copying the
+ * shape above into it is a REGRESSION, not the obvious next step:
+ *
+ *   - It calls `sanitizeDefaultTodoLaneMetadata(card)`, which MUTATES the card
+ *     (clearing `branch` and `pr_url`). Running the gate to describe a waiver
+ *     would silently change what the forced write persists — a reporting path
+ *     that alters the record is not reporting.
+ *   - It calls `assertBodyLoaded`, which throws `card_body_not_loaded` on a
+ *     body-free projection. That is an INSTRUMENT failure, not a verdict about
+ *     the card, and voicing it as a waiver would put a sentence about a rule
+ *     nobody broke in front of the operator.
+ *
+ * Voicing it therefore needs its verdict split from its mutation and its
+ * hydration precondition first. Until then, silence is the honest option.
  *
  * ## Two constraints the shape here exists to honor
  *
