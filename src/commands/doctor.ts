@@ -27,7 +27,14 @@ import {
   sweepMilestoneCardsPartition,
 } from "../milestone-cards.ts";
 import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
-import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveLoadedSchema } from "../schemas.ts";
+import {
+  OWNER_APP_ID,
+  UNIQUE_SCHEMAS,
+  allPinnedSchemas,
+  checkPinnedSchemaIdentity,
+  formatSchemaIdentityMismatch,
+  resolveLoadedSchema,
+} from "../schemas.ts";
 
 // A single machine-readable health check. `pass`/`fail` checks flip `ok`;
 // `info` checks (e.g. the optional PATH shim) are advisory and never do.
@@ -192,6 +199,60 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // This makes `doctor` red — not cosmetically green — when writes are broken.
   try {
     const loaded = await node.listSchemas();
+
+    // Identity first, and for ALL SEVEN pinned keys — including the four
+    // membership/projection indexes that `resolveLoadedSchema` and
+    // `probeSchemaWritable` structurally cannot be called for (both are keyed on
+    // `RecordType`). Asked before writability because it is the more fundamental
+    // question: a pin that addresses the WRONG record type is not a weaker
+    // version of the right one, and "your milestone_cards pin points at the
+    // Milestone entity" beats any diagnosis derived from its field set.
+    //
+    // For the three RecordTypes this is subsumed by the resolution check below
+    // (a wrong-identity hash cannot appear in `compatible`), and it still runs on
+    // them deliberately: a check whose coverage depends on which loop a key
+    // happens to sit in is exactly the shape that let the primary's mispinned
+    // `milestone_cards` sit unreported. Uniform is cheap; selective is how blind
+    // spots get re-introduced.
+    for (const entry of allPinnedSchemas()) {
+      const configHash = cfg.schemaHashes[entry.key];
+      const identity = checkPinnedSchemaIdentity(entry, configHash, loaded);
+      // Does the loop below already report this key's unset/not-loaded state?
+      // Only the three RecordTypes are in `UNIQUE_SCHEMAS`, and for those its
+      // message is the better one (it names the remedy). Computed rather than
+      // assumed so that moving a key between the two lists cannot silently drop
+      // its coverage — the failure mode being repaired here in the first place.
+      const reportedBelow = UNIQUE_SCHEMAS.some((u) => (u.key as string) === entry.key);
+      if (identity.kind === "mismatch") {
+        check(
+          false,
+          `${entry.key} pin identity`,
+          `config pins ${configHash}, which the node has registered as a DIFFERENT schema` +
+            ` — ${formatSchemaIdentityMismatch(identity)}. Reads and writes through this pin address` +
+            ` "${identity.loadedDescriptiveName}", not ${entry.schema.schema.descriptive_name}.`,
+        );
+      } else if (identity.kind === "ok") {
+        check(true, `${entry.key} pin identity`, entry.schema.schema.descriptive_name);
+      } else if (identity.kind === "not_loaded" && !reportedBelow) {
+        // An extra-schema pin that points at nothing the node has loaded. Every
+        // read and write through it fails, and until now NOTHING in doctor said
+        // so for these four keys.
+        check(
+          false,
+          `${entry.key} pin identity`,
+          `config hash ${configHash} is not loaded on the node — run \`kanban init\``,
+        );
+      } else if (identity.kind === "unset" && !reportedBelow) {
+        // NOT a failure. An unpinned index is a supported degraded mode, not a
+        // broken one: `boardCardsHash`/`milestoneCardsHash` return null and their
+        // callers fall back to the unindexed path. Red here would fail doctor on
+        // every config predating a catalog entry — a red whose only cause is an
+        // optional feature being off is how doctors get ignored (the lesson
+        // already written into the resolution check below).
+        info(`${entry.key} not pinned`, "index unused — reads fall back to the unindexed path");
+      }
+    }
+
     for (const entry of UNIQUE_SCHEMAS) {
       const descriptive = entry.schema.schema.descriptive_name;
       const configHash = cfg.schemaHashes[entry.key];

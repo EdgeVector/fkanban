@@ -52,6 +52,10 @@ export type SchemaDefinition = {
   >;
 };
 
+// `membership_schema_guard.ts` is import-free, so this stays acyclic and this
+// module stays pure.
+import { MEMBERSHIP_KEY_EXPECTATIONS } from "./membership_schema_guard.ts";
+
 export type AddSchemaRequest = {
   schema: SchemaDefinition;
   mutation_mappers: Record<string, string>;
@@ -669,6 +673,132 @@ function keyLayoutMatches(
     loadedKey.hash_field === local.hash_field &&
     loadedKey.range_field === (local.range_field ?? null)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Pinned-hash identity check (every config key, not just the three RecordTypes)
+// ---------------------------------------------------------------------------
+//
+// `resolveLoadedSchema` and `probeSchemaWritable` are both keyed on `RecordType`
+// — they read `RECORDS[type]` — so neither can be CALLED for the four
+// `EXTRA_SCHEMAS` (`card_list_index`, `board_cards`, `board_milestones`,
+// `milestone_cards`). That is not a scoping decision anyone made; the check was
+// un-writable for those keys, so it was never written, and the membership
+// indexes — the surface most of this seat's repair work has landed on — got no
+// identity check at all.
+//
+// This asks the cheapest, most load-bearing half of that question, and asks it
+// off the DECLARED DEFINITION rather than a record-type lookup, so it applies
+// uniformly to all seven keys: **is the schema this config hash points at the
+// one we declared?** Not "does it accept our fields" (that is the write probe,
+// which for a HashRange index would deposit a throwaway row in a live
+// partition), just "is it the same record type".
+//
+// Why identity alone is worth a check: a schema hash is the ADDRESS of a record
+// type. A pin that points at a DIFFERENT type's schema does not error — it reads
+// exactly like an empty index. Measured on the primary 2026-08-04: config pinned
+// `milestone_cards` to a hash the node has registered under `descriptive_name:
+// "Milestone"` (the Hash entity), so partition reads on a milestone slug
+// returned the Milestone record with `range` coerced to `""` — the "phantom row"
+// three runs spent time on. Field/key-layout parity checks cannot see it: they
+// verify what the pinned schema looks like, never WHICH schema it is.
+export type SchemaIdentityMismatch = {
+  what: "owner_app_id" | "descriptive_name" | "key";
+  expected: string;
+  actual: string;
+};
+
+export type SchemaIdentityCheck =
+  | { kind: "ok" }
+  // The pinned hash is not in the node's loaded set at all. Distinct from a
+  // mismatch: the caller already reports this for the three RecordTypes and the
+  // remedy differs (re-init vs. investigate a crossed pin).
+  | { kind: "not_loaded" }
+  | { kind: "unset" }
+  | { kind: "mismatch"; loadedDescriptiveName: string; mismatches: SchemaIdentityMismatch[] };
+
+function formatKeyLayout(hash: string, range: string | null | undefined): string {
+  return range == null ? `Hash(${hash})` : `HashRange(${hash}, ${range})`;
+}
+
+// Hash fields this config key's index legitimately ALSO answers on, because a
+// multi-key catalog expand bound both lookups to one schema. Read off the same
+// table `checkMembershipKeyLayout` uses rather than restated here — the live
+// `board_cards` pin reports `hash_field=milestone` and serves every board row,
+// and a second, independent opinion about which layouts are legal is how one
+// check ends up calling the designed state a fault while its neighbour passes.
+function siblingHashFields(configKey: string): readonly string[] {
+  return MEMBERSHIP_KEY_EXPECTATIONS.find((e) => e.configKey === configKey)?.alsoAccepts ?? [];
+}
+
+export function checkPinnedSchemaIdentity(
+  // The catalog ENTRY, not just its schema: the multi-key allowance is keyed on
+  // the config key, and a signature that took only the definition would push
+  // that lookup onto every caller — a caller that forgets it reports a false red
+  // about the live board.
+  entry: { key: string; schema: AddSchemaRequest },
+  configHash: string | undefined,
+  loaded: LoadedSchemaCandidate[],
+): SchemaIdentityCheck {
+  if (!configHash) return { kind: "unset" };
+  const match = loaded.find((s) => s.name === configHash);
+  if (!match) return { kind: "not_loaded" };
+
+  const def = entry.schema.schema;
+  const mismatches: SchemaIdentityMismatch[] = [];
+  if (match.owner_app_id !== def.owner_app_id) {
+    mismatches.push({ what: "owner_app_id", expected: def.owner_app_id, actual: match.owner_app_id });
+  }
+  if (match.descriptive_name !== def.descriptive_name) {
+    mismatches.push({
+      what: "descriptive_name",
+      expected: def.descriptive_name,
+      actual: match.descriptive_name,
+    });
+  }
+  // Key layout, with the multi-key expand honoured on the hash axis only.
+  //
+  // `range_field` is compared STRICTLY and that is the load-bearing half: it is
+  // what separates a Hash entity from a HashRange index over that same entity,
+  // which is the confusion this check exists to catch. `hash_field` cannot carry
+  // the same weight — after an expand the catalog reports whichever key was
+  // declared last for BOTH lookups, so equality there fails on the designed
+  // state (measured on the primary: `board_cards` pinned to a schema reporting
+  // `HashRange(milestone, sk)`, and `HashKey=default` returns every board row).
+  //
+  // `loadedKey == null` means the node did not report a layout — unknown, not
+  // mismatched — matching `keyLayoutMatches` so an older node does not turn
+  // every pin red.
+  const loadedKey = match.key;
+  if (loadedKey) {
+    const declaredRange = def.key.range_field ?? null;
+    const hashOk =
+      loadedKey.hash_field === def.key.hash_field ||
+      siblingHashFields(entry.key).includes(loadedKey.hash_field);
+    if (!hashOk || loadedKey.range_field !== declaredRange) {
+      mismatches.push({
+        what: "key",
+        expected: formatKeyLayout(def.key.hash_field, declaredRange),
+        actual: formatKeyLayout(loadedKey.hash_field, loadedKey.range_field),
+      });
+    }
+  }
+
+  if (mismatches.length === 0) return { kind: "ok" };
+  return { kind: "mismatch", loadedDescriptiveName: match.descriptive_name, mismatches };
+}
+
+/** One-line human rendering of every mismatch, for doctor/init diagnostics. */
+export function formatSchemaIdentityMismatch(check: SchemaIdentityCheck): string {
+  if (check.kind !== "mismatch") return "";
+  return check.mismatches
+    .map((m) => `${m.what}: declared ${m.expected}, pinned schema is ${m.actual}`)
+    .join("; ");
+}
+
+/** Every config key fkanban pins, declared definition included. */
+export function allPinnedSchemas(): Array<{ key: string; schema: AddSchemaRequest }> {
+  return [...UNIQUE_SCHEMAS, ...EXTRA_SCHEMAS];
 }
 
 export function resolveLoadedSchema(

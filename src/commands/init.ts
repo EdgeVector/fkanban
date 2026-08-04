@@ -12,7 +12,13 @@
 // Service-registered catalog hashes. Shared-surface publish/attach is separate
 // governance and is not a prerequisite for registration.
 
-import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
+import {
+  newNodeClient,
+  FkanbanError,
+  type LoadedSchema,
+  type NodeClient,
+  type Verbose,
+} from "../client.ts";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fkanbanInvocation, mcpAddCommand } from "../mcp/register.ts";
@@ -22,6 +28,9 @@ import {
   OWNER_APP_ID,
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
+  allPinnedSchemas,
+  checkPinnedSchemaIdentity,
+  formatSchemaIdentityMismatch,
 } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -207,6 +216,24 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     });
   }
 
+  // Is each resolved hash the schema we DECLARED? The write probe answers "will
+  // the node accept our fields here", which a schema belonging to a different
+  // record type can answer `yes` to whenever its field set happens to cover ours
+  // — and a membership index is a field superset of the entity it indexes BY
+  // CONSTRUCTION, so that is not a hypothetical. Measured on the primary: the
+  // `milestone_cards` pin addresses a hash registered as `Milestone`.
+  //
+  // Runs BEFORE the pin-move guard on purpose. Both refuse before `writeConfig`,
+  // so ordering only decides which diagnosis prints — but a crossed identity is
+  // also WHY a pin would move, and unlike the move guard this one has no
+  // operator override: `--accept-schema-repin` says "yes, re-point it", never
+  // "yes, point it at another record type".
+  //
+  // A node whose schema list is unreadable (socket-only control plane) cannot be
+  // checked. It says so on its own line rather than passing quietly — this seat
+  // has now found four checks that reported coverage they did not have.
+  await assertResolvedSchemaIdentities(node, schemaHashes, print);
+
   // A resolved hash that differs from the incumbent is an ADDRESS CHANGE, not a
   // config refresh, and the write probe above cannot stand in for this check: it
   // asks only "will the node accept a write here?", which a brand-new EMPTY
@@ -371,6 +398,50 @@ export function assertSafePrimaryConfigRepoint(args: {
     hint:
       "Use KANBAN_CONFIG or FKANBAN_CONFIG to write an alternate config for " +
       "test-node init, or re-run against the configured primary socket.",
+  });
+}
+
+/**
+ * Refuse to adopt any resolved hash whose loaded schema is not the record type
+ * fkanban declared. Pure decision lives in `checkPinnedSchemaIdentity`; this
+ * wrapper owns the I/O (one `listSchemas`) and the operator-facing error.
+ */
+export async function assertResolvedSchemaIdentities(
+  node: NodeClient,
+  schemaHashes: Record<string, string>,
+  print: (line: string) => void,
+): Promise<void> {
+  let loaded: LoadedSchema[];
+  try {
+    loaded = await node.listSchemas();
+  } catch {
+    print(`        ** schema identities NOT verified — node schema list unavailable **`);
+    return;
+  }
+
+  const crossed: string[] = [];
+  for (const entry of allPinnedSchemas()) {
+    const identity = checkPinnedSchemaIdentity(entry, schemaHashes[entry.key], loaded);
+    if (identity.kind !== "mismatch") continue;
+    crossed.push(
+      `${entry.key} (${schemaHashes[entry.key]}) is registered as "${identity.loadedDescriptiveName}" — ` +
+        formatSchemaIdentityMismatch(identity),
+    );
+  }
+  if (crossed.length === 0) return;
+
+  throw new FkanbanError({
+    code: "schema_identity_crossed",
+    message:
+      `The node resolved ${crossed.length === 1 ? "a schema hash" : "schema hashes"} that ` +
+      `${crossed.length === 1 ? "belongs" : "belong"} to a DIFFERENT record type than fkanban ` +
+      `declared, so init is refusing to adopt ${crossed.length === 1 ? "it" : "them"}:\n  ` +
+      crossed.join("\n  "),
+    hint:
+      "A schema hash is the address of a record type. Pinning one that resolves to another type " +
+      "does not error at write time — the index simply reads as empty. Repair the node's catalog " +
+      "registration for the named schema(s), then re-run `kanban init`. Your existing config was " +
+      "left untouched.",
   });
 }
 

@@ -14,7 +14,19 @@ import { join } from "node:path";
 
 import { FkanbanError } from "../src/client.ts";
 import { runInit } from "../src/commands/init.ts";
-import { fieldsFor } from "../src/schemas.ts";
+import { allPinnedSchemas, fieldsFor } from "../src/schemas.ts";
+
+// The stub used to hand `declaredCardHash` back for every schema that wasn't
+// Board, and list only Card + Board as loaded — so five of the seven declared
+// schemas resolved to the Card identity. That is not a node any real Mini
+// resembles, and `assertResolvedSchemaIdentities` refuses it (correctly: one
+// hash answering for six record types is exactly the crossed-pin fault). Mint a
+// distinct identity per declared schema instead, and list them all.
+function stubHashFor(descriptiveName: string, declaredCardHash: string): string {
+  if (descriptiveName === "Card") return declaredCardHash;
+  if (descriptiveName === "Board") return BOARD_HASH;
+  return `hash-${descriptiveName}`;
+}
 
 const FULL_CARD_HASH = "fullcardhash18";
 const STALE_CARD_HASH = "stalecardhash10";
@@ -59,7 +71,7 @@ function makeNode(declaredCardHash: string, opts: { legacyDeclareResponse?: bool
       }
       if (url.pathname === "/api/apps/declare-schema") {
         const schema = (body!.schema ?? {}) as { descriptive_name?: string };
-        const canonical = schema.descriptive_name === "Board" ? BOARD_HASH : declaredCardHash;
+        const canonical = stubHashFor(schema.descriptive_name ?? "", declaredCardHash);
         return Response.json({
           app_id: "fkanban",
           schema: schema.descriptive_name,
@@ -79,20 +91,17 @@ function makeNode(declaredCardHash: string, opts: { legacyDeclareResponse?: bool
       }
       if (url.pathname === "/api/schemas") {
         const cardFields = declaredCardHash === STALE_CARD_HASH ? OLD_CARD_FIELDS : fieldsFor("card");
-        const schemas = [
-          {
-            name: declaredCardHash,
-            descriptive_name: "Card",
+        // One loaded row per declared schema, each under its OWN identity —
+        // the shape a real node reports. Card keeps the #94 field split.
+        const schemas = allPinnedSchemas().map((entry) => {
+          const descriptive = entry.schema.schema.descriptive_name;
+          return {
+            name: stubHashFor(descriptive, declaredCardHash),
+            descriptive_name: descriptive,
             owner_app_id: "fkanban",
-            fields: cardFields,
-          },
-          {
-            name: BOARD_HASH,
-            descriptive_name: "Board",
-            owner_app_id: "fkanban",
-            fields: fieldsFor("board"),
-          },
-        ];
+            fields: descriptive === "Card" ? cardFields : [...entry.schema.schema.fields],
+          };
+        });
         return Response.json({ schemas });
       }
       if (url.pathname === "/api/mutation") {

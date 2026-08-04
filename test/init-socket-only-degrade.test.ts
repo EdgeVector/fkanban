@@ -19,7 +19,17 @@ import { dirname, join } from "node:path";
 
 import { FkanbanError } from "../src/client.ts";
 import { assertSafePrimaryConfigRepoint, runInit } from "../src/commands/init.ts";
-import { fieldsFor, OWNER_APP_ID } from "../src/schemas.ts";
+import { allPinnedSchemas, OWNER_APP_ID } from "../src/schemas.ts";
+
+// One identity per declared schema, as a real node reports. The stub used to
+// answer `CARD_HASH` for everything except Board and list only those two, so
+// five record types shared the Card identity — a shape no Mini produces, and
+// one `assertResolvedSchemaIdentities` refuses on sight.
+function stubHashFor(descriptiveName: string): string {
+  if (descriptiveName === "Card") return CARD_HASH;
+  if (descriptiveName === "Board") return BOARD_HASH;
+  return `hash-${descriptiveName}`;
+}
 
 const CARD_HASH = "socketcardhash18";
 const BOARD_HASH = "socketboardhash";
@@ -76,7 +86,7 @@ function makeSocketNode(
       }
       if (opts.fullSurface && url.pathname === "/api/apps/declare-schema") {
         const schema = (body!.schema ?? {}) as { descriptive_name?: string };
-        const canonical = schema.descriptive_name === "Board" ? BOARD_HASH : CARD_HASH;
+        const canonical = stubHashFor(schema.descriptive_name ?? "");
         return Response.json({
           app_id: OWNER_APP_ID,
           schema: schema.descriptive_name,
@@ -92,20 +102,12 @@ function makeSocketNode(
       }
       if (opts.fullSurface && url.pathname === "/api/schemas") {
         return Response.json({
-          schemas: [
-            {
-              name: CARD_HASH,
-              descriptive_name: "Card",
-              owner_app_id: OWNER_APP_ID,
-              fields: fieldsFor("card"),
-            },
-            {
-              name: BOARD_HASH,
-              descriptive_name: "Board",
-              owner_app_id: OWNER_APP_ID,
-              fields: fieldsFor("board"),
-            },
-          ],
+          schemas: allPinnedSchemas().map((entry) => ({
+            name: stubHashFor(entry.schema.schema.descriptive_name),
+            descriptive_name: entry.schema.schema.descriptive_name,
+            owner_app_id: OWNER_APP_ID,
+            fields: [...entry.schema.schema.fields],
+          })),
         });
       }
       if (url.pathname === "/api/mutation") {
