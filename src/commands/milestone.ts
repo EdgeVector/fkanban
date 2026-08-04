@@ -36,7 +36,7 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
-import { findMilestoneCardBySk, listMilestoneCardsPartition, milestoneCardFieldsFromCard, milestoneCardSk, removeMilestoneCard, upsertMilestoneCard } from "../milestone-cards.ts";
+import { cardFromMilestoneCardFields, findMilestoneCardBySk, listMilestoneCardsPartition, listMilestoneCardsPartitionSpine, type MilestoneCardRow, milestoneCardFieldsFromCard, milestoneCardSk, removeMilestoneCard, upsertMilestoneCard } from "../milestone-cards.ts";
 
 export type MilestoneWarning = {
   code: string;
@@ -481,6 +481,25 @@ function milestoneCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
 }
 
 /**
+ * A MilestoneCards row rebuilt from its ADDRESS alone, for the repair calls
+ * that only need to name a row rather than describe it.
+ *
+ * `removeMilestoneCard` recomputes the sk from `column`/`position`/`slug`, all
+ * three of which the spine parses out of the real range key — so this addresses
+ * the same row the enumeration found. If the sk could not be parsed, the
+ * recomputed key addresses nothing, and the removal still lands: the purge that
+ * follows it sweeps every row for the slug by address, keeping none.
+ */
+function cardForRemoval(milestone: string, row: MilestoneCardRow): Card {
+  return cardFromMilestoneCardFields({
+    milestone,
+    slug: row.slug,
+    column: row.column,
+    position: row.position,
+  });
+}
+
+/**
  * Verify every child of a milestone against Card truth and repair MilestoneCards.
  *
  * The two inputs play different roles and conflating them is how this function
@@ -504,16 +523,30 @@ async function reconcileMilestoneCardChildren(
   opts: { cfg: Config; node: NodeClient },
   milestone: Milestone,
   indexRows: Card[],
+  indexAddresses: MilestoneCardRow[],
   boardRows: Card[],
   repair: { apply: boolean; budget: number | null; directPayloadUpsert: boolean },
 ): Promise<{ children: Card[]; repairs: MilestoneRepairPlan }> {
-  const rowsBySlug = new Map<string, Card[]>();
+  // WHICH ROWS EXIST comes from the address enumeration; WHAT THEY SAY comes
+  // from the payload read. Conflating the two is what made this function blind
+  // to the rows most likely to need repair — see the call site.
+  //
+  // A row present by address with no payload cannot be compared to truth, so it
+  // is treated as stale rather than as absent. That is the conservative
+  // direction: it costs a redundant upsert on a row that may already be
+  // correct, and it buys the sibling purge arming on a partition that really
+  // does hold duplicates.
+  const payloadBySk = new Map<string, Card>();
   for (const row of indexRows) {
+    payloadBySk.set(milestoneCardSk(row.column, row.position, row.slug), row);
+  }
+  const rowsBySlug = new Map<string, MilestoneCardRow[]>();
+  for (const row of indexAddresses) {
     const rows = rowsBySlug.get(row.slug) ?? [];
     rows.push(row);
     rowsBySlug.set(row.slug, rows);
   }
-  const slugs = [...new Set([...indexRows.map((row) => row.slug), ...boardRows.map((row) => row.slug)])];
+  const slugs = [...new Set([...indexAddresses.map((row) => row.slug), ...boardRows.map((row) => row.slug)])];
 
   // Reads first, fanned out: they have no ordering dependency on each other and
   // a point read is ~190ms on the primary, so 69 of them serially is 13s.
@@ -537,18 +570,32 @@ async function reconcileMilestoneCardChildren(
     // No such card, or it belongs to a different milestone/board now: retire
     // the index rows. One removal per slug is enough — removeMilestoneCard
     // purges every other row for that slug itself.
+    //
+    // `rows` is now the ADDRESS set, so a row whose payload the wide read
+    // denied still queues its removal. That is the whole point: an orphan
+    // nothing can see is an orphan nothing can delete, and this branch was
+    // unreachable for precisely the rows that needed it.
     if (!truth || (truth.milestone ?? "") !== milestone.slug || (truth.board || "default") !== milestone.board) {
-      if (rows[0]) removals.push(rows[0]);
+      if (rows[0]) removals.push(cardForRemoval(milestone.slug, rows[0]));
       return;
     }
 
     // rows.length === 0 is the missing-index-row case reconcile exists to fix.
-    const stale = rows.length !== 1 || !milestoneCardSummaryMatchesTruth(rows[0]!, truth);
+    // A row present by address but absent from the payload read cannot be
+    // compared, so it counts as stale — never as "matches truth".
+    const payload = rows[0] ? payloadBySk.get(rows[0].sk) ?? null : null;
+    const stale = rows.length !== 1 || payload === null || !milestoneCardSummaryMatchesTruth(payload, truth);
     // `previous` is rows[0], one of possibly several. Say so: the upsert's
     // orphan sweep is otherwise gated on rows[0] having a different sk, and
     // rows[0] is whichever row the partition read returned first, not whichever
     // one is wrong. See MilestoneCardUpsertOptions.purgeSiblings.
-    if (stale) upserts.push({ truth, previous: rows[0] ?? null, siblings: rows.length > 1 });
+    if (stale) {
+      upserts.push({
+        truth,
+        previous: rows[0] ? cardForRemoval(milestone.slug, rows[0]) : null,
+        siblings: rows.length > 1,
+      });
+    }
     out.push(truth);
   });
 
@@ -658,8 +705,29 @@ export async function milestoneReconcileResult(opts: {
   // Prefer keyed partitions, but union MilestoneCards with current board
   // membership so a lagging/missing milestone-keyed fold cannot hide a live
   // Card whose board row already carries the milestone link.
-  const [fromIndex, boardCards, boards, proofCard] = await Promise.all([
+  const [fromIndex, indexAddresses, boardCards, boards, proofCard] = await Promise.all([
     listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug),
+    // The ADDRESS enumeration, in the same wave — this read decides which rows
+    // exist, and the wide read above only decides what their payloads say.
+    //
+    // They cannot be the same read. The wide read leads with `milestone`, the
+    // partition key, and a row whose payload copy of that key did not persist
+    // is dropped from it with no error — while remaining addressable, and
+    // remaining visible to `purgeOtherMilestoneCardRows`, which has always
+    // enumerated by spine for exactly this reason. Classifying repairs from the
+    // wide read therefore made the two halves of this command disagree about
+    // which rows exist: the half that DECIDES could not see rows the half that
+    // DELETES could.
+    //
+    // Measured on the live primary 2026-08-03, partition
+    // `lastdb-0231-read-regression-fixes`: 7 rows by address, 4 under the wide
+    // read. Of the 3 invisible rows, two were stale duplicates of a card that
+    // had since moved (so `rows.length > 1` read as 0 and the sibling purge
+    // never armed) and one belonged to a DELETED card (so `rows[0]` was
+    // undefined and no removal was ever queued). Both are permanent: every
+    // subsequent run re-derived the same blind classification and re-issued the
+    // same non-repair.
+    listMilestoneCardsPartitionSpine(opts.node, opts.cfg, milestone.slug),
     listCardsOnBoard(opts.node, opts.cfg, milestone.board),
     listBoards(opts.node, opts.cfg),
     milestone.proof_card
@@ -668,7 +736,7 @@ export async function milestoneReconcileResult(opts: {
   ]);
   const fromBoard = boardCards.filter((card) => card.milestone === milestone.slug);
   const reconciled = fromIndex !== null
-    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, fromBoard, { apply, budget, directPayloadUpsert })
+    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, indexAddresses ?? [], fromBoard, { apply, budget, directPayloadUpsert })
     : {
       // No MilestoneCards partition to reconcile against: membership came
       // straight from the board, so nothing was classified and nothing is

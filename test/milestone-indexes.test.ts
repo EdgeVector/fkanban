@@ -1009,9 +1009,15 @@ describe("milestone HashRange indexes", () => {
     partitionReads = 0;
     await milestoneReconcileResult({ cfg, node: counting, slug: "ms-one-stale" });
 
-    // Exactly the one read `milestoneReconcileResult` makes itself. A sweep
-    // inside the upsert would show up as a second.
-    expect(partitionReads).toBe(1);
+    // Exactly the two reads `milestoneReconcileResult` makes itself, both in
+    // its opening wave: the wide payload read and the spine address read. They
+    // are two reads and ONE round trip, which is the cost that matters here.
+    //
+    // The guard is unchanged in what it catches: this partition is converged on
+    // the second run, so nothing below the classifier should touch it at all. A
+    // sweep inside the upsert — the regression this test was written for —
+    // still shows up, now as a THIRD read.
+    expect(partitionReads).toBe(2);
     expect((await listMilestoneCardsPartition(node, cfg, "ms-one-stale"))?.map((c) => c.title))
       .toEqual(["PR one-stale"]);
   });
