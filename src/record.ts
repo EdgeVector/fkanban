@@ -45,7 +45,6 @@ import {
   CARD_FIELDS,
   CARD_OPTIONAL_SCHEMA_FIELDS,
   fieldsFor,
-  fixedColumns,
   isDefaultColumn,
   resolveColumns,
   type AddSchemaRequest,
@@ -317,9 +316,13 @@ export function isWorkingColumn(column: string): boolean {
   return (WORKING_COLUMNS as readonly string[]).includes(column);
 }
 
+// The last column of `columns`. `resolveColumns` ignores its argument while
+// columns are fixed, so this is `TERMINAL_COLUMN` for every input — it is kept
+// as the choke point where per-board columns would come back, not as a value
+// callers need to compute. Prefer `TERMINAL_COLUMN` directly.
 export function terminalColumn(columns: readonly string[]): string {
   const resolved = resolveColumns(columns);
-  return resolved[resolved.length - 1] ?? FALLBACK_TERMINAL_COLUMN;
+  return resolved[resolved.length - 1] ?? TERMINAL_COLUMN;
 }
 
 export function doneAtForColumnTransition(
@@ -2019,64 +2022,48 @@ export type DepStatus = {
   blocked: boolean;
 };
 
-// Fallback terminal column used when a dep's board can't be resolved (deleted
-// board, forward reference, or no board map supplied): the historical literal
-// `done`, so nothing regresses when the board context is unavailable.
-export const FALLBACK_TERMINAL_COLUMN = "done";
+/**
+ * The column at which work is complete, on EVERY board.
+ *
+ * Columns are fixed (backlog → todo → doing → done) and `board create` rejects
+ * any other list, so `terminalColumn()` — which routes through `resolveColumns`,
+ * and `resolveColumns` ignores what it is handed — returns `done` for every
+ * input. This constant is that value, named for what it is.
+ *
+ * IT USED TO BE A MAP. `boardTerminalMap(boards)` built `slug → terminalColumn`
+ * for callers that keyed by board, and `terminalColumnFor(slug, map)` read
+ * `map?.get(slug) ?? "done"`. Once columns became fixed, every value in that map
+ * was `done` and so was the fallback — the map could not differ from omitting
+ * it, for any board, present or absent. `test/dep-block-terminal-column.test.ts`
+ * had already been asserting exactly that (a populated map and an EMPTY map
+ * produce identical verdicts) without naming it.
+ *
+ * Constant-valued, it was not free: four call sites issued a dedicated
+ * `listBoards` read purely to build it — including `assertDepUnblocked`, which
+ * runs on the WRITE path for every card entering a gated column. Those reads
+ * could not change an answer, and are gone.
+ *
+ * If per-board columns ever come back, the choke point is `resolveColumns`, not
+ * this constant: `test/terminal-column-is-fixed.test.ts` fails the moment
+ * `terminalColumn` stops being constant, and points here.
+ */
+export const TERMINAL_COLUMN = "done";
 
-// Map of board slug → that board's terminal column. Columns are fixed
-// (backlog → todo → doing → done), so every board's terminal is `done`.
-// Built once per command from `listBoards` for callers that still key by board.
-export function boardTerminalMap(boards: Board[]): Map<string, string> {
-  const m = new Map<string, string>();
-  const terminal = terminalColumn(fixedColumns());
-  for (const b of boards) {
-    m.set(b.slug, terminal);
-  }
-  return m;
-}
-
-// The column at which a dep card on `boardSlug` counts as done: its board's
-// terminal column, or the literal `done` fallback when the board is unresolvable.
-function terminalColumnFor(
-  boardSlug: string,
-  boardTerminal?: Map<string, string>,
-): string {
-  return boardTerminal?.get(boardSlug) ?? FALLBACK_TERMINAL_COLUMN;
-}
-
-// Whether moving a blocked card INTO `column` (on board `boardSlug`) is gated by
-// the dependency soft-block. A blocked card may not enter a column that is a
-// default-named working column (doing/done) OR that is `boardSlug`'s own
-// terminal column — so on a custom board (e.g. `spec,build,ship`) a blocked card
-// can't be *completed* into its terminal column (`ship`) without --force, even
-// though that board has none of the default working columns. The default board's
-// terminal column is `done`, which is already in WORKING_COLUMNS, so the gating
-// set is unchanged there.
+// Whether moving a blocked card INTO `column` is gated by the dependency
+// soft-block: the default-named working columns (doing/done), which already
+// include the terminal column.
 //
 // Default/`todo` is intentionally not gated: grooming may surface dependency
 // state there, but the hard block starts when work enters `doing` or terminal.
-//
-// This intentionally does NOT gate intermediate custom columns (e.g. `spec →
-// build`) — that needs board-level intake metadata that doesn't exist yet.
-export function isDepEnforcedColumn(
-  column: string,
-  boardSlug: string,
-  boardTerminal?: Map<string, string>,
-): boolean {
-  return isWorkingColumn(column) || column === terminalColumnFor(boardSlug, boardTerminal);
+export function isDepEnforcedColumn(column: string): boolean {
+  return isWorkingColumn(column) || column === TERMINAL_COLUMN;
 }
 
 // Resolve a card's deps against the full set of live cards. A dependency is
-// satisfied once its dep card reaches the LAST column of the dep card's own
-// board (resolved via `boardTerminal`), not only the literal `done` — so a
-// board with a custom terminal column still unblocks its dependents. When
-// `boardTerminal` is omitted or a dep's board can't be resolved, falls back to
-// the literal `done` (preserving the default board's behavior exactly).
+// satisfied once its dep card reaches the terminal column.
 export function depStatus(
   card: Card,
   allCards: Card[],
-  boardTerminal?: Map<string, string>,
 ): DepStatus {
   const bySlug = new Map(allCards.map((c) => [c.slug, c]));
   const blockedBy: string[] = [];
@@ -2088,7 +2075,7 @@ export function depStatus(
       blockedBy.push(dep);
     } else if (isMetaCardKind(d.kind)) {
       continue;
-    } else if (d.column !== terminalColumnFor(d.board, boardTerminal)) {
+    } else if (d.column !== TERMINAL_COLUMN) {
       blockedBy.push(dep);
     }
   }
@@ -2188,16 +2175,15 @@ export async function assertDepUnblocked(
 ): Promise<void> {
   if (force && card.deps.length === 0) return;
 
-  let boardTerminal: Map<string, string>;
+  // The gate check is now pure — no read at all. It used to sit behind a
+  // `listBoards` inside this try, which meant a card headed for a NON-gated
+  // column still paid a board read (and, under --force on an unreachable node,
+  // warned about skipping a check that did not apply to it).
+  if (!isDepEnforcedColumn(card.column)) return;
+
   let status: DepStatus;
   try {
-    boardTerminal = boardTerminalMap(await listBoards(node, cfg));
-    if (!isDepEnforcedColumn(card.column, card.board, boardTerminal)) return;
-    status = depStatus(
-      card,
-      await listDependencyStatusesForCards(node, cfg, [card]),
-      boardTerminal,
-    );
+    status = depStatus(card, await listDependencyStatusesForCards(node, cfg, [card]));
   } catch (err) {
     // Under force this read exists only to describe the waiver, so a node that
     // cannot answer must not convert an override into a refusal. Unforced, the
@@ -2205,7 +2191,7 @@ export async function assertDepUnblocked(
     if (!force) throw err;
     console.error(
       `warning: --force placed "${card.slug}" in ${card.column} without checking its ` +
-        `${card.deps.length} dependency(ies) — the board could not be read.`,
+        `${card.deps.length} dependency(ies) — the dependencies could not be read.`,
     );
     return;
   }
@@ -2268,16 +2254,10 @@ export function wouldCreateCycle(
 }
 
 // Map of slug → blocked? across a set of cards, resolved against `allCards`.
-// `boardTerminal` (board slug → terminal column) lets a dep on a custom board
-// count as done at that board's last column; omit it to fall back to `done`.
-export function blockedSlugSet(
-  cards: Card[],
-  allCards: Card[],
-  boardTerminal?: Map<string, string>,
-): Set<string> {
+export function blockedSlugSet(cards: Card[], allCards: Card[]): Set<string> {
   const blocked = new Set<string>();
   for (const c of cards) {
-    if (depStatus(c, allCards, boardTerminal).blocked) blocked.add(c.slug);
+    if (depStatus(c, allCards).blocked) blocked.add(c.slug);
   }
   return blocked;
 }

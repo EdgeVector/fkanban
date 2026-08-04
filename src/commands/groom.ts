@@ -4,6 +4,7 @@ import {
   bodyLooksLikeKnownClobber,
   deriveStructuredFields,
   listBoards,
+  TERMINAL_COLUMN,
   listBoardCardsWithBodies,
   nowIso,
   sortCards,
@@ -162,8 +163,7 @@ export async function groomStructuredRoutingResult(opts: GroomStructuredRoutingO
 }> {
   const boards = await listBoards(opts.node, opts.cfg);
   const cards = await listBoardCardsWithBodies(opts.node, opts.cfg, { boards });
-  const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
-  const active = sortCards(cards.filter((c) => c.column !== (terminalByBoard.get(c.board) ?? "done")));
+  const active = sortCards(cards.filter((c) => c.column !== TERMINAL_COLUMN));
 
   const repairs: StructuredRoutingRepair[] = [];
   for (const card of active) {
@@ -206,8 +206,7 @@ export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions):
   // pickup lane. One admin scan per sweep is the correct cost here.
   const boards = await listBoards(opts.node, opts.cfg);
   const cards = await listBoardCardsWithBodies(opts.node, opts.cfg, { boards });
-  const terminalByBoard = new Map(boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]));
-  const active = sortCards(cards.filter((c) => c.column !== (terminalByBoard.get(c.board) ?? "done")));
+  const active = sortCards(cards.filter((c) => c.column !== TERMINAL_COLUMN));
 
   const cardResults = [];
   let changed = 0;

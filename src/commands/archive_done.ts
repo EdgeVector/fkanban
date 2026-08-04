@@ -37,17 +37,13 @@ import {
   deleteCardRecord,
   listBoards,
   listCardsByColumn,
-  boardTerminalMap,
-  FALLBACK_TERMINAL_COLUMN,
+  TERMINAL_COLUMN,
   type Board,
   type Card,
   type Milestone,
 } from "../record.ts";
 import { proofCardRefsFrom, proofHoldReason, readProofCardRefs } from "../proof_card_refs.ts";
 import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "../concurrency.ts";
-
-const terminalFor = (board: string, terminals: Map<string, string>): string =>
-  terminals.get(board) ?? FALLBACK_TERMINAL_COLUMN;
 
 export const DEFAULT_ARCHIVE_CUTOFF_HOURS = 24;
 /**
@@ -204,7 +200,6 @@ export async function archiveDoneResult(
       hint: "Run kanban board list to see live boards.",
     });
   }
-  const terminals = boardTerminalMap(allBoards);
 
   const boardReports: ArchiveDoneBoardReport[] = [];
   const actions: ArchiveDoneAction[] = [];
@@ -224,12 +219,12 @@ export async function archiveDoneResult(
   // byte-identical to the serial version.
   const terminalRowsByBoard = await mapWithConcurrency(
     boards,
-    (b) => cardsIn(opts.node, opts.cfg, terminalFor(b.slug, terminals), b.slug),
+    (b) => cardsIn(opts.node, opts.cfg, TERMINAL_COLUMN, b.slug),
     PARTITION_READ_CONCURRENCY,
   );
 
   for (const [i, b] of boards.entries()) {
-    const terminal = terminalFor(b.slug, terminals);
+    const terminal = TERMINAL_COLUMN;
     const rows = terminalRowsByBoard[i]!;
     let unparsable = 0;
     let count = 0;
@@ -268,11 +263,11 @@ export async function archiveDoneResult(
     // dep slugs, none of which depends on any other read.
     //
     // Which columns are read is unchanged: still every non-terminal column of
-    // every board, with the terminal resolved by the same `terminalFor` used
+    // every board, with the terminal being the fixed `TERMINAL_COLUMN` used
     // above. Only the order and overlap of the reads differ, and `depTargets`
     // is a Set, so result order cannot affect the outcome.
     const depScanTargets = allBoards.flatMap((b) => {
-      const terminal = terminalFor(b.slug, terminals);
+      const terminal = TERMINAL_COLUMN;
       return b.columns.filter((col) => col !== terminal).map((col) => ({ board: b.slug, col }));
     });
     const depScanRows = await mapWithConcurrency(

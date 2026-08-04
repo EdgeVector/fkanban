@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import type { Config, } from "../src/config.ts";
 import type { NodeClient, QueryFilter } from "../src/client.ts";
 import { buildPickupStatusReportWithSituations } from "../src/pickup.ts";
-import type { Board, Card } from "../src/record.ts";
+import type { Card } from "../src/record.ts";
 
 const cfg = {
   configVersion: 1,
@@ -19,17 +19,6 @@ const cfg = {
   schemaServiceUrl: "http://127.0.0.1:9",
   schemaHashes: { card: "card-hash" },
 } as unknown as Config;
-
-const boards: Board[] = [
-  {
-    slug: "default",
-    title: "default",
-    body: "",
-    columns: ["backlog", "todo", "doing", "done"],
-    created_at: "",
-    updated_at: "",
-  } as Board,
-];
 
 function card(partial: Partial<Card> & { slug: string }): Card {
   return {
@@ -81,7 +70,7 @@ describe("pickup dep fan-out is bounded to the classified set", () => {
       card({ slug: "waiting", column: "todo" }),
     ];
 
-    await buildPickupStatusReportWithSituations(cards, boards, undefined, { cfg, node });
+    await buildPickupStatusReportWithSituations(cards, undefined, { cfg, node });
 
     expect(hashKeyReads).not.toContain("ghost-dep");
   });
@@ -90,7 +79,7 @@ describe("pickup dep fan-out is bounded to the classified set", () => {
     const { node, hashKeyReads } = recordingNode();
     const cards = [card({ slug: "waiting", column: "todo", deps: ["off-board-dep"] })];
 
-    await buildPickupStatusReportWithSituations(cards, boards, undefined, { cfg, node });
+    await buildPickupStatusReportWithSituations(cards, undefined, { cfg, node });
 
     expect(hashKeyReads).toContain("off-board-dep");
   });
@@ -102,7 +91,7 @@ describe("pickup dep fan-out is bounded to the classified set", () => {
       card({ slug: "peer", column: "done" }),
     ];
 
-    await buildPickupStatusReportWithSituations(cards, boards, undefined, { cfg, node });
+    await buildPickupStatusReportWithSituations(cards, undefined, { cfg, node });
 
     expect(hashKeyReads).not.toContain("peer");
   });
@@ -114,7 +103,7 @@ describe("pickup dep fan-out is bounded to the classified set", () => {
       card({ slug: "finished", column: "done", deps: ["ghost-dep"] }),
     ];
 
-    const report = await buildPickupStatusReportWithSituations(cards, boards, undefined, {
+    const report = await buildPickupStatusReportWithSituations(cards, undefined, {
       cfg,
       node,
     });

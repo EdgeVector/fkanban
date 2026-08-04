@@ -207,10 +207,7 @@ export async function pickupExplainResult(opts: {
   // surface-overlap gate reports OK about peers it could not evaluate.
   cards = await hydrateOverlapPeers(opts.node, opts.cfg, cards);
 
-  const terminalByBoard = new Map(
-    boards.map((b) => [b.slug, b.columns[b.columns.length - 1] ?? "done"]),
-  );
-  const dep = depStatus(card, cards, terminalByBoard);
+  const dep = depStatus(card, cards);
 
   const fence = await checkSituationFence(card, opts.situationPreflight);
   const enforceLivePrMilestone = opts.cfg.enforceLivePrMilestone === true;

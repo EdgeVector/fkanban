@@ -25,7 +25,6 @@ import {
   normalizeTags,
   depStatus,
   blockedSlugSet,
-  boardTerminalMap,
   wouldCreateCycle,
   cardMatchesQuery,
   queryTerms,
@@ -315,53 +314,33 @@ describe("dependencies", () => {
     }
   });
 
-  // --- dep done-ness uses the dep board's TERMINAL column, not literal "done" ---
-
-  test("boardTerminalMap maps every board slug to fixed terminal `done`", () => {
-    const m = boardTerminalMap([
-      { slug: "zz", title: "Z", body: "", columns: ["spec", "build", "ship"], created_at: "", updated_at: "" },
-      { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-      { slug: "empty", title: "E", body: "", columns: [], created_at: "", updated_at: "" },
-    ]);
-    expect(m.get("zz")).toBe("done");
-    expect(m.get("default")).toBe("done");
-    expect(m.get("empty")).toBe("done");
-  });
+  // --- dep done-ness is the fixed TERMINAL_COLUMN (see terminal-column-is-fixed.test.ts) ---
 
   test("dep is satisfied once it reaches fixed terminal column `done`", () => {
-    const terminal = boardTerminalMap([
-      { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-    ]);
     const c1 = card({ slug: "c1", board: "zz", column: "done" });
     const c2 = card({ slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
     const all = [c1, c2];
-    expect(depStatus(c2, all, terminal).blocked).toBe(false);
-    expect(blockedSlugSet([c2], all, terminal).has("c2")).toBe(false);
+    expect(depStatus(c2, all).blocked).toBe(false);
+    expect(blockedSlugSet([c2], all).has("c2")).toBe(false);
   });
 
   test("dep in a NON-terminal column still blocks", () => {
-    const terminal = boardTerminalMap([
-      { slug: "zz", title: "Z", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-    ]);
     // c1 is in `doing`, not terminal — so c2 is still blocked.
     const c1 = card({ slug: "c1", board: "zz", column: "doing" });
     const c2 = card({ slug: "c2", board: "zz", column: "todo", deps: ["c1"] });
-    const s = depStatus(c2, [c1, c2], terminal);
+    const s = depStatus(c2, [c1, c2]);
     expect(s.blocked).toBe(true);
     expect(s.blockedBy).toEqual(["c1"]);
   });
 
   test("default board: dep done-ness unchanged (terminal column is `done`)", () => {
-    const terminal = boardTerminalMap([
-      { slug: "default", title: "D", body: "", columns: [...DEFAULT_COLUMNS], created_at: "", updated_at: "" },
-    ]);
     // Non-terminal columns (e.g. leftover `review` label) do NOT satisfy; `done` does.
     const inDoing = card({ slug: "a", column: "doing" });
     const inDone = card({ slug: "b", column: "done" });
     const x = card({ slug: "x", column: "todo", deps: ["a", "b"] });
     const all = [inDoing, inDone, x];
     // With the map AND without it (omitted → falls back to "done") behaves identically.
-    expect(depStatus(x, all, terminal).blockedBy).toEqual(["a"]);
+    expect(depStatus(x, all).blockedBy).toEqual(["a"]);
     expect(depStatus(x, all).blockedBy).toEqual(["a"]);
   });
 
@@ -373,9 +352,8 @@ describe("dependencies", () => {
     const blockedBy = card({ slug: "x", deps: ["c1"] });
     const unblocked = card({ slug: "y", deps: ["c1d"] });
     const all = [inShip, inDone, blockedBy, unblocked];
-    const empty = new Map<string, string>();
-    expect(depStatus(blockedBy, all, empty).blocked).toBe(true); // `ship` ≠ `done`
-    expect(depStatus(unblocked, all, empty).blocked).toBe(false); // `done` satisfies
+    expect(depStatus(blockedBy, all).blocked).toBe(true); // `ship` ≠ `done`
+    expect(depStatus(unblocked, all).blocked).toBe(false); // `done` satisfies
   });
 
   test("only doing/done are gating (working) columns", () => {

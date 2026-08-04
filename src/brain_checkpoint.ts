@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import type { NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
 import {
-  boardTerminalMap,
+  TERMINAL_COLUMN,
   listBoards,
   listCards,
   parseBodyHeader,
@@ -199,12 +199,11 @@ async function remainingLiveOwnerCards(opts: {
 }): Promise<string[]> {
   const boards = await listBoards(opts.node, opts.cfg);
   const cards = await listCards(opts.node, opts.cfg, { boards });
-  const terminals = boardTerminalMap(boards);
   return cards
     .filter((card) => card.slug !== opts.completedCard.slug)
     .filter(isExecutionCard)
     .filter((card) => explicitOwnerSlug(card) === opts.ownerSlug)
-    .filter((card) => card.column !== (terminals.get(card.board) ?? "done"))
+    .filter((card) => card.column !== TERMINAL_COLUMN)
     .map((card) => card.slug)
     .sort();
 }

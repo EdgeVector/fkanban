@@ -6,13 +6,11 @@ import { FkanbanError, type AppSearchHit, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   blockedSlugSet,
-  boardTerminalMap,
   CARD_DISPLAY_FIELDS,
   ensureColumn,
   findCard,
   listCardBodies,
   listDependencyStatusesForCards,
-  listBoards,
   listCardsByFilter,
   listCardsWithBodies,
   queryTerms,
@@ -415,9 +413,8 @@ export async function searchResult(
   // Resolve blocked status against ALL live cards so cross-board deps count,
   // counting a dep as done at its own board's terminal column (board slug →
   // last column), falling back to `done` for unresolvable boards.
-  const boardTerminal = boardTerminalMap(await listBoards(opts.node, opts.cfg));
   const text = renderSearchResults(matches, opts.query, {
-    blocked: blockedSlugSet(matches, allCards, boardTerminal),
+    blocked: blockedSlugSet(matches, allCards),
     limit: textLimit,
   });
   return { text, cards: matches, jsonLimit };

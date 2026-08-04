@@ -41,7 +41,6 @@ export async function pickupLanesResult(opts: {
 
   const report = await buildPickupStatusReportWithSituations(
     cards,
-    boards,
     opts.situationPreflight,
     { cfg: opts.cfg, node: opts.node },
   );

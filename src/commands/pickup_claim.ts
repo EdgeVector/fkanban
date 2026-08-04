@@ -403,7 +403,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   if (opts.maxDoing !== undefined) {
     const doingCount = cardsForSelection.filter((c) => c.board === board && c.column === "doing").length;
     if (doingCount >= opts.maxDoing) {
-      const report = await buildPickupStatusReportWithSituations(cardsForSelection, boards, opts.situationPreflight, {
+      const report = await buildPickupStatusReportWithSituations(cardsForSelection, opts.situationPreflight, {
         cfg: opts.cfg,
         node: opts.node,
       });
@@ -427,7 +427,6 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
 
   const report = await buildPickupStatusReportWithSituations(
     cardsForSelection,
-    boards,
     opts.situationPreflight,
     { cfg: opts.cfg, node: opts.node },
   );
@@ -438,7 +437,6 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     opts.node,
     opts.cfg,
     cardsForSelection,
-    boards,
   );
   const diagnostics = claimDiagnostics(report, cardsForDiagnostics, board);
   const claimDiagnosticsIfActionable = diagnostics.todo_blockers > 0 ? diagnostics : undefined;

@@ -8,7 +8,7 @@ import {
   MILESTONE_PROOF_STATUSES,
   MILESTONE_STATES,
   ensureBoardRecord,
-  boardTerminalMap,
+  TERMINAL_COLUMN,
   cardExists,
   depStatus,
   findCard,
@@ -329,8 +329,7 @@ async function proofGate(
     });
   }
   if (target !== "complete") return;
-  const terminals = boardTerminalMap(await listBoards(opts.node, opts.cfg));
-  if (proof.column !== (terminals.get(proof.board) ?? "done")) {
+  if (proof.column !== TERMINAL_COLUMN) {
     throw new FkanbanError({
       code: "milestone_proof_not_terminal",
       message: `Proof card "${proof.slug}" is not in its terminal column.`,
@@ -761,7 +760,7 @@ export async function milestoneReconcileResult(opts: {
   // that is the only case where "absent" and "sparse" are in question.
   const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
     && (await cardExists(opts.node, opts.cfg, milestone.proof_card!));
-  const result = milestoneReconcileFromSnapshot(milestone, children, statuses, boards, proofCard, proofCardSparse);
+  const result = milestoneReconcileFromSnapshot(milestone, children, statuses, proofCard, proofCardSparse);
   // `boards` travels out so a caller that needs the board list too — `detail`
   // renders one column group per column — can thread it instead of paying the
   // same read a second time in a wave of its own.
@@ -772,7 +771,6 @@ export function milestoneReconcileFromSnapshot(
   milestone: Milestone,
   boardCards: Card[],
   statuses: Card[],
-  boards: Board[],
   proofCard: Card | null,
   // The proof card exists (key-only read found it) but the wide read that
   // produced `proofCard` dropped it — a sparse record, not a missing one. The
@@ -782,9 +780,8 @@ export function milestoneReconcileFromSnapshot(
   proofCardSparse = false,
 ): MilestoneReconcileResult {
   const children = boardCards.filter((card) => card.milestone === milestone.slug);
-  const terminals = boardTerminalMap(boards);
   const childStatuses = children.map((card): MilestoneChildStatus => {
-    const dep = depStatus(card, statuses, terminals);
+    const dep = depStatus(card, statuses);
     return { slug: card.slug, title: card.title, column: card.column, blocked: dep.blocked, blockedBy: dep.blockedBy };
   });
   const bySlug = new Map(children.map((card) => [card.slug, card]));
@@ -794,7 +791,7 @@ export function milestoneReconcileFromSnapshot(
   });
   const proof = proofCard ? {
     slug: proofCard.slug,
-    terminal: proofCard.column === (terminals.get(proofCard.board) ?? "done"),
+    terminal: proofCard.column === TERMINAL_COLUMN,
     passingEvidence: hasPassingProofEvidence(proofCard.body),
   } : null;
   const warnings: MilestoneWarning[] = [];
@@ -811,7 +808,7 @@ export function milestoneReconcileFromSnapshot(
   else if (!proofCard) warnings.push({ code: "missing-proof-card", message: `Linked proof card "${milestone.proof_card}" is missing.`, hint: "Repair the proof link before proving." });
   else if (proofCard.board !== milestone.board || proofCard.milestone !== milestone.slug) warnings.push({ code: "proof-card-mismatch", message: "Proof card board or milestone link does not match.", hint: "Align the proof card's --board and --milestone fields." });
   if (milestone.state === "blocked" && !milestone.block_reason) warnings.push({ code: "blocked-no-reason", message: "Blocked milestone has no reason.", hint: "Add --block-reason or return it to active." });
-  const terminalCol = terminals.get(milestone.board) ?? "done";
+  const terminalCol = TERMINAL_COLUMN;
   // Non-proof children still open (not in the board terminal column).
   const incomplete = childStatuses.filter((child) => child.column !== terminalCol && child.slug !== milestone.proof_card);
   // Implementation children = any non-proof child. Empty milestone ≠ "implementation done".
@@ -964,7 +961,6 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
         milestone,
         childLists[i] ?? [],
         statuses,
-        boards,
         proofs.get(milestone.proof_card) ?? null,
         sparseProofs.has(milestone.proof_card),
       )),
