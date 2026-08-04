@@ -257,6 +257,12 @@ type ParitySweep<T> = { rows: readonly T[]; failedLeads: readonly { field: strin
 
 export type ConfirmedParity = {
   parity: ProjectionParityResult;
+  /**
+   * The slugs behind the verdict. `parity.reason` formats at most three of
+   * these for an operator; a caller that needs the list must get it here rather
+   * than parse it back out of prose.
+   */
+  drift: string[];
   /** Slugs that entered or left mid-check. Reportable as churn; never a repair. */
   moved: string[];
   /**
@@ -299,13 +305,14 @@ export async function parityWithConfirmation<T extends { sk: string; slug: strin
   const { firstSweep, wideSlugs, wideRows, resweep, remedy } = args;
   const droppedSlugs = [...new Set(firstSweep.map((r) => r.slug))].filter((s) => !wideSlugs.has(s));
   if (droppedSlugs.length === 0) {
-    return { parity: { ok: true, rows: wideRows }, moved: [], confirmed: true };
+    return { parity: { ok: true, rows: wideRows }, drift: [], moved: [], confirmed: true };
   }
 
   const second = await resweep();
   if (second === null || second.failedLeads.length > 0) {
     return {
       parity: checkProjectionParityBySlugs(droppedSlugs, wideRows, remedy),
+      drift: droppedSlugs,
       moved: [],
       confirmed: false,
     };
@@ -314,6 +321,7 @@ export async function parityWithConfirmation<T extends { sk: string; slug: strin
   const { drift, moved } = confirmParityDrop(firstSweep, second.rows, wideSlugs);
   return {
     parity: checkProjectionParityBySlugs(drift, wideRows, remedy),
+    drift,
     moved,
     confirmed: true,
   };
