@@ -153,6 +153,11 @@ Host-track registers this repo under the app ids `kanban` and `fkanban`
 status, and `fkanban which --json` or `~/.host-track/stamps/fkanban.json` to
 inspect the live install.
 
+When promoting a host-track build or config that flips an operational default
+such as an `enforce*` guard, post a temporary Situations notice before the
+promotion. See [Operational Default Flips](docs/operational-default-flips.md)
+for the notice convention.
+
 ## Quick start
 
 With the prerequisites in place (Bun installed, repo cloned, `bun install` run,
