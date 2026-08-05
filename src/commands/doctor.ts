@@ -43,6 +43,7 @@ import {
   allPinnedSchemas,
   checkPinnedSchemaIdentity,
   formatSchemaIdentityMismatch,
+  isAcceptedPinDeviation,
   resolveLoadedSchema,
 } from "../schemas.ts";
 
@@ -272,14 +273,52 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       // its coverage — the failure mode being repaired here in the first place.
       const reportedBelow = UNIQUE_SCHEMAS.some((u) => (u.key as string) === entry.key);
       if (identity.kind === "mismatch") {
-        check(
-          false,
-          `${entry.key} pin identity`,
-          `config pins ${configHash}, which the node has registered as a DIFFERENT schema` +
-            ` — ${formatSchemaIdentityMismatch(identity)}. Reads and writes through this pin address` +
-            ` "${identity.loadedDescriptiveName}", not ${entry.schema.schema.descriptive_name}.`,
-        );
+        if (isAcceptedPinDeviation(cfg.acceptedSchemaPinIdentities, entry.key, configHash, identity)) {
+          // Acknowledged deviation: report it every run, never fail on it.
+          //
+          // The condition is real and the check is right — but on a node whose
+          // only remedy is a data migration, and where `assertNoSilentSchemaRepin`
+          // correctly refuses to re-point the pin, a red here is one no operator
+          // action can clear. That is the failure mode this file already names
+          // twenty lines down: a permanent ✗ trains operators to ignore ✗, and
+          // the next REAL mismatch arrives into a doctor that already exits 1.
+          //
+          // Still printed in full, because "accepted" must not mean "hidden" —
+          // the acknowledgement narrows what is waived to one exact pair, and
+          // any other divergence on this key is still a fresh red.
+          info(
+            `${entry.key} pin identity — ACCEPTED DEVIATION`,
+            `config pins ${configHash}, registered as "${identity.loadedDescriptiveName}"` +
+              ` rather than ${entry.schema.schema.descriptive_name}` +
+              ` (${formatSchemaIdentityMismatch(identity)}).` +
+              ` Acknowledged in config via acceptedSchemaPinIdentities["${entry.key}"];` +
+              ` remove that entry to restore the check.`,
+          );
+        } else {
+          check(
+            false,
+            `${entry.key} pin identity`,
+            `config pins ${configHash}, which the node has registered as a DIFFERENT schema` +
+              ` — ${formatSchemaIdentityMismatch(identity)}. Reads and writes through this pin address` +
+              ` "${identity.loadedDescriptiveName}", not ${entry.schema.schema.descriptive_name}.` +
+              ` If this is the accepted state of this node (the rows are read and written` +
+              ` consistently through this pin and re-pointing it would orphan them), record it:` +
+              ` acceptedSchemaPinIdentities: { "${entry.key}":` +
+              ` { "hash": "${configHash}", "registeredAs": "${identity.loadedDescriptiveName}" } }`,
+          );
+        }
       } else if (identity.kind === "ok") {
+        // A stale acknowledgement is cruft that outlives its reason, and this
+        // seat keeps finding suppressions nobody revisited. Say so the run it
+        // stops being needed, rather than leaving a waiver in place for a
+        // mismatch that no longer exists.
+        if (cfg.acceptedSchemaPinIdentities?.[entry.key]) {
+          info(
+            `${entry.key} pin identity acknowledgement is stale`,
+            `the pin now matches ${entry.schema.schema.descriptive_name};` +
+              ` remove acceptedSchemaPinIdentities["${entry.key}"] from config`,
+          );
+        }
         check(true, `${entry.key} pin identity`, entry.schema.schema.descriptive_name);
       } else if (identity.kind === "not_loaded" && !reportedBelow) {
         // An extra-schema pin that points at nothing the node has loaded. Every

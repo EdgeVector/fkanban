@@ -788,6 +788,30 @@ export function checkPinnedSchemaIdentity(
   return { kind: "mismatch", loadedDescriptiveName: match.descriptive_name, mismatches };
 }
 
+/**
+ * Is this mismatch the one the operator already acknowledged for this key?
+ *
+ * Both the pinned hash AND the identity the node reports for it must match the
+ * acknowledgement. Checking only the key would waive every future mismatch on
+ * it; checking only the hash would keep waiving after the node re-registered
+ * that hash as something else again. The pair is what was actually accepted.
+ *
+ * Deliberately NOT a wildcard and deliberately not inferred: nothing computes
+ * an acknowledgement from the live node, because a check that acknowledges
+ * whatever it finds is not a check.
+ */
+export function isAcceptedPinDeviation(
+  accepted: Record<string, { hash: string; registeredAs: string }> | undefined,
+  key: string,
+  configHash: string | undefined,
+  check: SchemaIdentityCheck,
+): boolean {
+  if (!accepted || !configHash || check.kind !== "mismatch") return false;
+  const entry = accepted[key];
+  if (!entry) return false;
+  return entry.hash === configHash && entry.registeredAs === check.loadedDescriptiveName;
+}
+
 /** One-line human rendering of every mismatch, for doctor/init diagnostics. */
 export function formatSchemaIdentityMismatch(check: SchemaIdentityCheck): string {
   if (check.kind !== "mismatch") return "";
