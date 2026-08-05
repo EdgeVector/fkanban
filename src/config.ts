@@ -42,6 +42,39 @@ export type Config = {
    * tests that cover the guard set `enforceLivePrMilestone: true` explicitly.
    */
   enforceLivePrMilestone?: boolean;
+  /**
+   * Operator acknowledgement that a pinned schema hash addresses a schema the
+   * node registered under a DIFFERENT identity than the catalog declares, and
+   * that this is the accepted state of this node rather than a defect to fix.
+   *
+   * Exists because the alternative is a red nobody can clear. On the primary,
+   * `milestone_cards` is pinned to a hash the node registered as `Milestone`
+   * (the multi-key expand put entity and index on one product). The rows are
+   * read and written consistently through that pin and are fine; the only
+   * remedy that would satisfy the identity check is a data migration on Tom's
+   * primary brain, and `assertNoSilentSchemaRepin` correctly REFUSES to
+   * re-point the pin. So doctor failed permanently on a condition no operator
+   * action could resolve — the exact shape this file already warns about:
+   * "a red whose only cause is an optional feature being off is how doctors
+   * get ignored".
+   *
+   * Scoped to the exact (hash, registeredAs) pair on purpose. Acknowledging
+   * "milestone_cards may differ" would waive every future mismatch on that key;
+   * acknowledging one pair means any OTHER divergence — a re-pointed pin, a
+   * re-registered hash — is still a fresh red.
+   */
+  acceptedSchemaPinIdentities?: Record<string, AcceptedPinIdentity>;
+};
+
+/**
+ * One acknowledged pin/identity pair. Both halves are required: `hash` is what
+ * config pins, `registeredAs` is the `descriptive_name` the node reports for
+ * it. An acknowledgement that named only one of them could not tell "the state
+ * I accepted" from "something moved underneath me".
+ */
+export type AcceptedPinIdentity = {
+  hash: string;
+  registeredAs: string;
 };
 
 const SOCKET_FILE_NAME = "folddb.sock";
@@ -216,6 +249,41 @@ function assertConfigShape(path: string, raw: unknown): Config {
   // (undefined → not enforced) unless a test opts in explicitly.
   const enforceLivePrMilestone = r.enforceLivePrMilestone === false ? false : true;
 
+  // Validated STRICTLY rather than coerced. This field's whole job is to
+  // suppress a red, so a malformed entry that silently parsed to "no
+  // acknowledgement" would be indistinguishable from an absent one — and a
+  // malformed entry that silently parsed to a WILDCARD would waive a real
+  // mismatch. A typo here is an error at read time, where it is visible.
+  const rawAccepted = r.acceptedSchemaPinIdentities;
+  let acceptedSchemaPinIdentities: Record<string, AcceptedPinIdentity> | undefined;
+  if (rawAccepted !== undefined) {
+    if (typeof rawAccepted !== "object" || rawAccepted === null || Array.isArray(rawAccepted)) {
+      throw new ConfigInvalidError(path, `field "acceptedSchemaPinIdentities" must be an object`);
+    }
+    acceptedSchemaPinIdentities = {};
+    for (const [k, v] of Object.entries(rawAccepted as Record<string, unknown>)) {
+      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+        throw new ConfigInvalidError(
+          path,
+          `acceptedSchemaPinIdentities["${k}"] must be an object with "hash" and "registeredAs"`,
+        );
+      }
+      const e = v as Record<string, unknown>;
+      for (const f of ["hash", "registeredAs"] as const) {
+        if (typeof e[f] !== "string" || (e[f] as string).length === 0) {
+          throw new ConfigInvalidError(
+            path,
+            `acceptedSchemaPinIdentities["${k}"].${f} is not a non-empty string`,
+          );
+        }
+      }
+      acceptedSchemaPinIdentities[k] = {
+        hash: e.hash as string,
+        registeredAs: e.registeredAs as string,
+      };
+    }
+  }
+
   return {
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
@@ -225,5 +293,6 @@ function assertConfigShape(path: string, raw: unknown): Config {
     enforceLivePrMilestone,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
     ...(cardLegacyWriteHash !== undefined ? { cardLegacyWriteHash } : {}),
+    ...(acceptedSchemaPinIdentities !== undefined ? { acceptedSchemaPinIdentities } : {}),
   };
 }

@@ -317,15 +317,37 @@ describe("the identity check is wired into init and doctor", () => {
     // That is a red — `info(` never flips doctor's exit code, and this block
     // does use `info(` for the unpinned-index case, so assert the MISMATCH
     // branch specifically rather than the absence of `info(` anywhere in it.
+    //
+    // This asserted the ordering "the first thing the mismatch branch reaches
+    // for is `check(false, …)`" until 2026-08-05, when the branch gained an
+    // acknowledgement gate ahead of it (`acceptedSchemaPinIdentities`). That
+    // gate is why the ordering form no longer holds and must not simply be
+    // relaxed: the invariant it stood for — an UNACKNOWLEDGED crossed identity
+    // is a red — is unchanged, so it is asserted directly instead.
+    //
+    // The behavioural counterpart, which runs doctor against a node reproducing
+    // the primary's mispin and asserts on the exit code rather than the source
+    // text, is `test/doctor-accepted-pin-identity.test.ts`. Kept here too
+    // because a source-shape check catches an `info(` that a behavioural test
+    // would only catch if someone remembered to write the matching case.
     const block = doctor.slice(
       doctor.indexOf("for (const entry of allPinnedSchemas())"),
       doctor.indexOf("for (const entry of UNIQUE_SCHEMAS)"),
     );
     const branchAt = block.indexOf(`identity.kind === "mismatch"`);
     expect(branchAt).toBeGreaterThan(-1);
-    // ...and what that branch reaches for first is `check(false, …)`.
     const afterBranch = block.slice(branchAt);
-    expect(afterBranch.indexOf("check(\n          false,")).toBeLessThan(afterBranch.indexOf("info("));
+
+    // The red path exists and is a `check(false, …)`, not an info line.
+    expect(afterBranch).toMatch(/check\(\s*false,/);
+
+    // Every `info(` in this branch is downstream of the acknowledgement gate.
+    // Without this, "make the mismatch an info line" — the exact regression the
+    // original test was written to stop — passes again by deleting the gate's
+    // condition and keeping its `info(`.
+    const gateAt = afterBranch.indexOf("isAcceptedPinDeviation(");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(afterBranch.indexOf("info(")).toBeGreaterThan(gateAt);
   });
 
   test("an unpinned index is an info line, not a red", () => {
