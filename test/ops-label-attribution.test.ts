@@ -25,14 +25,19 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_OPS_LABEL,
   DOCTOR_OPS_LABEL,
   PARITY_OPS_LABEL,
+  groomOpsLabel,
   newNodeClient,
 } from "../src/client.ts";
 import { doctor } from "../src/commands/doctor.ts";
+import { GROOM_SUBCOMMANDS } from "../src/commands/groom.ts";
+
+const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 import { allPinnedSchemas } from "../src/schemas.ts";
 
 const HASH_FOR: Record<string, string> = Object.fromEntries(
@@ -213,4 +218,71 @@ describe("doctor attributes its own traffic", () => {
     expect(mutations.some((m) => m.mutationType === "delete")).toBe(true);
     for (const m of mutations) expect(m.label).toBe(DOCTOR_OPS_LABEL);
   });
+});
+
+// A maintenance SWEEP is not a user moving a card, even when the rows it writes
+// are real board rows. Measured on the live primary 2026-08-05: one
+// `groom board-cards-heal --apply` emitted 686 board_cards mutations at avg
+// 9408ms (max 36.7s) under the plain `kanban` label, next to a ~300-400ms real
+// `move`. Nothing in `lastdb ops` could separate them, so the bucket read as
+// "board writes take 9.4 seconds" — the same misreading DOCTOR_OPS_LABEL exists
+// to prevent, one layer out.
+describe("every groom sweep attributes its own traffic", () => {
+  test("no groom subcommand bills itself to the board label", () => {
+    // Table-driven over the dispatcher's OWN list, so a groom subcommand added
+    // later cannot quietly inherit the user's bucket — the failure mode that
+    // left nine of ten sweeps unlabelled when parity-check was fixed.
+    expect(GROOM_SUBCOMMANDS.length).toBeGreaterThan(1);
+    for (const sub of GROOM_SUBCOMMANDS) {
+      expect(groomOpsLabel(sub)).not.toBe(DEFAULT_OPS_LABEL);
+    }
+  });
+
+  test("each sweep is distinguishable from every other sweep", () => {
+    // One blanket `kanban-groom` would pass the test above while still pooling
+    // a 686-write heal with a handful of archive-done deletes. "Name the
+    // offender" needs the labels to differ from each other, not just from the
+    // board.
+    const labels = GROOM_SUBCOMMANDS.map((s) => groomOpsLabel(s));
+    expect(new Set(labels).size).toBe(GROOM_SUBCOMMANDS.length);
+    expect(labels).not.toContain(DOCTOR_OPS_LABEL);
+  });
+
+  test("parity-check keeps the label already cited in the record", () => {
+    // Renaming it would be tidier and would invalidate a shipped measurement.
+    expect(groomOpsLabel("parity-check")).toBe(PARITY_OPS_LABEL);
+  });
+
+  // The assertions above all run inside the process that defines the label, so
+  // they pass whether or not the dispatcher uses it. These drive the REAL CLI
+  // as a subprocess against a stub node and read the header off the wire —
+  // the "plumbed but never wired" shape this repo keeps hitting.
+  for (const sub of ["board-cards-heal", "structured-routing"] as const) {
+    test(`groom ${sub} sends its own label on every request`, async () => {
+      const node = makeNode();
+      const cfgPath = writeCfg(`groom-${sub}.json`, node.socketPath);
+      try {
+        const proc = Bun.spawn(["bun", "run", CLI, "groom", sub], {
+          stdout: "pipe",
+          stderr: "pipe",
+          stdin: "ignore",
+          env: { ...process.env, KANBAN_CONFIG: cfgPath },
+        });
+        await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+      } finally {
+        node.stop();
+      }
+
+      // Like doctor above: not required to be all-green against the stub, only
+      // required to be honest about who it is on every request it does make.
+      expect(node.seen.length).toBeGreaterThan(0);
+      const labels = new Set(node.seen.map((s) => s.label));
+      expect(labels).toEqual(new Set([groomOpsLabel(sub)]));
+      expect(labels.has(DEFAULT_OPS_LABEL)).toBe(false);
+    });
+  }
 });

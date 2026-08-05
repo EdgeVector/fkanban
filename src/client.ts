@@ -133,8 +133,46 @@ export const DEFAULT_OPS_LABEL = "kanban";
 // runs the projection parity sweeps. Both are synthetic.
 export const DOCTOR_OPS_LABEL = "kanban-doctor";
 // `kanban groom parity-check` — read-only, but 24 partition queries per board
-// per index, and it runs daily from a routine.
+// per index, and it runs daily from a routine. Kept as its own constant rather
+// than folded into GROOM_OPS_LABEL below because it shipped first and brain
+// records cite this exact string.
 export const PARITY_OPS_LABEL = "kanban-parity";
+
+/**
+ * Ops label for a `kanban groom <sub>` maintenance sweep.
+ *
+ * ## Why every groom subcommand needs one, not just the read-only sweep
+ *
+ * When `parity-check` was labelled, the other nine groom subcommands were left
+ * on the plain label deliberately: they "repair real board state", so their
+ * writes are real board writes. That reasoning does not survive contact with
+ * the thing the label exists for. The stated purpose is that `client=kanban` in
+ * `lastdb ops` means *traffic a user actually caused* — and a repair sweep is
+ * not that. It is a routine or an agent doing upkeep, at a volume and shape no
+ * user produces.
+ *
+ * Measured on the live primary 2026-08-05, during one
+ * `groom board-cards-heal --apply`:
+ *
+ *   client=kanban kind=mutation schema=board_cards
+ *     count=686 avg=9408ms max=36692ms   <- ALL of it one heal process (pid 1563)
+ *
+ * A real `move` measured 300-400ms on an idle board in the same week. An
+ * operator reading that bucket concludes "board writes take 9.4 seconds", and
+ * there is nothing in the table to tell them otherwise — the sweep and the user
+ * share a name. This is the same misreading `kanban-doctor` was minted to stop,
+ * one layer out, and it is the sixth time this repo has produced a measurement
+ * that could not name its own author.
+ *
+ * So the rule is the general one: the whole `groom` tree is maintenance, and
+ * maintenance identifies itself. Per-subcommand rather than one blanket
+ * `kanban-groom`, because the sweeps have nothing in common by cost —
+ * `board-cards-heal` emitted 686 heavy writes above while `archive-done` issues
+ * a handful of deletes — and "name the offender" is the entire point.
+ */
+export function groomOpsLabel(sub: string): string {
+  return sub === "parity-check" ? PARITY_OPS_LABEL : `kanban-groom-${sub}`;
+}
 
 // fold's /api/query `filter` — exact field filters. `HashKey` is the special
 // primary-key point read; schema fields such as `column` may be backed by node
