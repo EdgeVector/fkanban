@@ -2,7 +2,7 @@
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
-import { mapWithConcurrency } from "./concurrency.ts";
+import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
 import {
   patchCardListIndex,
   readCardListIndex,
@@ -4176,6 +4176,105 @@ export async function listMilestones(
     });
   }
   return sortMilestones(milestones);
+}
+
+/** The result of {@link sweepMilestoneSlugs}: slugs reached, and leads refused. */
+export type MilestoneSlugSweep = {
+  /** Every slug reachable under some leading field, deduped. */
+  slugs: string[];
+  /** What the single widest-projection scan alone would have reached. */
+  wideScanSlugs: number;
+  /**
+   * Leads the node refused. Non-empty means `slugs` is a LOWER BOUND, and a
+   * caller asserting completeness must fail rather than report a clean result.
+   */
+  failedLeads: Array<{ field: string; error: string }>;
+};
+
+/**
+ * Every slug in the fat `Milestone` schema, reached under EVERY leading field.
+ *
+ * The counterpart to {@link sweepBoardMilestonesPartition}, and it exists
+ * because the obvious enumeration is backwards. `groom milestone-indexes-heal`
+ * full-scanned with `fields: fieldsFor("milestone")` on the reasoning that the
+ * widest projection must see the most rows. In LastDB's atom model the
+ * opposite holds: every projected field is a GATE, so a scan sees only rows
+ * carrying the gate atom, and widening the projection can only ever REMOVE
+ * rows. `kanban doctor` states the rule ("any read that projects it drops
+ * every row with no such atom, from any position in the field list"); the gate
+ * is the hash field when projected, else the leading field.
+ *
+ * Measured on the primary 2026-08-05
+ * (`scripts/probe-milestone-scan-lead-recall.ts`), all 15 leads, 0 refused:
+ *
+ *   fieldsFor("milestone")  15 fields  ->   74 slugs   633ms   <- what heal used
+ *   ["slug"]                 1 field   ->   74 slugs            <- same: slug IS the gate
+ *   ["title"]                1 field   ->  134 slugs
+ *   ["deps"] / ["updated_at"]           ->  133 slugs
+ *   union of all 15 leads               -> 1478 slugs   20.7s
+ *
+ * The widest projection tied the SPARSEST single field, because `slug` is the
+ * hash field and therefore the gate whenever it appears. Five of the slugs
+ * only the union reached point-read back to LIVE milestones that were in
+ * neither the scan nor BoardMilestones — so no repair path could reach them,
+ * while heal printed `upserts=0` and exited 0. That is the mechanism behind
+ * four recurrences of the `milestone list` / `portfolio` undercount.
+ *
+ * Recall is what this buys and the only thing it claims. Most of the union is
+ * husks of deleted milestones (1368 of 1478 on that run); the caller still
+ * point-reads every slug for truth, exactly as before, so precision costs
+ * nothing but reads. This is a repair-path price, not a list price — no read
+ * serving `milestone list` calls it.
+ */
+export async function sweepMilestoneSlugs(
+  node: NodeClient,
+  cfg: Config,
+): Promise<MilestoneSlugSweep> {
+  const schemaHash = schemaHashFor("milestone", cfg);
+  const leads = fieldsFor("milestone");
+
+  const slugsFrom = (rows: QueryRow[]): string[] => {
+    const out: string[] = [];
+    for (const r of rows) {
+      // The HashKey IS the slug; the payload copy is a copy, and under a lead
+      // that is not `slug` the copy is exactly what the node did not return.
+      const keyed = typeof r.key?.hash === "string" ? r.key.hash : "";
+      const slug = keyed || stringField((r.fields ?? {}) as Record<string, unknown>, "slug");
+      if (slug.length > 0) out.push(slug);
+    }
+    return out;
+  };
+
+  const perLead = await mapWithConcurrency(leads, async (lead) => {
+    try {
+      const res = await node.queryAll({ schemaHash, fields: [lead], allowFullScan: true });
+      return { slugs: slugsFrom(res.results ?? []), failure: null };
+    } catch (err) {
+      // Reported, never swallowed — a swallowed lead hands back a short
+      // enumeration labelled complete, which is the failure this removes.
+      return {
+        slugs: [] as string[],
+        failure: { field: lead, error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  }, PARTITION_READ_CONCURRENCY);
+
+  const all = new Set<string>();
+  const failedLeads: MilestoneSlugSweep["failedLeads"] = [];
+  for (const lead of perLead) {
+    if (lead.failure) failedLeads.push(lead.failure);
+    for (const s of lead.slugs) all.add(s);
+  }
+
+  // `slug` is the gate the old scan hit, so its lead reproduces exactly what
+  // the widest projection reached. Reported so the recall gain stays visible
+  // in the heal's own output instead of living only in this comment.
+  const slugLeadIndex = leads.indexOf("slug");
+  const wideScanSlugs = slugLeadIndex >= 0
+    ? new Set(perLead[slugLeadIndex]!.slugs).size
+    : 0;
+
+  return { slugs: [...all], wideScanSlugs, failedLeads };
 }
 
 export async function findMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone | null> {
