@@ -80,8 +80,22 @@ export type MilestoneIndexesHealResult = {
   removal_ceiling: number | null;
   /** True when the ceiling refused an apply this run — NOTHING was written. */
   blocked: boolean;
-  /** Slugs the full scan returned — mostly husks; NOT a count of live milestones. */
+  /** Slugs the enumeration returned — mostly husks; NOT a count of live milestones. */
   milestones_enumerated: number;
+  /**
+   * What the pre-2026-08-05 single widest-projection scan alone would have
+   * enumerated. Reported beside `milestones_enumerated` so the recall the
+   * multi-lead sweep buys stays visible in the command's own output — this is
+   * the gap that hid live milestones from every repair path for four
+   * recurrences. See {@link sweepMilestoneSlugs}.
+   */
+  milestones_enumerated_single_lead: number;
+  /**
+   * Leads the node refused during enumeration. Non-empty means
+   * `milestones_enumerated` is a LOWER BOUND and this run must not be read as
+   * having seen every milestone.
+   */
+  enumeration_failed_leads: Array<{ field: string; error: string }>;
   /** Enumerated slugs whose point-read found nothing (deleted husks). */
   milestone_husks_dropped: number;
   /** Enumerated slugs that point-read back to a live milestone. */
@@ -281,6 +295,8 @@ export async function milestoneIndexesHealResult(opts: {
       applied: apply,
       budget,
       milestones_enumerated: 0,
+      milestones_enumerated_single_lead: 0,
+      enumeration_failed_leads: [],
       milestone_husks_dropped: 0,
       milestones_scanned: 0,
       milestone_card_children_scanned: 0,
@@ -304,30 +320,36 @@ export async function milestoneIndexesHealResult(opts: {
 
   // Always rebuild from fat Milestone rows (full-scan + HashKey hydrate), never
   // from BoardMilestones (may be empty or polluted during first heal).
-  const { schemaHashFor } = await import("../config.ts");
-  const { fieldsFor } = await import("../schemas.ts");
-  const { rowToMilestone, milestoneQueryFieldsLookSparse } = await import("../record.ts");
-  const res = await opts.node.queryAll({
-    schemaHash: schemaHashFor("milestone", opts.cfg),
-    fields: fieldsFor("milestone"),
-    allowFullScan: true,
-  });
-  const slugs = res.results.map((row) => {
-    const mapped = rowToMilestone(row);
-    if (!milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>)) {
-      return mapped.slug;
-    }
-    return mapped.slug || String((row.fields as { slug?: string } | undefined)?.slug ?? "");
-  }).filter(Boolean);
+  const { sweepMilestoneSlugs } = await import("../record.ts");
+  const { mapWithConcurrency, PARTITION_READ_CONCURRENCY } = await import("../concurrency.ts");
+
+  // Enumerate under EVERY lead, not under the widest projection. Widening a
+  // projection cannot add rows in LastDB's atom model — every projected field
+  // gates on its atom — so the old single wide scan was the narrowest
+  // enumeration available, tied to whichever field is sparsest. See
+  // {@link sweepMilestoneSlugs} for the measured numbers and the five live
+  // milestones no repair path could reach because of it.
+  const sweep = await sweepMilestoneSlugs(opts.node, opts.cfg);
+  const slugs = sweep.slugs;
 
   // The scan ENUMERATES; only a point-read establishes truth. Most of what it
   // returns on the live primary is husks of deleted milestones, so track what
   // the hydrate discards instead of letting `scanned` imply the scan found it.
-  // Measured 2026-08-03: 21 enumerated -> 10 live, 11 husks.
+  // Measured 2026-08-05: 1478 enumerated -> 110 live, 1368 husks.
+  //
+  // Hydrated concurrently. The sweep raised the candidate set from 74 to 1478,
+  // and these were serial point-reads: at the ~50ms this node answers one in,
+  // serial hydration would have turned a 20s recall win into a 70s regression
+  // on a command that already runs longest. They are independent keyed reads
+  // with no ordering between them, so they wait on each other for no reason.
+  const hydrated = await mapWithConcurrency(
+    slugs,
+    (slug) => findMilestone(opts.node, opts.cfg, slug),
+    PARTITION_READ_CONCURRENCY,
+  );
   const milestones: Milestone[] = [];
   let husksDropped = 0;
-  for (const slug of slugs) {
-    const full = await findMilestone(opts.node, opts.cfg, slug);
+  for (const full of hydrated) {
     if (!full) {
       husksDropped++;
       continue;
@@ -434,12 +456,24 @@ export async function milestoneIndexesHealResult(opts: {
         "  to read the classification, and only raise --max-removals once the removals are confirmed.",
       ]
     : [];
+  // A refused lead means the enumeration is a lower bound. Say so where the
+  // operator reads the result, not only in the JSON: `upserts=0` on a short
+  // enumeration is indistinguishable from a clean index, and that ambiguity is
+  // what let four undercount recurrences read as "converged".
+  const leadLine = sweep.failedLeads.length > 0
+    ? [
+        `  WARNING: ${sweep.failedLeads.length} enumeration lead(s) were refused — enumerated=${slugs.length} is a LOWER BOUND.`,
+        `    ${sweep.failedLeads.map((l) => `${l.field}: ${l.error}`).join("; ")}`,
+        "    A milestone missing from this run's candidates may exist and simply not have been reached.",
+      ]
+    : [];
   const text = [
     "milestone indexes heal:",
     ...ceilingLine,
+    ...leadLine,
     `  applied=${applying} budget=${budget === null ? "unlimited" : budget}`,
     `  rows_examined=${rowsExamined} removals_classified=${removalsClassified} removal_ceiling=${removalCeiling === null ? "unlimited" : removalCeiling} blocked=${blocked}`,
-    `  board_milestones bound=${boardMsBound} scanned=${milestones.length} (enumerated=${slugs.length} husks_dropped=${husksDropped}) upserts=${boardMilestoneUpserts} removals=${boardMilestoneRemovals}`,
+    `  board_milestones bound=${boardMsBound} scanned=${milestones.length} (enumerated=${slugs.length} single_lead=${sweep.wideScanSlugs} husks_dropped=${husksDropped}) upserts=${boardMilestoneUpserts} removals=${boardMilestoneRemovals}`,
     `  milestone_cards bound=${msCardsBound} mode=${directMilestoneCardPayloadUpsert ? "direct-payload-upsert" : "protein-fold-request"} children_scanned=${milestoneCardChildrenScanned} upserts=${milestoneCardUpserts} removals=${milestoneCardRemovals}`,
     `  issued=${issued} deferred=${deferred}`,
   ].join("\n");
@@ -454,6 +488,8 @@ export async function milestoneIndexesHealResult(opts: {
     removal_ceiling: removalCeiling,
     blocked,
     milestones_enumerated: slugs.length,
+    milestones_enumerated_single_lead: sweep.wideScanSlugs,
+    enumeration_failed_leads: sweep.failedLeads,
     milestone_husks_dropped: husksDropped,
     milestones_scanned: milestones.length,
     milestone_card_children_scanned: milestoneCardChildrenScanned,
