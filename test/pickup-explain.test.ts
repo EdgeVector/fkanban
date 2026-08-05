@@ -126,6 +126,29 @@ describe("classify live-milestone requirement", () => {
     expect(c.ready).toBe(true);
   });
 
+  test("an abandoned milestone is unattached when the portfolio map is supplied", () => {
+    const card = baseCard({ slug: "dead-ms", milestone: "ms-gone" });
+    const map = new Map([["ms-gone", "abandoned"]]);
+    const c = classifyPickupCard(card, [card], dep, undefined, {
+      requireLiveMilestone: true,
+      milestoneStateBySlug: map,
+    });
+    expect(c.ready).toBe(false);
+    expect(c.category).toBe("unattached-outcome");
+    expect(c.reason).toContain("abandoned");
+  });
+
+  test("a missing milestone slug is unattached when the portfolio map is empty", () => {
+    const card = baseCard({ slug: "ghost-ms", milestone: "ms-never" });
+    const c = classifyPickupCard(card, [card], dep, undefined, {
+      requireLiveMilestone: true,
+      milestoneStateBySlug: new Map(),
+    });
+    expect(c.ready).toBe(false);
+    expect(c.category).toBe("unattached-outcome");
+    expect(c.reason).toContain("not found");
+  });
+
   test("without the option, classification is unchanged", () => {
     const card = baseCard({ slug: "no-ms-legacy" });
     const c = classifyPickupCard(card, [card], dep);

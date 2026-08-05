@@ -1144,16 +1144,15 @@ describe("pickup claim live-milestone gate", () => {
     expect(report.eligible_for_claim).toBe(false);
   });
 
-  test("explain fails the write-guard on an abandoned milestone even though classify is ready", async () => {
+  test("explain classifies abandoned milestone as unattached and fails write-guard together", async () => {
     await seedMilestone(node, milestoneFixture({ slug: "ms-gone", state: "abandoned" }));
     await seedCard(node, card({ slug: "abandoned-ms-card", milestone: "ms-gone" }));
 
     const report = await pickupExplainResult({ cfg: cfgEnforced, node, slug: "abandoned-ms-card" });
 
-    // Classification cannot see milestone state (that needs the record), so
-    // the write-guard is the gate that must catch it — and eligibility must
-    // follow the guard, not contradict it.
-    expect(report.ready).toBe(true);
+    // Classification and write-guard must agree: abandoned outcomes are not ready.
+    expect(report.ready).toBe(false);
+    expect(report.category).toBe("unattached-outcome");
     expect(report.write_guard.ok).toBe(false);
     expect(report.write_guard.code).toBe("live_pr_milestone_abandoned");
     expect(report.eligible_for_claim).toBe(false);

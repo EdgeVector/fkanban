@@ -15,6 +15,7 @@ import {
   PICKUP_AREA_ACTIVE_COLUMNS,
   PICKUP_AREA_BLOCK_PREFIX,
   listDependencyStatusesForCards,
+  listMilestones,
   resolvePickupRepo,
   sanitizeRepoValue,
   sortCards,
@@ -209,6 +210,13 @@ export type ClassifyPickupCardOpts = {
    * behavior.
    */
   requireLiveMilestone?: boolean;
+  /**
+   * Optional map of milestone slug → state from one portfolio list. When
+   * present under `requireLiveMilestone`, abandoned or missing milestones are
+   * classified unattached-outcome so status matches claim write-guard (which
+   * rejects `live_pr_milestone_abandoned`).
+   */
+  milestoneStateBySlug?: ReadonlyMap<string, string>;
 };
 
 export function classifyPickupCard(
@@ -304,31 +312,63 @@ export function classifyPickupCard(
     }
     return out("malformed-routing", "missing Base header/field", "Set `Base: main` or pass `--base main`.");
   }
-  // kind === "pr" is established above (non-pr kinds returned already). The
-  // abandoned-milestone variant still needs a Milestone read, so the claim
-  // loop keeps its per-card skip for live_pr_milestone_abandoned.
+  // kind === "pr" is established above (non-pr kinds returned already).
   if (
     opts?.requireLiveMilestone === true &&
     card.board === "default" &&
-    card.column === "todo" &&
-    !(card.milestone ?? "").trim()
+    card.column === "todo"
   ) {
-    // NOT `malformed-routing`. Everything routing needs is present and correct —
-    // repo, base, and kind all resolved above, or this line is unreachable. The
-    // card is well-formed and merely unattached to an outcome, which is one
-    // `--milestone` away and is a POLICY gate, not a defect in the card.
-    //
-    // Collapsing the two hid both. `malformed-routing` is where a genuinely
-    // broken card shows up — no `Repo:` header, nothing can route it — and on
-    // 2026-08-03 that bucket read 12 on the live board while every one of the 12
-    // was well-formed. A real routing bug would have been invisible in that
-    // count, and the reported remedy ("set a bare Repo: header") was wrong for
-    // all 12. Splitting the bucket is what makes each number actionable.
-    return out(
-      "unattached-outcome",
-      "missing milestone linkage",
-      "Attach an outcome with `fkanban add <slug> --milestone <slug>`; the claim write-guard (assertLivePrMilestone) rejects milestone-less Kind:pr claims.",
-    );
+    const msSlug = (card.milestone ?? "").trim();
+    if (!msSlug) {
+      // NOT `malformed-routing`. Everything routing needs is present and correct —
+      // repo, base, and kind all resolved above, or this line is unreachable. The
+      // card is well-formed and merely unattached to an outcome, which is one
+      // `--milestone` away and is a POLICY gate, not a defect in the card.
+      //
+      // Collapsing the two hid both. `malformed-routing` is where a genuinely
+      // broken card shows up — no `Repo:` header, nothing can route it — and on
+      // 2026-08-03 that bucket read 12 on the live board while every one of the 12
+      // was well-formed. A real routing bug would have been invisible in that
+      // count, and the reported remedy ("set a bare Repo: header") was wrong for
+      // all 12. Splitting the bucket is what makes each number actionable.
+      return out(
+        "unattached-outcome",
+        "missing milestone linkage",
+        "Attach an outcome with `fkanban add <slug> --milestone <slug>`; the claim write-guard (assertLivePrMilestone) rejects milestone-less Kind:pr claims.",
+      );
+    }
+    // When the portfolio map is supplied, abandoned / missing milestones must
+    // not classify as ready — claim rejects them with live_pr_milestone_abandoned
+    // (or fails the milestone resolve) and workers previously burned a full LLM
+    // run re-discovering an empty ready queue.
+    const msMap = opts.milestoneStateBySlug;
+    if (msMap) {
+      if (!msMap.has(msSlug)) {
+        return out(
+          "unattached-outcome",
+          `milestone not found: ${msSlug}`,
+          "Create the milestone or re-link with `fkanban add <slug> --milestone <active-slug>`.",
+        );
+      }
+      const state = (msMap.get(msSlug) ?? "").trim();
+      if (state === "abandoned") {
+        return out(
+          "unattached-outcome",
+          `abandoned milestone: ${msSlug}`,
+          "Pick an active/planned milestone (`fkanban add <slug> --milestone <active-slug>`); claim write-guard rejects abandoned outcomes.",
+        );
+      }
+    }
+  }
+  // Soft collision-gate hygiene: empty structured surfaces mean overlap is
+  // unknown. Do not block ready — last-stack-unattached-outcome-heal backfills
+  // Surfaces: headers into the field — but surface the gap in details.
+  if (
+    card.column === "todo" &&
+    card.surfaces.length === 0 &&
+    !isBodyOmitted(card)
+  ) {
+    details.push("no surfaces declared; overlap gate unknown until Surfaces: is set");
   }
   if (dep.blocked) {
     details.push(`blockedBy: ${dep.blockedBy.join(", ")}`);
@@ -467,8 +507,25 @@ export async function buildPickupStatusReportWithSituations(
     );
     cardsWithDeps = merged.map((card) => late.get(card.slug) ?? card);
   }
+  let milestoneStateBySlug: Map<string, string> | undefined;
+  if (depsContext?.cfg.enforceLivePrMilestone === true) {
+    // One portfolio list per status/claim scan — cheap vs per-card point reads,
+    // and required so abandoned milestones classify as unattached-outcome.
+    try {
+      const milestones = await listMilestones(depsContext.node, depsContext.cfg);
+      milestoneStateBySlug = new Map(
+        milestones.map((m) => [m.slug, (m.state ?? "").trim()]),
+      );
+    } catch {
+      // Classification still works without the map (missing-milestone only).
+      milestoneStateBySlug = undefined;
+    }
+  }
   const classifyOpts: ClassifyPickupCardOpts | undefined = depsContext
-    ? { requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true }
+    ? {
+        requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true,
+        milestoneStateBySlug,
+      }
     : undefined;
   const local = buildPickupStatusReport(cardsWithDeps, undefined, classifyOpts);
   const activeBySlug = new Map(activeCards(cardsWithDeps).map((card) => [card.slug, card]));
