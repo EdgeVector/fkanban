@@ -16,10 +16,21 @@
 //   order-required writes        1
 //
 // Every one of those 54 is a separate `(molecule, hash)` gate acquisition on
-// one BoardCards partition, and gate wait is 88.5% of board write time
-// (papercut-kanban-board-cards-partition-gate-is-the-board-write-bottleneck).
-// 53 of the 54 bought nothing: the cards were already in the right order
-// relative to one another and only their absolute values were "wrong".
+// one BoardCards partition. 53 of the 54 bought nothing: the cards were already
+// in the right order relative to one another and only their absolute values
+// were "wrong". That argument stands on the write COUNT alone and needs no
+// claim about what a write costs.
+//
+// It was originally written citing "gate wait is 88.5% of board write time"
+// from papercut-kanban-board-cards-partition-gate-is-the-board-write-bottleneck.
+// Do not lean on that number: the papercut measured a window in which this very
+// fan-out was running, and its headline latencies were sampled after the 05:26Z
+// cutover to a binary that independently slowed board writes (see the papercut's
+// 2026-08-05 correction). Measured on a FRESH, EMPTY, UNCONTENDED partition on
+// that same binary, one `upsertBoardCard` still costs ~1.7s
+// (`scripts/probe-heal-upsert-serial-vs-batch.ts`) — so a multi-second board
+// write does not require any kanban-side contention to explain, and cutting
+// write count is worth doing on its own terms.
 //
 // So: positions are an ORDERING, not an address. Keep every position that
 // already sits in increasing order along the ranked sequence, and place only
