@@ -127,6 +127,14 @@ export type FakeNode = NodeClient & {
    * This is the surface that can tell them apart.
    */
   batches: string[][];
+  /**
+   * One entry per `deleteRecords` REQUEST, holding that request's row keys.
+   *
+   * The delete-side twin of {@link batches}, and needed for the same reason:
+   * `writes` records 48 deletes whether they cost 48 partition-gate
+   * acquisitions or one, and the difference is the whole point of the path.
+   */
+  deleteBatches: string[][];
   /** Reads in issue order — `fields` is the projection asked for. */
   reads: Array<{ schemaHash: string; fields: string[]; filter?: QueryFilter }>;
   /** See the file header. Faithful (`true`) unless a test says otherwise. */
@@ -310,6 +318,7 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
   const store = new Map<string, Map<string, StoredRecord>>();
   const writes: RecordedWrite[] = [];
   const batches: string[][] = [];
+  const deleteBatches: string[][] = [];
   const reads: Array<{ schemaHash: string; fields: string[]; filter?: QueryFilter }> = [];
 
   const tableFor = (schemaHash: string) => {
@@ -329,6 +338,7 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
     hashFields: opts.hashFields ?? {},
     writes,
     batches,
+    deleteBatches,
     reads,
 
     autoIdentity: notImpl("autoIdentity"),
@@ -383,6 +393,20 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
       writes.push({ op: "delete", schemaHash, keyHash, rangeKey: rangeKey ?? null });
       tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
+    },
+
+    // Implemented for the same reason `updateRecords` is: left off, every reap
+    // path would fall back to per-row here and ship untested. Rows land through
+    // the same map delete `deleteRecord` does and are recorded in `writes` in
+    // order, so assertions written against per-row deletes keep reading true;
+    // `deleteBatches` is what distinguishes "N rows deleted" from "N rows
+    // deleted in one request".
+    async deleteRecords(rows) {
+      deleteBatches.push(rows.map((row) => row.rangeKey ?? row.keyHash));
+      for (const { schemaHash, keyHash, rangeKey } of rows) {
+        writes.push({ op: "delete", schemaHash, keyHash, rangeKey: rangeKey ?? null });
+        tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
+      }
     },
 
     async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {

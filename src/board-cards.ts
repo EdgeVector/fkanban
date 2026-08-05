@@ -564,6 +564,57 @@ async function deleteBoardCardSk(
 }
 
 /**
+ * Retire many sks from ONE partition with the fewest write-gate acquisitions —
+ * the delete-side twin of {@link upsertBoardCardsBatch}.
+ *
+ * Same gate arithmetic: a BoardCards write gates per `(molecule, hash-half)`,
+ * so every row of one board shares one gate and a per-row reap takes it once
+ * per row. Batched on the live primary that is 2.59x/4.88x cheaper for 48 rows
+ * (`scripts/probe-boardcards-batch-delete.ts`) — see {@link NodeClient.deleteRecords}
+ * for the table and for why the node accepted this all along.
+ *
+ * Best-effort per row, exactly like {@link deleteBoardCardSk}, because every
+ * caller is reaping rows that are ALREADY superseded: a row that is missing is
+ * the outcome the caller wanted. A rejected chunk therefore falls back to
+ * per-row deletes — the node names the batch, never the item, so asking for the
+ * other 47 separately is the only way to reap them — and each of those swallows
+ * its own failure.
+ *
+ * Returns the number of sks it attempted, matching the per-row callers'
+ * long-standing "attempts, not confirmed deletes" contract. Nothing here reads
+ * the partition back to count survivors, and callers must not either: the
+ * BoardCards index lags its own ack, so the most recently deleted row reads as
+ * present for ~half a second after it is gone.
+ */
+async function deleteBoardCardSksBatched(
+  node: NodeClient,
+  schemaHash: string,
+  board: string,
+  sks: readonly string[],
+): Promise<number> {
+  const targets = sks.filter((sk) => sk);
+  if (targets.length === 0) return 0;
+
+  // A client with no batch delete verb (the ad-hoc test fakes) still has to
+  // reap. Per-row is what this used to do everywhere, so falling back to it is
+  // a loss of speed and nothing else.
+  const batch = node.deleteRecords?.bind(node);
+
+  for (let i = 0; i < targets.length; i += BOARD_CARDS_WRITE_BATCH) {
+    const chunk = targets.slice(i, i + BOARD_CARDS_WRITE_BATCH);
+    try {
+      if (!batch) throw new Error("node client exposes no batch delete");
+      await batch(chunk.map((sk) => ({ schemaHash, keyHash: board, rangeKey: sk })));
+    } catch {
+      for (const sk of chunk) {
+        await deleteBoardCardSk(node, schemaHash, board, sk);
+      }
+    }
+  }
+  return targets.length;
+}
+
+/**
  * Delete every BoardCards row for `slug` on `board` whose sk is not `keepSk`
  * (when keepSk is set). When keepSk is null, delete all rows for the slug.
  * Returns how many delete attempts ran.
@@ -608,15 +659,14 @@ export async function purgeOtherBoardCardRows(
   if (!schemaHash || !slug) return 0;
   const part = await listBoardCardsPartitionSpine(node, cfg, board);
   if (!part) return 0;
-  let n = 0;
+  const doomed: string[] = [];
   for (const row of part) {
     if (row.slug !== slug) continue;
     // `row.sk` is the row's real range key, not a rebuild of it.
     if (keepSk !== null && row.sk === keepSk) continue;
-    await deleteBoardCardSk(node, schemaHash, board, row.sk);
-    n += 1;
+    doomed.push(row.sk);
   }
-  return n;
+  return await deleteBoardCardSksBatched(node, schemaHash, board, doomed);
 }
 
 /**
@@ -701,13 +751,7 @@ export async function deleteBoardCardRowsBySk(
 ): Promise<number> {
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return 0;
-  let n = 0;
-  for (const sk of sks) {
-    if (!sk) continue;
-    await deleteBoardCardSk(node, schemaHash, board, sk);
-    n += 1;
-  }
-  return n;
+  return await deleteBoardCardSksBatched(node, schemaHash, board, sks);
 }
 
 /**
