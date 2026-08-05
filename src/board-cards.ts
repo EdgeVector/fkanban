@@ -775,6 +775,20 @@ export async function deleteBoardCardRowsBySk(
  * partition and found it is never in one at all (`HashKey=<milestone>` returns
  * nothing, before or after). Do not restate the correlation as re-placement.
  *
+ * The correlation has since been NARROWED by a control arm, and the narrowing
+ * is what makes it actionable: `scripts/probe-per-field-freshness-matched-key-
+ * schema.ts` runs the identical sweep on `milestone_cards`, whose catalog pin
+ * declares `hash_field = "milestone"` and which the app SUPPLIES `milestone`
+ * for — the same 24 field names, the same HashRange shape, the same write
+ * path, differing only in which of `{board, milestone}` is the supplied key.
+ * There, all 18 varied fields read fresh at 4-8ms, `board` included, while a
+ * BoardCards control taken minutes later on the same binary reproduced
+ * `milestone` at 1479/1923/621ms. So the lag is NOT a property of declared key
+ * fields in general, and it is NOT symmetric across the multi-key pair: it
+ * needs the catalog to declare a hash_field the client does not supply. That
+ * makes it an artifact of the expand, owned by the node, not a general
+ * read-path property of this schema shape.
+ *
  * Never quote a freshness figure for this schema without naming the field it
  * was polled on.
  *

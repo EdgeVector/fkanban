@@ -727,6 +727,16 @@ function formatKeyLayout(hash: string, range: string | null | undefined): string
 // `board_cards` pin reports `hash_field=milestone` and serves every board row,
 // and a second, independent opinion about which layouts are legal is how one
 // check ends up calling the designed state a fault while its neighbour passes.
+//
+// TOLERATED IS NOT FREE, and the price is measured. Where the declared
+// hash_field and the key the app supplies disagree, the DECLARED field reads
+// back stale for ~1.4s after an acked write while every other field on the row
+// is fresh in ~5ms. On `board_cards` that field is `milestone`. The control
+// that isolates it is `scripts/probe-per-field-freshness-matched-key-schema.ts`:
+// on `milestone_cards`, where declared and supplied agree, nothing lags at all.
+// So this allowance is still correct — refusing the expand would be a false red
+// — but anything reading `milestone` off a freshly written BoardCards row must
+// treat it as possibly pre-write. See readWholeBoardCardRow in board-cards.ts.
 function siblingHashFields(configKey: string): readonly string[] {
   return MEMBERSHIP_KEY_EXPECTATIONS.find((e) => e.configKey === configKey)?.alsoAccepts ?? [];
 }
