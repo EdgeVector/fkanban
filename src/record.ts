@@ -2486,6 +2486,28 @@ type BoardListOpt = {
    * this option from turning a degraded read into a wrong one.
    */
   activeOnly?: boolean;
+  /**
+   * Read only ONE column of each board, as a `HashRangePrefix` per partition.
+   *
+   * The same kind of option as {@link activeOnly}, and it carries the same
+   * obligation: ONLY for a caller that provably discards every other column
+   * anyway. `overlap` is the motivating one — an overlap peer must be in
+   * `doing` by definition, which the file has always said in prose while
+   * reading the whole board to find out.
+   *
+   * ## Why this is a read narrowing and not a filter
+   *
+   * The bound is real, and measured rather than assumed
+   * (`scripts/probe-column-prefix-selectivity.ts`, live `default` partition):
+   * a prefix matching ZERO rows costs 0.5ms against 214ms for the 115-row
+   * whole-partition read, so cost tracks rows MATCHED, not partition size. On
+   * the live board `doing` is 1 row: 8.8ms against 208ms.
+   *
+   * Best-effort on the same terms as `activeOnly`: it applies only on the
+   * BoardCards partition path, and every fallback still returns the whole
+   * board — correct for these callers, because they filter.
+   */
+  column?: string;
 };
 
 /**
@@ -2608,6 +2630,7 @@ async function listCardsWithFields(
       const partitioned = await listAllBoardCards(node, cfg, boards, {
         fields: projection,
         skipTerminalColumn: opts.activeOnly === true,
+        ...(opts.column ? { column: opts.column } : {}),
       });
       if (partitioned !== null && partitioned.length > 0) {
         // BoardCards rows are already body-free; promote any structured fields.
@@ -2627,7 +2650,16 @@ async function listCardsWithFields(
       // the board went all-`done` every `pickup status` would take the
       // fall-through below: an admin full scan of Card, an index rewrite and a
       // BoardCards reseed, i.e. a WRITE storm triggered by finishing the work.
-      if (partitioned !== null && partitioned.length === 0 && opts.activeOnly === true) {
+      // `column` carries the identical hazard, and more often: an empty `doing`
+      // is the ORDINARY state of a quiet board, not a signal about dual-write
+      // coverage. Without this guard, running `overlap` while nothing is in
+      // flight would take the fall-through below — an admin full scan of Card,
+      // an index rewrite and a BoardCards reseed — so narrowing the read would
+      // have traded 200ms for a write storm on the `pickup claim` path.
+      if (
+        partitioned !== null && partitioned.length === 0 &&
+        (opts.activeOnly === true || opts.column !== undefined)
+      ) {
         return [];
       }
       if (partitioned !== null && partitioned.length === 0) {

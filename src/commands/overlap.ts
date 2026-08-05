@@ -261,9 +261,19 @@ export async function overlapResult(opts: {
   // would mask "no such card" on a typo'd slug — the one error the caller can
   // act on. The candidate's failure keeps precedence, exactly as when the
   // reads were serial.
+  //
+  // `column: "doing"` is a read narrowing, not a new filter. Both consumers of
+  // this set — `hydrateOverlapPeers` and `overlapAgainstCards` — already
+  // filtered `card.column === "doing"`, and `hydrateOverlapPeers`' own comment
+  // has said "only cards in `doing` can be an overlap peer" since it was
+  // written. The read was the last place that did not believe it: measured on
+  // the live `default` partition, the whole-board read is 115 rows / 208ms and
+  // the `doing` prefix is 1 row / 8.8ms, for a set that was discarded either
+  // way. The candidate is unaffected — it is point-read above precisely
+  // because it may be in a column this list drops.
   const [candidate, cards] = await Promise.allSettled([
     requireCard(opts.node, opts.cfg, opts.slug),
-    listCards(opts.node, opts.cfg),
+    listCards(opts.node, opts.cfg, { column: "doing" }),
   ]);
   if (candidate.status === "rejected") throw candidate.reason;
   if (cards.status === "rejected") throw cards.reason;
