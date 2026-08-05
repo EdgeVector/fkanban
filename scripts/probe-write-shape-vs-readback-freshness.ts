@@ -3,6 +3,21 @@
  * Probe: after a REAL board mutation, how long until the BoardCards row reads
  * back the new value — and does sending 24 fields instead of 2 change that?
  *
+ * ## SCOPE CORRECTION 2026-08-05 — what this probe's 6ms does and does not say
+ *
+ * This probe polls ONE witness field, `tags`. Its "fresh in 2-9ms, 11/11" is a
+ * fact about that field. `probe-per-field-readback-freshness.ts` polls all 24
+ * fields off a single write and finds 17 of 18 fresh at 5ms with `milestone`
+ * alone stale for 935-1798ms, 3/3 — so `tags` is representative of almost the
+ * whole row, but the row is NOT uniformly fresh, and this probe cannot see the
+ * one field that is not.
+ *
+ * The width and partition-age eliminations below are unaffected and stand;
+ * `probe-freshness-bisect-raw-vs-real-path.ts` re-confirmed both while showing
+ * that the polled FIELD is the variable those two were being compared against.
+ * Anything that needs "is the row fresh", rather than "is `tags` fresh", must
+ * use the per-field probe.
+ *
  * This is the safety check on deleting `upsertBoardCard`'s narrow path. Every
  * board read is BoardCards-backed (`list`, `pickup`, `overlap`, `rank`,
  * `milestone portfolio`), so if a wide write stays invisible longer than a
