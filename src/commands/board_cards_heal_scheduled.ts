@@ -14,10 +14,48 @@ export type BoardCardsHealScheduledReport = {
   drifted: number;
   applied: boolean;
   blocked: boolean;
-  reason: "clean" | "dry-run-only" | "healed" | "ceiling-exceeded";
+  /**
+   * `clean` is a verdict ABOUT THE BOARD and may only be used by a run that
+   * looked at it. `incomplete` is the same `drifted === 0` with the coverage
+   * missing — see {@link healWasIncomplete}.
+   */
+  reason: "clean" | "incomplete" | "dry-run-only" | "healed" | "ceiling-exceeded";
+  /**
+   * Why this run's coverage was partial, or null. Carried up from the heal
+   * report because this wrapper reduces it to one number and one word, and
+   * those two are what the hourly routine logs — the nested report is not read
+   * by anything.
+   */
+  incomplete_reason: string | null;
   dry_run: BoardCardsHealReport;
   apply_run?: BoardCardsHealReport;
 };
+
+/**
+ * Did this heal actually cover the board it is about to pronounce on?
+ *
+ * Two ways it did not, and `drifted === 0` is the output of BOTH:
+ *
+ *  - the candidate-discovery scan was refused, so cards with no BoardCards row
+ *    were never offered — and those are the ones invisible to `kanban list`;
+ *  - `board_cards` is unbound, so no partition was read and no row could be
+ *    written.
+ *
+ * This wrapper is what `last-stack-fkanban-watch` runs hourly, and
+ * `renderReport` is what lands in its log. Before this, both states rendered as
+ * `drifted=0 ... reason=clean` — the word `clean`, from a run that did not
+ * look. The underlying report grew fields for this; nothing up here read them,
+ * which is the same defect one level up and at the level that actually runs.
+ */
+export function healWasIncomplete(report: BoardCardsHealReport): string | null {
+  if (report.board_cards_bound === false) {
+    return "board_cards schema not bound — no partition was read and no row could be written";
+  }
+  if (report.discovery_failed) {
+    return `candidate-discovery scan failed: ${report.discovery_failed}`;
+  }
+  return null;
+}
 
 export type BoardCardsHealScheduledOptions = {
   cfg: Config;
@@ -39,7 +77,14 @@ function renderReport(report: BoardCardsHealScheduledReport): string {
     `reason=${report.reason}`,
   ];
   if (report.apply_run) parts.push(`healed=${report.apply_run.healed}`);
-  return parts.join(" ");
+  const line = parts.join(" ");
+  // On its OWN line and marked, not appended to the summary: this text is
+  // grepped out of a routine log, and a caveat living at the end of the line
+  // that starts `drifted=0` gets read as part of the good news.
+  return report.incomplete_reason
+    ? `${line}\n  ⚠ INCOMPLETE COVERAGE — ${report.incomplete_reason}.\n` +
+      `    drifted=${report.drifted} is a LOWER BOUND; this run did not see the whole board.`
+    : line;
 }
 
 export async function boardCardsHealScheduledResult(
@@ -57,6 +102,7 @@ export async function boardCardsHealScheduledResult(
     json: false,
   });
   const drifted = dry.report.drifted;
+  const incomplete = healWasIncomplete(dry.report);
 
   let report: BoardCardsHealScheduledReport;
   if (drifted === 0) {
@@ -66,7 +112,13 @@ export async function boardCardsHealScheduledResult(
       drifted,
       applied: false,
       blocked: false,
-      reason: "clean",
+      // The only branch where the distinction changes the WORD, because it is
+      // the only one that asserts something about the board rather than about
+      // this run's own limits. A partial run that still found drift is
+      // reported as `healed` — it did real work — with the caveat on its own
+      // line.
+      reason: incomplete ? "incomplete" : "clean",
+      incomplete_reason: incomplete,
       dry_run: dry.report,
     };
   } else if (drifted > maxDrift) {
@@ -77,6 +129,7 @@ export async function boardCardsHealScheduledResult(
       applied: false,
       blocked: true,
       reason: "ceiling-exceeded",
+      incomplete_reason: incomplete,
       dry_run: dry.report,
     };
   } else if (opts.dryRunOnly) {
@@ -87,6 +140,7 @@ export async function boardCardsHealScheduledResult(
       applied: false,
       blocked: false,
       reason: "dry-run-only",
+      incomplete_reason: incomplete,
       dry_run: dry.report,
     };
   } else {
@@ -104,6 +158,9 @@ export async function boardCardsHealScheduledResult(
       applied: true,
       blocked: false,
       reason: "healed",
+      // From the APPLY run, not the dry one: the two are separate reads, and a
+      // scan that answered for the plan may be refused for the write.
+      incomplete_reason: healWasIncomplete(applied.report) ?? incomplete,
       dry_run: dry.report,
       apply_run: applied.report,
     };
