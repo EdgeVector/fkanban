@@ -2564,8 +2564,29 @@ async function seedBoardCards(
   cfg: Config,
   cards: Card[],
   boardCardsThrew: boolean,
+  scannedFields: string[],
 ): Promise<void> {
   if (boardCardsThrew) return;
+  // Never write a field this scan did not read.
+  //
+  // The seed states a whole membership row, but the scan above runs at the
+  // CALLER's projection, and callers are deliberately narrow: the text `list`
+  // reads `CARD_DISPLAY_FIELDS` (no repo/base/pr_url/branch/north_star/block_*/
+  // updated_at) and the pickup-area peer scan is narrower still — both by
+  // design, both correct as reads. `boardCardFieldsFromCard` then writes `""`
+  // for every field the scan never asked for, and `cardFromBoardCardFields`
+  // reads that `""` back as a value, so the rows are well-formed and wrong.
+  // Nothing downstream can tell "not read" from "not set" — the same
+  // indistinguishable-by-value hazard `BODY_OMITTED` guards for `body`, one
+  // field over. A card with no repo/base is `malformed-routing` to the pickup
+  // gate, so the symptom is a board that stops being pickupable after a READ.
+  //
+  // Declining is the conservative half and the self-correcting one: the seed is
+  // best-effort index repair, the list still returns from the scan either way,
+  // and the next read wide enough to state a row (`listCards`, `pickup status`)
+  // seeds it properly. Widening the scan instead would be the wrong trade — it
+  // would undo read narrowings that were measured and are load-bearing.
+  if (!scanCoversSeed(scannedFields)) return;
   const bySlug = new Map<string, Card>();
   for (const card of cards) {
     if (!card.slug) continue;
@@ -2730,7 +2751,7 @@ async function listCardsWithFields(
     } catch {
       // best-effort seed; list still returns
     }
-    await seedBoardCards(node, cfg, cards, boardCardsThrew);
+    await seedBoardCards(node, cfg, cards, boardCardsThrew, fields);
     return cards;
   }
 
@@ -2823,6 +2844,30 @@ export const CARD_LIST_FIELDS: string[] = [
   "pr_url",
   "branch",
 ];
+
+/**
+ * What a scan must have read before it is allowed to SEED a membership row.
+ *
+ * A WRITE contract, not a read one, and separate from every list projection for
+ * that reason: a renderer may read as few fields as it likes, but a scan that
+ * goes on to seed must have read at least this set — `boardCardFieldsFromCard`
+ * writes `""` for an unprojected field rather than skipping it.
+ *
+ * This is {@link CARD_LIST_FIELDS}, i.e. everything BoardCards serves as list
+ * truth. `db` is the deliberate exception: `boardCardFieldsFromCard` does write
+ * it, but no list projection carries it and `show` point-reads Card for it (see
+ * `BOARD_CARDS_LIST_FIELDS`), so requiring it here would refuse every seed the
+ * product actually makes — including `listCards`' own — and disable the repair
+ * entirely. Blanking `db` on a seeded row is pre-existing and by design; that
+ * is a different question from the routing fields this guard exists for.
+ */
+export const CARD_SEED_FIELDS: string[] = [...CARD_LIST_FIELDS];
+
+/** Did a scan at `fields` read enough to state a whole membership row? */
+export function scanCoversSeed(fields: string[]): boolean {
+  const got = new Set(fields);
+  return CARD_SEED_FIELDS.every((f) => got.has(f));
+}
 
 export async function listCards(
   node: NodeClient,
