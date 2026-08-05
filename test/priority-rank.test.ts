@@ -22,6 +22,7 @@ import {
   priorityRank,
   priorityTag,
   rankCards,
+  writeCardPatch,
   withPriorityTag,
   type Card,
 } from "../src/record.ts";
@@ -199,6 +200,54 @@ describe("rank command", () => {
     const second = await rankCmd({ cfg, node });
     expect(second.reordered).toBe(0);
     expect(second.order.map((o) => o.slug)).toEqual(first.order.map((o) => o.slug));
+  });
+
+  test("a sparse column already in ranked order is not rewritten", async () => {
+    // The live `default`/`todo` shape, and the reason this command stopped
+    // renumbering densely: cards leave the column, the survivors keep their old
+    // positions, and nothing sits at (i+1)*10 any more. The ORDER is still
+    // exactly what the ranker wants, so the correct number of gated BoardCards
+    // writes is zero — a dense renumber spends one per card to buy nothing.
+    await seedTodo();
+    await rankCmd({ cfg, node }); // c2, c4, c1, c3 → 10, 20, 30, 40
+    const sparse: Record<string, string> = { c2: "230", c4: "240", c1: "370", c3: "410" };
+    for (const [slug, position] of Object.entries(sparse)) {
+      const card = await findCard(node, cfg, slug);
+      await writeCardPatch({ cfg, node }, card!, { position });
+    }
+
+    const res = await rankCmd({ cfg, node });
+
+    expect(res.order.map((o) => o.slug)).toEqual(["c2", "c4", "c1", "c3"]);
+    expect(res.reordered).toBe(0);
+    // Positions kept, not compacted back to 10/20/30/40.
+    expect(res.order.map((o) => o.position)).toEqual([230, 240, 370, 410]);
+    for (const [slug, position] of Object.entries(sparse)) {
+      expect((await findCard(node, cfg, slug))?.position).toBe(position);
+    }
+  });
+
+  test("a sparse column with one card out of order costs one write", async () => {
+    await seedTodo();
+    await rankCmd({ cfg, node });
+    // c4 ranks second but is parked last; the other three are already ordered.
+    const start: Record<string, string> = { c2: "230", c1: "370", c3: "410", c4: "900" };
+    for (const [slug, position] of Object.entries(start)) {
+      const card = await findCard(node, cfg, slug);
+      await writeCardPatch({ cfg, node }, card!, { position });
+    }
+
+    const res = await rankCmd({ cfg, node });
+
+    expect(res.order.map((o) => o.slug)).toEqual(["c2", "c4", "c1", "c3"]);
+    expect(res.reordered).toBe(1);
+    const c4 = Number((await findCard(node, cfg, "c4"))?.position);
+    expect(c4).toBeGreaterThan(230);
+    expect(c4).toBeLessThan(370);
+    // Untouched cards really were untouched.
+    expect((await findCard(node, cfg, "c2"))?.position).toBe("230");
+    expect((await findCard(node, cfg, "c1"))?.position).toBe("370");
+    expect((await findCard(node, cfg, "c3"))?.position).toBe("410");
   });
 
   test("only ranks the requested column", async () => {
