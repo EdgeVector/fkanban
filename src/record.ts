@@ -2806,10 +2806,37 @@ async function listCardsWithFieldsTraced(
     }
     const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
     if (!fields.includes("body")) markBodyOmitted(cards);
-    try {
-      await writeCardListIndex(node, cfg, cards.map(toCardSummary));
-    } catch {
-      // best-effort seed; list still returns
+    // Never write a field this scan did not read — the same contract
+    // `seedBoardCards` states below, at the other index, from the same scan.
+    //
+    // A `CardSummary` states every routing field (`repo`, `base`, `pr_url`,
+    // `branch`, `north_star`, `block_status`, `block_reason`, `updated_at`), and
+    // `toCardSummary` is a spread: it copies whatever `rowToCard` produced,
+    // which is `""` for every field the caller's projection never asked for.
+    // Identical mechanism, one line apart, and this half was left unguarded
+    // when the BoardCards half was fixed.
+    //
+    // The consequence here is WORSE than a blanked BoardCards row, which is
+    // why the guard belongs at both call sites rather than only the reachable
+    // one. A blanked rollup is then SERVED: the branch above returns any
+    // non-null payload on a legacy node, so it answers every later list until
+    // something clears it, while a blanked BoardCards row is re-checked by
+    // `groom parity-check` and repaired by `board-cards-heal`. Nothing audits
+    // `all_cards` — the retirement path only clears it.
+    //
+    // Reach is narrow and stated plainly rather than assumed: the write is
+    // already refused on a modern node (`cardListIndexIsSuperseded`), and on a
+    // legacy node with a rollup present the branch above returns before the
+    // scan. So this fires only where `board_cards` is unbound AND the `all_cards`
+    // row is absent — the first list on a legacy install. That path is retired
+    // (`groom card-list-index-retire`), and the guard is cheap; a defect that
+    // survives because its path is unpopular is still a defect.
+    if (scanCoversSeed(fields)) {
+      try {
+        await writeCardListIndex(node, cfg, cards.map(toCardSummary));
+      } catch {
+        // best-effort seed; list still returns
+      }
     }
     await seedBoardCards(node, cfg, cards, boardCardsThrew, fields);
     return { cards, servedBy: "full-scan" };
