@@ -36,6 +36,7 @@ import {
   rankCardsHardTodo,
   type HardTodoRankContext,
 } from "../pickup_lanes.ts";
+import { planRankPositions } from "../rank_positions.ts";
 import type { RankResult } from "../format.ts";
 
 export type RankMode = "hard" | "priority";
@@ -89,11 +90,19 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
 
   const ranked = mode === "hard" ? rankCardsHardTodo(inColumn, ctx) : rankCards(inColumn);
 
+  // Positions are an ORDERING, not an address. Keep every card whose current
+  // position already sits in increasing order along `ranked` and write only the
+  // rest — each write is one gate acquisition on the board's single BoardCards
+  // partition, and a dense renumber spends ~54 of them to realize an order that
+  // needs 1 (see src/rank_positions.ts for the measurement).
+  const plan = planRankPositions(ranked.map((c) => c.position), RANK_POSITION_STEP);
+  const mustWrite = new Set(plan.writeIndices);
+
   const order: RankedCard[] = [];
   let reordered = 0;
   for (let i = 0; i < ranked.length; i++) {
     const card = ranked[i]!;
-    const position = (i + 1) * RANK_POSITION_STEP;
+    const position = plan.positions[i]!;
     const lane = laneOf(card);
     order.push({
       slug: card.slug,
@@ -104,7 +113,7 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
     });
     // Idempotent: skip the write (and the updated_at bump) when the card is
     // already at its ranked position.
-    if (card.position === String(position)) continue;
+    if (!mustWrite.has(i)) continue;
     await writeCardPatch(opts, card, { position: String(position) });
     reordered++;
   }
