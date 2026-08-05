@@ -11,6 +11,7 @@ import { mapWithConcurrency } from "../concurrency.ts";
 import {
   boardCardFieldsFromCard,
   boardCardSk,
+  boardCardsHash,
   classifyBoardCardDuplicateRows,
   deleteBoardCardRowsBySk,
   listBoardCardsPartition,
@@ -154,6 +155,23 @@ export type BoardCardsHealReport = {
   healed: number;
   missing_card: number;
   /**
+   * False when `board_cards` is not bound in config. Every partition read then
+   * returns null and every write no-ops in `upsertBoardCard`, so the other
+   * counts in this report describe nothing — see the early return.
+   */
+  board_cards_bound: boolean;
+  /**
+   * The error the candidate-discovery scan failed with, or null if it ran.
+   *
+   * Non-null means the "missing BoardCards membership" half of this run did not
+   * happen: `missing_card`, `drifted` and every `upsert-truth` action are a
+   * LOWER BOUND, and a card whose row is absent may simply never have been
+   * offered as a candidate. The sibling signal for the partition-read half is
+   * `incomplete_leads`; the two fail in opposite directions and both have to be
+   * readable, because `missing_card: 0` means the same thing either way.
+   */
+  discovery_failed: string | null;
+  /**
    * `<board>:<field>` for each completeness lead the node refused. Non-empty
    * means every count in this report is a LOWER BOUND — see
    * `sweepBoardCardsPartition`.
@@ -248,6 +266,43 @@ function thinFieldDrift(row: Card, truth: Card): string[] {
 export async function boardCardsHealResult(
   opts: BoardCardsHealOptions,
 ): Promise<{ text: string; report: BoardCardsHealReport }> {
+  // NOT CHECKED, not "clean". With `board_cards` unbound every partition read
+  // below returns null and every repair no-ops inside `upsertBoardCard`'s
+  // `if (!schemaHash) return` — but the loop still counted `drifted += 1` and
+  // `healed += 1` per candidate. Measured pre-fix on a 5-entry `all_cards`
+  // rollup: `scanned=0 drifted=5 healed=5`, and **0 BoardCards writes**. One
+  // claimed repair per rollup entry, none of them written — a positive claim
+  // rendered from an aggregate with no slot for "none of these landed."
+  //
+  // On a node that has already run `card-list-index-retire` the rollup is
+  // empty, so the same state renders as `scanned=0 drifted=0 healed=0` — the
+  // quieter half of the same defect, and the one the live primary produces
+  // (measured 2026-08-05 against a config with `board_cards` removed).
+  //
+  // `board-list-heal` and `milestone-indexes-heal` both refuse this state by
+  // name and say which schema is missing. This command was the one that did
+  // not.
+  if (!boardCardsHash(opts.cfg)) {
+    return {
+      text:
+        "board-cards heal: NOT CHECKED — no `board_cards` schema hash in config, so no " +
+        "partition can be read and no membership row can be written.\n" +
+        "  Run `kanban init` to bind it. Nothing was scanned and nothing was repaired.",
+      report: {
+        scanned_index_rows: 0,
+        drifted: 0,
+        healed: 0,
+        missing_card: 0,
+        board_cards_bound: false,
+        discovery_failed: null,
+        incomplete_leads: [],
+        dryRun: !opts.apply,
+        blocked: false,
+        actions: [],
+      },
+    };
+  }
+
   const boards = await listBoards(opts.node, opts.cfg);
   const boardFilter = opts.board?.trim();
   let targetBoards = boardFilter
@@ -288,13 +343,39 @@ export async function boardCardsHealResult(
   // scan returns twice resolve last-write-wins, so which of the two rows won
   // was arbitrary. Truth decides the board, below, after a keyed read.
   const candidateSlugs = new Set<string>();
+  // Non-null once the scan has failed. Reported, never swallowed — see below.
+  let discoveryFailed: string | null = null;
   if (cardListIndexIsSuperseded(opts.cfg)) {
     try {
       for (const c of await scanCardSummariesForReconcile(opts.node, opts.cfg)) {
         if (c.slug) candidateSlugs.add(c.slug);
       }
-    } catch {
-      // Scan unavailable (older node / scan refused): fall back to the rollup.
+    } catch (err) {
+      // THIS IS NOT A FALLBACK, and the comment that used to sit here said it
+      // was. `cardListIndexIsSuperseded` is true exactly when `board_cards` is
+      // bound — i.e. whenever this branch runs at all — and both
+      // `writeCardListIndex` and `patchCardListIndex` return early in that
+      // case. The rollup read below is therefore frozen at whatever it held
+      // when the cutover happened, and on the primary
+      // `groom card-list-index-retire` has already emptied it. Measured
+      // 2026-08-05: rollup 0 entries, scan 217 distinct slugs in 822ms. So the
+      // "fallback" is a fallback to ZERO candidates.
+      //
+      // The consequence is asymmetric with the partition-read failure handled
+      // further down, which is why only that one had a signal. A refused LEAD
+      // costs heal rows it could have DELETED — under-reaping, the safe
+      // direction. A refused SCAN costs heal every card whose Card record is
+      // live and whose BoardCards row is missing: cards invisible to
+      // `kanban list` entirely, which is the condition this command exists to
+      // repair, and which nothing else re-derives.
+      //
+      // Still not fatal, for the reason `sweepBoardCardsPartition` gives about
+      // its own failures: heal under-repairing is safe, heal not running is
+      // not, and `service_timeout` / "too many concurrent reads" are documented
+      // load signals on this node rather than a broken one. So the run
+      // continues on the partitions it CAN read — and says, where the operator
+      // reads the result, that it did not look.
+      discoveryFailed = err instanceof Error ? err.message : String(err);
     }
   }
   const indexed = (await readCardListIndex(opts.node, opts.cfg)) ?? [];
@@ -558,6 +639,8 @@ export async function boardCardsHealResult(
       drifted: 0,
       healed: 0,
       missing_card: 0,
+      board_cards_bound: true,
+      discovery_failed: discoveryFailed,
       incomplete_leads: incompleteLeads,
       dryRun: false,
       blocked: true,
@@ -832,6 +915,8 @@ export async function boardCardsHealResult(
     drifted,
     healed: opts.apply ? healed : drifted,
     missing_card,
+    board_cards_bound: true,
+    discovery_failed: discoveryFailed,
     incomplete_leads: incompleteLeads,
     dryRun: !opts.apply,
     blocked: false,
@@ -863,7 +948,19 @@ export async function boardCardsHealResult(
       `    Counts above are a LOWER BOUND; rows only reachable under those leads were not scanned.`,
     ]
     : [];
-  const text = [head, ...warn, ...lines].join("\n");
+  // The other half, and it needs its own line rather than a shared one: this
+  // failure removes CANDIDATES (cards with no row anywhere), while the leads
+  // above remove ROWS from a partition heal did read. An operator seeing
+  // `missing_card=0` has to be able to tell which of the two produced it.
+  const discoveryWarn = discoveryFailed
+    ? [
+      `  ⚠ DISCOVERY INCOMPLETE — the Card scan that finds cards with NO BoardCards row failed: ${discoveryFailed}`,
+      `    missing_card and upsert-truth above are a LOWER BOUND. A card whose membership row is`,
+      `    absent is invisible to \`kanban list\`, and this run may never have been offered it as a`,
+      `    candidate. Re-run when the node is not shedding reads before treating this as converged.`,
+    ]
+    : [];
+  const text = [head, ...discoveryWarn, ...warn, ...lines].join("\n");
   return { text, report };
 }
 
