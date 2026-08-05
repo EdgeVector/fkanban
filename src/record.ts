@@ -2623,6 +2623,39 @@ function cardFieldWeight(card: Card): number {
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
 // Native deletes are hidden by the node before this point.
+/**
+ * Which read actually answered a card list.
+ *
+ * Reported, never inferred. `listCardsByFilter` used to hand its caller a
+ * hard-coded `indexed: false` on both return paths, so the one thing that
+ * consumed it — `search`'s `FKANBAN_DEBUG_QUERY_PLAN` line — printed a constant
+ * dressed as a measurement. An operator reading `displayIndexed: false` while
+ * debugging a slow search would conclude the display read had missed its index
+ * and go provisioning one, on a board where BoardCards was serving the read
+ * correctly the whole time.
+ *
+ * That is the same defect shape this suite keeps finding in its own
+ * instruments — a check that can only ever report one answer — and it is worse
+ * in a diagnostic than in a test, because a diagnostic is what someone reaches
+ * for when they already believe something is wrong.
+ *
+ * The values are the real branches of {@link listCardsWithFields}, not a
+ * healthy/unhealthy summary: `refused` and `full-scan` are both "not served by
+ * an index" but they want opposite responses, and collapsing them back to a
+ * boolean would rebuild the field this replaces.
+ */
+export type CardListServedBy =
+  /** BoardCards HashRange partitions — the healthy Dynamo-style path. */
+  | "board-cards"
+  /** The legacy CardListIndex rollup (unbound `board_cards`, i.e. a legacy node). */
+  | "card-list-index"
+  /** Admin full scan over Card; also seeds the indexes. Rare and expensive. */
+  | "full-scan"
+  /** No index answered and `allowFullScanFallback: false` declined the scan. */
+  | "refused"
+  /** A `HashKey` filter — a Card point read, not a list at all. */
+  | "card-point-read";
+
 async function listCardsWithFields(
   node: NodeClient,
   cfg: Config,
@@ -2630,6 +2663,23 @@ async function listCardsWithFields(
   filter?: QueryFilter,
   opts: { allowFullScanFallback?: boolean } & BoardListOpt = {},
 ): Promise<Card[]> {
+  return (await listCardsWithFieldsTraced(node, cfg, fields, filter, opts)).cards;
+}
+
+/**
+ * {@link listCardsWithFields}, plus which branch answered.
+ *
+ * Split rather than widening the original's return type so the six callers that
+ * only want cards stay untouched — the trace exists for the diagnostic, and a
+ * diagnostic should not get to reshape the read path it reports on.
+ */
+async function listCardsWithFieldsTraced(
+  node: NodeClient,
+  cfg: Config,
+  fields: string[],
+  filter?: QueryFilter,
+  opts: { allowFullScanFallback?: boolean } & BoardListOpt = {},
+): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   // Prefer BoardCards HashRange partitions (hash=board) — Dynamo-style list.
   // Never hydrate body for board-wide lists (that was the N+1 storm). Callers
   // that need body must findCard/show by slug.
@@ -2655,11 +2705,14 @@ async function listCardsWithFields(
       });
       if (partitioned !== null && partitioned.length > 0) {
         // BoardCards rows are already body-free; promote any structured fields.
-        return markBodyOmitted(
-          partitioned
-            .filter((c) => !isHiddenCard(c))
-            .map((c) => Object.assign(c, deriveStructuredFields(c))),
-        );
+        return {
+          cards: markBodyOmitted(
+            partitioned
+              .filter((c) => !isHiddenCard(c))
+              .map((c) => Object.assign(c, deriveStructuredFields(c))),
+          ),
+          servedBy: "board-cards",
+        };
       }
       // Empty partition may mean "no cards" OR "not dual-written yet".
       // Fall through to CardListIndex when partitions are empty so dual-read
@@ -2681,12 +2734,16 @@ async function listCardsWithFields(
         partitioned !== null && partitioned.length === 0 &&
         (opts.activeOnly === true || opts.column !== undefined)
       ) {
-        return [];
+        // An empty BoardCards answer IS a BoardCards answer here — the guard
+        // above exists precisely because emptiness is legitimate under these
+        // narrowings, so reporting it as anything else would misname a healthy
+        // read as a missing index.
+        return { cards: [], servedBy: "board-cards" };
       }
       if (partitioned !== null && partitioned.length === 0) {
         const indexedEmpty = await readCardListIndex(node, cfg);
         if (indexedEmpty !== null && indexedEmpty.length === 0) {
-          return [];
+          return { cards: [], servedBy: "card-list-index" };
         }
         // indexed has data but BoardCards empty → legacy path below
       }
@@ -2721,14 +2778,17 @@ async function listCardsWithFields(
     // precisely when it had nothing to give and accept it when it did.
     if (indexed !== null && !cardListIndexIsSuperseded(cfg)) {
       // CardListIndex is body-free by construction — never N+1 hydrate.
-      return markBodyOmitted(
-        (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
-          Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
+      return {
+        cards: markBodyOmitted(
+          (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
+            Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
+          ),
         ),
-      );
+        servedBy: "card-list-index",
+      };
     }
     if (opts.allowFullScanFallback === false) {
-      return [];
+      return { cards: [], servedBy: "refused" };
     }
     // Index missing: one admin full scan seeds indexes (keeps body for this
     // rare path only — still not N+1). Prefer BoardCards after dual-write.
@@ -2752,7 +2812,7 @@ async function listCardsWithFields(
       // best-effort seed; list still returns
     }
     await seedBoardCards(node, cfg, cards, boardCardsThrew, fields);
-    return cards;
+    return { cards, servedBy: "full-scan" };
   }
 
   const hash = schemaHashFor("card", cfg);
@@ -2766,7 +2826,10 @@ async function listCardsWithFields(
     res = await query(fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)));
   }
   const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
-  return fields.includes("body") ? cards : markBodyOmitted(cards);
+  return {
+    cards: fields.includes("body") ? cards : markBodyOmitted(cards),
+    servedBy: "card-point-read",
+  };
 }
 
 function isOnlyOptionalFieldMiss(err: unknown, fields: string[]): boolean {
@@ -2800,6 +2863,17 @@ async function listCardsClientFiltered(
   predicate: Record<string, string>,
   opts: { allowFullScanFallback?: boolean } = {},
 ): Promise<Card[]> {
+  return (await listCardsClientFilteredTraced(node, cfg, fields, predicate, opts)).cards;
+}
+
+/** {@link listCardsClientFiltered}, carrying the underlying read's serving path. */
+async function listCardsClientFilteredTraced(
+  node: NodeClient,
+  cfg: Config,
+  fields: string[],
+  predicate: Record<string, string>,
+  opts: { allowFullScanFallback?: boolean } = {},
+): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const required = Object.keys(predicate);
   const matches = (c: Card): boolean =>
     required.every((field) => {
@@ -2807,7 +2881,10 @@ async function listCardsClientFiltered(
       return typeof actual === "string" && actual === predicate[field];
     });
   // Prefer column-only path via full list then filter (partition already thin).
-  const cards = await listCardsWithFields(
+  // The filtering is client-side, so `servedBy` describes the READ, not the
+  // predicate — which is the honest thing to report: the cost this is a
+  // diagnostic for is paid by the read, before a single row is matched.
+  const read = await listCardsWithFieldsTraced(
     node,
     cfg,
     withRequiredFields(
@@ -2817,7 +2894,7 @@ async function listCardsClientFiltered(
     undefined,
     opts,
   );
-  return cards.filter(matches);
+  return { cards: read.cards.filter(matches), servedBy: read.servedBy };
 }
 
 /** Body-free structured fields for list/pickup/MCP — never includes `body`. */
@@ -3330,15 +3407,12 @@ export async function listCardsByFilter(
   filter: QueryFilter,
   fields: string[],
   opts: { allowFullScanFallback?: boolean } = {},
-): Promise<{ cards: Card[]; indexed: boolean }> {
+): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const entries = Object.entries(filter).filter(([, value]) => value.length > 0);
   if (entries.length === 0) {
-    return { cards: await listCardsWithFields(node, cfg, fields, undefined, opts), indexed: false };
+    return await listCardsWithFieldsTraced(node, cfg, fields, undefined, opts);
   }
-  return {
-    cards: await listCardsClientFiltered(node, cfg, fields, Object.fromEntries(entries), opts),
-    indexed: false,
-  };
+  return await listCardsClientFilteredTraced(node, cfg, fields, Object.fromEntries(entries), opts);
 }
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
