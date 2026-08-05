@@ -1634,6 +1634,32 @@ export async function pingNode(opts: {
     // `?brief=true` are both accepted and both ignored — the router drops the
     // query string before the handler). Filed node-side; from here the only
     // honest saving is to not JSON.parse 176 KB to look for nothing.
+    //
+    // ## The 176 KB is a SIZE problem, not the node's COST problem
+    //
+    // Written down because the paragraph above reads like an explanation of why
+    // a ping is slow, and it is not — a reader optimizing from it would go
+    // after the wrong phase. Re-measured 2026-08-05 as an `lastdb ops` phase
+    // delta across exactly 5 `kanban ping`s on the live primary:
+    //
+    // | phase | per ping | share of node time |
+    // |---|---|---|
+    // | `status_data_dir`     | **331.6ms** | 99.9% |
+    // | `status_request_ops`  | 0.19ms      | 0.06% |
+    // | everything else       | ~0.15ms     | — |
+    //
+    // Serializing the whole telemetry ring costs the node 0.19ms. What costs
+    // 332ms is `status_data_dir` — a synchronous recursive `std::fs` walk of
+    // the entire store (132,705 entries / 7.32 GiB on the primary), recomputed
+    // per request with no cache and no `spawn_blocking`. It scales with the
+    // user's data, which is why the observed max is tens of seconds.
+    //
+    // So: trimming the body would not measurably speed up a ping, and the
+    // node-side fix worth asking for is caching that gauge, not paginating the
+    // ring. Ground truth, with the offending call site:
+    // brain `lastdb-status-data-dir-walk-is-the-most-expensive-op-on-the-node`
+    // (still unfixed as of 2026-08-05). The endpoint choice above is unchanged
+    // and still correct — `/health` cannot observe storage.
     const text = await readBody({ asText: true });
     if (!res.ok) {
       // The failure path DOES parse: a node that answers non-2xx puts the
