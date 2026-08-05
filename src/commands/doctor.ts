@@ -34,6 +34,7 @@ import {
 } from "../board-milestones.ts";
 import {
   listMilestoneCardsPartition,
+  milestoneCardsHash,
   sweepMilestoneCardsPartition,
   MILESTONE_CARDS_PAYLOAD_FIELDS,
 } from "../milestone-cards.ts";
@@ -555,12 +556,30 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // it is looking for cannot report the failure; the union over leading fields
   // is the only input here that is not itself a projection.
   const milestonesNamedByCards = new Set<string>();
+  // Boards whose BoardCards read did not happen or did not complete. The
+  // candidate list below is harvested from exactly that read, so a board in
+  // here is a board whose milestones are UNKNOWN — not a board with none.
+  //
+  // Without this the MilestoneCards check reported `no card names a milestone
+  // — nothing to check` whenever `board_cards` was unbound: a claim about the
+  // DATA, produced by a read that never ran. Found by the test for the
+  // NOT-CHECKED vocabulary rather than by inspection, which is the argument for
+  // asserting on what the operator reads.
+  const boardsWithUnharvestedCards: string[] = [];
   try {
     const boards = boardSet ?? (await listBoards(node, cfg));
     for (const b of boards) {
       const sweep = await sweepBoardCardsPartition(node, cfg, b.slug);
       if (sweep === null) {
-        info(`BoardCards partition probe (${b.slug})`, "board_cards not bound — skipped");
+        boardsWithUnharvestedCards.push(b.slug);
+        // One vocabulary for a coverage gap across all three indexes, so
+        // `doctor | grep 'NOT CHECKED'` is a complete answer to "what did this
+        // run not look at". It was three different phrasings, and the third one
+        // was a ✓.
+        info(
+          `BoardCards partition probe (${b.slug})`,
+          "NOT CHECKED — no `board_cards` schema hash in config; run `kanban init` to re-resolve the published schema hashes",
+        );
         continue;
       }
       // A refused lead is a hole in the baseline, so parity below would be
@@ -574,6 +593,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       // every other lead returned 0 rows. No kanban read leads with `column`,
       // so that partition has looked empty and healthy to every check there is.
       if (sweep.failedLeads.length > 0) {
+        boardsWithUnharvestedCards.push(b.slug);
         check(
           false,
           `BoardCards projection parity (${b.slug})`,
@@ -585,6 +605,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       }
       const wide = await listBoardCardsPartition(node, cfg, b.slug);
       if (wide === null) {
+        boardsWithUnharvestedCards.push(b.slug);
         check(false, `BoardCards partition probe (${b.slug})`, "wide partition read returned no result");
         continue;
       }
@@ -627,6 +648,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       );
     }
   } catch (err) {
+    // The board list itself failed, so not one card was harvested and the
+    // candidate set below is empty for a reason that has nothing to do with
+    // milestones.
+    boardsWithUnharvestedCards.push("<board list unavailable>");
     check(false, "BoardCards projection parity", formatDoctorError(err));
   }
 
@@ -680,7 +705,16 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     for (const b of boards) {
       const sweep = await sweepBoardMilestonesPartition(node, cfg, b.slug);
       if (sweep === null) {
-        info(`BoardMilestones projection parity (${b.slug})`, "board_milestones not bound or partition unreadable — skipped");
+        // "or partition unreadable" used to be in this line and could not
+        // happen: `sweepBoardMilestonesPartition` returns null ONLY on an
+        // unresolvable schema hash — a read that fails comes back in
+        // `failedLeads` and is reported as a ✗ immediately below. A skip line
+        // that overstates what it is tolerating is the same defect as a verdict
+        // that overstates what it checked, one register quieter.
+        info(
+          `BoardMilestones projection parity (${b.slug})`,
+          "NOT CHECKED — no `board_milestones` schema hash in config; run `kanban init` to re-resolve the published schema hashes",
+        );
         continue;
       }
       // A refused lead means the enumeration is short by exactly that lead, so
@@ -731,7 +765,19 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // out at the partition width, not a sweep and not a scan.
   try {
     const candidates = [...milestonesNamedByCards].sort();
-    if (candidates.length === 0) {
+    if (candidates.length === 0 && boardsWithUnharvestedCards.length > 0) {
+      // "No card names a milestone" is a claim about the DATA. It may only be
+      // made from a read that happened. When the harvest above was skipped or
+      // incomplete, the honest report is that the answer is unknown — the same
+      // distinction the `unreadable` arm below draws between "no drift" and "no
+      // read", one level further up the dependency chain.
+      info(
+        "MilestoneCards projection parity",
+        `NOT CHECKED — the candidate list could not be harvested: BoardCards was not read for ${
+          boardsWithUnharvestedCards.slice(0, 3).join(", ")
+        }, so whether any card names a milestone is unknown`,
+      );
+    } else if (candidates.length === 0) {
       info("MilestoneCards projection parity", "no card names a milestone — nothing to check");
     } else {
       const results = await mapWithConcurrency(
@@ -772,6 +818,29 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         refused: ReadonlyArray<{ field: string; error: string }>;
       }>;
       const unreadable = results.filter((r) => "unreadable" in r).map((r) => r.ms);
+      // Partitions the sweep declined to open at all. Until 2026-08-05 these
+      // were dropped by all three filters below and left NO trace: nothing
+      // counted them, nothing printed them, and the verdict fell through to the
+      // success arm rendering `measured.length` as its coverage. With
+      // `milestone_cards` unpinned that is every candidate, and doctor printed
+      //
+      //   ✓ MilestoneCards projection parity — 0 rows across 0 milestone
+      //     partition(s), every lead agrees
+      //
+      // — "every lead agrees" over zero leads, as a PASS, on an index nothing
+      // read. The sibling indexes above never had this shape because they skip
+      // with a `continue` AT the call site, so their skip IS the printed line;
+      // this one folds its skips into an aggregate that had no slot for them.
+      //
+      // Not a red: `doctor` treats an unpinned index as a supported degraded
+      // mode (see the `identity.kind === "unset"` arm), and a red no operator
+      // action can clear is how doctors get ignored. `groom parity-check` DOES
+      // go red on the same state, and correctly — refusing to check parity is
+      // its one job. What is removed here is the false claim, not the verdict.
+      const skipped = results.filter((r) => "skipped" in r).map((r) => r.ms);
+      const skipReason = milestoneCardsHash(cfg) === null
+        ? "no `milestone_cards` schema hash in config — the index was not enumerated; run `kanban init` to re-resolve the published schema hashes"
+        : "the sweep declined the partition key";
       const measured = results.filter(
         (r): r is {
           ms: string;
@@ -830,12 +899,39 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
             bad.every((r) => r.confirmed),
           ),
         );
+      } else if (measured.length === 0) {
+        // Nothing was opened, so there is no verdict to give. Reported as a
+        // skip in the same voice the two indexes above use, rather than as a ✓.
+        info(
+          "MilestoneCards projection parity",
+          `NOT CHECKED — ${skipped.length} milestone partition(s) skipped: ${skipReason}`,
+        );
       } else {
         const rows = measured.reduce((n, r) => n + r.wide, 0);
         check(
           true,
           "MilestoneCards projection parity",
-          `${rows} rows across ${measured.length} milestone partition(s), every lead agrees`,
+          `${rows} rows across ${measured.length} milestone partition(s), every lead agrees` +
+            // The mixed case, and the reason the guard above is not enough on
+            // its own: `measured.length` is the count of partitions that were
+            // READ, and on its own it reads as the count that EXISTS. A
+            // candidate the sweep declined has to be named here or the readable
+            // majority silently vouches for it — the rule
+            // `listAllBoardMilestones` and the `unreadable` arm above already
+            // had to learn.
+            (skipped.length > 0
+              ? ` — ${skipped.length} further candidate partition(s) NOT checked (${skipReason}): ${
+                skipped.slice(0, 3).map((m) => JSON.stringify(m)).join(", ")
+              }`
+              : "") +
+            // A partially harvested candidate list makes this a LOWER BOUND on
+            // coverage, not a clean bill for the index: a milestone named only
+            // by cards on an unread board was never a candidate at all.
+            (boardsWithUnharvestedCards.length > 0
+              ? ` — candidate list INCOMPLETE: BoardCards was not read for ${
+                boardsWithUnharvestedCards.slice(0, 3).join(", ")
+              }, so milestones named only there were never checked`
+              : ""),
         );
       }
     }
