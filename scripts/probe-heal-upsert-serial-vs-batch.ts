@@ -5,7 +5,7 @@
  *
  * The heal's two pure-upsert branches (`upsert-truth`, `refresh-thin-fields`)
  * call `upsertBoardCard` once per card in a serial loop. This times that exact
- * call — same options the heal passes (`skipOrphanPurge`, `wideWrite`) —
+ * call — same options the heal passes (`skipOrphanPurge`) —
  * against the batch wrapper doing the identical logical work.
  *
  * ## Controls, because the last three runs were all confounded
@@ -119,7 +119,7 @@ async function runArm(arm: Arm, rep: number): Promise<number> {
   if (arm === "serial") {
     // Exactly what board_cards_heal's upsert-truth branch does, per row.
     for (const c of cards) {
-      await upsertBoardCard(node, cfg, c, null, { skipOrphanPurge: true, wideWrite: true });
+      await upsertBoardCard(node, cfg, c, null, { skipOrphanPurge: true });
     }
   } else {
     const failed: string[] = [];

@@ -641,21 +641,26 @@ describe("board-cards-heal thin-field drift", () => {
 });
 
 /**
- * Narrow BoardCards writes.
+ * Wide BoardCards writes.
  *
- * A BoardCards write costs roughly 200ms per field SENT on the primary, and
- * the row has 24 fields. LastDB does skip a write whose every value is
- * byte-identical (~140ms), but that skip is whole-record: change one field and
- * the node pays for all 24 that were sent. So a `tag` that changes two fields
- * cost ~4.7s for as long as it sent the whole row. Measured numbers and method:
- * scripts/probe-partial-write-cost.ts.
+ * Every BoardCards write sends the full 24-field row, and there is no pre-write
+ * read on the write path at all. This replaced a narrow path (read the row,
+ * diff, send only the difference) on 2026-08-05, for two measured reasons:
+ * payload width does not drive write cost on this schema — 24-changed 1983ms,
+ * 2-changed 1768ms, narrow-4-field 1806ms against a 229ms noise floor, one
+ * number — and the diff basis was the BoardCards index, which can serve
+ * pre-write state, making "read it back to decide what to send" unsound
+ * regardless of how small that window is on any given day. Method and numbers:
+ * scripts/probe-partial-write-cost.ts, scripts/probe-prewrite-read-vs-blind-wide.ts,
+ * scripts/probe-write-shape-vs-readback-freshness.ts.
  *
- * These tests lock the three things that make narrowing safe rather than just
- * fast — because the failure mode of getting it wrong is silent: a row missing
- * an atom on any projected field is DROPPED from every wide read, with no
- * error (see BOARD_CARDS_SPINE_FIELDS).
+ * These tests lock the write SHAPE, because the failure mode of getting it
+ * wrong is silent: a row missing an atom on any projected field is DROPPED from
+ * every wide read, with no error (see BOARD_CARDS_SPINE_FIELDS). The stale-diff
+ * regression the narrow path could suffer is pinned separately, in
+ * test/board-cards-wide-write.test.ts.
  */
-describe("board-cards narrow write", () => {
+describe("board-cards wide write", () => {
   /** Wrap a node, recording every mutation's field payload. */
   function writeRecordingNode(inner: NodeClient): {
     node: NodeClient;
@@ -687,31 +692,34 @@ describe("board-cards narrow write", () => {
     writes: Array<{ op: "create" | "update"; schemaHash: string; fields: string[] }>,
   ) => writes.filter((w) => w.schemaHash === BC);
 
-  test("a metadata change sends only the changed fields, not the whole row", async () => {
+  test("a metadata change sends the whole row, not just the changed fields", async () => {
     const { node, writes } = writeRecordingNode(fakeNode());
-    const before = card({ slug: "narrow", tags: ["a"] });
-    await upsertBoardCard(node, cfgWithBoardCards, before, null, { wideWrite: true });
+    const before = card({ slug: "wide", tags: ["a"] });
+    await upsertBoardCard(node, cfgWithBoardCards, before, null);
     writes.length = 0;
 
     // Same sk (column/position/slug unchanged) — a tag add.
-    const after = card({ slug: "narrow", tags: ["a", "b"], updated_at: "2026-02-02T00:00:00.000Z" });
+    const after = card({ slug: "wide", tags: ["a", "b"], updated_at: "2026-02-02T00:00:00.000Z" });
     await upsertBoardCard(node, cfgWithBoardCards, after, before);
 
     const bc = boardCardWrites(writes);
     expect(bc).toHaveLength(1);
     expect(bc[0]!.op).toBe("update");
-    expect(bc[0]!.fields.sort()).toEqual(["tags", "updated_at"]);
-    // The whole point: nothing near the 24-field write shape.
-    expect(bc[0]!.fields.length).toBeLessThan(BOARD_CARDS_LIST_FIELDS.length);
+    // Sending two fields cost the same as sending 24 and diffed against a
+    // 1.2-2.4s-stale row to decide which two. So: send all of them.
+    expect(bc[0]!.fields.length).toBe(Object.keys(boardCardFieldsFromCard(after)).length);
+    expect(bc[0]!.fields.length).toBeGreaterThanOrEqual(BOARD_CARDS_LIST_FIELDS.length);
+    expect(bc[0]!.fields).toContain("tags");
+    expect(bc[0]!.fields).toContain("milestone");
   });
 
-  test("the fields it did not send survive at the full projection", async () => {
+  test("the row reads back correct at the full projection after a metadata change", async () => {
     const node = fakeNode();
-    const before = card({ slug: "narrow", tags: ["a"], milestone: "m1", repo: "EdgeVector/fkanban" });
-    await upsertBoardCard(node, cfgWithBoardCards, before, null, { wideWrite: true });
+    const before = card({ slug: "wide", tags: ["a"], milestone: "m1", repo: "EdgeVector/fkanban" });
+    await upsertBoardCard(node, cfgWithBoardCards, before, null);
 
     const after = card({
-      slug: "narrow",
+      slug: "wide",
       tags: ["a", "b"],
       milestone: "m1",
       repo: "EdgeVector/fkanban",
@@ -721,30 +729,19 @@ describe("board-cards narrow write", () => {
 
     const rows = (await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }])) ?? [];
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.slug).toBe("narrow");
+    expect(rows[0]!.slug).toBe("wide");
     expect(rows[0]!.tags).toEqual(["a", "b"]);
-    // Untouched by the narrow write, still readable.
     expect(rows[0]!.milestone).toBe("m1");
     expect(rows[0]!.repo).toBe("EdgeVector/fkanban");
     expect(rows[0]!.title).toBe(before.title);
   });
 
-  test("a write that changes nothing issues no mutation at all", async () => {
+  test("an INCOMPLETE row is repaired wide", async () => {
     const { node, writes } = writeRecordingNode(fakeNode());
-    const c = card({ slug: "narrow" });
-    await upsertBoardCard(node, cfgWithBoardCards, c, null, { wideWrite: true });
-    writes.length = 0;
-
-    await upsertBoardCard(node, cfgWithBoardCards, c, c);
-    expect(boardCardWrites(writes)).toHaveLength(0);
-  });
-
-  test("an INCOMPLETE row is repaired wide, never patched narrow", async () => {
-    const { node, writes } = writeRecordingNode(fakeNode());
-    const c = card({ slug: "narrow" });
+    const c = card({ slug: "wide" });
     const sk = boardCardSk(c.column, c.position, c.slug);
     // A row that predates a schema expand: present, but missing an atom on a
-    // projected field. The probe read must refuse to treat this as diffable.
+    // projected field, so every wide reader drops it.
     const partial = { ...boardCardFieldsFromCard(c) };
     delete partial.milestone;
     await node.createRecord({ schemaHash: BC, keyHash: "default", rangeKey: sk, fields: partial });
@@ -760,20 +757,18 @@ describe("board-cards narrow write", () => {
     expect(bc[0]!.fields.length).toBe(Object.keys(boardCardFieldsFromCard(c)).length);
   });
 
-  test("a MOVE writes the destination row whole, and does not probe for it", async () => {
+  test("a MOVE writes the destination row whole", async () => {
     const { node, writes, reads } = writeRecordingNode(fakeNode());
-    const before = card({ slug: "narrow", column: "todo", position: "3" });
-    await upsertBoardCard(node, cfgWithBoardCards, before, null, { wideWrite: true });
+    const before = card({ slug: "wide", column: "todo", position: "3" });
+    await upsertBoardCard(node, cfgWithBoardCards, before, null);
     writes.length = 0;
     reads.length = 0;
 
-    const moved = card({ slug: "narrow", column: "doing", position: "3" });
+    const moved = card({ slug: "wide", column: "doing", position: "3" });
     await upsertBoardCard(node, cfgWithBoardCards, moved, before);
 
-    // The probe would return null here anyway — the destination sk is brand
-    // new — so skipping it is purely about not paying for an answer we can
-    // derive from `previous`. A move is the board's most common mutation, so
-    // that round trip is worth not making.
+    // A move with a known `previous` retires the source sk by address, so it
+    // needs no partition read either.
     expect(reads.filter((r) => r.schemaHash === BC)).toHaveLength(0);
 
     // The destination sk does not exist, so `write` update-then-creates; both
@@ -789,14 +784,14 @@ describe("board-cards narrow write", () => {
     expect(rows[0]!.column).toBe("doing");
   });
 
-  test("wideWrite skips the probe read entirely", async () => {
+  test("no BoardCards read is issued on the write path", async () => {
     const { node, reads } = writeRecordingNode(fakeNode());
-    const c = card({ slug: "narrow" });
-    reads.length = 0;
-    await upsertBoardCard(node, cfgWithBoardCards, c, null, {
-      wideWrite: true,
-      skipOrphanPurge: true,
-    });
+    const c = card({ slug: "wide" });
+    // skipOrphanPurge because the orphan rescan is a partition read by design
+    // and a separate decision (BoardCardWriteOptions.skipOrphanPurge); what is
+    // asserted here is that nothing reads the row back to decide the write.
+    await upsertBoardCard(node, cfgWithBoardCards, c, null, { skipOrphanPurge: true });
+    await upsertBoardCard(node, cfgWithBoardCards, c, c, { skipOrphanPurge: true });
     expect(reads.filter((r) => r.schemaHash === BC)).toHaveLength(0);
   });
 });

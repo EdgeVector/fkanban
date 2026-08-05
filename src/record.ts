@@ -4610,10 +4610,10 @@ export async function createCardRecord(
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  // wideWrite: this sk was just minted for a card that did not exist, so there
-  // is nothing to diff against and the pre-write probe read would only cost a
-  // round trip to learn "absent".
-  await writeCardMembership(opts, card, null, { skipOrphanPurge: true, wideWrite: true });
+  // skipOrphanPurge: this sk was just minted for a card that did not exist, so
+  // there can be no other row for the slug to purge. (There is no pre-write read
+  // to skip any more — `upsertBoardCard` always writes wide.)
+  await writeCardMembership(opts, card, null, { skipOrphanPurge: true });
 }
 
 /**
