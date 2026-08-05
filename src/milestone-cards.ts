@@ -421,6 +421,12 @@ export async function listMilestoneCardsPartition(
     for (const r of res.results) {
       const f = (r.fields ?? {}) as Record<string, unknown>;
       if (isForeignLayout(f.layout, MILESTONE_CARDS_LAYOUT)) continue;
+      // WHAT COUNTS AS A ROW OF THIS INDEX is decided by the one helper the
+      // address reads use, so this read cannot admit a row they reject. It
+      // could before, and the row it admitted was the Milestone record itself —
+      // see {@link milestoneCardRowFromQueryRow} for the shape and the measure.
+      const address = milestoneCardRowFromQueryRow(r, milestone);
+      if (address === null) continue;
       // The partition key is deliberately not projected — see
       // MILESTONE_CARDS_PAYLOAD_FIELDS — so it comes from the caller's own
       // filter argument. That is the same value the payload copy would carry,
@@ -429,12 +435,9 @@ export async function listMilestoneCardsPartition(
       // The range key IS the row's address; the copied scalars are just copies,
       // and this read has measured them going missing. Recover identity from
       // the address before falling back to a copy that may not have come back.
-      const parsed = parseBoardCardSk(typeof r.key?.range === "string" ? r.key.range : "");
-      if (parsed) {
-        if (card.slug.length === 0) card.slug = parsed.slug;
-        if (card.column.length === 0) card.column = parsed.column;
-        if (card.position.length === 0) card.position = parsed.position;
-      }
+      if (card.slug.length === 0) card.slug = address.slug;
+      if (card.column.length === 0) card.column = address.column;
+      if (card.position.length === 0) card.position = address.position;
       if (card.slug.length === 0) continue;
       out.push(card);
     }
@@ -555,14 +558,45 @@ export async function listMilestoneCardsPartitionSpine(
  *
  * It appears under 9 of the 24 leads — exactly the fields `MilestoneCards`
  * shares with `BoardMilestones` — and under none of the other 15, so which
- * field leads decides whether a caller sees it. The wide display read leads
- * with `milestone`, which the Milestone record has no atom for, so the product
- * has never seen it. Every read that leads with `slug` does.
+ * field leads decides whether a caller sees it.
  *
- * Dropping it is REQUIRED as a baseline row: it is a permanent phantom drop —
- * the sweep would reach it and the wide read never can, so parity would report
- * one invisible row on every milestone partition, forever, with nothing to
- * repair.
+ * Dropping it is REQUIRED as a baseline row: it is a permanent phantom — the
+ * sweep reaches it and it can never be repaired away, so parity would report
+ * one bogus row on every milestone partition, forever, with nothing to fix.
+ *
+ * ## The wide read's immunity was a coincidence, and a later fix removed it
+ *
+ * This comment used to end "the wide display read leads with `milestone`, which
+ * the Milestone record has no atom for, so the product has never seen it. Every
+ * read that leads with `slug` does." That was true when written and is not
+ * true now. {@link MILESTONE_CARDS_PAYLOAD_FIELDS} was subsequently re-led with
+ * `slug` and stripped of `milestone` — the correct fix for the hash-gate row
+ * drop — which moved the wide read into exactly the category the last sentence
+ * names. Measured on the live primary 2026-08-05, partition
+ * `lastdb-0231-read-regression-fixes`:
+ *
+ *     raw wide read (MILESTONE_CARDS_PAYLOAD_FIELDS)  7 rows, 1 keyless
+ *     listMilestoneCardsPartition                     7 cards  <- phantom card
+ *     listMilestoneCardsPartitionSpine                6 rows
+ *
+ * The phantom arrived as `slug=<the milestone's own slug>`, `column=""`,
+ * `position="1785025144594"` (the Milestone record's `position` field, an
+ * epoch-ms portfolio ordering, not a card position) and the milestone's title.
+ * `milestone detail` never rendered it — that path takes its ROW SET from the
+ * spine and the board and uses the wide read only for payloads keyed by `sk` —
+ * but `doctor`'s and `parity check`'s `rows: wide.length` counted it, so both
+ * over-reported by exactly one row on every milestone partition.
+ *
+ * So {@link listMilestoneCardsPartition} now decides what a row IS through this
+ * same helper rather than through a projection that happened not to reach one.
+ * This is the failure mode the last paragraph below warns about, arriving from
+ * the other direction: the guard was not removed, the coincidence that made a
+ * second guard unnecessary was.
+ *
+ * `BoardCards` does not have this shape — measured the same day, its `default`
+ * partition returns 0 keyless rows under every lead — because `board_cards`
+ * resolves to a schema of its own, while `milestone_cards` resolves to one the
+ * node registered under the ENTITY's `descriptive_name: "Milestone"`.
  *
  * ## It is NOT a data-loss risk, and that was measured rather than assumed
  *
