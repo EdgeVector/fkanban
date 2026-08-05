@@ -450,6 +450,57 @@ export type NodeClient = {
     keyHash: string;
     rangeKey?: string | null;
   }>): Promise<void>;
+  /**
+   * Delete many rows in one request — the retirement half of {@link updateRecords}.
+   *
+   * ## Why this exists separately, and why it was missing
+   *
+   * `updateRecords` hard-codes `mutation_type: "update"` on every item it
+   * sends, so for a long time the batch endpoint could only be reached to
+   * WRITE. That was a property of this client, never of the node: fold's
+   * `execute_mutations_batch` builds each item through the same
+   * `MutationComponents { .., mutation_type, .. }` as the single-record route,
+   * so a delete in a batch resolves, validates and writes by exactly the path a
+   * single delete does.
+   *
+   * The cost of not having it is paid per ROW on a gate taken per BOARD. A
+   * BoardCards write gates on `(molecule, hash-half)`, so every sk retirement —
+   * the delete in every `move`, every `rank` reposition, every `groom
+   * board-cards-heal` duplicate reap — took the whole board's write gate on its
+   * own, behind every other kanban process writing that board.
+   *
+   * Measured on the live primary (`scripts/probe-boardcards-batch-delete.ts`),
+   * 48 rows, arms interleaved so a warming node cannot hand either one the win:
+   *
+   *   | per-row `deleteRecord` x48 | 110.7s / 250.9s |
+   *   | one batched request        |  42.7s /  51.4s |
+   *   | speedup                    |  2.59x / 4.88x  |
+   *
+   * with a projected partition read-back after each arm confirming the rows are
+   * actually gone — a 200 that deletes nothing would otherwise read as a win.
+   *
+   * ## The read-back caveat that probe also pinned
+   *
+   * Both per-row arms left the LAST-deleted row reading as still present, and
+   * both were empty 3s later
+   * (`scripts/probe-boardcards-batch-delete-survivor.ts`: survivor is always
+   * delete-order index N-1, gone after settle). That is the BoardCards index
+   * lagging its own ack — the same asymmetry `upsertBoardCard` documents for
+   * writes ("the INDEX lags; the record does not") — reaching deletes. It is
+   * NOT a lost delete, and a caller that re-reads a partition to confirm its own
+   * reap will see one phantom survivor. Do not build a repair decision on that
+   * read.
+   *
+   * All-or-nothing like `updateRecords`, and optional for the same reason: the
+   * ad-hoc fakes implement only what their subject touches. The SHARED fake
+   * implements it, so the batched path is exercised rather than silently
+   * fallen back over.
+   */
+  deleteRecords?(rows: Array<{
+    schemaHash: string;
+    keyHash: string;
+    rangeKey?: string | null;
+  }>): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse>;
   search?(query: string, opts?: AppSearchOptions): Promise<AppSearchHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
@@ -1084,6 +1135,47 @@ export function newNodeClient(opts: {
     return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
   };
 
+  /**
+   * The one place `/api/mutations/batch` is spoken to.
+   *
+   * The vendored SDK has no batch verb, so this goes over `rawCall`. The wire
+   * type is fold's `Operation`, which is
+   * `#[serde(tag = "type", deny_unknown_fields)]` — an extra or misspelled key
+   * is a 400, not a silently dropped field, so the shape below is exact rather
+   * than best-effort.
+   *
+   * `updateRecords` and `deleteRecords` differ by two things only: the
+   * `mutation_type` they name and whether they carry fields. Sharing the
+   * envelope means a wire-shape fix reaches both, which is the failure the
+   * split invited — the delete verb did not exist for as long as it did partly
+   * because adding it looked like duplicating this object.
+   */
+  const mutationsBatch = async (
+    rows: Array<{
+      schemaHash: string;
+      keyHash: string;
+      rangeKey?: string | null;
+      fields: Record<string, unknown>;
+      mutationType: "update" | "delete";
+    }>,
+  ): Promise<void> => {
+    if (rows.length === 0) return;
+    const ops = rows.map((row) => ({
+      type: "mutation",
+      schema: row.schemaHash,
+      fields_and_values: row.fields,
+      key_value: {
+        hash: row.keyHash,
+        range: row.rangeKey === undefined ? null : row.rangeKey,
+      },
+      mutation_type: row.mutationType,
+    }));
+    const res = await rawCallImpl("POST", "/api/mutations/batch", ops);
+    if (res.status !== 200) {
+      throw mapNodeError(res.status, res.json ?? res.body, "/api/mutations/batch");
+    }
+  };
+
   return {
     baseUrl: url,
     userHash,
@@ -1223,27 +1315,27 @@ export function newNodeClient(opts: {
       );
     },
     async updateRecords(rows) {
-      if (rows.length === 0) return;
-      // The vendored SDK has no batch verb, so this goes over `rawCall`. The
-      // wire type is fold's `Operation`, which is
-      // `#[serde(tag = "type", deny_unknown_fields)]` — an extra or misspelled
-      // key is a 400, not a silently dropped field, so the shape below is
-      // exact rather than best-effort. `mutation_type: "update"` covers create
-      // too: an update against an absent row is an upsert storing what is sent.
-      const ops = rows.map((row) => ({
-        type: "mutation",
-        schema: row.schemaHash,
-        fields_and_values: row.fields,
-        key_value: {
-          hash: row.keyHash,
-          range: row.rangeKey === undefined ? null : row.rangeKey,
-        },
-        mutation_type: "update",
-      }));
-      const res = await rawCallImpl("POST", "/api/mutations/batch", ops);
-      if (res.status !== 200) {
-        throw mapNodeError(res.status, res.json ?? res.body, "/api/mutations/batch");
-      }
+      // `mutation_type: "update"` covers create too: an update against an
+      // absent row is an upsert storing what is sent.
+      await mutationsBatch(rows.map((row) => ({
+        schemaHash: row.schemaHash,
+        keyHash: row.keyHash,
+        rangeKey: row.rangeKey,
+        fields: row.fields,
+        mutationType: "update" as const,
+      })));
+    },
+    async deleteRecords(rows) {
+      // A delete carries no fields. The single-record route sends `fields: {}`
+      // for the same reason and the node validates the two identically, so an
+      // empty map here is the shape it already accepts, not a special case.
+      await mutationsBatch(rows.map((row) => ({
+        schemaHash: row.schemaHash,
+        keyHash: row.keyHash,
+        rangeKey: row.rangeKey,
+        fields: {},
+        mutationType: "delete" as const,
+      })));
     },
     // Both branches page through `queryAllPaged`. The vendored SDK's own
     // `queryAll` (0.2.0) prefers a returned cursor over the offset and has no
