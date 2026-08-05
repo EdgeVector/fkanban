@@ -175,3 +175,64 @@ export function unattributedRemainder(
   }
   return { count: Math.max(0, count), sumMs: Math.max(0, sumMs) };
 }
+
+/**
+ * Rows whose LIFETIME cold-load ratio contradicts the ratio measured over a
+ * live window.
+ *
+ * `lastdb ops` prints a table titled "Top by cold shard loads (read cost, not
+ * wall time)" whose values are cumulative over the daemon's whole life.
+ * Dividing that total by the lifetime call count looks like a per-call cost and
+ * is not one: cold loads are cache MISSES, so they cluster at daemon start and
+ * after any sweep across a wide, cold key range, and the average smears that
+ * burst over every call that came afterwards.
+ *
+ * Measured on the live primary 2026-08-05, `client=kanban kind=mutation
+ * schema=board_cards`: lifetime `loads=14484 count=3734` implies 3.9 loads per
+ * call. Over a 36-minute window the same key took **137 mutations and 1 cold
+ * load** — 0.007. Two consecutive chief-engineer handoffs carried "why does a
+ * single-row upsert cold-load FOUR shards?" as the live lead; the answer is
+ * that it does not, and never did.
+ *
+ * `minCalls` exists because a window with three calls in it cannot contradict
+ * anything, and `divergence` because cold loads are legitimately bursty — the
+ * point is to flag rows where the two numbers tell different STORIES, not every
+ * row where they differ.
+ */
+export type ColdLoadRow = {
+  client: string;
+  kind: string;
+  schema: string;
+  /** Calls and loads observed in the sampled window. */
+  count: number;
+  loads: number;
+  /** Cumulative counters as `lastdb ops` would print them. */
+  lifetimeCount?: number;
+  lifetimeLoads?: number;
+};
+
+export type ColdLoadVerdict<T> = { row: T; lifetime: number; live: number; ratio: number };
+
+export function misleadingColdLoadRows<T extends ColdLoadRow>(
+  rows: Iterable<T>,
+  opts: { minCalls?: number; divergence?: number } = {},
+): Array<ColdLoadVerdict<T>> {
+  const minCalls = opts.minCalls ?? 20;
+  const divergence = opts.divergence ?? 4;
+  // Guards a division, and sets the ceiling on the reported ratio: a live rate
+  // of exactly zero would otherwise be an infinity in a report meant to be read.
+  const FLOOR = 0.001;
+  const out: Array<ColdLoadVerdict<T>> = [];
+  for (const r of rows) {
+    if (r.lifetimeCount === undefined) continue;
+    if (r.count < minCalls) continue;
+    const lifetime = (r.lifetimeLoads ?? 0) / Math.max(1, r.lifetimeCount);
+    const live = r.loads / r.count;
+    // A lifetime rate under half a load per call is not worth anyone's
+    // attention even when the window is quieter still.
+    if (lifetime <= 0.5) continue;
+    if (lifetime < divergence * Math.max(live, FLOOR)) continue;
+    out.push({ row: r, lifetime, live, ratio: lifetime / Math.max(live, FLOOR) });
+  }
+  return out.sort((a, b) => b.lifetime - a.lifetime);
+}

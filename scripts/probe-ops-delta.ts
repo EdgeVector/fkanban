@@ -18,6 +18,28 @@
  *   bun scripts/probe-ops-delta.ts 90         # 90s window
  *   bun scripts/probe-ops-delta.ts 90 kanban  # only rows for one client
  *
+ * ## Cold shard loads, and the fourth run this table caught out
+ *
+ * The warning above was written after two runs chased phantom LOAD. A third and
+ * fourth then chased a phantom READ COST, from the one column this probe
+ * computed and did not print.
+ *
+ * `lastdb ops` ranks a table titled "Top by cold shard loads (read cost, not
+ * wall time)". On 2026-08-05 its top row was
+ * `client=kanban kind=mutation schema=board_cards loads=14484 count=3734`, and
+ * two consecutive chief-engineer handoffs carried "why does a single-row upsert
+ * cold-load FOUR shards?" as the live lead. Measured over a 36-minute window on
+ * the same node, the same key took **137 mutations and 1 cold load** — 0.007
+ * per call, against the 3.9 the lifetime ratio implies. A 530x gap.
+ *
+ * Cold loads are cache MISSES, so they cluster at the start of a daemon's life
+ * and after any sweep that touches a wide, cold key range. Dividing a lifetime
+ * total by lifetime traffic averages that burst over every call that came
+ * after, producing a per-call figure that describes no operation the product
+ * performs. It is the same mistake as the wall-clock one, in the column nobody
+ * was subtracting — so the delta table now prints `loads` and `loads/call`, and
+ * flags any row whose lifetime ratio disagrees with its live one.
+ *
  * Counters reset when `lastdbd` restarts. A restart mid-window shows up as
  * negative deltas; the script says so rather than printing nonsense.
  */
@@ -26,6 +48,7 @@ import { newNodeClient } from "../src/client.ts";
 
 import {
   KEY_SEP,
+  misleadingColdLoadRows,
   rowsFromRequestOps,
   splitKey,
   unattributedRemainder,
@@ -90,6 +113,8 @@ type Delta = {
   sumMs: number;
   errors: number;
   loads: number;
+  lifetimeCount?: number;
+  lifetimeLoads?: number;
   phases: Record<string, number>;
 };
 
@@ -113,6 +138,10 @@ for (const [key, now] of after.rows) {
     sumMs: now.sum_ms - (then?.sum_ms ?? 0),
     errors: now.error_count - (then?.error_count ?? 0),
     loads: (now.sum_cold_shard_loads ?? 0) - (then?.sum_cold_shard_loads ?? 0),
+    // Kept alongside the delta so the two ratios can be shown side by side.
+    // This is the number `lastdb ops` prints, and on its own it is the trap.
+    lifetimeCount: now.count,
+    lifetimeLoads: now.sum_cold_shard_loads ?? 0,
     phases,
   });
 }
@@ -158,14 +187,46 @@ deltas.sort((a, b) => b.sumMs - a.sumMs);
 console.log(`\n== live delta over ${elapsed.toFixed(0)}s (this is what is happening NOW) ==\n`);
 console.log(
   `  ${pad("client", 12)} ${pad("kind", 10)} ${pad("schema", 14)} ` +
-    `${"calls".padStart(7)} ${"/min".padStart(7)} ${"avg ms".padStart(8)} ${"sum ms".padStart(10)} ${"err".padStart(4)}`,
+    `${"calls".padStart(7)} ${"/min".padStart(7)} ${"avg ms".padStart(8)} ${"sum ms".padStart(10)} ` +
+    `${"loads".padStart(7)} ${"ld/call".padStart(8)} ${"err".padStart(4)}`,
 );
 for (const d of deltas) {
   console.log(
     `  ${pad(d.client, 12)} ${pad(d.kind, 10)} ${pad(d.schema.slice(0, 12), 14)} ` +
       `${fmt(d.count).padStart(7)} ${(d.count / (elapsed / 60)).toFixed(1).padStart(7)} ` +
       `${(d.sumMs / d.count).toFixed(0).padStart(8)} ${fmt(Math.round(d.sumMs)).padStart(10)} ` +
+      `${fmt(d.loads).padStart(7)} ${(d.loads / d.count).toFixed(2).padStart(8)} ` +
       `${String(d.errors).padStart(4)}`,
+  );
+}
+
+// The rows where `lastdb ops` and this window disagree about read cost.
+//
+// Printed as its own block rather than a footnote, because the lifetime ratio
+// is what an operator reaches for first (CLAUDE.md sends every agent to
+// `lastdb ops` to "name the offender") and it is the number that has now sent
+// two chief-engineer runs after a non-problem. A row here means: the loads in
+// that bucket were paid EARLIER — a cold cache at daemon start, or a sweep over
+// a wide key range — and are not being paid by the traffic running now.
+const misleading = misleadingColdLoadRows(deltas);
+
+if (misleading.length > 0) {
+  console.log(`\n== cold-load rows where the LIFETIME table disagrees with this window ==\n`);
+  console.log(
+    `  ${pad("client", 12)} ${pad("kind", 10)} ${pad("schema", 14)} ` +
+      `${"lifetime".padStart(9)} ${"live".padStart(8)}  ratio`,
+  );
+  for (const r of misleading) {
+    console.log(
+      `  ${pad(r.row.client, 12)} ${pad(r.row.kind, 10)} ${pad(r.row.schema.slice(0, 12), 14)} ` +
+        `${r.lifetime.toFixed(2).padStart(9)} ${r.live.toFixed(3).padStart(8)}  ` +
+        `${r.ratio.toFixed(0)}x`,
+    );
+  }
+  console.log(
+    `\n  loads/call from \`lastdb ops\` is a LIFETIME total over LIFETIME traffic.\n` +
+      `  For these rows it does not describe the workload running now — quote the\n` +
+      `  live column, or say explicitly that the cost was paid earlier.`,
   );
 }
 
