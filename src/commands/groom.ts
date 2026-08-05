@@ -17,6 +17,38 @@ import {
   type GroomReport,
 } from "../pickup.ts";
 
+/**
+ * Every `kanban groom` subcommand, in help order.
+ *
+ * One list, three consumers: the dispatcher's validation, the unknown-subcommand
+ * help line, and the per-sweep ops label (`groomOpsLabel` in client.ts). It was
+ * spelled out three times before — a `sub !== "..."` chain, a hand-written help
+ * string, and a ternary — so adding a sweep meant remembering three places, and
+ * the ops label was the one that got forgotten.
+ *
+ * Adding a subcommand here is what makes it attributable in `lastdb ops`;
+ * `ops-label-attribution.test.ts` fails if any entry maps to the plain board
+ * label, so a new sweep cannot silently bill itself to the user.
+ */
+export const GROOM_SUBCOMMANDS = [
+  "structured-routing",
+  "body-clobber-scan",
+  "stale-blockers",
+  "board-cards-heal",
+  "board-cards-heal-scheduled",
+  "board-list-heal",
+  "milestone-indexes-heal",
+  "archive-done",
+  "card-list-index-retire",
+  "parity-check",
+] as const;
+
+export type GroomSubcommand = (typeof GROOM_SUBCOMMANDS)[number];
+
+export function isGroomSubcommand(sub: string | undefined): sub is GroomSubcommand {
+  return sub !== undefined && (GROOM_SUBCOMMANDS as readonly string[]).includes(sub);
+}
+
 export type GroomStaleBlockersOptions = {
   cfg: Config;
   node: NodeClient;

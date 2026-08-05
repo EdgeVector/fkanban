@@ -19,7 +19,7 @@ import {
 } from "./host_track.ts";
 
 import pkg from "../package.json" with { type: "json" };
-import { FkanbanError, PARITY_OPS_LABEL, type Verbose } from "./client.ts";
+import { FkanbanError, groomOpsLabel, type Verbose } from "./client.ts";
 import { ConfigMissingError, ConfigInvalidError } from "./config.ts";
 import { loadAppCtx, loadCtx } from "./context.ts";
 import { runInit } from "./commands/init.ts";
@@ -38,7 +38,13 @@ import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
-import { groomBodyClobberScanCmd, groomStaleBlockersCmd, groomStructuredRoutingCmd } from "./commands/groom.ts";
+import {
+  GROOM_SUBCOMMANDS,
+  groomBodyClobberScanCmd,
+  groomStaleBlockersCmd,
+  groomStructuredRoutingCmd,
+  isGroomSubcommand,
+} from "./commands/groom.ts";
 import { parityCheckCmd } from "./commands/parity_check.ts";
 import {
   archiveDoneResult,
@@ -1987,32 +1993,18 @@ async function dispatch(
 
     case "groom": {
       const sub = positionals[1];
-      if (
-        sub !== "body-clobber-scan" &&
-        sub !== "stale-blockers" &&
-        sub !== "structured-routing" &&
-        sub !== "board-cards-heal" &&
-        sub !== "board-cards-heal-scheduled" &&
-        sub !== "board-list-heal" &&
-        sub !== "milestone-indexes-heal" &&
-        sub !== "archive-done" &&
-        sub !== "card-list-index-retire" &&
-        sub !== "parity-check"
-      ) {
+      if (!isGroomSubcommand(sub)) {
         console.error(
-          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: groom structured-routing | groom body-clobber-scan | groom stale-blockers | groom board-cards-heal | groom board-cards-heal-scheduled | groom board-list-heal | groom milestone-indexes-heal | groom archive-done | groom card-list-index-retire | groom parity-check`,
+          `kanban: Unknown groom subcommand "${sub ?? ""}". Try: ${GROOM_SUBCOMMANDS.map((s) => `groom ${s}`).join(" | ")}`,
         );
         return 2;
       }
-      // `parity-check` is a diagnostic, not board work: read-only, but 24
-      // partition queries per board per index, and a routine runs it daily.
-      // Labelling it separately keeps `client=kanban` in `lastdb ops` meaning
-      // traffic a user actually caused. Every other groom subcommand repairs
-      // real board state and keeps the plain label.
-      const ctx = loadCtx({
-        verbose,
-        opsLabel: sub === "parity-check" ? PARITY_OPS_LABEL : undefined,
-      });
+      // Every groom subcommand is MAINTENANCE and says so on the wire. Not just
+      // the read-only sweep: a `board-cards-heal --apply` was measured emitting
+      // 686 board_cards writes at avg 9.4s under the plain `kanban` label, which
+      // is indistinguishable in `lastdb ops` from a user moving a card. See
+      // groomOpsLabel() for the measurement and the rule.
+      const ctx = loadCtx({ verbose, opsLabel: groomOpsLabel(sub) });
       if (sub === "archive-done") {
         const extra = rejectExtraPositionals(positionals, 2, "groom archive-done");
         if (extra !== undefined) return extra;
