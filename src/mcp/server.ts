@@ -635,14 +635,22 @@ export function createFkanbanMcpServer(
       description: "Show one milestone's outcome, lifecycle, driver, dependencies, and proof linkage.",
       annotations: { title: "Show milestone", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional() },
-      outputSchema: { milestone: milestoneSchema },
+      // `proof_verdict` sits OUTSIDE `milestone` because it is not part of the
+      // record — it is re-derived from the proof card on this read, and putting
+      // a computed value inside the stored shape is how the two become
+      // indistinguishable later.
+      outputSchema: { milestone: milestoneSchema, proof_verdict: z.string(), proof_verdict_reason: z.string() },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const result = await milestoneShowResult({ cfg, node, slug });
-        return toolResult(result.text, { milestone: result.milestone });
+        return toolResult(result.text, {
+          milestone: result.milestone,
+          proof_verdict: result.proof_verdict,
+          proof_verdict_reason: result.proof_verdict_reason,
+        });
       } catch (err) {
         return errorResult(err);
       }
@@ -757,7 +765,7 @@ export function createFkanbanMcpServer(
       description: "List milestone health with North Star, lifecycle, proof, ready frontier, blocker, and warning count.",
       annotations: { title: "Milestone portfolio", readOnlyHint: true, openWorldHint: false },
       inputSchema: { board: z.string().optional() },
-      outputSchema: { entries: z.array(z.object({ slug: z.string(), title: z.string(), north_star: z.string(), state: z.string(), driver: z.string(), proof_card: z.string(), proof_status: z.string(), ready: z.array(z.string()), blocker: z.string(), warning_count: z.number() })) },
+      outputSchema: { entries: z.array(z.object({ slug: z.string(), title: z.string(), north_star: z.string(), state: z.string(), driver: z.string(), proof_card: z.string(), proof_status: z.string(), proof_verdict: z.string(), proof_verdict_reason: z.string(), ready: z.array(z.string()), blocker: z.string(), warning_count: z.number() })) },
     },
     async (args) => {
       try {
@@ -777,7 +785,7 @@ export function createFkanbanMcpServer(
       description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns. Read-only: reports index drift, repairs none.",
       annotations: { title: "Milestone detail", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional() },
-      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), columns: z.record(z.string(), z.array(milestoneChildSchema)), repairs: milestoneRepairsSchema },
+      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), proof_verdict: z.string(), proof_verdict_reason: z.string(), columns: z.record(z.string(), z.array(milestoneChildSchema)), repairs: milestoneRepairsSchema },
     },
     async (args) => {
       try {

@@ -1467,7 +1467,13 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, 3, "milestone show <slug>");
         if (extra !== undefined) return extra;
         const result = await milestoneShowResult({ cfg: ctx.cfg, node: ctx.node, slug });
-        console.log(values.json ? JSON.stringify(result.milestone, null, 2) : result.text);
+        // The derived verdict rides in the SAME object as the stored claim. A
+        // consumer that reads `proof_status` and stops has no way to learn the
+        // evidence is gone, so the correction has to be impossible to miss by
+        // reading one level deeper — not parked in a sibling command.
+        console.log(values.json
+          ? JSON.stringify({ ...result.milestone, proof_verdict: result.proof_verdict, proof_verdict_reason: result.proof_verdict_reason }, null, 2)
+          : result.text);
         return 0;
       }
       if (action === "state") {
