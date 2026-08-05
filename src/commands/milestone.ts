@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
@@ -7,7 +5,14 @@ import {
   POINT_READ_CONCURRENCY,
   mapWithConcurrency,
 } from "../concurrency.ts";
-import { doneWhenPredicate } from "../pickup.ts";
+import {
+  hasPassingProofEvidence,
+  milestoneProofVerdict,
+  proofVerdictNote,
+  type MilestoneProofVerdict,
+  type MilestoneProofVerdictReason,
+  type MilestoneProofVerdictResult,
+} from "../milestone_proof.ts";
 import {
   MILESTONE_PROOF_STATUSES,
   MILESTONE_STATES,
@@ -62,6 +67,15 @@ export type MilestoneReconcileResult = {
   ready: MilestoneChildStatus[];
   proof: { slug: string; terminal: boolean; passingEvidence: boolean } | null;
   warnings: MilestoneWarning[];
+  /**
+   * The LIVE proof answer, re-derived from the proof card on this read —
+   * `unproven` where `milestone.proof_status` claims `passing` and the evidence
+   * no longer holds. Machine-readable on purpose: a consumer gating on proof
+   * (the milestone-driver's completion check) needs one field to read, not a
+   * prose `warnings[]` array to pattern-match. See `../milestone_proof.ts`.
+   */
+  proof_verdict: MilestoneProofVerdict;
+  proof_verdict_reason: MilestoneProofVerdictReason;
 };
 
 /**
@@ -112,7 +126,11 @@ export type MilestonePortfolioEntry = {
   state: string;
   driver: string;
   proof_card: string;
+  /** The operator's recorded claim, verbatim. */
   proof_status: string;
+  /** The live re-derived answer — `unproven` when the claim has lost its evidence. */
+  proof_verdict: MilestoneProofVerdict;
+  proof_verdict_reason: MilestoneProofVerdictReason;
   ready: string[];
   blocker: string;
   warning_count: number;
@@ -132,44 +150,11 @@ const ALLOWED_TRANSITIONS: Record<string, readonly string[]> = {
   abandoned: ["planned", "active"],
 };
 
-/**
- * Terminal proof evidence for milestone completion.
- *
- * Accepts either:
- * - an exact body line `PROOF: PASS` / `RESULT: PASS`, or
- * - a satisfied `DONE-WHEN: file <path> matches /regex/` when the file exists
- *   and the first line (or full content) matches (covers PASS / PASS-OFFLINE
- *   North Star proof reports without requiring a second PROOF: line).
- */
-export function hasPassingProofEvidence(body: string): boolean {
-  if (/^[ \t]*(?:PROOF|RESULT):[ \t]*PASS[ \t]*$/im.test(body)) return true;
-  return doneWhenFileProofSatisfied(body);
-}
-
-function expandProofPath(path: string): string {
-  if (path.startsWith("~/")) return `${homedir()}${path.slice(1)}`;
-  if (path.startsWith("$HOME/")) return `${homedir()}${path.slice(5)}`;
-  if (path.startsWith("${HOME}/")) return `${homedir()}${path.slice(7)}`;
-  return path;
-}
-
-/** Evaluate `DONE-WHEN: file <path> matches /regex/` as milestone proof evidence. */
-export function doneWhenFileProofSatisfied(body: string): boolean {
-  const predicate = doneWhenPredicate(body);
-  const match = predicate.match(/^file\s+(\S+)\s+matches\s+\/(.+)\/$/);
-  if (!match) return false;
-  const filePath = expandProofPath(match[1]!);
-  const regexSrc = match[2]!;
-  if (!existsSync(filePath)) return false;
-  try {
-    const content = readFileSync(filePath, "utf8");
-    const re = new RegExp(regexSrc, "m");
-    const firstLine = content.split(/\r?\n/, 1)[0] ?? "";
-    return re.test(firstLine) || re.test(content);
-  } catch {
-    return false;
-  }
-}
+// The terminal-proof EVIDENCE predicates moved to `../milestone_proof.ts`, next
+// to the derived verdict that re-runs them on every read. They are re-exported
+// here because this module was their published home — `proofGate` and the
+// existing tests import them from this path.
+export { doneWhenFileProofSatisfied, hasPassingProofEvidence } from "../milestone_proof.ts";
 
 export type MilestoneAddOptions = {
   cfg: Config;
@@ -413,7 +398,15 @@ export async function milestoneAddCmd(opts: MilestoneAddOptions): Promise<{ slug
   return { slug: milestone.slug, action: existing ? "updated" : "created", state: milestone.state };
 }
 
-export function renderMilestone(milestone: Milestone): string {
+/**
+ * `verdict` is optional because two callers render a milestone without having
+ * re-read its proof card, and a MISSING verdict must not be silently rendered as
+ * a passing one. When it is absent the proof line is unchanged; when it is
+ * present and disagrees with the stored claim, the disagreement is printed
+ * directly under the claim rather than left for the reader to notice.
+ */
+export function renderMilestone(milestone: Milestone, verdict?: MilestoneProofVerdictResult): string {
+  const note = verdict ? proofVerdictNote(milestone, verdict) : null;
   return [
     `${milestone.title}  (${milestone.slug})`,
     `state: ${milestone.state}`,
@@ -421,6 +414,7 @@ export function renderMilestone(milestone: Milestone): string {
     `north star: ${milestone.north_star || "—"}`,
     `driver: ${milestone.driver || "—"}`,
     `proof: ${milestone.proof_status}${milestone.proof_card ? ` · ${milestone.proof_card}` : ""}`,
+    ...(note ? [`  ${note}`] : []),
     `dependencies: ${milestone.deps.length ? milestone.deps.join(", ") : "—"}`,
     ...(milestone.block_reason ? [`blocked: ${milestone.block_reason}`] : []),
     ...(milestone.body ? ["", milestone.body] : []),
@@ -439,9 +433,45 @@ export async function milestoneListResult(opts: { cfg: Config; node: NodeClient;
   return { text, milestones };
 }
 
-export async function milestoneShowResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{ text: string; milestone: Milestone }> {
+/**
+ * One milestone, with its proof claim RE-CHECKED against the card it names.
+ *
+ * This is the cheap single-milestone read — it deliberately does not reconcile
+ * children, read the board, or touch MilestoneCards, and it must stay that way.
+ * The one read it now pays for is `findProofCard` (~120ms, six fields), and only
+ * when the milestone actually claims `passing`: `milestoneProofVerdict` returns
+ * `not_required`/`not-claimed` without consulting the card at all, so the common
+ * pending and not_required cases cost exactly what they used to.
+ *
+ * Paying it is not optional. `show` was the ONLY milestone read path that
+ * recomputed nothing, which made it the only one that could not contradict a
+ * stale `proof_status` — and it is the one an agent reaches for first, and the
+ * one behind `fkanban_milestone_show`. A cheap read that answers wrong is not a
+ * cheaper read.
+ *
+ * The key-only `cardExists` follow-up is paid only when the wide read came back
+ * empty, mirroring the reconcile path: that is the sole case where "absent" and
+ * "sparse" are in question, and telling them apart is the difference between
+ * sending the operator to recreate a card and sending them to heal one.
+ */
+export async function milestoneShowResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{
+  text: string;
+  milestone: Milestone;
+  proof_verdict: MilestoneProofVerdict;
+  proof_verdict_reason: MilestoneProofVerdictReason;
+}> {
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
-  return { text: renderMilestone(milestone), milestone };
+  const needsEvidence = milestone.proof_status === "passing" && Boolean(milestone.proof_card);
+  const proofCard = needsEvidence ? await findProofCard(opts.node, opts.cfg, milestone.proof_card) : null;
+  const proofCardSparse = needsEvidence && !proofCard
+    && (await cardExists(opts.node, opts.cfg, milestone.proof_card));
+  const verdict = milestoneProofVerdict(milestone, proofCard, proofCardSparse);
+  return {
+    text: renderMilestone(milestone, verdict),
+    milestone,
+    proof_verdict: verdict.verdict,
+    proof_verdict_reason: verdict.reason,
+  };
 }
 
 export async function milestoneStateCmd(opts: { cfg: Config; node: NodeClient; slug: string; state: string; proofStatus?: string }): Promise<{ slug: string; from: string; to: string; proof_status: string }> {
@@ -837,7 +867,20 @@ export function milestoneReconcileFromSnapshot(
     });
   }
   if (milestone.state === "complete" && childStatuses.some((child) => child.column !== terminalCol)) warnings.push({ code: "complete-has-active-cards", message: "Complete milestone still has non-terminal child cards.", hint: "Reopen the milestone or finish/abandon the remaining cards." });
-  return { milestone, children: childStatuses, ready, proof, warnings };
+  // Derived from the SAME `proofCard`/`proofCardSparse` the warnings above were
+  // built from, so the verdict and the warning list can never disagree about
+  // what was read. The warnings say it in prose for a human; this says it in one
+  // field for a driver.
+  const verdict = milestoneProofVerdict(milestone, proofCard, proofCardSparse);
+  return {
+    milestone,
+    children: childStatuses,
+    ready,
+    proof,
+    warnings,
+    proof_verdict: verdict.verdict,
+    proof_verdict_reason: verdict.reason,
+  };
 }
 
 /**
@@ -868,6 +911,7 @@ function renderMilestoneReconcile(result: MilestoneReconcileResult, repairs?: Mi
     `${result.milestone.title} (${result.milestone.slug}) — ${result.milestone.state}`,
     `ready frontier: ${result.ready.length ? result.ready.map((card) => card.slug).join(", ") : "—"}`,
     `proof: ${result.proof ? `${result.proof.slug} · ${result.proof.terminal ? "terminal" : "not terminal"} · ${result.proof.passingEvidence ? "PASS" : "no PASS"}` : "—"}`,
+    `proof verdict: ${result.proof_verdict}${result.proof_verdict === result.milestone.proof_status ? "" : ` (${result.proof_verdict_reason}; recorded "${result.milestone.proof_status}")`}`,
     ...(repairs ? renderRepairPlan(result.milestone.slug, repairs) : []),
     ...(result.warnings.length ? ["warnings:", ...result.warnings.map((warning) => `- ${warning.code}: ${warning.message} ${warning.hint}`)] : ["warnings: none"]),
   ].join("\n");
@@ -1018,13 +1062,21 @@ export async function milestonePortfolioResult(opts: { cfg: Config; node: NodeCl
     driver: result.milestone.driver,
     proof_card: result.milestone.proof_card,
     proof_status: result.milestone.proof_status,
+    proof_verdict: result.proof_verdict,
+    proof_verdict_reason: result.proof_verdict_reason,
     ready: result.ready.map((card) => card.slug),
     blocker: result.milestone.state === "blocked" ? (result.milestone.block_reason || "blocked with no reason") : (result.warnings[0]?.message ?? ""),
     warning_count: result.warnings.length,
   }));
+  // The PROOF column shows the VERDICT, not the recorded claim. A status table
+  // exists to answer "where does this actually stand", and printing `passing`
+  // for 14 milestones whose evidence is gone made this table the single largest
+  // source of that false answer on the board. The recorded claim is not lost —
+  // it stays in `--json` as `proof_status`, and the BLOCKER column already names
+  // why the verdict differs.
   const text = entries.length ? [
     "STATE      MILESTONE                         NORTH STAR              READY  PROOF       WARN  BLOCKER",
-    ...entries.map((entry) => `${entry.state.padEnd(10)} ${entry.slug.slice(0, 32).padEnd(33)} ${(entry.north_star || "—").slice(0, 23).padEnd(24)} ${String(entry.ready.length).padEnd(6)} ${entry.proof_status.padEnd(11)} ${String(entry.warning_count).padEnd(5)} ${entry.blocker || "—"}`),
+    ...entries.map((entry) => `${entry.state.padEnd(10)} ${entry.slug.slice(0, 32).padEnd(33)} ${(entry.north_star || "—").slice(0, 23).padEnd(24)} ${String(entry.ready.length).padEnd(6)} ${entry.proof_verdict.padEnd(11)} ${String(entry.warning_count).padEnd(5)} ${entry.blocker || "—"}`),
   ].join("\n") : "No milestones.";
   return { entries, text };
 }
@@ -1049,9 +1101,9 @@ export async function milestoneDetailResult(opts: { cfg: Config; node: NodeClien
   // done-ness), so re-reading it here bought nothing and cost a whole extra
   // wave — ~190ms on an idle node — for bytes that were already in memory.
   const columns: Record<string, MilestoneChildStatus[]> = Object.fromEntries(result.boards.find((board) => board.slug === result.milestone.board)?.columns.map((column) => [column, result.children.filter((card) => card.column === column)]) ?? []);
-  const detail = { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, columns };
+  const detail = { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, proof_verdict: result.proof_verdict, proof_verdict_reason: result.proof_verdict_reason, columns };
   const columnText = Object.entries(columns).map(([column, cards]) => `${column.toUpperCase()} (${cards.length})\n${cards.length ? cards.map((card) => `  • ${card.blocked ? "🔒 " : ""}${card.title}  ${card.slug}`).join("\n") : "  —"}`).join("\n\n");
-  return { detail, repairs: result.repairs, text: `${renderMilestone(result.milestone)}\n\n${columnText}\n\n${renderMilestoneReconcile(result, result.repairs)}` };
+  return { detail, repairs: result.repairs, text: `${renderMilestone(result.milestone, { verdict: result.proof_verdict, reason: result.proof_verdict_reason })}\n\n${columnText}\n\n${renderMilestoneReconcile(result, result.repairs)}` };
 }
 
 export async function milestoneGroomResult(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ issues: MilestoneGroomIssue[]; text: string }> {
