@@ -314,7 +314,7 @@ async function indexedSearchCards(
 
   debugSearchPlan("indexed-candidates", {
     displayCards: scopedDisplay.length,
-    displayIndexed: displayRead.indexed,
+    displayServedBy: displayRead.servedBy,
     bodiesRead: bodies?.size ?? 0,
     bodyScanUnavailable: bodies === null,
     nativeCandidates: native?.slugs.length ?? 0,
