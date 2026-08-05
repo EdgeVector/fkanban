@@ -16,7 +16,7 @@
 //     36min win loads=1     count=137    -> 0.007 loads/call
 //
 // A 530x gap, in a bucket whose per-request samples were measured at ZERO loads
-// across 76 controlled writes.
+// across 120 controlled writes (partition sizes 0 and 48).
 import { describe, expect, test } from "bun:test";
 
 import { misleadingColdLoadRows, type ColdLoadRow } from "../scripts/lib/ops-delta-rows.ts";

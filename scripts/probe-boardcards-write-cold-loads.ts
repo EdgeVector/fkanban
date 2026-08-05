@@ -22,9 +22,10 @@
  * ## The answer, recorded here because the question was wrong
  *
  * A single-row BoardCards write cold-loads **nothing**. Measured per request on
- * the live primary: 76 clean single-row create/update/delete samples across
- * partition sizes 0 and 48, every one at `cold_shard_loads=0`, plus 8
- * production `client=kanban` writes in the same window, also zero.
+ * the live primary: **120 clean single-row create/update/delete samples across
+ * partition sizes 0 and 48**, every one at `cold_shard_loads=0`, plus 8
+ * production `client=kanban` writes in the same window, also zero. One
+ * 48-row batch write sampled cleanly, also zero.
  *
  * The 3.9 is a lifetime total over lifetime traffic. Cold loads are cache
  * MISSES: they cluster at daemon start and after a sweep across a wide, cold
@@ -37,7 +38,13 @@
  *   - **It is not the write mix.** Batch writes go to `POST
  *     /api/mutations/batch` and are booked under `kind=mutation_batch`, a
  *     DIFFERENT bucket. Nothing batch does can contaminate `kind=mutation`.
- *   - **It is not partition size.** Zero at 0 rows, zero at 48, zero at 192.
+ *   - **It is not partition size** — as far as this was actually measured, which
+ *     is 0 and 48 rows. `PARTITION_SIZES` also lists 192, and **no run has
+ *     reached it**: four attempts died first, three to the 10-minute harness cap
+ *     and one to a `service_timeout` on a 48-row batch delete, because every
+ *     write on the Aug-1 rollback binary costs seconds and seeding 192 rows
+ *     costs minutes before the first measurement. Do not cite 192 as measured.
+ *     Confirming it needs either a healthy binary or an isolated node.
  *
  * The instrument fix is in `probe-ops-delta.ts`, which computed this delta since
  * the day it was written and printed every column except this one. What remains
@@ -57,7 +64,8 @@
  * So this varies BOTH, independently:
  *
  *   - partition size: 0, 48, 192 rows already present (the live default board
- *     carries ~181, so 192 brackets production)
+ *     carries ~181, so 192 would bracket production — see the caveat above:
+ *     that arm has never completed on this binary)
  *   - verb: create / update-in-place / delete, issued as SINGLE node calls
  *
  * It calls `node.createRecord` / `updateRecord` / `deleteRecord` directly
