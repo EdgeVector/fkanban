@@ -2,6 +2,26 @@
 /**
  * Probe: how long does one BoardCards row read STALE after its own write acks?
  *
+ * ## SCOPE CORRECTION 2026-08-05 — read this before quoting the number below
+ *
+ * This probe polls ONE witness field, `milestone`, and its ~0.8-2.4s figure is
+ * a fact about THAT FIELD, not about the row. `probe-per-field-readback-
+ * freshness.ts` writes one row and polls all 24 fields off that single write:
+ * 17 of the 18 varied fields are fresh at 5ms and `milestone` alone lags,
+ * 3/3 reps. The sibling probe that reported "fresh in 6ms, 11/11" polled `tags`
+ * and is equally correct and equally non-general.
+ *
+ * `probe-freshness-bisect-raw-vs-real-path.ts` settled which factor it is: a
+ * five-rung ladder from this probe's configuration to the sibling's moved the
+ * number only when the polled FIELD changed — seed path and write path did
+ * nothing, 15/15. So the explanations previously attached to this probe — that
+ * it writes raw rather than through `writeCardPatch`, and that it hammers one
+ * slot — are both retired; `probe-followon-write-drains-deferred-put.ts`
+ * measured repeated same-slot writes as FASTER to fresh, not slower.
+ *
+ * The measurement below stands. Its scope does not: say "`milestone` reads
+ * stale for ~1-2s", never "BoardCards reads stale for 1.2-2.4s".
+ *
  * Writes a row, then polls the exact query `readWholeBoardCardRow` issues
  * (`HashRangePrefix` on the full sk, 24-field projection) until it reflects the
  * write, printing what it saw at each step.

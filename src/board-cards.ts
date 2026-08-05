@@ -745,18 +745,38 @@ export async function deleteBoardCardRowsBySk(
  * there is nothing partial to return. A torn row would read partial; a deferred
  * one reads absent.
  *
- * **How wide the window is depends on the write shape, and the figure on record
- * does not describe board traffic.** `scripts/probe-boardcard-read-after-write-lag.ts`
- * measures ~0.8-2.4s, on repeated raw `node.updateRecord` writes to ONE slot with
- * no settle between generations. A real mutation through `writeCardPatch` reads
- * back FRESH in 2-9ms, 11/11 —
- * `scripts/probe-write-shape-vs-readback-freshness.ts`, which eliminated payload
- * width (2 fields 6ms, 24 fields 6ms) and partition age (brand-new partition
- * 2ms) as the variable, and
- * `scripts/probe-narrow-write-drops-a-toggled-field.ts`, 3/3. Both were run in
- * the same hour as a lag-probe run that still reproduced staleness, so this is a
- * shape difference, not a change in the node. Quote 1.2-2.4s only WITH the shape
- * it was measured on.
+ * **The window is per FIELD, not per row — and only one field on this row has
+ * one.** Measured 2026-08-05, `scripts/probe-per-field-readback-freshness.ts`:
+ * one write, then all 24 fields polled off that single write, 3/3 reps.
+ * Seventeen of the eighteen varied fields read fresh at **5ms**. `milestone`
+ * alone reads stale for **935-1798ms**.
+ *
+ * That is what the two contradictory figures on record were both measuring.
+ * `scripts/probe-boardcard-read-after-write-lag.ts` polled `milestone` and
+ * reported ~0.8-2.4s; `scripts/probe-write-shape-vs-readback-freshness.ts`
+ * polled `tags` and reported 2-9ms fresh, 11/11. Both are correct and NEITHER
+ * generalizes to the row. `scripts/probe-freshness-bisect-raw-vs-real-path.ts`
+ * ran the five-rung ladder between the two configurations and found, 15/15,
+ * that the seed path and the write path move the number not at all — the
+ * polled field is the whole variable. So the earlier explanations, write shape
+ * and hammering-one-slot, are both retired: `probe-followon-write-drains-
+ * deferred-put.ts` measured repeated same-slot writes as FASTER to fresh, not
+ * slower, and an extra follow-on write as no help.
+ *
+ * It is not field position — `pr_url` and `branch` sit after `milestone` in the
+ * projection and are fresh. What `milestone` is, and no other field on this row
+ * is, is the node's declared partition key: the live `board_cards` pin reports
+ * `key.hash_field = "milestone"` (read off the catalog on today's binary; see
+ * `checkPinnedSchemaIdentity` in schemas.ts for why the multi-key expand leaves
+ * it that way), while every row is written with `keyHash = board`. That is a
+ * CORRELATION with a named cause, not a proven mechanism, and the obvious
+ * mechanism is already ruled out: `scripts/probe-partition-key-field-is-the-
+ * stale-one.ts` predicted the row would be re-placed into a `milestone`-keyed
+ * partition and found it is never in one at all (`HashKey=<milestone>` returns
+ * nothing, before or after). Do not restate the correlation as re-placement.
+ *
+ * Never quote a freshness figure for this schema without naming the field it
+ * was polled on.
  *
  * That is survivable for existence-and-wholeness, which is why the remaining
  * caller is sound: {@link classifyBoardCardDuplicateRows} only ever needs
