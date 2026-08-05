@@ -8,6 +8,7 @@
 import type { Config } from "./config.ts";
 import type { NodeClient, QueryFilter, QueryRow } from "./client.ts";
 import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
+import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
 import { BOARD_MILESTONES_FIELDS, BOARD_MILESTONES_LAYOUT } from "./schemas.ts";
 import type { Milestone } from "./record.ts";
 
@@ -15,8 +16,7 @@ export { BOARD_MILESTONES_LAYOUT };
 
 /** Sort key: state#pos(8)#slug — ordered, state-prefix filterable. */
 export function boardMilestoneSk(state: string, position: string | number, slug: string): string {
-  const pos = String(position).padStart(8, "0");
-  return `${state}#${pos}#${slug}`;
+  return `${state}#${padPositionSegment(position)}#${slug}`;
 }
 
 export function parseBoardMilestoneSk(
@@ -28,7 +28,7 @@ export function parseBoardMilestoneSk(
   if (j < 0) return null;
   return {
     state: sk.slice(0, i),
-    position: String(Number(sk.slice(i + 1, j))),
+    position: unpadPositionSegment(sk.slice(i + 1, j)),
     slug: sk.slice(j + 1),
   };
 }

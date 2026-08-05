@@ -22,6 +22,7 @@ import {
   PARTITION_READ_CONCURRENCY,
   POINT_READ_CONCURRENCY,
 } from "./concurrency.ts";
+import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 
@@ -262,44 +263,7 @@ export function boardCardsProjectionForCardFields(
 
 /** Sort key: column#pos(8)#slug — ordered, column-prefix filterable. */
 export function boardCardSk(column: string, position: string | number, slug: string): string {
-  const pos = String(position).padStart(8, "0");
-  return `${column}#${pos}#${slug}`;
-}
-
-/**
- * Invert {@link boardCardSk}'s `padStart(8, "0")` on the position segment.
- *
- * The inverse of STRING padding is STRING stripping. This used to be
- * `String(Number(seg))`, which is a different operation that happens to agree
- * on plain integers and disagrees destructively everywhere else:
- *
- * | position | key segment | `String(Number(…))` | strip |
- * |---|---|---|---|
- * | `7777` | `00007777` | `7777` | `7777` |
- * | `m` | `0000000m` | **`NaN`** | `m` |
- * | `-5` | `000000-5` | **`NaN`** | `-5` |
- * | `1e3` | `000001e3` | **`1000`** | `1e3` |
- *
- * The `1e3` row is the one worth staring at: the numeric path did not fail
- * loudly there, it returned a plausible DIFFERENT position. `board_cards_heal`
- * compares rebuilt addresses (`boardCardSk(r.column, r.position, r.slug) ===
- * truthSk`) and writes the parsed value back, so a value that parses to
- * something else is how a correct membership row gets reported stale and then
- * "repaired" into a wrong rank.
- *
- * What still does not round-trip is a position whose own string form STARTS
- * with `0` (`"007"` pads to `"00000007"` and strips back to `"7"`). That is not
- * recoverable here and not a parse bug: `padStart` is not injective over such
- * inputs, so the key format itself cannot represent them distinctly. Callers
- * that need to know go through the rebuild check — a position that survives
- * `boardCardSk(column, position, slug) === sk` is exact, and that comparison is
- * what heal already gates on.
- *
- * An all-zero segment is the position `0`, not the empty string.
- */
-function unpadBoardCardPosition(segment: string): string {
-  const stripped = segment.replace(/^0+/, "");
-  return stripped.length > 0 ? stripped : "0";
+  return `${column}#${padPositionSegment(position)}#${slug}`;
 }
 
 export function parseBoardCardSk(
@@ -311,7 +275,7 @@ export function parseBoardCardSk(
   if (j < 0) return null;
   return {
     column: sk.slice(0, i),
-    position: unpadBoardCardPosition(sk.slice(i + 1, j)),
+    position: unpadPositionSegment(sk.slice(i + 1, j)),
     slug: sk.slice(j + 1),
   };
 }
