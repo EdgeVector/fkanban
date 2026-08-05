@@ -674,9 +674,10 @@ export async function purgeOtherBoardCardRows(
  * costs only one point read per candidate row, and only for slugs measured to
  * hold more than one.
  *
- * Wholeness is decided by {@link readWholeBoardCardRow} — the same "all 24
- * fields, and not returned means not whole" gate the narrow write path already
- * trusts.
+ * Wholeness is decided by {@link readWholeBoardCardRow} — "all 24 fields, and
+ * not returned means not whole". This is that function's only remaining caller,
+ * and the only one it is sound for: a stale answer makes this REFUSE, never
+ * delete. It must never be used as a diff basis for a write.
  */
 export async function classifyBoardCardDuplicateRows(
   node: NodeClient,
@@ -720,47 +721,55 @@ export async function deleteBoardCardRowsBySk(
 
 /**
  * Read exactly one BoardCards row, keyed by its full sk, at the WIDE
- * projection — and treat "not returned" as "not writable narrowly".
+ * projection — and treat "not returned" as "not whole".
  *
- * This is the safety gate for the narrow write path, and it works because of
- * a LastDB projection rule that is normally a hazard: a query returns a row
- * only when EVERY projected field has an atom on it (see
- * {@link BOARD_CARDS_SPINE_FIELDS}). So asking for all 24 fields answers both
- * questions a narrow write must have answered, in one round trip:
+ * It works because of a LastDB projection rule that is normally a hazard: a
+ * query returns a row only when EVERY projected field has an atom on it (see
+ * {@link BOARD_CARDS_SPINE_FIELDS}). So asking for all 24 fields answers two
+ * questions in one round trip — does the row exist, and is it whole — and a
+ * `null` return deliberately does not distinguish them, because every caller's
+ * response to both is the same.
  *
- *   - does the row exist?  (a narrow `updateRecord` against a MISSING row does
- *     not fail — measured 2026-07-31, `scripts/probe-narrow-write-shape.ts`:
- *     it silently succeeds and stores just the subset it was handed, creating
- *     a row that every wide reader then drops)
- *   - is it whole?  (an incomplete row must be repaired by a wide write, not
- *     patched by a narrow one that leaves the hole in place)
+ * Measured cost: **3-6ms** on the post-2026-08-05T15:40Z binary
+ * (`scripts/probe-prewrite-read-vs-blind-wide.ts`, 24 samples). The 207ms
+ * median once recorded here was the pre-2026-08-05 binary
+ * (`scripts/probe-boardcard-point-read.ts`). Projection width barely moves a
+ * single-row read, so there is no cheaper variant of this check worth having.
  *
- * A `null` return means "one of those is false" without distinguishing them —
- * deliberately, because the caller's response to both is the same: write wide.
+ * ## The one thing a caller must not do with the row it returns
  *
- * Measured cost: 207ms median at 24 fields on the pre-2026-08-05 binary
- * (`scripts/probe-boardcard-point-read.ts`); **3-6ms** on the post-15:40Z one
- * (`scripts/probe-prewrite-read-vs-blind-wide.ts`, 24 samples). Projection
- * width barely moves a single-row read, so there is no cheaper variant of this
- * check worth having. Cost is not what to weigh this against.
+ * This reads the BoardCards INDEX, and that index CAN serve pre-write state,
+ * because the write acks off resident and defers the durable put while this read
+ * consults durable storage only. A row created moments ago reads `<absent>`
+ * rather than partial — the durable molecule has no record for the key yet, so
+ * there is nothing partial to return. A torn row would read partial; a deferred
+ * one reads absent.
  *
- * ## What to weigh it against: the row it returns can be seconds stale
+ * **How wide the window is depends on the write shape, and the figure on record
+ * does not describe board traffic.** `scripts/probe-boardcard-read-after-write-lag.ts`
+ * measures ~0.8-2.4s, on repeated raw `node.updateRecord` writes to ONE slot with
+ * no settle between generations. A real mutation through `writeCardPatch` reads
+ * back FRESH in 2-9ms, 11/11 —
+ * `scripts/probe-write-shape-vs-readback-freshness.ts`, which eliminated payload
+ * width (2 fields 6ms, 24 fields 6ms) and partition age (brand-new partition
+ * 2ms) as the variable, and
+ * `scripts/probe-narrow-write-drops-a-toggled-field.ts`, 3/3. Both were run in
+ * the same hour as a lag-probe run that still reproduced staleness, so this is a
+ * shape difference, not a change in the node. Quote 1.2-2.4s only WITH the shape
+ * it was measured on.
  *
- * This reads the BoardCards INDEX, and that index lags its own write ack by
- * **1.2-2.4 seconds** (`scripts/probe-boardcard-read-after-write-lag.ts`,
- * 2026-08-05 — the figure previously on record was 514ms). A row created
- * moments ago reads `<absent>` rather than partial.
+ * That is survivable for existence-and-wholeness, which is why the remaining
+ * caller is sound: {@link classifyBoardCardDuplicateRows} only ever needs
+ * "absent or not whole", answered conservatively, and a stale `null` makes it
+ * refuse rather than delete.
  *
- * That is survivable for the two questions in the contract above: "absent or
- * not whole" is answered conservatively, and a stale answer of `null` only
- * routes the caller to a wide write, which is always correct.
- *
- * It is NOT survivable as a diff basis. A caller that subtracts this row from
- * what it intends to write gets a diff against pre-write state: fields whose
- * stale value already matches the intended value are dropped from the write
- * even when the row's CURRENT value differs, and the write can no longer
- * correct them. See {@link upsertBoardCard}'s narrow path, which does exactly
- * this and is measured doing it.
+ * It is NOT survivable as a **diff basis**, and no caller may use it as one. A
+ * caller that subtracts this row from what it intends to write gets a diff
+ * against pre-write state: a field whose stale value already matches the
+ * intended value is dropped from the write even when the row's CURRENT value
+ * differs, and the write can no longer correct it. {@link upsertBoardCard} did
+ * exactly this until 2026-08-05 and was measured doing it; that path is gone
+ * and its replacement writes wide with no read at all.
  */
 async function readWholeBoardCardRow(
   node: NodeClient,
@@ -800,56 +809,7 @@ async function readWholeBoardCardRow(
   }
 }
 
-function sameBoardCardValue(a: unknown, b: unknown): boolean {
-  if (Array.isArray(a) || Array.isArray(b)) {
-    const xs = Array.isArray(a) ? a : [];
-    const ys = Array.isArray(b) ? b : [];
-    return xs.length === ys.length && xs.every((x, i) => x === ys[i]);
-  }
-  return a === b;
-}
-
-/**
- * The subset of `next` that differs from what is stored.
- *
- * Key fields are NOT re-sent: `board`/`sk` address the row (they travel as
- * keyHash/rangeKey) and cannot differ here — this path only runs when the sk
- * is unchanged. Measured, a narrow update with the key fields omitted is
- * accepted and leaves them intact.
- */
-function changedBoardCardFields(
-  stored: Record<string, unknown>,
-  next: Record<string, unknown>,
-  projected: readonly string[],
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const field of projected) {
-    if (field === "board" || field === "sk") continue;
-    if (!(field in next)) continue;
-    if (sameBoardCardValue(stored[field], next[field])) continue;
-    out[field] = next[field];
-  }
-  return out;
-}
-
 export type BoardCardWriteOptions = {
-  /**
-   * Skip the pre-write probe read and write the full 24-field shape.
-   *
-   * Two callers can justify this, for opposite reasons:
-   *
-   * - `createCardRecord` — the sk was just minted, so there is nothing to diff
-   *   against and the probe could only ever return "absent".
-   * - `board-cards-heal` — restoring the whole row IS the job, and it has
-   *   already enumerated the partition. A probe read here would reintroduce
-   *   the per-card re-read that `board-cards heal read cost` exists to forbid.
-   *
-   * Anything else currently lets the probe decide. Note that the saving it was
-   * added for is no longer measurable — see {@link upsertBoardCard}'s "an
-   * argument that no longer measures true" — so passing this flag costs nothing
-   * a probe run can detect, and skips a read whose diff basis is stale.
-   */
-  wideWrite?: boolean;
   /**
    * Skip the defensive orphan-purge rescan for this slug.
    *
@@ -875,19 +835,21 @@ export type BoardCardWriteOptions = {
  * stale column membership after a successful card update — see
  * `BoardCardWriteOptions.skipOrphanPurge` for the bulk-reconciler opt-out.
  *
- * ## Why this reads before it writes — an argument that no longer measures true
+ * ## Why this no longer reads before it writes
  *
- * The narrow path was built on a table showing cost scaling with the number of
- * fields SENT: 24-changed 5376ms, 24-sent-2-changed 4695ms, 4-sent-2-changed
- * 1197ms, byte-identical 140ms. On that reading a metadata write (tag / claim /
- * pr_url / block_status) changes two or three fields, so a 207ms read turned a
- * ~4.7s wide upsert into a ~0.6s narrow one.
+ * Until 2026-08-05 every non-move, non-create write took a NARROW path: read
+ * the stored row, diff it against the intended fields, send only the
+ * difference, skip the write entirely when nothing differed. Two arguments held
+ * it up, and both were retired by measurement rather than by preference.
  *
- * Three of those four numbers came from `scripts/probe-partial-write-cost.ts`
- * while it ran its arms in a FIXED order, which left arm and slot the same
- * variable, and reported a 3-sample median to the millisecond. Re-run with the
- * arms shuffled and each arm's precondition established rather than inherited,
- * 10 samples per arm on the post-2026-08-05T15:40Z binary:
+ * **The saving was an artefact.** The table it was built on showed cost scaling
+ * with fields SENT (24-changed 5376ms, 24-sent-2-changed 4695ms,
+ * 4-sent-2-changed 1197ms, byte-identical 140ms). Three of those four numbers
+ * came from `scripts/probe-partial-write-cost.ts` while it ran its arms in a
+ * FIXED order, which left arm and slot the same variable, at a 3-sample median
+ * reported to the millisecond. Re-run with the arms shuffled per rep and each
+ * arm's precondition established rather than inherited, 10 samples/arm on the
+ * post-2026-08-05T15:40Z binary:
  *
  * | update | ms |
  * |---|---|
@@ -897,26 +859,51 @@ export type BoardCardWriteOptions = {
  * | 24 fields, every value byte-identical | **48** |
  * | noise floor (median within-arm IQR) | 229 |
  *
- * The first three are one number. **Payload width and changed-field count do
- * not drive write cost**, so narrowing buys nothing — confirmed end to end on a
- * 180-row partition, read+narrow 2309ms vs blind-wide 2455ms, inside the floor
+ * The first three are ONE number: payload width and changed-field count do not
+ * drive BoardCards write cost. Confirmed end to end on a 180-row partition —
+ * read+narrow 2309ms vs blind-wide 2455ms, inside the floor
  * (`scripts/probe-prewrite-read-vs-blind-wide.ts`).
  *
- * The last row is the only real cliff, and it is reachable without reading
- * anything: send the unchanged row and the node skips it whole-record, 36x
- * cheaper than any write. Today's path cannot collect that discount, because
- * its diff runs against an index that lags its own ack by 1.2-2.4s
- * ({@link readWholeBoardCardRow}) — handed a byte-identical row it "found" a
- * change and wrote anyway in 16 of 16 samples, paying ~2.3s for what the node
- * would have skipped in ~60ms.
+ * **The diff basis could be stale, which made the pattern unsound.** The read
+ * hits the BoardCards INDEX ({@link readWholeBoardCardRow}), and diffing against
+ * pre-write state has two failure modes, both silent:
  *
- * So the read is cheap (3-6ms) and honest about existence and wholeness, but
- * the narrowing it enables is worth ~0 and its diff basis is stale. Writing
- * wide unconditionally is cheaper on no-ops, the same on real changes, and
- * strictly safer — a wide write creates a missing row whole and heals a holed
- * one, which is what the fall-through below already relies on. That change is
- * NOT made here: it is a hot-path behaviour change that deserves its own tests.
- * Filed as `papercut-kanban-prewrite-read-narrows-against-a-stale-index`.
+ *   - Wasted write: handed a byte-identical row, the diff "found" a change that
+ *     was not one and wrote anyway in 16 of 16 samples — ~2.3s for what the
+ *     node skips whole-record in ~48ms. So the one real cliff in the table above
+ *     was a discount the narrow path structurally could not collect, and a wide
+ *     write collects it for free by sending the unchanged row.
+ *   - **Missed write**: a field whose STALE value already equalled the intended
+ *     value was dropped from the narrow write EVEN WHEN the row's current value
+ *     differed — so the write could not correct it, and nothing errored. A wide
+ *     write has no such mode.
+ *
+ * **Neither was measured happening to real board traffic, and that is worth
+ * stating plainly.** The wasted-write mode needs a byte-identical no-op, and
+ * every production caller of this path stamps `updated_at: nowIso()`
+ * (`writeCardPatch`, move, add, groom, pickup claim, migrate) while the callers
+ * that did not — heal, the batch fall-back, milestone `writePayload:false` — all
+ * opted out of narrowing anyway. The missed-write mode needs a stale read, and
+ * `scripts/probe-narrow-write-drops-a-toggled-field.ts` drove the exact toggle
+ * that would hit it through the pre-fix tree: 3/3 the path's own read came back
+ * FRESH 3-6ms after the prior ack and sent `tags` correctly. The 1.2-2.4s
+ * staleness on record is real for the shape it was measured on and does not
+ * carry here — see {@link readWholeBoardCardRow}.
+ *
+ * So this is a soundness fix, not an incident fix: writing wide is cheaper on
+ * no-ops, the same on real changes (inside the floor, measured twice), one round
+ * trip fewer, and strictly safer — a wide write creates a missing row whole and
+ * heals a holed one, which is what the narrow path's own fall-through already
+ * relied on. Deciding a write from a read that CAN lag is the pattern being
+ * removed; how wide the lag happens to be today is not the argument. Evidence:
+ * `papercut-kanban-prewrite-read-narrows-against-a-stale-index`; the law it
+ * follows from is `decision-2026-08-05-no-stale-reads-after-ack`.
+ *
+ * The general rule this leaves behind, and the reason the flag it replaced is
+ * gone rather than defaulted: **do not read a partition back to decide what to
+ * write.** The comment inside this function said exactly that about its
+ * callers, one branch above a path that did it. Pinned by
+ * `test/board-cards-wide-write.test.ts`.
  */
 export async function upsertBoardCard(
   node: NodeClient,
@@ -1000,11 +987,13 @@ export async function upsertBoardCard(
   // `add` end at the write and `pickup claim` CAS-claims the Card rather than
   // re-reading the board — keep it that way.
   //
-  // This function is the exception, and said otherwise until 2026-08-05. The
-  // narrow path below reads the partition back and decides what to write from
-  // it, which is this hazard exactly, one branch away from the comment warning
-  // about it. The window is 1.2-2.4s, not the ~514ms recorded above
-  // (`scripts/probe-boardcard-read-after-write-lag.ts`).
+  // This function was the exception while asserting it was not: until
+  // 2026-08-05 the narrow path below read the partition back and decided what
+  // to write from it, one branch away from the comment warning against it. That
+  // path is gone; there is now no read on this write path at all. The window it
+  // was diffing against is 1.2-2.4s, not the ~514ms recorded above
+  // (`scripts/probe-boardcard-read-after-write-lag.ts`) — the 514ms figure
+  // answered a different question, whether the FIRST read back is fresh.
   const retireSupersededRows = async () => {
     if (previous) {
       const prevBoard = previous.board || "default";
@@ -1037,32 +1026,8 @@ export async function upsertBoardCard(
     }
   };
 
-  // Narrow path: send only what changed. Skipped for a row we know is new
-  // (nothing to diff against) and for a move, whose destination sk is a row
-  // that does not exist yet and must therefore be written whole.
-  const movedHere = Boolean(previous) &&
-    (String(previous?.board || "default") !== nextBoard ||
-      boardCardSk(previous!.column, previous!.position, previous!.slug) !== nextSk);
-  if (!opts.wideWrite && !movedHere) {
-    const stored = await readWholeBoardCardRow(node, cfg, nextBoard, nextSk);
-    if (stored) {
-      const changed = changedBoardCardFields(stored.fields, nextFields, stored.projected);
-      // Nothing changed: the node would no-op this in ~140ms, but a round trip
-      // we can prove is pointless is a round trip not worth taking. The row is
-      // already correct and durable, so its superseded siblings can still go.
-      if (Object.keys(changed).length === 0) {
-        await retireSupersededRows();
-        return;
-      }
-      await write(changed);
-      await retireSupersededRows();
-      return;
-    }
-    // Row absent or missing an atom on some field. Fall through: the wide
-    // write below both creates it and heals the hole. Narrowing here would
-    // leave an incomplete row that every wide reader silently drops.
-  }
-
+  // One write, always the full 24-field shape. No pre-write read: see the
+  // docstring's "why this no longer reads before it writes".
   try {
     await write(nextFields);
   } catch (err) {
@@ -1173,10 +1138,7 @@ export async function upsertBoardCardsBatch(
       // so the only way to write the other 47 is to ask for them separately.
       for (const card of chunk) {
         try {
-          await upsertBoardCard(node, cfg, card, null, {
-            skipOrphanPurge: true,
-            wideWrite: true,
-          });
+          await upsertBoardCard(node, cfg, card, null, { skipOrphanPurge: true });
         } catch (err) {
           onError?.(card, err);
         }

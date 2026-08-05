@@ -309,7 +309,7 @@ export async function upsertMilestoneCard(
   }
 
   if (opts.writePayload === false) {
-    await upsertBoardCard(node, cfg, card, previous, { wideWrite: true });
+    await upsertBoardCard(node, cfg, card, previous);
     if (previous && prevMs) {
       await retireMilestoneCardMembership(node, cfg, card, previous);
       if (opts.purgeSiblings) {

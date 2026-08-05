@@ -712,7 +712,6 @@ export async function boardCardsHealResult(
         if (opts.apply) {
           await upsertBoardCard(opts.node, opts.cfg, truth, null, {
             skipOrphanPurge: enumeratedBoards.has(truthBoard),
-            wideWrite: true,
           });
           healed += 1;
         }
@@ -753,7 +752,6 @@ export async function boardCardsHealResult(
         // rescan it replaces is a whole-partition read per card.
         await upsertBoardCard(opts.node, opts.cfg, truth, null, {
           skipOrphanPurge: enumeratedBoards.has(truthBoard),
-          wideWrite: true,
         });
         healed += 1;
       }
@@ -792,7 +790,6 @@ export async function boardCardsHealResult(
       }
       await upsertBoardCard(opts.node, opts.cfg, truth, null, {
         skipOrphanPurge: enumeratedBoards.has(truthBoard),
-        wideWrite: true,
       });
       healed += 1;
     }

@@ -11,10 +11,18 @@
  *    `scripts/probe-narrow-write-shape.ts`). Every hand-rolled fake used to
  *    implement update as a whole-row replace, which is strictly MORE
  *    destructive than production. That sounds safe and is not: it makes a
- *    correct narrow write — now the recommended pattern, since write cost
- *    scales with fields SENT, not fields changed — indistinguishable from
- *    catastrophic field loss. When `Card` was narrowed, 70 tests failed
- *    against the fakes and 0 against the node.
+ *    correct narrow write indistinguishable from catastrophic field loss. When
+ *    `Card` was narrowed, 70 tests failed against the fakes and 0 against the
+ *    node.
+ *
+ *    Narrowing is NOT a general recommendation, and this file called it one
+ *    until 2026-08-05. Cost scaling with fields SENT holds on `Card` and was
+ *    re-measured FALSE on `BoardCards` (24-changed 1983ms, 2-changed 1768ms,
+ *    narrow 1806ms, noise floor 229ms), whose narrow path also diffed against an
+ *    index that can serve pre-write state and so could silently drop a field
+ *    whose stale value matched the intent. BoardCards writes wide unconditionally now
+ *    (`test/board-cards-wide-write.test.ts`). Merge semantics stay faithful
+ *    either way: the node merges, so the fake must.
  *
  * 2. **A projection is a FILTER, not a superset read.** A field missing from
  *    the SCHEMA is a loud `unknown_fields` error; a field missing from a ROW is
