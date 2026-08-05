@@ -13,6 +13,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
+import { resolveRunningBuild, shortBuild } from "../host_track.ts";
 import { readRecentRejections, rejectionsPath } from "../diagnostics.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
 import { listBoards, listCards, findCard, probeSchemaWritable, WRITE_PROBE_SLUG, type Board, type Card } from "../record.ts";
@@ -129,6 +130,11 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // most needs. Sourced from package.json (same as `kanban --version`), it's a
   // report line, not a check, so it never flips `ok`.
   print(`  fkanban v${pkg.version}`);
+
+  // Is this report coming from the installed build? `pkg.version` has been
+  // "0.1.0" for the life of the repo and cannot answer that. Runs first
+  // because the answer qualifies every verdict below it.
+  reportRunningBuild(check, info);
 
   // Informational only — the global shim is optional, so this never flips `ok`.
   // It just tells the user whether bare `fkanban` resolves on PATH.
@@ -972,6 +978,82 @@ function reportMcpEntrypoint(
     : "could not resolve the MCP entrypoint";
   print(`· MCP entrypoint could not be confirmed (optional) — ${detail}`);
   onCheck?.({ name, status: "info", detail });
+}
+
+// The repo/install root of the code that is EXECUTING this doctor run —
+// derived from this module's own URL, not from `command -v kanban`. The
+// distinction is the whole point: a long-lived `kanban mcp` server and the
+// shim on PATH can resolve to different version directories, and the honest
+// answer is the tree that is actually loaded.
+export function runningSourceRoot(): string {
+  return fileURLToPath(import.meta.url).replace(/\/src\/commands\/doctor\.ts$/, "");
+}
+
+/**
+ * Is this doctor report coming from the build that is currently installed?
+ *
+ * A `✗` rather than a `·` when the answer is no, and deliberately so. The
+ * failure being reported is not about the board — it is about the report's own
+ * provenance, and a report from a build that is provably not the installed one
+ * cannot vouch for its other verdicts. That is not hypothetical: on 2026-08-05
+ * a superseded MCP server returned `✗ milestone_cards pin identity` against a
+ * board the current CLI passed in the same minute, because the acknowledgement
+ * field that clears it postdated the build serving the verdict. `isError` is
+ * what makes an agent read the line instead of skimming past a `·`.
+ *
+ * The CLI cannot reach this state in normal operation — the shim re-resolves
+ * `current` on every exec — so this red is, in practice, the MCP surface
+ * telling an agent that its own answers are stale. The remedy is one action:
+ * restart the server (a new agent session), or use the CLI, which is current
+ * by construction.
+ */
+export function reportRunningBuild(
+  check: (pass: boolean, label: string, detail?: string) => void,
+  info: (label: string, detail?: string) => void,
+  // Tests pass a fixture root. Production callers must NOT: the default is the
+  // only value that answers "which tree is loaded right now", which is the
+  // question this check exists to ask.
+  sourceRoot: string = runningSourceRoot(),
+): void {
+  const name = "running build is the installed build";
+  const running = resolveRunningBuild(sourceRoot);
+
+  switch (running.status) {
+    case "unmanaged":
+      // A worktree or fresh clone. There is no `current` to be behind; saying
+      // "stale" here would be false, and saying "✓ current" would be a claim
+      // nothing was checked against.
+      info("running build", `${running.sourceRoot} (not a host-track install — nothing to compare)`);
+      return;
+
+    case "indeterminate":
+      // Under a host-track root, but `current` did not resolve. Unknown must
+      // fail toward "look at this", never toward "you're up to date".
+      info(
+        name,
+        `could not resolve ${running.installRoot}/current — cannot confirm this build is the installed one`,
+      );
+      return;
+
+    case "current":
+      check(true, name, shortBuild(running.build, running.sourceRoot));
+      return;
+
+    case "superseded": {
+      const mine = shortBuild(running.build, running.sourceRoot);
+      const installed = shortBuild(running.currentBuild, running.currentRoot);
+      check(
+        false,
+        name,
+        `this process is running ${mine}, but ${running.installRoot}/current is ${installed} — ` +
+          `it resolved the symlink at startup and a refresh cannot move a running process. ` +
+          `Every verdict in this report comes from the superseded build, including any that ` +
+          `postdate it. Restart this server (for an MCP server, start a new agent session), ` +
+          `or re-run through the \`kanban\` CLI, which re-resolves \`current\` on every invocation.`,
+      );
+      return;
+    }
+  }
 }
 
 // Resolve the preferred global kanban shim on PATH, falling back to the legacy

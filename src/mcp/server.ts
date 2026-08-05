@@ -1333,7 +1333,7 @@ export function createFkanbanMcpServer(
     {
       title: "Health-check fkanban",
       description:
-        "Diagnose the fkanban setup the same way the `kanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring.",
+        "Diagnose the fkanban setup the same way the `kanban doctor` CLI does: config present, node reachable + provisioned, both schemas loaded + matching config, and a query round-trip. Returns the full check report; `isError` is set when any check fails. Run this first when other fkanban tools start erroring. One check is about this server rather than the board: `running build is the installed build` fails when this MCP server was spawned on a version directory that has since been superseded — it cannot reload itself, so when that check fails treat EVERY other verdict here as coming from the old build and re-check with the `kanban` CLI, which re-resolves the install on each invocation.",
       annotations: { title: "Health-check fkanban", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
       // Mirrors the doctor result: the overall boolean plus the ordered checks,

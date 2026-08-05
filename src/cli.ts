@@ -5,9 +5,18 @@
 
 import { parseArgs, format } from "node:util";
 import * as fs from "node:fs";
-import { basename, isAbsolute, relative } from "node:path";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+
+import {
+  expectedHostTrackRoot,
+  pathWithinAnyHostTrack,
+  realpathOrSelf,
+  resolveRunningBuild,
+  shortBuild,
+  type RunningBuild,
+} from "./host_track.ts";
 
 import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, PARITY_OPS_LABEL, type Verbose } from "./client.ts";
@@ -1083,84 +1092,14 @@ type WhichReport = {
   source_root: string;
   expected_host_track: string;
   in_host_track: boolean;
+  build_status: RunningBuild["status"];
+  build: string | null;
+  current_build: string | null;
   bun_path: string;
   bun_version: string;
   cwd: string;
   issues: string[];
 };
-
-function realpathOrSelf(path: string): string {
-  try {
-    return fs.realpathSync.native(path);
-  } catch {
-    return path;
-  }
-}
-
-/**
- * Host-track install roots for fkanban/kanban.
- *
- * Prefer the Kind B local-safe layout used by host-track apps.json after the
- * 2026-07 portal cutover:
- *   ~/.host-track/apps/fkanban/{current,versions/<oid>}
- * Keep accepting the legacy checkout path for older machines:
- *   ~/.host-track/fkanban
- *
- * Override: FKANBAN_HOST_TRACK_DIR (or HOST_TRACK_ROOT for the whole tree root).
- */
-function hostTrackInstallRoots(): string[] {
-  const home = process.env.HOME ?? "";
-  const roots: string[] = [];
-  const seen = new Set<string>();
-  const push = (p: string) => {
-    if (!p) return;
-    const real = fs.existsSync(p) ? realpathOrSelf(p) : p;
-    if (seen.has(real)) return;
-    seen.add(real);
-    roots.push(real);
-  };
-
-  const override = process.env.FKANBAN_HOST_TRACK_DIR?.trim();
-  if (override) {
-    push(override);
-    return roots;
-  }
-
-  // Broad HOST_TRACK_ROOT (e.g. ~/.host-track) still counts as managed.
-  const hostTrackRoot = process.env.HOST_TRACK_ROOT?.trim();
-  if (hostTrackRoot) push(hostTrackRoot);
-
-  if (home) {
-    // Preferred: local-safe install root (contains current + versions/*)
-    push(`${home}/.host-track/apps/fkanban`);
-    // Legacy durable checkout (pre apps/ layout)
-    push(`${home}/.host-track/fkanban`);
-  }
-  return roots;
-}
-
-/** Preferred/advertised host-track root for which output. */
-function expectedHostTrackRoot(): string {
-  const home = process.env.HOME ?? "";
-  const roots = hostTrackInstallRoots().filter((r) => fs.existsSync(r));
-  if (roots.length > 0) return roots[0]!;
-  if (home) return `${home}/.host-track/apps/fkanban`;
-  return "";
-}
-
-function pathWithin(path: string, root: string): boolean {
-  if (!path || !root) return false;
-  const rel = relative(root, path);
-  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function pathWithinAnyHostTrack(path: string): { ok: boolean; root: string } {
-  const roots = hostTrackInstallRoots();
-  for (const root of roots) {
-    if (pathWithin(path, root)) return { ok: true, root };
-  }
-  return { ok: false, root: expectedHostTrackRoot() };
-}
 
 function whichReport(): WhichReport {
   const sourcePath = fileURLToPath(import.meta.url);
@@ -1170,6 +1109,20 @@ function whichReport(): WhichReport {
   const expectedHostTrack = match.ok ? match.root : expectedHostTrackRoot();
   const inHostTrack = match.ok;
   const issues = inHostTrack ? [] : [`fkanban is not running from ${expectedHostTrack}`];
+
+  // Containment (`in_host_track`) is satisfied forever by any version directory
+  // that was ever installed, so it cannot tell the current build from a
+  // superseded one. Report the comparison against `current` separately — this
+  // is the field that catches a long-lived `kanban mcp` still serving the
+  // version directory it was spawned on. See src/host_track.ts.
+  const running = resolveRunningBuild(sourceRoot);
+  if (running.status === "superseded") {
+    issues.push(
+      `running build ${shortBuild(running.build, running.sourceRoot)} is superseded — ` +
+        `current is ${shortBuild(running.currentBuild, running.currentRoot)}`,
+    );
+  }
+
   return {
     package: pkg.name,
     version: pkg.version,
@@ -1179,6 +1132,9 @@ function whichReport(): WhichReport {
     source_root: sourceRoot,
     expected_host_track: expectedHostTrack,
     in_host_track: inHostTrack,
+    build_status: running.status,
+    build: running.build,
+    current_build: running.currentBuild,
     bun_path: realpathOrSelf(process.execPath),
     bun_version: Bun.version,
     cwd: process.cwd(),
@@ -1195,6 +1151,9 @@ function formatWhichReport(report: WhichReport): string {
     `source_root: ${report.source_root}`,
     `expected_host_track: ${report.expected_host_track}`,
     `in_host_track: ${report.in_host_track}`,
+    `build_status: ${report.build_status}`,
+    `build: ${report.build ?? "(n/a)"}`,
+    `current_build: ${report.current_build ?? "(n/a)"}`,
     `bun_path: ${report.bun_path}`,
     `bun_version: ${report.bun_version}`,
     `cwd: ${report.cwd}`,
@@ -1578,7 +1537,10 @@ async function dispatch(
       if (name === undefined) {
         const report = whichReport();
         console.log(values.json ? JSON.stringify(report) : formatWhichReport(report));
-        return values.check && !report.in_host_track ? 1 : 0;
+        // `--check` fails on any recorded issue, not just containment: a
+        // superseded build is exactly the condition a scripted check wants to
+        // catch, and it satisfies `in_host_track` by construction.
+        return values.check && report.issues.length > 0 ? 1 : 0;
       }
       const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp", "host-track-refresh", "kanban-host-track-refresh"]);
       if (!allowed.has(name)) {
