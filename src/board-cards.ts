@@ -1513,7 +1513,7 @@ export async function listAllBoardCards(
   node: NodeClient,
   cfg: Config,
   boards: Array<{ slug: string; columns?: readonly string[] }>,
-  opts?: { fields?: readonly string[]; skipTerminalColumn?: boolean },
+  opts?: { fields?: readonly string[]; skipTerminalColumn?: boolean; column?: string },
 ): Promise<Card[] | null> {
   if (!boardCardsHash(cfg)) return null;
   if (boards.length === 0) return [];
@@ -1523,6 +1523,10 @@ export async function listAllBoardCards(
     (b) =>
     listBoardCardsPartition(node, cfg, b.slug, {
       fields: projection,
+      // A single-column read is a `HashRangePrefix` per partition, and it wins
+      // over `excludeColumn` when both are asked for: naming the one column you
+      // want is strictly narrower than naming the one you don't.
+      ...(opts?.column ? { column: opts.column } : {}),
       // Per BOARD, not a global constant: the terminal column is whatever that
       // board's column list ends with, and a caller that only reads the active
       // set must not assume every board calls it `done`. A board whose columns
