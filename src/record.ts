@@ -2794,18 +2794,43 @@ async function listCardsWithFieldsTraced(
     // rare path only — still not N+1). Prefer BoardCards after dual-write.
     const hash = schemaHashFor("card", cfg);
     let res;
+    // What the scan actually READ, which stops being `fields` the moment the
+    // optional-field retry fires. Both seeds below are gated on "never write a
+    // field this scan did not read" — `seedBoardCards` even names its parameter
+    // `scannedFields` — and handing them the caller's REQUESTED list is the one
+    // input that makes that contract state something false.
+    //
+    // The gap is not theoretical, because the retry is all-or-nothing across a
+    // set that is not all-or-nothing on the node. `isOnlyOptionalFieldMiss`
+    // fires when the node names ANY ONE of `CARD_OPTIONAL_SCHEMA_FIELDS`, and
+    // the retry then drops ALL FOUR. Three of them — `surfaces`, `created_by`,
+    // `milestone` — are in `CARD_SEED_FIELDS`, so on a node missing only `db`
+    // the scan silently stops reading three fields that are present and
+    // populated, `scanCoversSeed(fields)` still answers "covered" because the
+    // caller asked for them, and the seed writes `""` over each one.
+    //
+    // `milestone` is the one that bites: membership drives `milestone
+    // portfolio`, MilestoneCards parity, and the live-PR milestone gate, so a
+    // blanked value is precisely the "board that stops being pickupable after a
+    // READ" symptom `seedBoardCards`' own comment describes. Passing the
+    // scanned list makes the guard decline instead, which is the conservative
+    // half it was written to take.
+    let scannedFields = fields;
     try {
       res = await node.queryAll({ schemaHash: hash, fields, allowFullScan: true });
     } catch (err) {
       if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
+      scannedFields = fields.filter(
+        (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
+      );
       res = await node.queryAll({
         schemaHash: hash,
-        fields: fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)),
+        fields: scannedFields,
         allowFullScan: true,
       });
     }
     const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
-    if (!fields.includes("body")) markBodyOmitted(cards);
+    if (!scannedFields.includes("body")) markBodyOmitted(cards);
     // Never write a field this scan did not read — the same contract
     // `seedBoardCards` states below, at the other index, from the same scan.
     //
@@ -2831,14 +2856,14 @@ async function listCardsWithFieldsTraced(
     // row is absent — the first list on a legacy install. That path is retired
     // (`groom card-list-index-retire`), and the guard is cheap; a defect that
     // survives because its path is unpopular is still a defect.
-    if (scanCoversSeed(fields)) {
+    if (scanCoversSeed(scannedFields)) {
       try {
         await writeCardListIndex(node, cfg, cards.map(toCardSummary));
       } catch {
         // best-effort seed; list still returns
       }
     }
-    await seedBoardCards(node, cfg, cards, boardCardsThrew, fields);
+    await seedBoardCards(node, cfg, cards, boardCardsThrew, scannedFields);
     return { cards, servedBy: "full-scan" };
   }
 
