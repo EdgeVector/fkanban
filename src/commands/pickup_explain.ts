@@ -211,23 +211,34 @@ export async function pickupExplainResult(opts: {
 
   const fence = await checkSituationFence(card, opts.situationPreflight);
   const enforceLivePrMilestone = opts.cfg.enforceLivePrMilestone === true;
+
+  // The abandoned-milestone gate needs the Milestone record; a read failure
+  // degrades to state "" (gate passes on state, still fails on a missing
+  // milestone) rather than failing the whole explain. Classification gets the
+  // same state so ready ≠ write-guard cannot disagree on abandoned outcomes.
+  let milestoneState = "";
+  const msSlug = (card.milestone ?? "").trim();
+  let milestoneStateBySlug: Map<string, string> | undefined;
+  if (msSlug && enforceLivePrMilestone) {
+    const ms = await findMilestone(opts.node, opts.cfg, msSlug).catch(() => null);
+    if (ms) {
+      milestoneState = ms.state;
+      milestoneStateBySlug = new Map([[ms.slug, ms.state]]);
+    } else {
+      // Missing record: classify as unattached (same as empty portfolio map miss).
+      milestoneStateBySlug = new Map();
+    }
+  }
   const classification = classifyPickupCard(
     card,
     cards,
     dep,
     fence.allowed ? undefined : fence,
-    { requireLiveMilestone: enforceLivePrMilestone },
+    {
+      requireLiveMilestone: enforceLivePrMilestone,
+      milestoneStateBySlug,
+    },
   );
-
-  // The abandoned-milestone gate needs the Milestone record; a read failure
-  // degrades to state "" (gate passes on state, still fails on a missing
-  // milestone) rather than failing the whole explain.
-  let milestoneState = "";
-  const msSlug = (card.milestone ?? "").trim();
-  if (msSlug && enforceLivePrMilestone) {
-    const ms = await findMilestone(opts.node, opts.cfg, msSlug).catch(() => null);
-    if (ms) milestoneState = ms.state;
-  }
   const writeGuard = writeGuardFor(card, { enforceLivePrMilestone, milestoneState });
   const lane = laneOf(card);
   const overlap = overlapAgainstCards(card, cards);
