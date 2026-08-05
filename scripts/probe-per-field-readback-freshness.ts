@@ -70,6 +70,19 @@
  * re-placed into a `milestone`-keyed partition and found it is never in one,
  * before or after the write. Do not restate this as re-placement.
  *
+ * ## Narrowed 2026-08-05 by a control arm — run that one too before theorising
+ *
+ * `probe-per-field-freshness-matched-key-schema.ts` runs this identical sweep
+ * on `milestone_cards`, where the catalog's declared hash_field and the key the
+ * app supplies AGREE (both `milestone`). All 18 varied fields there read fresh
+ * at 4-8ms, including `board` — the field that is the sibling schema's
+ * partition key. A BoardCards control re-run minutes later on the same binary
+ * reproduced `milestone` at 1479/1923/621ms.
+ *
+ * So the lag is not a property of declared key fields in general, and it is not
+ * symmetric across the multi-key pair. It needs declared != supplied. Cite the
+ * pair of probes together; this one alone cannot tell those apart.
+ *
  * Run: bun scripts/probe-per-field-readback-freshness.ts
  *      REPS=5 bun scripts/probe-per-field-readback-freshness.ts
  */
