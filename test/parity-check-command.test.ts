@@ -33,9 +33,11 @@ const BOARD = "default";
 const SK_STAYS = boardCardSk("todo", "1", "stays");
 const SK_LEAVES = boardCardSk("todo", "2", "leaves");
 
-// `any_missing` — the fake's default — drops a row when ANY projected field
-// lacks an atom, so every wide read here would return zero rows and each test
-// would pass for the wrong reason. `hash_else_lead` is the measured rule.
+// `hash_else_lead` is the measured rule and also the fake's default; it is
+// named explicitly because these tests ARE about the projection, and the
+// `hashFields` below are only meaningful under it. Under the superseded
+// `any_missing` every wide read here would return zero rows and each test
+// would pass for the wrong reason.
 function board(): FakeNode {
   const node = fakeNode({
     projectionRule: "hash_else_lead",
