@@ -16,6 +16,7 @@ import {
   writeGroomedCard,
   type GroomReport,
 } from "../pickup.ts";
+import { renderSweepWrites } from "../sweep_report.ts";
 
 /**
  * Every `kanban groom` subcommand, in help order.
@@ -119,11 +120,13 @@ export function renderSweepHead(label: string, counts: SweepCounts): string {
   // "candidate cards" stays ungrammatical at 1 on purpose: the only behavioural
   // delta this change is allowed to carry is the count semantics and the key
   // name, so that reverting it produces an unambiguous test split.
-  const key = counts.dryRun ? "would_change" : "changed";
-  const n = counts.dryRun ? counts.would_change : counts.changed;
+  const writes = renderSweepWrites(
+    { applied: "changed", planned: "would_change" },
+    { dryRun: counts.dryRun, applied: counts.changed, planned: counts.would_change },
+  );
   return (
     `${label}: ${counts.candidates} candidate cards of ${counts.scanned} scanned; ` +
-    `${key}=${n}${counts.dryRun ? " — DRY RUN, no writes" : ""}`
+    `${writes}${counts.dryRun ? " — DRY RUN, no writes" : ""}`
   );
 }
 

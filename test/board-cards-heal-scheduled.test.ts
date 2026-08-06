@@ -26,6 +26,7 @@ function report(partial: Partial<BoardCardsHealReport> = {}): BoardCardsHealRepo
     scanned_index_rows: 0,
     drifted: 0,
     healed: 0,
+    would_heal: 0,
     missing_card: 0,
     board_cards_bound: true,
     discovery_failed: null,
