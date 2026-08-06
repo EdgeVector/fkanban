@@ -18,6 +18,7 @@
 // a ceiling.
 
 import { describe, expect, test } from "bun:test";
+import { cardsFromJson } from "./json_page.ts";
 
 import { DEP_SEED_POINT_READ_MAX, listCmd } from "../src/commands/list.ts";
 import { hydrateForPickupClassification } from "../src/pickup.ts";
@@ -232,7 +233,7 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
 
   test("narrowing does not change the verdict: a finished dep still clears the block", async () => {
     const node = fakeNode(cards);
-    const out = JSON.parse(await listCmd({ cfg, node, column: "todo", json: true })) as Array<
+    const out = cardsFromJson(await listCmd({ cfg, node, column: "todo", json: true })) as Array<
       Card & { blocked: boolean; missingDeps: string[] }
     >;
 
@@ -247,7 +248,7 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
       card({ slug: "backlog-a", column: "backlog", position: "1" }),
       card({ slug: "done-a", column: "done", position: "1" }),
     ]);
-    const out = JSON.parse(await listCmd({ cfg, node, column: "todo", json: true })) as Array<
+    const out = cardsFromJson(await listCmd({ cfg, node, column: "todo", json: true })) as Array<
       Card & { blocked: boolean; blockedBy: string[] }
     >;
 
@@ -261,7 +262,7 @@ describe("list --column: the finished-dependency seed reads the archive narrowly
       card({ slug: "todo-a", column: "todo", position: "1", deps: ["done-a"] }),
       card({ slug: "done-a", column: "done", position: "1", tags: [TOMBSTONE_TAG] }),
     ]);
-    const out = JSON.parse(await listCmd({ cfg, node, column: "todo", json: true })) as Array<
+    const out = cardsFromJson(await listCmd({ cfg, node, column: "todo", json: true })) as Array<
       Card & { blocked: boolean; missingDeps: string[] }
     >;
 

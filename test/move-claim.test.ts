@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { cardsFromJson } from "./json_page.ts";
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
@@ -218,7 +219,7 @@ describe("move claim guard", () => {
     await moveCmd({ cfg: cfgWithBoardCards, node, slug: initial.slug, column: "done" });
 
     expect(await findCard(node, cfgWithBoardCards, initial.slug)).toMatchObject({ column: "done" });
-    const doing = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));
+    const doing = cardsFromJson(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));
     expect(doing.map((c: { slug: string }) => c.slug)).not.toContain(initial.slug);
   });
 
@@ -249,10 +250,10 @@ describe("move claim guard", () => {
 
     // The projection is what renders — the un-updated BoardCards row still shows
     // its own column until an explicit heal runs.
-    const doing = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));
+    const doing = cardsFromJson(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));
     expect(doing.map((c: { slug: string }) => c.slug)).toEqual([stale.slug]);
 
-    const all = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, json: true }));
+    const all = cardsFromJson(await listCmd({ cfg: cfgWithBoardCards, node, json: true }));
     expect(all).toMatchObject([{ slug: stale.slug, column: "doing", position: "2" }]);
   });
 
@@ -270,7 +271,7 @@ describe("move claim guard", () => {
     await seedBoardCard(node, thinOnly);
 
     // Board-wide list (HashKey partition) — not --column (HashRangePrefix).
-    const listed = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, json: true })) as Array<{
+    const listed = cardsFromJson(await listCmd({ cfg: cfgWithBoardCards, node, json: true })) as Array<{
       slug: string;
       column: string;
     }>;
@@ -278,7 +279,7 @@ describe("move claim guard", () => {
     expect(listed.find((c) => c.slug === "ghost-membership")?.column).toBe("todo");
 
     // Second list must still see the row (not deleted on first reconcile).
-    const again = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, json: true })) as Array<{
+    const again = cardsFromJson(await listCmd({ cfg: cfgWithBoardCards, node, json: true })) as Array<{
       slug: string;
     }>;
     expect(again.map((c) => c.slug)).toContain("ghost-membership");
@@ -297,7 +298,7 @@ describe("move claim guard", () => {
     });
     await seedBoardCard(node, todo);
 
-    const listed = JSON.parse(await listCmd({ cfg: cfgWithBoardCards, node, column: "todo", json: true })) as Array<{
+    const listed = cardsFromJson(await listCmd({ cfg: cfgWithBoardCards, node, column: "todo", json: true })) as Array<{
       slug: string;
       column: string;
     }>;

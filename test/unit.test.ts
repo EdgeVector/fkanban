@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
+import { cardsFromJson } from "./json_page.ts";
 
 import {
   DEFAULT_COLUMNS,
@@ -1012,7 +1013,7 @@ describe("listCmd empty board", () => {
 
   test("--json on an empty board still returns []", async () => {
     const out = await listCmd({ cfg, node: emptyNode(), json: true });
-    expect(JSON.parse(out)).toEqual([]);
+    expect(cardsFromJson(out)).toEqual([]);
     expect(out).not.toContain("No cards yet");
   });
 
@@ -1190,7 +1191,7 @@ describe("listCmd --tag / --assignee filters", () => {
 
   async function slugs(opts: Partial<ListOptions>): Promise<string[]> {
     const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, ...opts });
-    return (JSON.parse(out) as Card[]).map((c) => c.slug).sort();
+    return (cardsFromJson(out) as Card[]).map((c) => c.slug).sort();
   }
 
   const cfg: Config = {
@@ -1211,7 +1212,7 @@ describe("listCmd --tag / --assignee filters", () => {
     const out = await listCmd({ cfg, node: populatedNode(corpus), tag: "nonexistent-xyz" });
     expect(typeof out).toBe("string");
     const json = await listCmd({ cfg, node: populatedNode(corpus), tag: "nonexistent-xyz", json: true });
-    expect(JSON.parse(json)).toEqual([]);
+    expect(cardsFromJson(json)).toEqual([]);
   });
 
   test("--assignee is an exact equality filter", async () => {
@@ -1319,7 +1320,7 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
 
   async function jsonSlugs(opts: Partial<ListOptions>): Promise<string[]> {
     const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, ...opts });
-    return (JSON.parse(out) as Card[]).map((c) => c.slug);
+    return (cardsFromJson(out) as Card[]).map((c) => c.slug);
   }
 
   // A BoardCards-derived list is body-free by construction: BOARD_CARDS_FIELDS is
@@ -1328,7 +1329,7 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
   // storm removed in "trust the BoardCards projection". `show <slug>` serves body.
   test("no --limit → broad JSON uses the default per-column cap and is body-free", async () => {
     const out = await listCmd({ cfg, node: populatedNode(corpus), json: true });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed.map((c) => c.slug).sort()).toEqual([
       "d1",
       "d2",
@@ -1341,7 +1342,7 @@ describe("listCmd --json honors an explicit --limit (per-column cap)", () => {
 
   test("column-filtered JSON is uncapped by default and is body-free", async () => {
     const out = await listCmd({ cfg, node: populatedNode(corpus), json: true, column: "todo" });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed.map((c) => c.slug)).toEqual(
       Array.from({ length: DEFAULT_COLUMN_LIMIT + 1 }, (_, i) => `t${i + 1}`),
     );
@@ -1502,7 +1503,7 @@ describe("listCmd multi-board footer", () => {
     const out = await listCmd({ cfg, node: populatedNode(multiBoard), json: true });
     expect(out).not.toContain("other board");
     // And the JSON array is exactly the viewed board's cards.
-    expect((JSON.parse(out) as Card[]).map((c) => c.slug).sort()).toEqual(["d1"]);
+    expect((cardsFromJson(out) as Card[]).map((c) => c.slug).sort()).toEqual(["d1"]);
   });
 
   test("tombstoned other-board cards are excluded from the count", async () => {

@@ -132,9 +132,14 @@ export async function boardListCmd(opts: {
   cfg: Config;
   node: NodeClient;
   json?: boolean;
+  /** Legacy bare-array stdout (`--json-array`). Default is the envelope. */
+  jsonArray?: boolean;
 }): Promise<string> {
   const { text, boards } = await boardListResult(opts);
-  return opts.json ? JSON.stringify(boards, null, 2) : text;
+  if (!opts.json) return text;
+  if (opts.jsonArray) return JSON.stringify(boards, null, 2);
+  // Uncapped today — total equals kept, truncated is always false.
+  return JSON.stringify({ boards, total: boards.length, truncated: false }, null, 2);
 }
 
 /**

@@ -1,30 +1,29 @@
 // A `--json` page that dropped rows must SAY SO on some channel.
 //
-// The CLI's broad `--json` reads (`list`, `search`) apply an implicit page cap
-// for token economy — the same reason the MCP tools cap. The MCP tools report
-// `total`/`truncated` beside the array, so their cap is never silent. The CLI
-// emitted a bare array and nothing else: measured 2026-08-06 on the live
-// primary, `kanban list --board default --json` returned 34 of 229 rows and
-// `kanban search "kanban" --json` returned 20 of 204, both with 0 bytes on fd 2
-// — while the SAME invocations' human rendering prints "… N more (--all)".
-// See papercut-kanban-list-json-silently-caps-while-the-human-line-says-32-more.
+// History (2026-08-06):
+//   1. CLI broad `--json` reads (`list`, `search`) applied an implicit page cap
+//      and emitted a bare array — measured 34 of 229 / 20 of 204 with 0 bytes on
+//      fd 2, while the human rendering printed "… N more (--all)".
+//   2. CR cr-msh8u5wt-2f6e closed the silence on stderr so stdout stayed
+//      byte-identical (needed because milestone-driver ran `jq 'length'` on the
+//      bare array — against an envelope, `jq length` returns the KEY COUNT and
+//      silently degrades).
+//   3. This file now owns the structural answer: `{items, total, truncated}`
+//      matching `milestone list` / MCP. Consumers of `jq 'length'` must migrate
+//      first (or use `--json-array`). See card kanban-json-envelope-total-truncated.
 //
-// WHY STDERR AND NOT AN ENVELOPE. The structurally better answer is the
-// `{items, total, truncated}` envelope `milestone list`/`portfolio` already
-// carry. It is a compat break on public output, and the consumer sweep run
-// before this change found the break is not theoretical: routine
-// `milestone-driver` reads `jq 'length'` off three `list --json` call sites to
-// gate milestone driving. Against an envelope, `jq length` does not error — it
-// returns the KEY COUNT (3) — so every one of those gates would silently read
-// "3 cards" forever. That is a worse failure than the one being fixed, so the
-// envelope needs its consumers migrated first (carded), and the silence gets
-// closed now on a channel that costs no stdout bytes.
-//
-// stdout stays byte-identical, so every existing `jq '.[]'` / `jq length`
-// consumer is untouched, while agents (whose tool harness captures fd 2) and
-// humans both see the undercount named.
+// Envelope is the default. `--json-array` restores the bare array and, when the
+// implicit cap dropped rows, re-uses the stderr notice so that path is not
+// silent either. The envelope path does NOT also warn on stderr — one channel.
 
 export type WarnSink = (message: string) => void;
+
+export type JsonPageEnvelope<K extends string, T> = {
+  [P in K]: T[];
+} & {
+  total: number;
+  truncated: boolean;
+};
 
 // Scope: the IMPLICIT default cap only. An explicit `--limit N` is the caller
 // stating the bound they want, and `--all` removes the cap entirely — neither
@@ -53,4 +52,40 @@ export function warnIfTruncated(
 ): void {
   const message = truncationNotice(command, kept, total);
   if (message !== undefined) warn(message);
+}
+
+/**
+ * Build the completeness envelope shared by list/search/board list/milestone
+ * groom `--json` (and already used by milestone list/portfolio).
+ *
+ * `truncated` is true **iff** rows were dropped (`kept < total`). The
+ * `kept === total` boundary — a complete page that happens to sit at the cap —
+ * must read `truncated: false`. An off-by-one here false-alarms every full page.
+ */
+export function jsonPageEnvelope<K extends string, T>(
+  key: K,
+  items: T[],
+  total: number,
+): JsonPageEnvelope<K, T> {
+  const kept = items.length;
+  // Clamp: never claim more kept than total if a caller miscounts.
+  const safeTotal = total < kept ? kept : total;
+  return {
+    [key]: items,
+    total: safeTotal,
+    truncated: kept < safeTotal,
+  } as JsonPageEnvelope<K, T>;
+}
+
+/** Serialize either the envelope or the legacy bare array. */
+export function renderJsonPage<K extends string, T>(
+  key: K,
+  items: T[],
+  total: number,
+  opts: { jsonArray?: boolean } = {},
+): string {
+  if (opts.jsonArray) {
+    return JSON.stringify(items, null, 2);
+  }
+  return JSON.stringify(jsonPageEnvelope(key, items, total), null, 2);
 }

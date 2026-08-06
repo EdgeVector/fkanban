@@ -19,6 +19,7 @@
 // fixtures here assert exactly that rather than papering over it.
 
 import { describe, expect, test } from "bun:test";
+import { cardsFromJson } from "./json_page.ts";
 
 import { boardListCmd, boardListResult } from "../src/commands/board.ts";
 import { DEP_SEED_POINT_READ_MAX, listCmd } from "../src/commands/list.ts";
@@ -256,7 +257,7 @@ describe("board list — per-board live-card counts", () => {
       cards: [card({ slug: "a", board: "default" }), card({ slug: "b", board: "default" })],
     });
     const out = await boardListCmd({ cfg, node, json: true });
-    const parsed = JSON.parse(out) as Array<Board & { cardCount: number | null }>;
+    const parsed = cardsFromJson(out) as Array<Board & { cardCount: number | null }>;
     const bySlug = new Map(parsed.map((b) => [b.slug, b]));
     expect(bySlug.get("default")!.cardCount).toBe(2);
     expect(bySlug.get("scratch")!.cardCount).toBe(0);
@@ -277,7 +278,7 @@ describe("board list — per-board live-card counts", () => {
     expect(boards[0]!.cardCount).toBeNull();
     // --json: cardCount is null (not absent), so consumers see the fallback.
     const out = await boardListCmd({ cfg, node, json: true });
-    const parsed = JSON.parse(out) as Array<Board & { cardCount: number | null }>;
+    const parsed = cardsFromJson(out) as Array<Board & { cardCount: number | null }>;
     expect(parsed[0]!.cardCount).toBeNull();
   });
 });
@@ -436,7 +437,7 @@ describe("search — default text path matches real bodies via one narrow scan",
     });
 
     const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle", json: true });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(20);
     expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
     expect(parsed[0]!.bodyTruncated).toBe(true);
@@ -468,7 +469,7 @@ describe("search — default text path matches real bodies via one narrow scan",
     });
 
     const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "feature-ship", json: true });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
 
     expect(parsed.map((c) => c.slug)).toEqual(["feature-ready"]);
     // The DEPRECATED unallowed scan stays forbidden; the approved admin scan
@@ -517,7 +518,7 @@ describe("search — default text path matches real bodies via one narrow scan",
     });
 
     const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle", json: true, all: true });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(25);
     expect(parsed[0]!.bodyTruncated).toBe(true);
     // The DEPRECATED unallowed scan stays forbidden; the approved admin scan
@@ -538,7 +539,7 @@ describe("search — default text path matches real bodies via one narrow scan",
     });
 
     const out = await searchCmd({ cfg, node, query: "needle", json: true, fullBody: true });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(1);
     expect(parsed[0]!.body).toContain("long body ".repeat(20));
     expect(parsed[0]!.bodyTruncated).toBe(false);
@@ -567,7 +568,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
       cards: [card({ slug: "a", board: "default", title: "Card A", body: longBody })],
     });
     const out = await listCmd({ cfg, node, json: true });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     // Thin list path: empty/preview body without N+1 Card point-reads for body.
     expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "a" && q.fields.includes("body"))).toBe(false);
@@ -580,7 +581,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
       cards: [card({ slug: "a", board: "default", title: "Card A", body: longBody })],
     });
     const out = await listCmd({ cfg, node, json: true, fullBody: true });
-    const parsed = JSON.parse(out) as Array<Card & { bodyTruncated: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed[0]!.body).toBe(longBody);
     expect(parsed[0]!.bodyTruncated).toBe(false);
   });
@@ -623,7 +624,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
       ],
     });
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
-    expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
+    expect((cardsFromJson(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
 
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
     // No secondary full-board Card scan for column list.
@@ -646,7 +647,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
       ],
     });
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
-    const parsed = JSON.parse(out) as Array<Card & { blocked: boolean; blockedBy: string[] }>;
+    const parsed = cardsFromJson(out) as Array<Card & { blocked: boolean; blockedBy: string[] }>;
     expect(parsed.map((c) => c.slug)).toEqual(["todo-a"]);
     // The verdict is the invariant that must not move, and it does not: an
     // unfinished dep blocks whether it was resolved by scan or by point-read.
@@ -681,7 +682,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
       ],
     });
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
-    const parsed = JSON.parse(out) as Array<
+    const parsed = cardsFromJson(out) as Array<
       Card & { blocked: boolean; blockedBy: string[]; missingDeps: string[] }
     >;
     expect(parsed[0]!.blocked).toBe(true);
@@ -708,7 +709,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
       ],
     });
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
-    const parsed = JSON.parse(out) as Array<Card & { blocked: boolean }>;
+    const parsed = cardsFromJson(out) as Array<Card & { blocked: boolean }>;
     // Every dep is finished, so the scan seed must clear the block — proving the
     // fallback resolved them rather than merely declining to point-read.
     expect(parsed[0]!.blocked).toBe(false);
@@ -725,7 +726,7 @@ describe("list — text path fetches body-free fields, structured views keep ful
       rejectColumnFilter: true,
     });
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
-    expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
+    expect((cardsFromJson(out) as Card[]).map((c) => c.slug)).toEqual(["todo-a"]);
 
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
     expect(node.cardQueries.some((q) => q.filter === undefined)).toBe(false);

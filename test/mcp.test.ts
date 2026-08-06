@@ -11,6 +11,7 @@
 // the test here, not just at runtime.
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import { cardsFromJson } from "./json_page.ts";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -573,7 +574,12 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
 
   test("fkanban_list returns { cards } matching `list --json` card-for-card, adding bounded body previews (validated against outputSchema)", async () => {
     const res = await client.callTool({ name: "fkanban_list", arguments: {} });
-    const cliCards = JSON.parse(await listCmd({ cfg, node, json: true }));
+    const cliRaw = JSON.parse(await listCmd({ cfg, node, json: true })) as {
+      cards: Array<Record<string, unknown>>;
+      total: number;
+      truncated: boolean;
+    };
+    const cliCards = cliRaw.cards;
     expect(res.structuredContent).toBeDefined();
     // The client validates structuredContent against the widened outputSchema —
     // an enriched-card-shape mismatch would fail this callTool, not just assert.
@@ -597,8 +603,8 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     };
     expect(mcp.cards.map(strip)).toEqual(cliCards.map(strip));
     expect({ total: mcp.total, truncated: mcp.truncated }).toEqual({
-      total: cliCards.length,
-      truncated: false,
+      total: cliRaw.total,
+      truncated: cliRaw.truncated,
     });
     // CLI list is body-free; the MCP page carries the real (flattened) body.
     for (const c of cliCards as Array<Record<string, unknown>>) expect(c.body).toBe("");
@@ -626,11 +632,20 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
 
   test("fkanban_search returns { cards } deep-equal to `search --json`", async () => {
     const res = await client.callTool({ name: "fkanban_search", arguments: { query: "search me" } });
-    const cliCards = JSON.parse(await searchCmd({ cfg, node, query: "search me", json: true }));
+    const cliRaw = JSON.parse(await searchCmd({ cfg, node, query: "search me", json: true })) as {
+      cards: Array<Record<string, unknown>>;
+      total: number;
+      truncated: boolean;
+    };
+    const cliCards = cliRaw.cards;
     // One match, under the default cap → full set + `truncated:false`. Body is
     // previewed (short fixture body → unchanged, bodyTruncated:false).
     const cliCardsPreviewed = cliCards.map((c: Record<string, unknown>) => ({ ...c, bodyTruncated: false }));
-    expect(res.structuredContent).toEqual({ cards: cliCardsPreviewed, total: cliCards.length, truncated: false });
+    expect(res.structuredContent).toEqual({
+      cards: cliCardsPreviewed,
+      total: cliRaw.total,
+      truncated: cliRaw.truncated,
+    });
     expect((cliCards as Array<{ slug: string }>).map((c) => c.slug)).toEqual(["ui"]);
   });
 
@@ -667,10 +682,13 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     expect(res.structuredContent).toMatchObject({ blocked: true, blockedBy: ["api", "ghost"], missingDeps: ["ghost"] });
   });
 
-  test("fkanban_board_list returns { boards } deep-equal to `board list --json`", async () => {
+  test("fkanban_board_list returns { boards } matching `board list --json` boards", async () => {
     const res = await client.callTool({ name: "fkanban_board_list", arguments: {} });
-    const cliBoards = JSON.parse(await boardListCmd({ cfg, node, json: true }));
-    expect(res.structuredContent).toEqual({ boards: cliBoards });
+    const cliBoards = cardsFromJson(await boardListCmd({ cfg, node, json: true }));
+    // CLI envelope adds total/truncated; MCP structuredContent may only carry boards.
+    // Compare the boards array card-for-card (the product surface both share).
+    const mcp = res.structuredContent as { boards: unknown[] };
+    expect(mcp.boards).toEqual(cliBoards);
     expect((cliBoards as Array<{ slug: string }>).map((b) => b.slug).sort()).toEqual(["default", "sprint"]);
   });
 

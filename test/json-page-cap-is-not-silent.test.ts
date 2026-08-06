@@ -43,7 +43,7 @@ import { boardCardFieldsFromCard } from "../src/board-cards.ts";
 import { DEFAULT_SEARCH_LIMIT } from "../src/board.ts";
 import { DEFAULT_COLUMN_LIMIT, listCmd, listResult } from "../src/commands/list.ts";
 import { searchCmd } from "../src/commands/search.ts";
-import { truncationNotice } from "../src/truncation_notice.ts";
+import { jsonPageEnvelope, truncationNotice } from "../src/truncation_notice.ts";
 import {
   boardToFields,
   cardToFields,
@@ -203,73 +203,98 @@ describe("truncationNotice", () => {
   });
 });
 
-describe("list --json capped page", () => {
-  test("warns, and the notice carries the true total", async () => {
-    const s = sink();
-    const out = await listCmd({ cfg, node: node(listCards), json: true, warn: s.warn });
-    const rows = JSON.parse(out) as unknown[];
-
-    expect(rows.length).toBe(LIST_KEPT);
-    expect(s.lines.length).toBe(1);
-    // The real total, not the page size — the whole point of the notice.
-    expect(s.lines[0]).toContain(`${LIST_KEPT} of ${LIST_TOTAL}`);
-    expect(s.lines[0]).toContain("--all");
+describe("jsonPageEnvelope", () => {
+  test("truncated is true iff rows were dropped", () => {
+    const dropped = jsonPageEnvelope("cards", [1, 2], 5);
+    expect(dropped).toEqual({ cards: [1, 2], total: 5, truncated: true });
   });
 
-  // POSITIVE CONTROL. Without it, `warn: () => always` passes everything above.
-  test("says NOTHING when the page is complete", async () => {
+  // POSITIVE CONTROL. kept === total is a complete page (including at the cap).
+  test("complete page reports truncated:false", () => {
+    const full = jsonPageEnvelope("cards", [1, 2, 3], 3);
+    expect(full.truncated).toBe(false);
+    expect(full.total).toBe(3);
+  });
+});
+
+describe("list --json capped page (envelope)", () => {
+  test("envelope names total and truncated; no stderr noise", async () => {
+    const s = sink();
+    const out = await listCmd({ cfg, node: node(listCards), json: true, warn: s.warn });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
+
+    expect(Array.isArray(parsed.cards)).toBe(true);
+    expect(parsed.cards.length).toBe(LIST_KEPT);
+    expect(parsed.total).toBe(LIST_TOTAL);
+    expect(parsed.truncated).toBe(true);
+    // Envelope is the structural channel — do not also spam fd 2.
+    expect(s.lines).toEqual([]);
+  });
+
+  // POSITIVE CONTROL. Without it, always-truncated would pass every other case.
+  test("complete page reports truncated:false and stays silent", async () => {
     const s = sink();
     const small = [card({ slug: "only", column: "todo" })];
     const out = await listCmd({ cfg, node: node(small), json: true, warn: s.warn });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
 
-    expect((JSON.parse(out) as unknown[]).length).toBe(1);
+    expect(parsed.cards.length).toBe(1);
+    expect(parsed.total).toBe(1);
+    expect(parsed.truncated).toBe(false);
     expect(s.lines).toEqual([]);
   });
 
-  // The compat guarantee this whole design was chosen to preserve.
-  test("stdout stays a BARE ARRAY, not an envelope", async () => {
+  test("--json-array restores bare array AND stderr notice on implicit cap", async () => {
     const s = sink();
-    const out = await listCmd({ cfg, node: node(listCards), json: true, warn: s.warn });
+    const out = await listCmd({
+      cfg, node: node(listCards), json: true, jsonArray: true, warn: s.warn,
+    });
     const parsed = JSON.parse(out);
 
     expect(Array.isArray(parsed)).toBe(true);
-    // `jq length` on an envelope silently returns the key count instead of
-    // erroring — this is the assertion that catches that swap.
     expect((parsed as unknown[]).length).toBe(LIST_KEPT);
+    expect(s.lines.length).toBe(1);
+    expect(s.lines[0]).toContain(`${LIST_KEPT} of ${LIST_TOTAL}`);
   });
 
-  test("--all returns everything and does not warn", async () => {
+  test("--all returns everything, truncated:false, no stderr", async () => {
     const s = sink();
     const out = await listCmd({ cfg, node: node(listCards), json: true, all: true, warn: s.warn });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
 
-    expect((JSON.parse(out) as unknown[]).length).toBe(LIST_TOTAL);
+    expect(parsed.cards.length).toBe(LIST_TOTAL);
+    expect(parsed.total).toBe(LIST_TOTAL);
+    expect(parsed.truncated).toBe(false);
     expect(s.lines).toEqual([]);
   });
 
-  test("an explicit --limit is the caller's own bound, so it is not a surprise", async () => {
+  test("an explicit --limit is the caller's bound — truncated by kept < total", async () => {
     const s = sink();
     const out = await listCmd({ cfg, node: node(listCards), json: true, limit: 1, warn: s.warn });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
 
-    expect((JSON.parse(out) as unknown[]).length).toBe(2); // 1 per column, 2 columns
+    expect(parsed.cards.length).toBe(2); // 1 per column, 2 columns
+    expect(parsed.total).toBe(LIST_TOTAL);
+    expect(parsed.truncated).toBe(true);
+    // Explicit --limit is not a surprise: no stderr (even for bare-array).
     expect(s.lines).toEqual([]);
   });
 
-  // Regression guard for the live consumer found by the sweep: routine
-  // `milestone-driver` runs `fkanban list --column <col> --json` and takes
-  // `jq 'length'` off it. That path must stay complete AND stay a bare array.
-  test("--column is uncapped, silent, and still a bare array", async () => {
+  // Migrated consumer path: read `.total` (or `.cards|length` when uncapped).
+  test("--column is uncapped and reports total equal to cards length", async () => {
     const s = sink();
-    const out = await listCmd({ cfg, node: node(listCards), json: true, column: "todo", warn: s.warn });
-    const parsed = JSON.parse(out);
+    const out = await listCmd({
+      cfg, node: node(listCards), json: true, column: "todo", warn: s.warn,
+    });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
 
-    expect(Array.isArray(parsed)).toBe(true);
-    expect((parsed as unknown[]).length).toBe(OVER_CAP);
+    expect(parsed.cards.length).toBe(OVER_CAP);
+    expect(parsed.total).toBe(OVER_CAP);
+    expect(parsed.truncated).toBe(false);
     expect(s.lines).toEqual([]);
   });
 
-  // The notice belongs to the CLI rendering, not the shared data path — MCP
-  // reports truncation structurally and must not also get a stderr line.
-  test("the MCP data path does not emit it", async () => {
+  test("the MCP data path does not emit stderr", async () => {
     const s = sink();
     const res = await listResult({ cfg, node: node(listCards), json: true, warn: s.warn });
 
@@ -278,13 +303,38 @@ describe("list --json capped page", () => {
   });
 });
 
-describe("search --json capped page", () => {
+describe("search --json capped page (envelope)", () => {
   const hits = Array.from({ length: DEFAULT_SEARCH_LIMIT + 4 }, (_, i) =>
     card({ slug: `needle-${i}`, title: `needle ${i}`, column: "todo", position: `${300 + i}` }));
 
-  test("warns with the true total, and stdout stays a bare array", async () => {
+  test("envelope carries true total; no stderr on default path", async () => {
     const s = sink();
     const out = await searchCmd({ cfg, node: node(hits), query: "needle", json: true, warn: s.warn });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
+
+    expect(parsed.cards.length).toBe(DEFAULT_SEARCH_LIMIT);
+    expect(parsed.total).toBe(hits.length);
+    expect(parsed.truncated).toBe(true);
+    expect(s.lines).toEqual([]);
+  });
+
+  test("complete match set reports truncated:false", async () => {
+    const s = sink();
+    const few = [card({ slug: "needle-only", title: "needle only", column: "todo" })];
+    const out = await searchCmd({ cfg, node: node(few), query: "needle", json: true, warn: s.warn });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
+
+    expect(parsed.cards.length).toBe(1);
+    expect(parsed.total).toBe(1);
+    expect(parsed.truncated).toBe(false);
+    expect(s.lines).toEqual([]);
+  });
+
+  test("--json-array restores bare array + stderr on implicit cap", async () => {
+    const s = sink();
+    const out = await searchCmd({
+      cfg, node: node(hits), query: "needle", json: true, jsonArray: true, warn: s.warn,
+    });
     const parsed = JSON.parse(out);
 
     expect(Array.isArray(parsed)).toBe(true);
@@ -293,20 +343,15 @@ describe("search --json capped page", () => {
     expect(s.lines[0]).toContain(`${DEFAULT_SEARCH_LIMIT} of ${hits.length}`);
   });
 
-  test("says NOTHING when every match fits", async () => {
-    const s = sink();
-    const few = [card({ slug: "needle-only", title: "needle only", column: "todo" })];
-    const out = await searchCmd({ cfg, node: node(few), query: "needle", json: true, warn: s.warn });
-
-    expect((JSON.parse(out) as unknown[]).length).toBe(1);
-    expect(s.lines).toEqual([]);
-  });
-
   test("--all returns everything and does not warn", async () => {
     const s = sink();
-    const out = await searchCmd({ cfg, node: node(hits), query: "needle", json: true, all: true, warn: s.warn });
+    const out = await searchCmd({
+      cfg, node: node(hits), query: "needle", json: true, all: true, warn: s.warn,
+    });
+    const parsed = JSON.parse(out) as { cards: unknown[]; total: number; truncated: boolean };
 
-    expect((JSON.parse(out) as unknown[]).length).toBe(hits.length);
+    expect(parsed.cards.length).toBe(hits.length);
+    expect(parsed.truncated).toBe(false);
     expect(s.lines).toEqual([]);
   });
 });

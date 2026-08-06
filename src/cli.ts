@@ -277,7 +277,7 @@ Usage:
   fkanban milestone reconcile <slug> [--dry-run] [--max-repairs N|unlimited] [--force-milestone-card-payload-upsert] [--json]
   fkanban milestone portfolio [--board <slug>] [--json]
   fkanban milestone detail <slug> [--json]
-  fkanban milestone groom [--board <slug>] [--json]
+  fkanban milestone groom [--board <slug>] [--json] [--json-array]
   fkanban milestone gap-report [--board <slug>] [--json]
 
 Add options:
@@ -457,7 +457,9 @@ Options:
                         (e.g. --field slug --field pr)
   --limit <N>           cap cards per column (applies to text AND --json)
   --all                 show every card (no per-column cap; --json previews bodies)
-  --json                machine-readable output (broad reads are capped previews)
+  --json                machine-readable output: {cards, total, truncated}
+                        (broad reads are capped previews; total is pre-cap)
+  --json-array          legacy bare-array stdout (compat; prefer the envelope)
   --full-body, --full_body
                         compatibility alias for --json with complete bodies
   --group-by-milestone group cards beneath milestone headings, with an
@@ -561,7 +563,9 @@ Options:
                         (e.g. --field slug --field pr)
   --limit <N>           cap rendered matches (applies to text AND --json)
   --all                 show every match (no cap; --json previews bodies)
-  --json                machine-readable output (broad reads are capped previews)
+  --json                machine-readable output: {cards, total, truncated}
+                        (broad reads are capped previews; total is pre-cap)
+  --json-array          legacy bare-array stdout (compat; prefer the envelope)
   --full-body, --full_body
                         compatibility alias for --json with complete bodies
 
@@ -632,7 +636,8 @@ Options:
   --body <text>         board body (create)
   --force               soft-delete a board with live cards (rm); refuses if
                         outside live cards depend on cards being deleted
-  --json                machine-readable output
+  --json                machine-readable list: {boards, total, truncated}
+  --json-array          legacy bare-array stdout for board list
 
 Examples:
   fkanban board create sprint --title "Sprint 1"
@@ -1104,7 +1109,7 @@ function isParseArgsError(err: unknown): err is Error & { code: string } {
 // the same exit-2 + per-command-help contract as a truly unknown flag.
 // `db` is set by org kanban ... (or LASTDB_DB) — explicit write-target locator
 // (lastdb://personal | lastdb://org/<slug>/<db>). Stamped on cards as `Db:`.
-const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "db"]);
+const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "json-array", "db"]);
 
 // Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
 // names as COMMAND_HELP. Derived from each command's `--help` text and the
@@ -1125,19 +1130,21 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   ]),
   // reconcile repairs MilestoneCards as it reads; --dry-run classifies without
   // writing and --max-repairs bounds how much it writes in one invocation.
-  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert"]),
+  // --json-array is the legacy bare-array escape for milestone groom.
+  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert", "json-array"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
-  list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone"]),
+  list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone", "json-array"]),
   rank: new Set(["board", "column", "mode"]),
-  search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body"]),
+  search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body", "json-array"]),
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
   show: new Set(["board"]),
   // board's subcommands read title/columns/body (create) and force (rm).
-  board: new Set(["title", "columns", "body", "force"]),
+  // --json-array is the legacy bare-array escape for board list.
+  board: new Set(["title", "columns", "body", "force", "json-array"]),
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
@@ -1269,6 +1276,7 @@ async function main(argv: string[]): Promise<number> {
         version: { type: "boolean", short: "V" },
         verbose: { type: "boolean" },
         json: { type: "boolean" },
+        "json-array": { type: "boolean" },
         db: { type: "string" },
         title: { type: "string" },
         board: { type: "string" },
@@ -1572,7 +1580,14 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, 2, "milestone groom");
         if (extra !== undefined) return extra;
         const result = await milestoneGroomResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
-        console.log(values.json ? JSON.stringify(result.issues, null, 2) : result.text);
+        if (values.json || values["json-array"]) {
+          const issues = result.issues;
+          console.log(values["json-array"]
+            ? JSON.stringify(issues, null, 2)
+            : JSON.stringify({ issues, total: issues.length, truncated: false }, null, 2));
+        } else {
+          console.log(result.text);
+        }
         return 0;
       }
       if (action === "gap-report" || action === "gap") {
@@ -2020,13 +2035,14 @@ async function dispatch(
         column: values.column as string | undefined,
         tag: values.tag as string | undefined,
         assignee: values.assignee as string | undefined,
-        json: fullBodyList ? true : values.json as boolean | undefined,
+        json: fullBodyList || values["json-array"] ? true : values.json as boolean | undefined,
         wide: values.wide as boolean | undefined,
         fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
         fullBody: fullBodyList,
         groupByMilestone: values["group-by-milestone"] as boolean | undefined,
+        jsonArray: Boolean(values["json-array"]),
       });
       console.log(out);
       return 0;
@@ -2377,11 +2393,12 @@ async function dispatch(
         query,
         board: values.board as string | undefined,
         column: values.column as string | undefined,
-        json: fullBodySearch ? true : values.json as boolean | undefined,
+        json: fullBodySearch || values["json-array"] ? true : values.json as boolean | undefined,
         fields: parseFields(values.field),
         limit,
         all: values.all as boolean | undefined,
         fullBody: fullBodySearch,
+        jsonArray: Boolean(values["json-array"]),
       });
       console.log(out);
       return 0;
@@ -2478,7 +2495,12 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, sub === undefined ? 1 : 2, "board list");
         if (extra !== undefined) return extra;
         const ctx = loadCtx({ verbose });
-        const out = await boardListCmd({ cfg: ctx.cfg, node: ctx.node, json: values.json as boolean | undefined });
+        const out = await boardListCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          json: values.json || values["json-array"] ? true : undefined,
+          jsonArray: Boolean(values["json-array"]),
+        });
         console.log(out);
         return 0;
       }

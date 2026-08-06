@@ -216,8 +216,13 @@ describe("first-class milestones", () => {
     expect(grouped).toContain("HEALTHY OUTCOME");
     expect(grouped).toContain("UNASSIGNED / OPERATIONAL");
     expect(grouped).toContain("healthy-slice");
-    const groupedJson = JSON.parse(await listCmd({ cfg, node, groupByMilestone: true, json: true }));
-    expect(groupedJson.groups.map((group: { slug: string }) => group.slug)).toEqual(["healthy-outcome", "unassigned-operational"]);
+    const groupedJson = JSON.parse(await listCmd({ cfg, node, groupByMilestone: true, json: true })) as {
+      groups: Array<{ slug: string }>;
+      total: number;
+      truncated: boolean;
+    };
+    expect(groupedJson.groups.map((group) => group.slug)).toEqual(["healthy-outcome", "unassigned-operational"]);
+    expect(groupedJson.truncated).toBe(false);
   });
 
   test("groom renders blocked and proving fixtures without false implementation-done", async () => {
