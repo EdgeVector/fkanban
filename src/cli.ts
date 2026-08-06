@@ -2008,6 +2008,10 @@ async function dispatch(
         json: values.json as boolean | undefined,
       });
       console.log(text);
+      // `conflicts`, NOT the verdict, on purpose. The verdict changed what this
+      // command SAYS; it must not change what it BLOCKS. Exiting 2 on `unknown`
+      // would fail every caller on a board where — as measured — essentially
+      // nothing declares surfaces. Same boundary `pickup claim` draws.
       return result.conflicts.length > 0 ? 2 : 0;
     }
 

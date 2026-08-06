@@ -69,6 +69,21 @@ export function overlapVerdict(result: OverlapResult): OverlapVerdict {
   return "clear";
 }
 
+/**
+ * The result as CONSUMERS should see it: the facts plus the verdict derived
+ * from them.
+ *
+ * `verdict` is derived, not stored, so it cannot disagree with `conflicts` /
+ * `candidateUndeclared` / `unevaluatedPeers` the way a second stored field
+ * would. It is attached here rather than at each call site so the CLI's
+ * `--json` and the MCP tool's `structuredContent` cannot drift into offering
+ * different fields for the same read — which is exactly how the text rendering
+ * below came to disagree with `pickup explain` about the same OverlapResult.
+ */
+export function overlapPayload(result: OverlapResult): OverlapResult & { verdict: OverlapVerdict } {
+  return { ...result, verdict: overlapVerdict(result) };
+}
+
 export function claimedRepo(card: Card): string {
   return (card.repo || parseBodyHeader(card.body, "Repo")).trim();
 }
@@ -281,18 +296,52 @@ export async function overlapResult(opts: {
   return overlapAgainstCards(candidate.value, peers);
 }
 
+/**
+ * The CONCLUSION line, one per verdict.
+ *
+ * This renderer used to branch on `result.conflicts.length === 0` and print
+ * "No declared surface conflicts" for `clear`, `unknown` AND `partial` alike —
+ * the precise reading `overlapVerdict` was introduced to prevent, still live in
+ * the command the verdict is named after. `pickup explain` got the honest
+ * rendering; `overlap` itself, and the `fkanban_overlap` MCP tool that renders
+ * through this function, did not. Measured on the live board 2026-08-06, where
+ * 0 of 6 `doing` cards declare surfaces: every call returned `unknown` and
+ * every one of them printed the clean-bill-of-health line.
+ *
+ * Keyed by `OverlapVerdict` rather than written as an if-chain so a fifth
+ * verdict cannot be added without the compiler demanding a line for it here.
+ * The prose is deliberately NOT shared with `pickup explain`'s gate notes: that
+ * command emits note FRAGMENTS inside a gate list, this one emits standalone
+ * sentences naming the slug. What must not drift is the classification, and
+ * that is shared — both call `overlapVerdict`.
+ */
+function conclusionLine(result: OverlapResult, verdict: OverlapVerdict): string {
+  switch (verdict) {
+    case "conflict":
+      return `Surface conflicts for ${result.slug}:`;
+    case "clear":
+      return `No declared surface conflicts for ${result.slug}.`;
+    case "unknown":
+      // Name WHICH claim is missing: "declare surfaces" and "declare a repo"
+      // are different fixes, and this line is the one an operator acts on.
+      return result.repo
+        ? `Overlap UNKNOWN for ${result.slug} — it declares no surfaces, so nothing was compared.`
+        : `Overlap UNKNOWN for ${result.slug} — it declares no repo, so nothing was compared.`;
+    case "partial":
+      return `Overlap PARTIAL for ${result.slug} — no conflicts among the peers that could be judged, but ${result.unevaluatedPeers.length} in doing could not be: ${result.unevaluatedPeers.join(", ")}.`;
+  }
+}
+
 export function formatOverlap(result: OverlapResult, json?: boolean): string {
-  if (json) return JSON.stringify(result, null, 2);
+  const verdict = overlapVerdict(result);
+  if (json) return JSON.stringify(overlapPayload(result), null, 2);
 
   const lines: string[] = [];
   for (const warning of result.warnings) lines.push(`warning: ${warning}`);
+  lines.push(conclusionLine(result, verdict));
 
-  if (result.conflicts.length === 0) {
-    lines.push(`No declared surface conflicts for ${result.slug}.`);
-    return lines.join("\n");
-  }
-
-  lines.push(`Surface conflicts for ${result.slug}:`);
+  // Only `conflict` has a detail body; the other three verdicts are fully
+  // said by their conclusion line.
   for (const conflict of result.conflicts) {
     const title = conflict.title ? ` — ${conflict.title}` : "";
     lines.push(`  - ${conflict.slug} [${conflict.column}]${title}`);

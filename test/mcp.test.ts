@@ -350,6 +350,39 @@ describe("MCP write tools return structuredContent", () => {
     expect(structured.conflicts[0]?.matches).toEqual([{ candidate: "src/mcp/server.ts", other: "src/mcp/**" }]);
   });
 
+  test("fkanban_overlap tells an agent when NOTHING was compared", async () => {
+    // The live-board shape, measured 2026-08-06: 0 of 6 `doing` cards declare
+    // surfaces, so every real call takes this path. The agent reads the text
+    // block first, and it used to say "No declared surface conflicts" here.
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "peer", column: "doing", body: validPickupBody(), surfaces: ["src/mcp/**"] },
+    });
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: { slug: "candidate", column: "todo", body: validPickupBody() },
+    });
+
+    const res = await client.callTool({ name: "fkanban_overlap", arguments: { slug: "candidate" } });
+
+    const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? "";
+    expect(text).not.toContain("No declared surface conflicts");
+    expect(text).toContain("Overlap UNKNOWN for candidate");
+
+    // `verdict` is now on the declared outputSchema, so the client validates it
+    // rather than receiving it as an undeclared passenger.
+    const structured = res.structuredContent as {
+      verdict: string;
+      conflicts: unknown[];
+      candidateUndeclared: boolean;
+      unevaluatedPeers: string[];
+    };
+    expect(structured.verdict).toBe("unknown");
+    expect(structured.candidateUndeclared).toBe(true);
+    expect(structured.conflicts).toEqual([]);
+    expect(structured.unevaluatedPeers).toEqual([]);
+  });
+
   test("fkanban_move echoes { slug, from, to }", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "card-b", column: "todo", body: validPickupBody() } });
     const res = await client.callTool({ name: "fkanban_move", arguments: { slug: "card-b", column: "doing" } });
