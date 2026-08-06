@@ -47,7 +47,6 @@ import {
   fieldsFor,
   resolveColumns,
   type AddSchemaRequest,
-  type RecordType,
 } from "./schemas.ts";
 
 /** See `Card[BODY_OMITTED]`. */
@@ -5010,9 +5009,4 @@ export function applyBodyPriorityTag(card: Pick<Card, "body" | "tags">, explicit
   const tier = normalizePriority(parseBodyHeader(card.body, "Priority"));
   if (!tier) return;
   card.tags = withPriorityTag(card.tags, tier);
-}
-
-// Type guard for record-type-keyed config lookups used by the CLI.
-export function recordTypeFields(type: RecordType): string[] {
-  return fieldsFor(type);
 }
