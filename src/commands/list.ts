@@ -38,6 +38,7 @@ import {
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
+import { type WarnSink, warnIfTruncated } from "../truncation_notice.ts";
 import { type CardDetail } from "./show.ts";
 
 // Cards shown per column before the rest collapse to a "… N more" line.
@@ -156,6 +157,10 @@ export type ListOptions = {
   // unpreviewed JSON surface. MCP has its own `full_body` option.
   fullBody?: boolean;
   groupByMilestone?: boolean;
+  // Sink for the capped-page notice on the CLI `--json` path (defaults to
+  // `console.error`, matching record.ts's `opts.warn ?? console.error`
+  // convention). Injected by tests so the notice is asserted, not printed.
+  warn?: WarnSink;
 };
 
 // Both the human text and the structured (`--json`) payload, built from a
@@ -450,6 +455,12 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     implicitJsonDefault && broadJson ? DEFAULT_COLUMN_LIMIT : 0;
   const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
   const capped = effectiveJsonLimit > 0 ? capPerColumn(board, cards, effectiveJsonLimit, opts.column) : cards;
+  // The implicit cap is the silent one — see truncation_notice.ts. Compare the
+  // capped page against the full filtered set (`cards`), which is already in
+  // hand, so the total is exact rather than estimated.
+  if (implicitJsonLimit > 0 && jsonLimit === 0) {
+    warnIfTruncated("list", capped.length, cards.length, opts.warn ?? console.error);
+  }
   // Bodies are never loaded for board-wide list (BoardCards thin projection).
   // --full-body is the explicit opt-in to the expensive surface: it suppresses
   // the implicit page cap (see `implicitJsonDefault`), so it point-gets one body
