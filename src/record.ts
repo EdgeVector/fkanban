@@ -2356,6 +2356,60 @@ function arrayStringField(f: Record<string, unknown>, key: string): string[] {
   return [];
 }
 
+/** The Card schema's hash field — the key, and the only field a husk keeps. */
+export const CARD_HASH_FIELD = "slug";
+
+/**
+ * True when a `/api/query` row carries the HASH FIELD and nothing else, for a
+ * read that asked for more than the hash field.
+ *
+ * This is what LastDB serves for a record whose atoms are gone but whose key
+ * still resolves — a delete that has been accepted but not yet fully applied.
+ * `rowToCard` maps every absent field to `""`, so without this guard such a row
+ * becomes a perfectly well-formed Card with a slug and nothing else, and every
+ * read surface renders it as real: `kanban show <deleted-slug>` prints an empty
+ * card and **exits 0**.
+ *
+ * Measured on the live primary 2026-08-06 (`scripts/probe-card-exists-after-delete.ts`).
+ * Immediately after `kanban rm` ACKed, a 23-field HashKey point read returned
+ * ONE row carrying exactly one field:
+ *
+ *   {"fields":{"slug":"zz-husk-raw-…"},"key":{"hash":"zz-husk-raw-…"},…}
+ *
+ * 10 of 12 deletes reproduced it; the window closed after 113–1072ms. So this
+ * is a transient the node settles on its own — the guard exists to stop fkanban
+ * reporting the intermediate state as a card, not to repair the node.
+ *
+ * ABSENCE, not emptiness, is the discriminator, and it is only visible on the
+ * raw row. `kanban add` writes an atom for EVERY field, empty ones included
+ * (measured: a card created with 6 flags came back with all 23 keys present),
+ * so "field missing from `fields`" cannot be confused with "field set to ''".
+ * A predicate written against the mapped Card could not tell those apart and
+ * would classify a live card with an unset `assignee` as a husk.
+ *
+ * The projection guard is the other half, and it is what keeps {@link cardExists}
+ * honest. That read projects the hash field ALONE precisely so a merely SPARSE
+ * card cannot read as absent and get its board membership reaped
+ * (`board_cards_heal`). Under a hash-field-only projection a husk and a live
+ * card are byte-identical, so there is no evidence to act on — this returns
+ * `false` and `cardExists` keeps its existing semantics unchanged. Widening
+ * that read to make it tombstone-aware would hand the reap path exactly the
+ * false negative it was built to avoid.
+ */
+export function isKeyOnlyRow(
+  row: QueryRow,
+  projected: string[],
+  hashField: string = CARD_HASH_FIELD,
+): boolean {
+  // Undecidable when the read asked for nothing but the key: see above.
+  if (!projected.some((field) => field !== hashField)) return false;
+  const fields = row.fields ?? {};
+  for (const key of Object.keys(fields)) {
+    if (key !== hashField) return false;
+  }
+  return true;
+}
+
 export function rowToCard(row: QueryRow): Card {
   const f = (row.fields ?? {}) as Record<string, unknown>;
   const body = stringField(f, "body");
@@ -2879,7 +2933,18 @@ async function listCardsWithFieldsTraced(
         allowFullScan: true,
       });
     }
-    const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+    // Drop delete-husks BEFORE they become writes. This branch does not merely
+    // return `cards` — it feeds `writeCardListIndex` and `seedBoardCards` below,
+    // so a husk mapped to an all-`""` Card is seeded as board membership for a
+    // card that no longer exists (`board` `""` resolves to the default board).
+    // The scan is also where husks actually accumulate: measured 2026-08-06, an
+    // unfiltered Card scan on the live primary returned 14 rows with a slug and
+    // no title/board/column, while HashKey point reads for those same slugs
+    // correctly returned nothing.
+    const cards = res.results
+      .filter((row) => !isKeyOnlyRow(row, scannedFields))
+      .map(rowToCard)
+      .filter((c) => !isHiddenCard(c));
     if (!scannedFields.includes("body")) markBodyOmitted(cards);
     // Never write a field this scan did not read — the same contract
     // `seedBoardCards` states below, at the other index, from the same scan.
@@ -2927,7 +2992,16 @@ async function listCardsWithFieldsTraced(
     if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
     res = await query(fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)));
   }
-  const cards = res.results.map(rowToCard).filter((c) => !isHiddenCard(c));
+  // A point read is where a fresh delete is actually observed: `findCard` and
+  // everything built on it (`show`, proof-card verdicts, pickup peers) come
+  // through here, and for ~1s after `rm` the node still answers with a
+  // key-only row. Without this, `kanban show <just-deleted-slug>` renders an
+  // empty card and exits 0 — the one answer a caller must not get from a
+  // question about existence.
+  const cards = res.results
+    .filter((row) => !isKeyOnlyRow(row, fields))
+    .map(rowToCard)
+    .filter((c) => !isHiddenCard(c));
   return {
     cards: fields.includes("body") ? cards : markBodyOmitted(cards),
     servedBy: "card-point-read",
