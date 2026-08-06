@@ -480,7 +480,10 @@ describe("groom stale-blockers", () => {
 
     const { report } = await groomStaleBlockersResult({ cfg, node });
     expect(report.dryRun).toBe(true);
-    expect(report.changed).toBe(1);
+    // "without writing" in this test's own name: `changed` counts writes that
+    // happened, so a dry run reports 0 and puts the plan in `would_change`.
+    expect(report.changed).toBe(0);
+    expect(report.would_change).toBe(1);
     expect(report.cards[0]?.issues.map((i) => i.kind)).toContain("malformed-repo-header");
     expect(report.cards[0]?.issues.map((i) => i.kind)).toContain("stale-blocked-prose");
 
@@ -623,7 +626,9 @@ describe("groom structured-routing", () => {
     const { report } = await groomStructuredRoutingResult({ cfg, node });
 
     expect(report.dryRun).toBe(true);
-    expect(report.changed).toBe(1);
+    // Was `changed: 1` for a run that wrote nothing — see groom-sweep-counts.test.ts.
+    expect(report.changed).toBe(0);
+    expect(report.would_change).toBe(1);
     expect(report.cards[0]).toMatchObject({
       slug: "body-routed",
       repo: "EdgeVector/fkanban",
