@@ -26,6 +26,7 @@ import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_p
 import { DEFAULT_COLUMNS } from "../schemas.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { querySearchPlane } from "../search-plane.ts";
+import { type WarnSink, warnIfTruncated } from "../truncation_notice.ts";
 
 const NATIVE_INDEX_RESULT_CAP = 50;
 
@@ -49,6 +50,8 @@ export type SearchOptions = {
   // CLI compatibility escape hatch: `--full-body` asks for the historical
   // unpreviewed JSON surface. MCP has its own `full_body` option.
   fullBody?: boolean;
+  // Sink for the capped-page notice on the CLI `--json` path. See list.ts.
+  warn?: WarnSink;
 };
 
 
@@ -429,6 +432,11 @@ export async function searchCmd(opts: SearchOptions): Promise<string> {
     opts.json && broadJson && !opts.all && !opts.fullBody && opts.limit === undefined ? DEFAULT_SEARCH_LIMIT : 0;
   const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
   const capped = effectiveJsonLimit > 0 ? capFlat(cards, effectiveJsonLimit) : cards;
+  // Implicit cap only — see truncation_notice.ts. `cards` is the complete match
+  // set (capping is the caller's job here), so the total is exact.
+  if (implicitJsonLimit > 0 && jsonLimit === 0) {
+    warnIfTruncated("search", capped.length, cards.length, opts.warn ?? console.error);
+  }
   if (projectionFields.length > 0) return renderFieldProjection(capped, projectionFields);
   if (!opts.json) return text;
   const out = broadJson || opts.fullBody ? previewCardBodies(capped, opts.fullBody ?? false) : capped;
