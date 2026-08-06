@@ -14,7 +14,7 @@ import { describe, expect, test } from "bun:test";
 
 import { boardCreateCmd, boardRmCmd } from "../src/commands/board.ts";
 import { boardListHealResult } from "../src/commands/board_list_heal.ts";
-import { patchBoardListIndex, BOARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
+import { patchBoardListIndex, writeBoardListIndex, BOARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
 import { listBoards, scanBoardsForReconcile, boardToFields, type Board } from "../src/record.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
@@ -120,6 +120,22 @@ function fakeNode(opts: {
     rawCall: stub as never,
     nodeTransport: stub as never,
     async createRecord({ schemaHash, keyHash, fields, expected }) {
+      // MEASURED (fold `fold_db` core, 2026-08-06): `MutationType::Create` is
+      // never handled distinctly from `Update` on the node's write path — a
+      // create against an existing key is an UPSERT, not an error. So this fake
+      // must overwrite rather than reject, and an `absent` expectation is the
+      // only thing that can stop it. Modelling create as "fails if present"
+      // would invent a safety property the node does not have and hide the
+      // silent last-write-wins these tests exist to catch.
+      if (schemaHash === INDEX && expected !== undefined) {
+        if (keyHash === BOARD_LIST_INDEX_KEY) fake.onBeforeIndexUpdate?.();
+        const exp = expected as { type: string; field: string };
+        // `absent` matches a missing head and a tombstoned one alike.
+        if (exp.type === "absent" && exp.field === "payload_json" && indexStore.has(keyHash)) {
+          writes.push({ op: "create", schemaHash, keyHash, expected });
+          throw new FkanbanError({ code: "cas_conflict", message: "CAS precondition failed." });
+        }
+      }
       writes.push({ op: "create", schemaHash, keyHash, expected });
       if (schemaHash === INDEX) {
         indexStore.set(keyHash, String((fields as Record<string, unknown>).payload_json ?? ""));
@@ -305,6 +321,88 @@ describe("all_boards rollup — CAS", () => {
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("cas_conflict");
     expect(n).toBeLessThanOrEqual(4);
+  });
+});
+
+/**
+ * The three tests above are exactly the right tests — and all three seed a
+ * PRESENT row (`index: [...]` or `index: []`), so all three take the UPDATE
+ * branch. The create branch had no coverage at all, and carried no
+ * precondition: on an unseeded `all_boards` every writer read absent, every
+ * writer created a one-element payload, and last write won. No `cas_conflict`
+ * was raised, so the retry loop — the whole mechanism — never ran.
+ *
+ * That is the worse half. `all_boards` decides which BoardCards partitions
+ * `kanban list` queries at all, so a board dropped here takes every card on it
+ * out of `list`/`pickup`/`overlap` while `show <slug>` still works.
+ *
+ * `index: null` is what puts these on the create branch.
+ */
+describe("all_boards rollup — CAS on the CREATE branch", () => {
+  test("a patch that read an absent row writes create-if-absent, not a bare create", async () => {
+    const fake = fakeNode({ boards: [board({ slug: "new" })], index: null });
+
+    await patchBoardListIndex(fake.node, cfg, summaryOf(board({ slug: "new" })), "upsert");
+
+    const create = fake.writes.find((w) => w.schemaHash === INDEX && w.op === "create");
+    expect(create?.expected).toEqual({ type: "absent", field: "payload_json" });
+  });
+
+  test("a concurrent first-write is not silently dropped — the patch re-reads and re-applies", async () => {
+    const fake = fakeNode({ boards: [board({ slug: "aaa" }), board({ slug: "mine" })], index: null });
+
+    // Someone else seeds `all_boards` between our absent read and our write —
+    // the burst `scripts/kanban-stress.sh` runs against a fresh node. Before the
+    // precondition existed this overwrote them and raised nothing.
+    let raced = false;
+    fake.onBeforeIndexUpdate = () => {
+      if (raced) return;
+      raced = true;
+      fake.setIndex([summaryOf(board({ slug: "aaa" }))]);
+    };
+
+    await patchBoardListIndex(fake.node, cfg, summaryOf(board({ slug: "mine" })), "upsert");
+
+    expect(raced).toBe(true);
+    // Both survive. Before the fix this was ["mine"] — `aaa` gone, no error.
+    expect(fake.indexEntries()?.map((b) => b.slug)).toEqual(["aaa", "mine"]);
+  });
+
+  test("an endlessly conflicting first-write throws cas_conflict instead of looping", async () => {
+    const fake = fakeNode({ boards: [], index: null });
+    let n = 0;
+    fake.onBeforeIndexUpdate = () => {
+      n += 1;
+      fake.setIndex([summaryOf(board({ slug: `racer-${n}` }))]);
+    };
+
+    const err = await patchBoardListIndex(fake.node, cfg, summaryOf(board({ slug: "mine" })), "upsert").catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("cas_conflict");
+    expect(n).toBeLessThanOrEqual(4);
+  });
+
+  /**
+   * CONTROL. Every assertion above is also satisfied by a build that attaches
+   * `absent` to EVERY create — including the truth-derived rewrites that are
+   * meant to win. `listBoards`'s cold seed, `groom board-list-heal --apply` and
+   * `card-list-index-retire` deliberately carry no witness, and giving them one
+   * would make a seed race throw where it used to converge: the rollup would be
+   * left unwritten by the one path that rebuilds it from Board truth.
+   *
+   * So the witness has to be a property of the CALLER's read, not of the branch.
+   */
+  test("a truth-derived rewrite still carries no precondition", async () => {
+    const fake = fakeNode({ boards: [board({ slug: "default" })], index: null });
+
+    await writeBoardListIndex(fake.node, cfg, [summaryOf(board({ slug: "default" }))]);
+
+    const create = fake.writes.find((w) => w.schemaHash === INDEX && w.op === "create");
+    expect(create).toBeDefined();
+    expect(create?.expected).toBeUndefined();
   });
 });
 
