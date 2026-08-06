@@ -62,6 +62,48 @@ export type MilestoneChildStatus = {
   blockedBy: string[];
 };
 
+/**
+ * THE machine-readable projection of a reconcile read — the one place that
+ * decides which fields of {@link MilestoneReconcileResult} reach a consumer.
+ *
+ * `milestoneReconcileResult` returns the result fields plus three carriers that
+ * are NOT payload (`text`, `repairs`, `boards`), so every surface has to select.
+ * Four of them did, by hand, field by field: `milestone reconcile --json`, the
+ * `fkanban_milestone_reconcile` MCP payload AND its output schema, and
+ * `milestoneDetailResult`. A field added to the type therefore reached a surface
+ * only if someone remembered it there — and `proof_verdict` /
+ * `proof_verdict_reason` were remembered in three places and forgotten in the
+ * fourth.
+ *
+ * Measured on the live primary 2026-08-06, one milestone claiming `passing`
+ * with no proof card:
+ *
+ *     human   proof verdict: unproven (no-proof-card; recorded "passing")
+ *     --json  {children, milestone, proof, ready, repairs, warnings}
+ *             .milestone.proof_status = "passing"
+ *
+ * The prose half of the same invocation corrected the claim; the machine half
+ * shipped the false one with nothing to contradict it. `milestone-driver.md`
+ * step 1 runs exactly `milestone reconcile <slug> --json` on the proof path, and
+ * the verdict exists (see its doc comment on the type) precisely so a driver
+ * reads ONE field rather than pattern-matching prose out of `warnings[]`.
+ *
+ * Selecting here instead of at each call site makes the next added field reach
+ * all four by construction; `test/milestone-reconcile-payload-parity.test.ts`
+ * asserts this projection stays exhaustive over what the read actually returns.
+ */
+export function milestoneReconcilePayload(result: MilestoneReconcileResult): MilestoneReconcileResult {
+  return {
+    milestone: result.milestone,
+    children: result.children,
+    ready: result.ready,
+    proof: result.proof,
+    warnings: result.warnings,
+    proof_verdict: result.proof_verdict,
+    proof_verdict_reason: result.proof_verdict_reason,
+  };
+}
+
 export type MilestoneReconcileResult = {
   milestone: Milestone;
   children: MilestoneChildStatus[];
@@ -1256,7 +1298,7 @@ export async function milestoneDetailResult(opts: { cfg: Config; node: NodeClien
   // done-ness), so re-reading it here bought nothing and cost a whole extra
   // wave — ~190ms on an idle node — for bytes that were already in memory.
   const columns: Record<string, MilestoneChildStatus[]> = Object.fromEntries(result.boards.find((board) => board.slug === result.milestone.board)?.columns.map((column) => [column, result.children.filter((card) => card.column === column)]) ?? []);
-  const detail = { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, proof_verdict: result.proof_verdict, proof_verdict_reason: result.proof_verdict_reason, columns };
+  const detail = { ...milestoneReconcilePayload(result), columns };
   const columnText = Object.entries(columns).map(([column, cards]) => `${column.toUpperCase()} (${cards.length})\n${cards.length ? cards.map((card) => `  • ${card.blocked ? "🔒 " : ""}${card.title}  ${card.slug}`).join("\n") : "  —"}`).join("\n\n");
   return { detail, repairs: result.repairs, text: `${renderMilestone(result.milestone, { verdict: result.proof_verdict, reason: result.proof_verdict_reason })}\n\n${columnText}\n\n${renderMilestoneReconcile(result, result.repairs)}` };
 }

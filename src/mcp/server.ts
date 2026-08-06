@@ -22,7 +22,7 @@ import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
 import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
-import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
+import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcilePayload, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
 // Render write confirmations through the SAME formatters the CLI uses. Every
 // one of these was a hand-built template literal duplicating a `format*`
@@ -790,6 +790,14 @@ export function createFkanbanMcpServer(
         ready: z.array(z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) })),
         proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(),
         warnings: z.array(z.object({ code: z.string(), message: z.string(), hint: z.string() })),
+        // Declared, not an undeclared passenger: `result.text` — the human half
+        // of this very tool result — prints `proof verdict: …`, and the
+        // structured half shipped `milestone.proof_status` alone. An agent
+        // reading structuredContent (the reason structuredContent exists) got
+        // the stored claim with nothing to contradict it. Same fields as
+        // fkanban_milestone_show / _detail / _portfolio, which all declare them.
+        proof_verdict: z.string().describe("The LIVE proof answer re-derived on this read — `unproven` where the stored proof_status claims passing and the evidence no longer holds."),
+        proof_verdict_reason: z.string().describe("Why the verdict differs from the stored claim (e.g. missing-proof-card, no-proof-card)."),
         repairs: milestoneRepairsSchema,
       },
     },
@@ -798,7 +806,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const result = await milestoneReconcileResult({ cfg, node, slug, apply: !args.dry_run, maxRepairs: args.max_repairs });
-        return toolResult(result.text, { milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, repairs: result.repairs });
+        return toolResult(result.text, { ...milestoneReconcilePayload(result), repairs: result.repairs });
       } catch (err) {
         return errorResult(err);
       }

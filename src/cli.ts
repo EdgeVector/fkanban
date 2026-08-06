@@ -33,7 +33,7 @@ import { searchCmd } from "./commands/search.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
-import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
+import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcilePayload, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
@@ -1529,7 +1529,10 @@ async function dispatch(
           maxRepairs,
           directPayloadUpsert: Boolean(values["force-milestone-card-payload-upsert"]),
         });
-        console.log(values.json ? JSON.stringify({ milestone: result.milestone, children: result.children, ready: result.ready, proof: result.proof, warnings: result.warnings, repairs: result.repairs }, null, 2) : result.text);
+        // `repairs` is a carrier of what THIS invocation did, not part of the
+        // reconcile read; the read's own fields come from the one shared
+        // projection so this payload cannot omit what `result.text` prints.
+        console.log(values.json ? JSON.stringify({ ...milestoneReconcilePayload(result), repairs: result.repairs }, null, 2) : result.text);
         return 0;
       }
       if (action === "portfolio") {
