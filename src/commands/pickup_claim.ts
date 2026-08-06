@@ -537,6 +537,9 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     }
 
     try {
+      // Pass worker into move so claim stamp is atomic with the column write
+      // (papercut-kanban-move-claim-must-stamp-assignee). Fallback re-stamp
+      // below remains for older moveCmd paths / empty worker.
       const moved = await moveCmd({
         cfg: opts.cfg,
         node: opts.node,
@@ -544,10 +547,11 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         column: "doing",
         expectColumn: "todo",
         situationPreflight: opts.situationPreflight,
+        worker: opts.worker,
       });
 
       let claimedCard = await requireCard(opts.node, opts.cfg, candidate.slug);
-      if (opts.worker && opts.worker.trim()) {
+      if (opts.worker && opts.worker.trim() && claimedCard.assignee !== opts.worker.trim()) {
         const stamped: Card = {
           ...claimedCard,
           assignee: opts.worker.trim(),

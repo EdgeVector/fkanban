@@ -1100,6 +1100,12 @@ export function createFkanbanMcpServer(
         expect: z.string().optional().describe("Alias for `from`."),
         position: z.number().int().optional().describe("Explicit ordering within the column."),
         force: z.boolean().optional().describe("Explicit operator override for dependency blocks and default/todo pickup-readiness policy."),
+        worker: z.string().optional().describe("Claim actor when moving into doing (preferred)."),
+        assignee: z.string().optional().describe("Alias for worker — stamps assignee on move into doing."),
+        allow_unclaimed: z
+          .boolean()
+          .optional()
+          .describe("Allow move into doing without stamping assignee (not recommended)."),
       },
       outputSchema: {
         slug: z.string(),
@@ -1110,6 +1116,9 @@ export function createFkanbanMcpServer(
         // MCP text dropped it and the schema never named it, so the field
         // reached agents only as an undeclared passenger.
         promotedDependents: z.array(z.string()).optional(),
+        // Move into doing is a claim: stamp/keep/unclaimed surface for agents.
+        assignee: z.string().optional(),
+        claim: z.enum(["stamped", "kept", "unclaimed"]).optional(),
       },
     },
     async (args) => {
@@ -1127,6 +1136,9 @@ export function createFkanbanMcpServer(
         if (args.from !== undefined || args.expect !== undefined) o.expectColumn = args.from ?? args.expect;
         if (args.position !== undefined) o.position = args.position;
         if (args.force !== undefined) o.force = args.force;
+        if (args.worker !== undefined) o.worker = args.worker;
+        if (args.assignee !== undefined) o.assignee = args.assignee;
+        if (args.allow_unclaimed !== undefined) o.allowUnclaimed = args.allow_unclaimed;
         const res = await moveCmd(o);
         return toolResult(formatMove(res), res);
       } catch (err) {

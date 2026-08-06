@@ -373,12 +373,22 @@ Options:
   --from <col>          claim guard: only move if the card is currently in col
   --expect <col>        alias for --from
   --position <N>        insert at position N within the column
+  --assignee <id>       when moving into doing: stamp claim owner
+  --worker <id>         alias for --assignee (same stamp as pickup claim)
+  --allow-unclaimed     allow move into doing WITHOUT stamping assignee
+                        (not a claim; sweeps may reclaim as a zombie)
   --force               explicit operator override for dependency blocks and
                         default/todo pickup-readiness policy
   --json                echo the write result as JSON
 
+Claim note: bare \`move … doing\` is not a full claim by itself. Prefer
+\`pickup claim --worker <id>\`, which CAS-claims and stamps assignee. A hand
+move into doing stamps assignee from --assignee/--worker or from
+LASTGIT_ACTOR / AUTOMATION_ID (DRIVEN_BY=routine) so closeout cannot treat
+the card as an empty zombie. Pass --allow-unclaimed only when you mean it.
+
 Example:
-  fkanban move ship-login doing --from todo`),
+  fkanban move ship-login doing --from todo --worker last-stack-fkanban-pickup`),
 
   dep: withFooter(`fkanban dep — manage dependency edges between cards
 
@@ -1118,7 +1128,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
-  move: new Set(["from", "expect", "position", "force"]),
+  move: new Set(["from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone"]),
   rank: new Set(["board", "column", "mode"]),
   search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body"]),
@@ -1317,6 +1327,7 @@ async function main(argv: string[]): Promise<number> {
         "prefer-repo": { type: "string" },
         "exclude-repo": { type: "string" },
         "max-doing": { type: "string" },
+        "allow-unclaimed": { type: "boolean" },
         check: { type: "boolean" },
         "group-by-milestone": { type: "boolean" },
       },
@@ -1847,6 +1858,9 @@ async function dispatch(
           position,
           force: values.force as boolean | undefined,
           dbLocator: ambientDbLocator(values),
+          assignee: values.assignee as string | undefined,
+          worker: values.worker as string | undefined,
+          allowUnclaimed: values["allow-unclaimed"] as boolean | undefined,
         });
         console.log(formatMove(res, values.json as boolean | undefined));
         return 0;

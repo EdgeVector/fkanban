@@ -385,9 +385,16 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_move echoes { slug, from, to }", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "card-b", column: "todo", body: validPickupBody() } });
-    const res = await client.callTool({ name: "fkanban_move", arguments: { slug: "card-b", column: "doing" } });
-    expect(res.structuredContent).toEqual({ slug: "card-b", from: "todo", to: "doing" });
-    expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toBe("moved card-b: todo → doing");
+    // allow_unclaimed: pin the structured echo without depending on ambient
+    // DRIVEN_BY/AUTOMATION_ID claim stamps (move-into-doing is now a claim).
+    const res = await client.callTool({
+      name: "fkanban_move",
+      arguments: { slug: "card-b", column: "doing", allow_unclaimed: true },
+    });
+    expect(res.structuredContent).toMatchObject({ slug: "card-b", from: "todo", to: "doing" });
+    expect((res.content as Array<{ type: string; text: string }>)[0]?.text).toMatch(
+      /^moved card-b: todo → doing/,
+    );
   });
 
   test("fkanban_dep_add / fkanban_dep_rm echo { slug, dep, action, deps }", async () => {

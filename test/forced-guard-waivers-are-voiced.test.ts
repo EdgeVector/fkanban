@@ -611,6 +611,8 @@ describe("every --force-waived guard announces itself", () => {
       ["src/commands/board.ts", "`board rm --force`, a different flag with its own delete semantics"],
       // Metadata-only path: forwards force into addCmd; owns no silent bail of its own.
       ["src/commands/set.ts", "forwards force to addCmd; holds no gate"],
+      // English "force an unclaimed" in an error string — not a --force gate.
+      ["src/doing-claim.ts", "claim-into-doing planner; mentions force only in prose"],
     ]);
 
     // Comments are stripped first: `doctor.ts`, `milestone.ts` and `search.ts`
