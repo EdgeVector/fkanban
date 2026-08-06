@@ -26,6 +26,9 @@ export interface MoveResult {
   from: string;
   to: string;
   promotedDependents?: string[];
+  /** Assignee after a claim stamp into doing (if any). */
+  assignee?: string;
+  claim?: "stamped" | "kept" | "unclaimed";
 }
 
 export interface DepResult {
