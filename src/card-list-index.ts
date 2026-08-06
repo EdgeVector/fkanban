@@ -173,19 +173,31 @@ async function readIndexPayload<T>(
   return (await readIndexRow<T>(node, cfg, key)).entries;
 }
 
+/**
+ * What a read-modify-write caller SAW, and therefore what it is willing to
+ * overwrite. Three states, because two are not enough:
+ *
+ *  - `{ kind: "value", raw }` — the payload this write was computed from.
+ *  - `{ kind: "absent" }`     — the row was ABSENT when this write was computed.
+ *  - `undefined`              — no witness: a rewrite derived from truth rather
+ *                               than from the row (seed / reconciler / clear),
+ *                               which is meant to win.
+ *
+ * The middle state is the one that used to be missing. A patch that read an
+ * absent row and a truth-rewrite both arrived as "no witness", so the create
+ * branch sent no precondition, and `patchBoardListIndex`'s entire lost-update
+ * protection — CAS plus a retry loop — was update-only. On an unseeded
+ * `all_boards`, concurrent writers all read absent, all created a one-element
+ * payload, and last write won with no `cas_conflict` for the retry loop to catch.
+ */
+type IndexWitness = { kind: "value"; raw: string } | { kind: "absent" };
+
 async function writeIndexPayload(
   node: NodeClient,
   cfg: Config,
   key: string,
   payload: unknown[],
-  /**
-   * CAS witness for the update branch: the `payload_json` string this payload
-   * was computed from. When provided and the stored payload has changed since,
-   * the node rejects with `cas_conflict` instead of silently dropping the other
-   * writer's edit. Omit for rewrites derived from truth rather than from the row
-   * being overwritten (seed / reconciler / clear) — those are meant to win.
-   */
-  expectRaw?: string | null,
+  witness?: IndexWitness,
 ): Promise<void> {
   const hash = cardListIndexHash(cfg);
   if (!hash) return;
@@ -194,20 +206,35 @@ async function writeIndexPayload(
     payload_json: JSON.stringify(payload),
     updated_at: new Date().toISOString(),
   };
+
+  // With a witness the PRECONDITION decides the outcome, so the create-vs-update
+  // probe is not just unnecessary, it is a liability: it is a second read, and
+  // anything that changes between it and the write is exactly the race being
+  // guarded. Measured on the node (fold `fold_db` core, 2026-08-06):
+  // `MutationType::Create` is never handled distinctly from `Update` on the
+  // write path — both are upserts — so the branch choice cannot decide
+  // correctness on its own, and the expectation can.
+  //
+  // `absent` matches a missing head AND a tombstoned one (fold
+  // `schema/types/cas.rs`), so a row deleted between read and write still
+  // satisfies the precondition it was computed under.
+  if (witness) {
+    const expected =
+      witness.kind === "value"
+        ? ({ type: "value" as const, field: "payload_json", value: witness.raw })
+        : ({ type: "absent" as const, field: "payload_json" });
+    const write = witness.kind === "value" ? node.updateRecord : node.createRecord;
+    await write.call(node, { schemaHash: hash, keyHash: key, fields, expected });
+    return;
+  }
+
   const probe = await node.queryAll({
     schemaHash: hash,
     fields: ["key"],
     filter: { HashKey: key },
   });
   if (probe.results[0]) {
-    await node.updateRecord({
-      schemaHash: hash,
-      keyHash: key,
-      fields,
-      ...(typeof expectRaw === "string"
-        ? { expected: { type: "value" as const, field: "payload_json", value: expectRaw } }
-        : {}),
-    });
+    await node.updateRecord({ schemaHash: hash, keyHash: key, fields });
   } else {
     await node.createRecord({ schemaHash: hash, keyHash: key, fields });
   }
@@ -340,8 +367,15 @@ export async function patchBoardListIndex(
       mode === "remove"
         ? without
         : [...without, board].sort((a, b) => a.slug.localeCompare(b.slug));
+    // The witness states what this patch was computed FROM, so the node can
+    // refuse it if that stopped being true. `raw === null` with `present` is the
+    // row-exists-but-yielded-nothing case the refusal above already covers for
+    // the readable path and which carries no usable witness either way; only a
+    // genuinely ABSENT row licenses the create-if-absent precondition.
+    const witness: IndexWitness | undefined =
+      raw !== null ? { kind: "value", raw } : present ? undefined : { kind: "absent" };
     try {
-      await writeIndexPayload(node, cfg, BOARD_LIST_INDEX_KEY, next, raw);
+      await writeIndexPayload(node, cfg, BOARD_LIST_INDEX_KEY, next, witness);
       return;
     } catch (err) {
       const conflict = err instanceof FkanbanError && err.code === "cas_conflict";
