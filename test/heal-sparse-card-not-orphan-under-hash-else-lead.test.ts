@@ -75,20 +75,28 @@ function seedBoard(node: FakeNode) {
   });
 }
 
-function memberSparse(node: FakeNode) {
-  // Membership row is whole; the Card plane is deliberately sparse.
-  const summary = {
-    slug: SPARSE_FIELDS.slug,
-    title: SPARSE_FIELDS.title,
+function membershipCard(partial: {
+  slug: string;
+  title: string;
+  column: string;
+  position: string;
+}): Card {
+  const now = nowIso();
+  return {
+    slug: partial.slug,
+    title: partial.title,
+    body: "",
     board: BOARD,
-    column: "todo",
-    position: "m",
+    column: partial.column,
+    position: partial.position,
     assignee: "",
-    tags: [] as string[],
-    deps: [] as string[],
-    surfaces: [] as string[],
-    created_at: nowIso(),
-    updated_at: nowIso(),
+    tags: [],
+    deps: [],
+    surfaces: [],
+    created_at: now,
+    updated_at: now,
+    done_at: "",
+    db: "",
     kind: "pr",
     priority: "",
     block_status: "none",
@@ -99,7 +107,18 @@ function memberSparse(node: FakeNode) {
     base: "main",
     pr_url: "",
     branch: "",
+    created_by: "test",
   } as Card;
+}
+
+function memberSparse(node: FakeNode) {
+  // Membership row is whole; the Card plane is deliberately sparse.
+  const summary = membershipCard({
+    slug: SPARSE_FIELDS.slug,
+    title: SPARSE_FIELDS.title,
+    column: "todo",
+    position: "m",
+  });
   node.seed({
     schemaHash: BOARD_CARDS_HASH,
     keyHash: BOARD,
@@ -193,29 +212,12 @@ describe("compound: sparse Card under hash_else_lead is not an orphan", () => {
   test("heal still reaps a true orphan (control — sparse guard did not disable deletes)", async () => {
     const node = fakeNode({ hashFields: { [CARD_HASH]: "slug" } });
     seedBoard(node);
-    const ghost = {
+    const ghost = membershipCard({
       slug: "ghost-orphan",
       title: "ghost",
-      board: BOARD,
       column: "todo",
       position: "z",
-      assignee: "",
-      tags: [] as string[],
-      deps: [] as string[],
-      surfaces: [] as string[],
-      created_at: nowIso(),
-      updated_at: nowIso(),
-      kind: "pr",
-      priority: "",
-      block_status: "none",
-      block_reason: "",
-      north_star: "",
-      milestone: "",
-      repo: "",
-      base: "",
-      pr_url: "",
-      branch: "",
-    } as Card;
+    });
     node.seed({
       schemaHash: BOARD_CARDS_HASH,
       keyHash: BOARD,
