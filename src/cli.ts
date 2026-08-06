@@ -86,6 +86,8 @@ import {
   formatRank,
   formatMigrateAreaTags,
   formatMigrateLegacyColumns,
+  formatMilestoneAdd,
+  formatMilestoneState,
   formatError,
 } from "./format.ts";
 
@@ -1458,7 +1460,7 @@ async function dispatch(
           proofStatus: values["proof-status"] as string | undefined,
           blockReason: values["block-reason"] as string | undefined,
         });
-        console.log(values.json ? JSON.stringify(result) : `${result.action} milestone ${result.slug} (${result.state})`);
+        console.log(formatMilestoneAdd(result, Boolean(values.json)));
         return 0;
       }
       if (action === "list") {
@@ -1493,7 +1495,7 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, 4, "milestone state <slug> <state>");
         if (extra !== undefined) return extra;
         const result = await milestoneStateCmd({ cfg: ctx.cfg, node: ctx.node, slug, state, proofStatus: values["proof-status"] as string | undefined });
-        console.log(values.json ? JSON.stringify(result) : `milestone ${slug}: ${result.from} → ${result.to}`);
+        console.log(formatMilestoneState(result, Boolean(values.json)));
         return 0;
       }
       if (action === "reconcile") {

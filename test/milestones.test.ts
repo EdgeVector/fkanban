@@ -94,8 +94,13 @@ describe("first-class milestones", () => {
       .rejects.toMatchObject({ code: "milestone_proof_card_required" });
     await addCmd({ cfg, node, slug: "ship-proof", title: "Ship proof", milestone: "ship-self-hosting", kind: "validation", column: "backlog" });
     await milestoneAddCmd({ cfg, node, slug: "ship-self-hosting", proofCard: "ship-proof" });
+    // `toEqual` (not `toMatchObject`) on purpose: this is the exhaustive shape
+    // assertion for a transition result, so a field added to the payload has to
+    // be looked at here rather than riding along unnoticed. `proof_status_from`
+    // equals `proof_status` on this call — the transition moved state only.
     expect(await milestoneStateCmd({ cfg, node, slug: "ship-self-hosting", state: "proving" })).toEqual({
       slug: "ship-self-hosting", from: "active", to: "proving", proof_status: "pending",
+      proof_status_from: "pending",
     });
     // Milestones do not share the Card schema and therefore cannot enter pickup.
     expect((await listCards(node, cfg)).map((card) => card.slug)).toEqual(["ship-proof"]);
@@ -505,7 +510,10 @@ describe("first-class milestones", () => {
     await addCmd({ cfg, node, slug: "mcp-proof", title: "MCP proof", milestone: "mcp-outcome", kind: "validation", column: "backlog" });
     await milestoneAddCmd({ cfg, node, slug: "mcp-outcome", proofCard: "mcp-proof" });
     const moved = await client.callTool({ name: "fkanban_milestone_state", arguments: { slug: "mcp-outcome", state: "proving" } });
-    expect(moved.structuredContent).toEqual({ slug: "mcp-outcome", from: "active", to: "proving", proof_status: "pending" });
+    // Exhaustive on purpose (see the `milestoneStateCmd` assertion above): the
+    // MCP payload is the agent-facing copy, so a field added to it has to be
+    // looked at here too rather than reaching agents unannounced.
+    expect(moved.structuredContent).toEqual({ slug: "mcp-outcome", from: "active", to: "proving", proof_status: "pending", proof_status_from: "pending" });
     const reconciled = await client.callTool({ name: "fkanban_milestone_reconcile", arguments: { slug: "mcp-outcome" } });
     expect(reconciled.isError).not.toBe(true);
     expect((reconciled.structuredContent as { proof: { slug: string } }).proof.slug).toBe("mcp-proof");

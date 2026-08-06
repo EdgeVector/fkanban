@@ -1,5 +1,6 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
+import type { MilestoneAddResult, MilestoneStateResult } from "../format.ts";
 import {
   PARTITION_READ_CONCURRENCY,
   POINT_READ_CONCURRENCY,
@@ -414,7 +415,7 @@ async function validateTransition(
   await proofGate(opts, milestone, to);
 }
 
-export async function milestoneAddCmd(opts: MilestoneAddOptions): Promise<{ slug: string; action: "created" | "updated"; state: string }> {
+export async function milestoneAddCmd(opts: MilestoneAddOptions): Promise<MilestoneAddResult> {
   validateSlug(opts.slug);
   const existing = await findMilestone(opts.node, opts.cfg, opts.slug);
   const state = opts.state ?? (opts.proofStatus === "failing" && existing?.state === "proving" ? "active" : existing?.state) ?? "planned";
@@ -446,7 +447,29 @@ export async function milestoneAddCmd(opts: MilestoneAddOptions): Promise<{ slug
   await validateLinks(opts, milestone);
   await validateTransition(opts, existing, milestone);
   await upsertMilestoneRecord(opts.node, opts.cfg, milestone, existing !== null, existing);
-  return { slug: milestone.slug, action: existing ? "updated" : "created", state: milestone.state };
+  // Report every field this write moved that the CALLER never named. Both of
+  // these are deliberate rules, and both were invisible: the result type could
+  // only say `state`, so a lifecycle move and a driver rewrite left the same
+  // confirmation as a no-op rename. Sourced from the written object (`milestone`)
+  // against the pre-write read (`existing`), never from the caller's intent.
+  const stateCoerced = opts.state === undefined && existing !== null && existing.state !== milestone.state
+    ? {
+      from: existing.state,
+      to: milestone.state,
+      reason: "a failing proof must return the milestone to active",
+    }
+    : undefined;
+  const driverHealed = opts.driver === undefined && existing !== null
+    && existing.driver !== "" && existing.driver !== milestone.driver
+    ? { from: existing.driver, to: milestone.driver }
+    : undefined;
+  return {
+    slug: milestone.slug,
+    action: existing ? "updated" : "created",
+    state: milestone.state,
+    ...(stateCoerced ? { stateCoerced } : {}),
+    ...(driverHealed ? { driverHealed } : {}),
+  };
 }
 
 /**
@@ -525,13 +548,24 @@ export async function milestoneShowResult(opts: { cfg: Config; node: NodeClient;
   };
 }
 
-export async function milestoneStateCmd(opts: { cfg: Config; node: NodeClient; slug: string; state: string; proofStatus?: string }): Promise<{ slug: string; from: string; to: string; proof_status: string }> {
+export async function milestoneStateCmd(opts: { cfg: Config; node: NodeClient; slug: string; state: string; proofStatus?: string }): Promise<MilestoneStateResult> {
   validateState(opts.state);
   if (opts.proofStatus) validateProofStatus(opts.proofStatus);
   const existing = await requireMilestone(opts.node, opts.cfg, opts.slug);
-  await milestoneAddCmd({ cfg: opts.cfg, node: opts.node, slug: opts.slug, state: opts.state, proofStatus: opts.proofStatus });
+  const written = await milestoneAddCmd({ cfg: opts.cfg, node: opts.node, slug: opts.slug, state: opts.state, proofStatus: opts.proofStatus });
   const updated = await requireMilestone(opts.node, opts.cfg, opts.slug);
-  return { slug: opts.slug, from: existing.state, to: updated.state, proof_status: updated.proof_status };
+  // `proof_status_from` comes from the pre-write read, so a transition whose
+  // state is unchanged can still say what it changed. `driverHealed` is
+  // forwarded rather than recomputed: the inner write is the one that healed it,
+  // and re-deriving it here would be a second source of the same claim.
+  return {
+    slug: opts.slug,
+    from: existing.state,
+    to: updated.state,
+    proof_status: updated.proof_status,
+    proof_status_from: existing.proof_status,
+    ...(written.driverHealed ? { driverHealed: written.driverHealed } : {}),
+  };
 }
 
 function arraysEqual(a: string[], b: string[]): boolean {
