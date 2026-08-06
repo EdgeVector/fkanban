@@ -137,8 +137,36 @@ export type MilestoneRepairPlan = {
   upserts: number;
   /** Index rows needing retirement, classified. */
   removals: number;
-  /** Repairs actually issued this run. */
+  /**
+   * Repair writes ATTEMPTED this run — not a claim that any of them landed.
+   *
+   * This is the budget counter: a refused write still cost a round trip on the
+   * shared primary, so it is spent either way. Read {@link written} for what
+   * the node actually accepted.
+   */
   issued: number;
+  /** Attempted repairs the node ACCEPTED. `written + failed === issued`. */
+  written: number;
+  /**
+   * Attempted repairs the node REFUSED.
+   *
+   * Non-zero means the drift these writes were classified to fix is still
+   * there. The write half of the same hazard {@link index_read_failed} names on
+   * the read half: `service_timeout` / "too many concurrent reads" is ordinary
+   * backpressure on this node, and it is most likely exactly when a heal is
+   * being run. Reported, never fatal — an under-repair is safe, a heal that
+   * refuses to run is not.
+   */
+  failed: number;
+  /**
+   * Slugs whose CARD truth point-read the node refused.
+   *
+   * Non-zero means this run could not classify those slugs at all, so
+   * `upserts`/`removals` are short by an unknown amount — the point-read
+   * counterpart to {@link index_read_failed}. It is emphatically NOT a removal
+   * count: absence was never established, so nothing was retired for them.
+   */
+  truth_read_failed: number;
   /** Classified but not issued — dry-run, or the budget ran out. */
   deferred: number;
   /** Repair budget in force; null when unlimited. */
@@ -710,9 +738,21 @@ async function reconcileMilestoneCardChildren(
 
   // Reads first, fanned out: they have no ordering dependency on each other and
   // a point read is ~190ms on the primary, so 69 of them serially is 13s.
+  //
+  // The result is DISCRIMINATED, and that is the whole point: `null` from this
+  // read means the card is genuinely gone, and the only consumer of that fact
+  // is a delete branch. `findCardWithFields` rethrows any real node error
+  // (only an optional-field miss is retried), so flattening a throw to `null`
+  // here told the classifier a live card had been deleted.
   const truths = await mapWithConcurrency(
     slugs,
-    (slug) => findCardSummaryForReconcile(opts.node, opts.cfg, slug).catch(() => null),
+    async (slug): Promise<{ read: true; card: Card | null } | { read: false }> => {
+      try {
+        return { read: true, card: await findCardSummaryForReconcile(opts.node, opts.cfg, slug) };
+      } catch {
+        return { read: false };
+      }
+    },
     POINT_READ_CONCURRENCY,
   );
 
@@ -720,12 +760,23 @@ async function reconcileMilestoneCardChildren(
   // LastDB's convergence wait is a global cross-writer barrier, so concurrent
   // mutations inflate each other's latency rather than overlapping.
   const out: Card[] = [];
+  let truthReadFailed = 0;
   const removals: Card[] = [];
   const upserts: Array<{ truth: Card; previous: Card | null; siblings: boolean }> = [];
 
   slugs.forEach((slug, i) => {
     const rows = rowsBySlug.get(slug) ?? [];
-    const truth = truths[i] ?? null;
+    const verdict = truths[i];
+
+    // The node refused this card's truth read. It classifies as NOTHING: not a
+    // removal (absence was never established) and not an upsert (there is no
+    // truth to write the index from). Counted, and reported by
+    // `renderTruthReadFailure` — see `MilestoneRepairPlan.truth_read_failed`.
+    if (!verdict || !verdict.read) {
+      truthReadFailed++;
+      return;
+    }
+    const truth = verdict.card ?? null;
 
     // No such card, or it belongs to a different milestone/board now: retire
     // the index rows. One removal per slug is enough — removeMilestoneCard
@@ -764,44 +815,71 @@ async function reconcileMilestoneCardChildren(
   // write on the shared primary), so spending it on removals first and then
   // reporting the upserts as deferred is the honest accounting.
   let issued = 0;
+  let failed = 0;
   let fallbackDirectPayloadUpsert = false;
   const exhausted = () => repair.budget !== null && issued >= repair.budget;
+  // Every repair write goes through this, so a refusal is OBSERVED rather than
+  // discarded. It still never throws: `reconcile` is a heal-on-read verb and
+  // one shed write must not abort the repairs queued behind it.
+  //
+  // It deliberately does NOT count. A single classified upsert can issue two
+  // writes (the fold-relying write, then the direct-payload fallback), and the
+  // first failing while the second lands is a repaired row, not a failure.
+  // Failure is counted once per classified repair, from its final outcome.
+  const tryWrite = async (write: Promise<unknown>): Promise<boolean> => {
+    try {
+      await write;
+      return true;
+    } catch {
+      return false;
+    }
+  };
   if (repair.apply) {
     for (const row of removals) {
       if (exhausted()) break;
-      await removeMilestoneCard(opts.node, opts.cfg, row).catch(() => undefined);
+      if (!(await tryWrite(removeMilestoneCard(opts.node, opts.cfg, row)))) failed++;
       issued++;
     }
     for (const { truth, previous, siblings } of upserts) {
       if (exhausted()) break;
+      let repaired: boolean;
       if (repair.directPayloadUpsert) {
-        await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
-          purgeSiblings: siblings,
-          writePayload: true,
-        })
-          .catch(() => undefined);
+        repaired = await tryWrite(
+          upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
+            purgeSiblings: siblings,
+            writePayload: true,
+          }),
+        );
       } else {
-        await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
-          purgeSiblings: siblings,
-          writePayload: false,
-        })
-          .catch(() => undefined);
+        await tryWrite(
+          upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
+            purgeSiblings: siblings,
+            writePayload: false,
+          }),
+        );
         const expected = milestoneCardFieldsFromCard(truth);
         const folded = expected
           ? await findMilestoneCardBySk(opts.node, opts.cfg, String(expected.milestone), String(expected.sk))
           : null;
-        if (!folded || !milestoneCardSummaryMatchesTruth(folded, truth)) {
+        // The read-back is the verdict on the fold-relying write, which is why
+        // its own resolution is not: the fold can accept the source write and
+        // still not materialize the tip. A row that reads back correct IS
+        // repaired, whatever the write call returned.
+        repaired = Boolean(folded) && milestoneCardSummaryMatchesTruth(folded!, truth);
+        if (!repaired) {
           // Key regeneration is still the repair job's responsibility on nodes
           // whose protein fold accepted the source write but did not materialize
           // the sibling tip. Keep the hot card path BoardCards-only.
           fallbackDirectPayloadUpsert = true;
-          await upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
-            purgeSiblings: siblings,
-            writePayload: true,
-          })
-            .catch(() => undefined);
+          repaired = await tryWrite(
+            upsertMilestoneCard(opts.node, opts.cfg, truth, previous, {
+              purgeSiblings: siblings,
+              writePayload: true,
+            }),
+          );
         }
       }
+      if (!repaired) failed++;
       issued++;
     }
   }
@@ -819,6 +897,9 @@ async function reconcileMilestoneCardChildren(
       upserts: upserts.length,
       removals: removals.length,
       issued,
+      written: issued - failed,
+      failed,
+      truth_read_failed: truthReadFailed,
       deferred: removals.length + upserts.length - issued,
       budget: repair.budget,
       direct_payload_upsert: repair.directPayloadUpsert || fallbackDirectPayloadUpsert,
@@ -935,6 +1016,12 @@ export async function milestoneReconcileResult(opts: {
         upserts: 0,
         removals: 0,
         issued: 0,
+        // Nothing was attempted, so nothing failed. `index_read_failed` is what
+        // carries the bad news on this path — a zero here is not a claim that
+        // the milestone is converged.
+        written: 0,
+        failed: 0,
+        truth_read_failed: 0,
         deferred: 0,
         budget,
         direct_payload_upsert: directPayloadUpsert,
@@ -1077,6 +1164,25 @@ export function milestoneReconcileFromSnapshot(
  * all-zero plan from a shed read renders byte-identically to a converged
  * milestone, measured on the live primary.
  */
+/**
+ * A refused CARD point read, named separately from the index reads.
+ *
+ * It renders independently of `renderRepairPlan`, which returns nothing when
+ * `classified === 0` — and a run whose truth reads were ALL refused classifies
+ * exactly zero repairs. Folding this into the repair plan line would make the
+ * total-shed case, the one where the command knows least, print nothing at all.
+ */
+function renderTruthReadFailure(slug: string, repairs: MilestoneRepairPlan): string[] {
+  if (repairs.truth_read_failed <= 0) return [];
+  return [
+    `⚠ TRUTH READ REFUSED — the node refused the card read for ${repairs.truth_read_failed}`,
+    `  slug(s) in this milestone. They were NOT classified and NOT retired: a`,
+    `  read that failed is not evidence a card was deleted. The counts below are`,
+    `  short by that much — re-run under lighter load`,
+    `  (\`kanban milestone reconcile ${slug}\`).`,
+  ];
+}
+
 function renderIndexReadFailure(slug: string, repairs: MilestoneRepairPlan): string[] {
   if (repairs.index_read_failed === null) return [];
   const what = INDEX_READ_FAILURE_LABEL[repairs.index_read_failed];
@@ -1096,10 +1202,21 @@ function renderRepairPlan(slug: string, repairs: MilestoneRepairPlan): string[] 
   if (!repairs.applied) {
     return [`index drift: ${classified} row(s) need repair (${shape}) — run \`kanban milestone reconcile ${slug}\` to fix`];
   }
+  const refused = repairs.failed > 0
+    ? [
+      `⚠ REPAIR WRITE REFUSED — the node rejected ${repairs.failed} of ${repairs.issued}`,
+      `  repair write(s) for this milestone. That drift is STILL THERE. This is`,
+      `  ordinary backpressure, not an outage — re-run under lighter load`,
+      `  (\`kanban milestone reconcile ${slug}\`).`,
+    ]
+    : [];
   if (repairs.deferred > 0) {
-    return [`index repair: ${repairs.issued} of ${classified} row(s) written (${shape}); ${repairs.deferred} deferred by --max-repairs ${repairs.budget} — run \`kanban milestone reconcile ${slug}\` again to continue`];
+    return [
+      ...refused,
+      `index repair: ${repairs.written} of ${classified} row(s) written (${shape}); ${repairs.deferred} deferred by --max-repairs ${repairs.budget} — run \`kanban milestone reconcile ${slug}\` again to continue`,
+    ];
   }
-  return [`index repair: ${repairs.issued} row(s) written (${shape})`];
+  return [...refused, `index repair: ${repairs.written} row(s) written (${shape})`];
 }
 
 function renderMilestoneReconcile(result: MilestoneReconcileResult, repairs?: MilestoneRepairPlan): string {
@@ -1108,6 +1225,7 @@ function renderMilestoneReconcile(result: MilestoneReconcileResult, repairs?: Mi
     `ready frontier: ${result.ready.length ? result.ready.map((card) => card.slug).join(", ") : "—"}`,
     `proof: ${result.proof ? `${result.proof.slug} · ${result.proof.terminal ? "terminal" : "not terminal"} · ${result.proof.passingEvidence ? "PASS" : "no PASS"}` : "—"}`,
     `proof verdict: ${result.proof_verdict}${result.proof_verdict === result.milestone.proof_status ? "" : ` (${result.proof_verdict_reason}; recorded "${result.milestone.proof_status}")`}`,
+    ...(repairs ? renderTruthReadFailure(result.milestone.slug, repairs) : []),
     ...(repairs ? renderIndexReadFailure(result.milestone.slug, repairs) : []),
     ...(repairs ? renderRepairPlan(result.milestone.slug, repairs) : []),
     ...(result.warnings.length ? ["warnings:", ...result.warnings.map((warning) => `- ${warning.code}: ${warning.message} ${warning.hint}`)] : ["warnings: none"]),
