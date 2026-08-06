@@ -394,10 +394,24 @@ describe("MCP write tools return structuredContent", () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo", body: validPickupBody() } });
     await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "done", body: validPickupBody() } });
 
+    // `ui` is seeded in default/todo, so this call ALSO demotes it to backlog —
+    // default/todo is the pickup claim lane. This test asserted the pre-2026-08-06
+    // output, which named only the edge, and so was quietly pinning the silence:
+    // it moved a card out of the pickup lane on every run and asserted a payload
+    // that could not say so. See
+    // test/write-confirmations-name-every-field-changed.test.ts.
     const added = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "api" } });
-    expect(added.structuredContent).toEqual({ slug: "ui", dep: "api", action: "added", deps: ["api"] });
+    expect(await findCard(node, cfg, "ui")).toMatchObject({ column: "backlog" });
+    expect(added.structuredContent).toEqual({
+      slug: "ui",
+      dep: "api",
+      action: "added",
+      deps: ["api"],
+      demoted: { from: "todo", to: "backlog" },
+    });
     expect((added.content as Array<{ type: string; text: string }>)[0]?.text).toBe(
-      "ui now depends on api (deps: api)",
+      "ui now depends on api (deps: api); demoted todo → backlog " +
+        "(default/todo is the pickup claim lane; a card with an unfinished dep is not claimable there)",
     );
 
     const removed = await client.callTool({ name: "fkanban_dep_rm", arguments: { slug: "ui", dep: "api" } });

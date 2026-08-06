@@ -1187,6 +1187,36 @@ export function sanitizeDefaultTodoLaneMetadata(card: Card): TodoLaneField[] {
   return cleared;
 }
 
+/**
+ * Voice a lane clear that just happened. THE counterpart to
+ * `sanitizeDefaultTodoLaneMetadata`, whose docstring makes reporting the
+ * caller's obligation: "A clear that nobody reports is how `add --pr-url`
+ * spent months exiting 0 on a card whose `pr_url` stayed `""`."
+ *
+ * It existed as one hand-built string inside `move`, so `move` honoured the
+ * contract and `add` (both its create and its update path) discarded the
+ * return value entirely — the same requeue, described by one verb and silent
+ * under the other. One function, so a third caller cannot re-open the gap and
+ * the two wordings cannot drift.
+ *
+ * No-op when nothing was cleared; the quiet case must stay quiet.
+ */
+export function warnClearedTodoLaneMetadata(opts: {
+  slug: string;
+  cleared: TodoLaneField[];
+  /** `pr_url` as it stood BEFORE the clear — the value the operator must re-attach. */
+  previousPrUrl: string;
+  warn?: (message: string) => void;
+}): void {
+  if (opts.cleared.length === 0) return;
+  const emit = opts.warn ?? ((message: string) => console.error(message));
+  emit(
+    `warning: cleared ${opts.cleared.join(" and ")} on "${opts.slug}" — ` +
+      "default/todo is the pickup claim lane and in-flight metadata blocks the claim. " +
+      `Re-attach after moving it back to doing (previous pr_url: ${opts.previousPrUrl || "none"}).`,
+  );
+}
+
 // The fields `sanitizeDefaultTodoLaneMetadata` owns, and the CLI flag each one
 // is written through — the flag is what the operator typed, so it is what an
 // error about a discarded write has to name.

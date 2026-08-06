@@ -18,6 +18,7 @@ import {
   assertPrWorkBrief,
   assertUnlessAlreadyViolating,
   sanitizeDefaultTodoLaneMetadata,
+  warnClearedTodoLaneMetadata,
   applyDbLocatorForWrite,
   captureFkanbanError,
   forcedGuardWaiverWarning,
@@ -460,7 +461,16 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     // a placement violation the card can already be in — it is a write THIS
     // call asked for and the lane cannot keep.
     assertNoExplicitTodoLaneMetadata(updated, { branch: opts.branch, prUrl: opts.prUrl });
-    sanitizeDefaultTodoLaneMetadata(updated);
+    // `assertNoExplicitTodoLaneMetadata` above refuses metadata THIS call asked
+    // to write, so everything reaching the clear below came from the card as it
+    // already stood — a requeue of a card that was mid-flight. That is exactly
+    // the case `move` voices, and `add`/`set` requeue the same card into the
+    // same lane, so it must read the same here.
+    warnClearedTodoLaneMetadata({
+      slug: updated.slug,
+      cleared: sanitizeDefaultTodoLaneMetadata(updated),
+      previousPrUrl: existing.pr_url,
+    });
     assertUnlessAlreadyViolating(
       placementUnchanged,
       () => assertDefaultTodoPickupReady(updated, opts.force, rawBody),
@@ -524,7 +534,16 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     enforce: opts.cfg.enforceLivePrMilestone === true,
   });
   assertNoExplicitTodoLaneMetadata(card, { branch: opts.branch, prUrl: opts.prUrl });
-  sanitizeDefaultTodoLaneMetadata(card);
+  // Create path. Explicit flags are already refused above, so a clear here means
+  // `stampCardForWrite` backfilled `branch`/`pr_url` out of a `Branch:`/`PR:`
+  // header in the brief. The operator wrote that line and it is not being kept;
+  // silently dropping it is the same discarded write, just sourced from the body.
+  const prUrlBeforeSanitize = card.pr_url;
+  warnClearedTodoLaneMetadata({
+    slug: card.slug,
+    cleared: sanitizeDefaultTodoLaneMetadata(card),
+    previousPrUrl: prUrlBeforeSanitize,
+  });
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
   await assertSituationPreflightAllowed(card, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);

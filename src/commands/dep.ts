@@ -50,7 +50,18 @@ export async function depAddCmd(opts: {
     patch.column = "backlog";
   }
   await writeCardPatch(opts, card, patch);
-  return { slug: opts.slug, dep: opts.dep, action: "added", deps };
+  // Report the demote, not just the edge. `patch.column` is the field this
+  // write actually changed, so the result is derived from it rather than
+  // re-deciding the condition — the two cannot disagree about whether the card
+  // moved. Built AFTER the write: an echoed transition must describe a write
+  // that happened, and `writeCardPatch` throws when the node refuses.
+  return {
+    slug: opts.slug,
+    dep: opts.dep,
+    action: "added",
+    deps,
+    ...(patch.column !== undefined ? { demoted: { from: card.column, to: patch.column } } : {}),
+  };
 }
 
 export async function depRmCmd(opts: {
