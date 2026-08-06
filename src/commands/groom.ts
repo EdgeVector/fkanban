@@ -75,9 +75,57 @@ export type StructuredRoutingReport = {
   scanned: number;
   candidates: number;
   changed: number;
+  would_change: number;
   dryRun: boolean;
   cards: StructuredRoutingRepair[];
 };
+
+/**
+ * The count pair every sweep head line is rendered from.
+ *
+ * `changed` counts writes that HAPPENED; `would_change` counts writes a
+ * `--apply` run WOULD make. They are separate fields on purpose. Both numbers
+ * used to be the same field, populated from the plan's length regardless of
+ * `--apply`, so a dry run reported `changed: 4` having written nothing — and
+ * `last-stack-groom-board` copied that number verbatim into its durable routine
+ * memory ("stale-blockers dry-run ... changed=3"). The rendered text carried a
+ * `— DRY RUN, no writes` suffix, so a human reading the sentence got the truth
+ * while every `--json` consumer reading the field alone did not.
+ *
+ * This is `archive_done`'s rule, which this file kept rediscovering: count the
+ * actions that occurred, never derive them from the actions that were planned,
+ * and make the KEY NAME change with the meaning so a reader cannot mistake one
+ * for the other (`would_archive=` vs `archived=` there, the same swap here).
+ */
+export type SweepCounts = {
+  scanned: number;
+  candidates: number;
+  changed: number;
+  would_change: number;
+  dryRun: boolean;
+};
+
+/**
+ * One head line for every groom sweep.
+ *
+ * Shared rather than spelled out per sweep because the three copies had already
+ * drifted three different ways: one derived `changed` from the plan, one hard-
+ * coded `"0 changed"` as a string literal that consulted no field at all, and
+ * only the third counted writes. A sweep added tomorrow gets the honest line by
+ * construction, and `groom-sweep-counts.test.ts` fails if any head line stops
+ * coming from here.
+ */
+export function renderSweepHead(label: string, counts: SweepCounts): string {
+  // "candidate cards" stays ungrammatical at 1 on purpose: the only behavioural
+  // delta this change is allowed to carry is the count semantics and the key
+  // name, so that reverting it produces an unambiguous test split.
+  const key = counts.dryRun ? "would_change" : "changed";
+  const n = counts.dryRun ? counts.would_change : counts.changed;
+  return (
+    `${label}: ${counts.candidates} candidate cards of ${counts.scanned} scanned; ` +
+    `${key}=${n}${counts.dryRun ? " — DRY RUN, no writes" : ""}`
+  );
+}
 
 export type BodyClobberScanHit = {
   slug: string;
@@ -89,20 +137,31 @@ export type BodyClobberScanHit = {
 export type BodyClobberScanReport = {
   scanned: number;
   candidates: number;
+  /**
+   * Literal `0` on purpose: this sweep has no `--apply` mode, and the type is
+   * what stops the renderer from going stale if it ever gains one. The count
+   * used to be the string `"0 changed"` spliced into the head line, consulting
+   * no field at all — correct only for exactly as long as nobody added a write
+   * path, and silently wrong on the day somebody did.
+   */
   changed: 0;
+  would_change: 0;
   dryRun: true;
   cards: BodyClobberScanHit[];
 };
 
 function renderGroomReport(report: GroomReport): string {
-  const head =
-    `stale-blocker groomer: ${report.candidates} candidate cards of ${report.scanned} scanned; ` +
-    `${report.changed} changed${report.dryRun ? " — DRY RUN, no writes" : ""}`;
+  const head = renderSweepHead("stale-blocker groomer", report);
   const lines = report.cards.map((card) => {
     const issues = card.issues
       .map((issue) => `${issue.kind}${issue.applyable ? "" : " (review)"}: ${issue.message}`)
       .join("; ");
-    return `  ${card.slug} [${card.board}/${card.column} kind=${card.kind}]${card.changed ? " changed" : ""} — ${issues}`;
+    // Per card, the same distinction as the head line: `card.changed` is a plan
+    // flag ("has an applyable change"), so under a dry run the honest word is
+    // "would change" — printing "changed" beside a card nothing was written to
+    // is the head-line defect at card granularity.
+    const mark = card.changed ? (report.dryRun ? " would change" : " changed") : "";
+    return `  ${card.slug} [${card.board}/${card.column} kind=${card.kind}]${mark} — ${issues}`;
   });
   const doneWhenFixes = report.cards.flatMap((card) =>
     card.issues
@@ -135,9 +194,7 @@ function structuredRoutingRepair(card: Card): { next: Card; repair: StructuredRo
 }
 
 function renderStructuredRoutingReport(report: StructuredRoutingReport): string {
-  const head =
-    `structured-routing groomer: ${report.candidates} candidate cards of ${report.scanned} scanned; ` +
-    `${report.changed} changed${report.dryRun ? " — DRY RUN, no writes" : ""}`;
+  const head = renderSweepHead("structured-routing groomer", report);
   const lines = report.cards.map((card) => {
     const fields = [
       card.repo ? `repo=${card.repo}` : "",
@@ -149,9 +206,7 @@ function renderStructuredRoutingReport(report: StructuredRoutingReport): string 
 }
 
 function renderBodyClobberScanReport(report: BodyClobberScanReport): string {
-  const head =
-    `body-clobber scan: ${report.candidates} candidate cards of ${report.scanned} scanned; ` +
-    "0 changed - DRY RUN, no writes";
+  const head = renderSweepHead("body-clobber scan", report);
   const lines = report.cards.map((card) =>
     `  ${card.slug} [${card.board}/${card.column}] - ${card.reason}`
   );
@@ -178,6 +233,7 @@ export async function groomBodyClobberScanResult(opts: GroomStructuredRoutingOpt
     scanned: cards.length,
     candidates: hits.length,
     changed: 0,
+    would_change: 0,
     dryRun: true,
     cards: hits,
   };
@@ -198,6 +254,9 @@ export async function groomStructuredRoutingResult(opts: GroomStructuredRoutingO
   const active = sortCards(cards.filter((c) => c.column !== TERMINAL_COLUMN));
 
   const repairs: StructuredRoutingRepair[] = [];
+  // Incremented AFTER the write returns, never from `repairs.length` — the
+  // whole point of `SweepCounts`.
+  let changed = 0;
   for (const card of active) {
     const repair = structuredRoutingRepair(card);
     if (!repair) continue;
@@ -209,13 +268,15 @@ export async function groomStructuredRoutingResult(opts: GroomStructuredRoutingO
         undefined,
         card,
       );
+      changed += 1;
     }
   }
 
   const report: StructuredRoutingReport = {
     scanned: active.length,
     candidates: repairs.length,
-    changed: repairs.length,
+    changed,
+    would_change: repairs.length,
     dryRun: !opts.apply,
     cards: repairs,
   };
@@ -242,14 +303,14 @@ export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions):
 
   const cardResults = [];
   let changed = 0;
+  let wouldChange = 0;
   for (const card of active) {
     const groomed = groomCard(card, active);
     if (groomed.issues.length === 0) continue;
     const applyableChange = groomed.changed && groomed.issues.some((issue) => issue.applyable);
+    if (applyableChange) wouldChange += 1;
     if (opts.apply && applyableChange) {
       await writeGroomedCard(opts, groomed.card, card);
-      changed += 1;
-    } else if (!opts.apply && applyableChange) {
       changed += 1;
     }
     cardResults.push({
@@ -266,6 +327,7 @@ export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions):
     scanned: active.length,
     candidates: cardResults.length,
     changed,
+    would_change: wouldChange,
     dryRun: !opts.apply,
     cards: cardResults,
   };

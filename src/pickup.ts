@@ -623,7 +623,14 @@ export type GroomCardResult = {
 export type GroomReport = {
   scanned: number;
   candidates: number;
+  /**
+   * Cards this run actually WROTE. Always 0 on a dry run — see
+   * `SweepCounts` in `commands/groom.ts` for why the plan count lives in a
+   * separate field instead of sharing this one.
+   */
   changed: number;
+  /** Cards a `--apply` run would write. Equals `changed` after a clean apply. */
+  would_change: number;
   dryRun: boolean;
   cards: GroomCardResult[];
 };
