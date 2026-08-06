@@ -16,7 +16,7 @@ import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
 import { pickupStatusResult } from "../commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "../commands/pickup_claim.ts";
-import { overlapResult, formatOverlap } from "../commands/overlap.ts";
+import { overlapResult, formatOverlap, overlapPayload } from "../commands/overlap.ts";
 import { rankCmd } from "../commands/rank.ts";
 import { searchResult } from "../commands/search.ts";
 import { showResult } from "../commands/show.ts";
@@ -1258,13 +1258,21 @@ export function createFkanbanMcpServer(
     {
       title: "Check surface overlap",
       description:
-        "Compare a candidate card's declared surfaces against every doing card with the same repo. Returns conflicts by slug + matched patterns. Missing surfaces are adoption warnings, not conflicts.",
+        "Compare a candidate card's declared surfaces against every doing card with the same repo. Returns conflicts by slug + matched patterns. Read `verdict`, not `conflicts.length`: only `clear` is a pass — `unknown` means the candidate declared nothing so NOTHING was compared, and `partial` means some in-flight peer could not be judged. Missing surfaces are adoption warnings, not conflicts.",
       annotations: { title: "Check surface overlap", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional().describe("Candidate card slug.") },
       outputSchema: {
         slug: z.string(),
         repo: z.string(),
         surfaces: z.array(z.string()),
+        // These three were reaching clients already — undeclared keys survive
+        // the SDK's outputSchema validation, measured — but nothing on the
+        // contract told an agent to look for them, and an empty `conflicts`
+        // reads as a pass without them. Declared so the distinction is part of
+        // the tool's advertised shape rather than an accident of validation.
+        verdict: z.enum(["conflict", "clear", "unknown", "partial"]),
+        candidateUndeclared: z.boolean(),
+        unevaluatedPeers: z.array(z.string()),
         conflicts: z.array(
           z.object({
             slug: z.string(),
@@ -1282,7 +1290,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const result = await overlapResult({ cfg, node, slug });
-        return toolResult(formatOverlap(result), result);
+        return toolResult(formatOverlap(result), overlapPayload(result));
       } catch (err) {
         return errorResult(err);
       }

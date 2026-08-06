@@ -15,7 +15,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { emptyStructuredFields, type Card } from "../src/record.ts";
-import { overlapAgainstCards, overlapVerdict } from "../src/commands/overlap.ts";
+import { formatOverlap, overlapAgainstCards, overlapVerdict } from "../src/commands/overlap.ts";
 import { renderPickupExplain, type PickupExplainReport } from "../src/commands/pickup_explain.ts";
 
 function card(partial: Partial<Card>): Card {
@@ -125,6 +125,89 @@ describe("overlap verdict — what the gate is entitled to say", () => {
 
     expect(result.unevaluatedPeers).toEqual([]);
     expect(overlapVerdict(result)).toBe("clear");
+  });
+});
+
+/**
+ * `pickup explain` got the honest rendering when the verdict was introduced;
+ * `overlap` — the command the verdict is NAMED after, and the one the
+ * `fkanban_overlap` MCP tool renders through — kept branching on
+ * `conflicts.length === 0` and printing the clean-bill-of-health line for
+ * `clear`, `unknown` and `partial` alike.
+ *
+ * Nothing pinned it: before these tests, no assertion in the suite touched
+ * `formatOverlap`'s conclusion line at all.
+ */
+describe("formatOverlap — the conclusion line must come from the verdict", () => {
+  const undeclared = () =>
+    overlapAgainstCards(card({ slug: "cand", surfaces: [] }), [
+      card({ slug: "cand", surfaces: [] }),
+      card({ slug: "peer", column: "doing", surfaces: ["src/cli.ts"] }),
+    ]);
+
+  test("`unknown` must not print the clean-bill-of-health line", () => {
+    const text = formatOverlap(undeclared());
+
+    // The defect, stated directly: this exact sentence is reserved for `clear`.
+    expect(text).not.toContain("No declared surface conflicts");
+    expect(text).toContain("Overlap UNKNOWN for cand");
+    expect(text).toContain("nothing was compared");
+  });
+
+  test("`unknown` names WHICH claim is missing — surfaces vs repo are different fixes", () => {
+    expect(formatOverlap(undeclared())).toContain("declares no surfaces");
+
+    const noRepo = overlapAgainstCards(card({ slug: "cand", repo: "", surfaces: ["src/cli.ts"] }), [
+      card({ slug: "cand", repo: "", surfaces: ["src/cli.ts"] }),
+    ]);
+    expect(overlapVerdict(noRepo)).toBe("unknown");
+    expect(formatOverlap(noRepo)).toContain("declares no repo");
+  });
+
+  test("`partial` says a conflict may hide behind a peer it could not judge", () => {
+    const partial = overlapAgainstCards(card({ slug: "cand", surfaces: ["src/cli.ts"] }), [
+      card({ slug: "cand", surfaces: ["src/cli.ts"] }),
+      card({ slug: "peer-blind", column: "doing", surfaces: [] }),
+    ]);
+
+    const text = formatOverlap(partial);
+
+    expect(text).not.toContain("No declared surface conflicts");
+    expect(text).toContain("Overlap PARTIAL for cand");
+    // The peer must be NAMED — "1 could not be judged" is not actionable.
+    expect(text).toContain("peer-blind");
+  });
+
+  test("`clear` still earns the pass line, and `conflict` still lists its matches", () => {
+    // The deliberate quiet half: the two verdicts that were already honest must
+    // read exactly as before. `clear` is the only state that earns a pass.
+    const clear = overlapAgainstCards(card({ slug: "cand", surfaces: ["src/cli.ts"] }), [
+      card({ slug: "cand", surfaces: ["src/cli.ts"] }),
+      card({ slug: "peer", column: "doing", surfaces: ["docs/x.md"] }),
+    ]);
+    expect(overlapVerdict(clear)).toBe("clear");
+    expect(formatOverlap(clear)).toContain("No declared surface conflicts for cand.");
+
+    const conflict = overlapAgainstCards(card({ slug: "cand", surfaces: ["src/cli.ts"] }), [
+      card({ slug: "cand", surfaces: ["src/cli.ts"] }),
+      card({ slug: "peer", column: "doing", surfaces: ["src/cli.ts"] }),
+    ]);
+    const text = formatOverlap(conflict);
+    expect(text).toContain("Surface conflicts for cand:");
+    expect(text).toContain("src/cli.ts ↔ src/cli.ts");
+  });
+
+  test("--json carries the verdict, so a scripted caller need not re-derive it", () => {
+    const parsed = JSON.parse(formatOverlap(undeclared(), true)) as {
+      verdict: string;
+      conflicts: unknown[];
+      candidateUndeclared: boolean;
+    };
+
+    expect(parsed.verdict).toBe("unknown");
+    // ...and the facts it is derived from stay on the payload, unchanged.
+    expect(parsed.conflicts).toEqual([]);
+    expect(parsed.candidateUndeclared).toBe(true);
   });
 });
 
