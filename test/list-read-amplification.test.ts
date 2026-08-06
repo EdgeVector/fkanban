@@ -13,6 +13,7 @@
 // count. They all use `cfgWithIndexes` — the shape a real install has.
 
 import { describe, expect, test } from "bun:test";
+import { cardsFromJson } from "./json_page.ts";
 
 import { listCmd } from "../src/commands/list.ts";
 import type { NodeClient, QueryFilter, QueryResponse } from "../src/client.ts";
@@ -154,7 +155,7 @@ describe("list read amplification — cost must not scale with card count", () =
     const node = fakeNode(todoCards(10));
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
 
-    expect((JSON.parse(out) as Card[]).map((c) => c.slug)).toContain("todo-0");
+    expect((cardsFromJson(out) as Card[]).map((c) => c.slug)).toContain("todo-0");
     expect(boardCardQueries(node)).toHaveLength(1);
     // The regression this file exists for: one Card point-read per rendered row.
     expect(cardQueries(node)).toHaveLength(0);
@@ -168,7 +169,7 @@ describe("list read amplification — cost must not scale with card count", () =
     ]);
     const out = await listCmd({ cfg: cfgWithIndexes, node, json: true });
 
-    expect((JSON.parse(out) as Card[]).length).toBeGreaterThan(0);
+    expect((cardsFromJson(out) as Card[]).length).toBeGreaterThan(0);
     expect(cardQueries(node)).toHaveLength(0);
   });
 
@@ -195,7 +196,7 @@ describe("list read amplification — cost must not scale with card count", () =
   // `--limit` is how a caller bounds it.
   test("--full-body pays one body read per returned card and no more", async () => {
     const node = fakeNode(todoCards(50));
-    const out = JSON.parse(
+    const out = cardsFromJson(
       await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true, fullBody: true }),
     ) as Card[];
 
@@ -205,7 +206,7 @@ describe("list read amplification — cost must not scale with card count", () =
 
   test("--limit bounds body hydration to the capped page", async () => {
     const node = fakeNode(todoCards(50));
-    const out = JSON.parse(
+    const out = cardsFromJson(
       await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true, fullBody: true, limit: 5 }),
     ) as Card[];
 
@@ -384,7 +385,7 @@ describe("list read amplification — cost must not scale with card count", () =
     const fresh = card({ slug: "dup", column: "done", position: "2", updated_at: "2026-02-01T00:00:00.000Z" });
     const node = fakeNode([stale, fresh]);
 
-    const out = JSON.parse(await listCmd({ cfg: cfgWithIndexes, node, json: true })) as Card[];
+    const out = cardsFromJson(await listCmd({ cfg: cfgWithIndexes, node, json: true })) as Card[];
     const dup = out.filter((c) => c.slug === "dup");
     expect(dup).toHaveLength(1);
     expect(dup[0]!.column).toBe("done");

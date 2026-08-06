@@ -7,6 +7,7 @@ import { classifyMilestoneGap, milestoneAddCmd, milestoneDetailResult, milestone
 import { addCmd } from "../src/commands/add.ts";
 import { listCmd } from "../src/commands/list.ts";
 import {
+import { cardsFromJson } from "./json_page.ts";
   boardToFields,
   findCard,
   listCards,
@@ -216,7 +217,7 @@ describe("first-class milestones", () => {
     expect(grouped).toContain("HEALTHY OUTCOME");
     expect(grouped).toContain("UNASSIGNED / OPERATIONAL");
     expect(grouped).toContain("healthy-slice");
-    const groupedJson = JSON.parse(await listCmd({ cfg, node, groupByMilestone: true, json: true }));
+    const groupedJson = cardsFromJson(await listCmd({ cfg, node, groupByMilestone: true, json: true }));
     expect(groupedJson.groups.map((group: { slug: string }) => group.slug)).toEqual(["healthy-outcome", "unassigned-operational"]);
   });
 

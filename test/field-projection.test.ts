@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { cardsFromJson } from "./json_page.ts";
 
 import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
@@ -221,7 +222,7 @@ describe("--field projection", () => {
       nodeTransport: () => ({ transport: "unavailable" }),
     };
 
-    const out = JSON.parse(await searchCmd({ cfg: noIndexCfg, node: noScanNode, query: "needle", json: true })) as Array<{ slug: string }>;
+    const out = cardsFromJson(await searchCmd({ cfg: noIndexCfg, node: noScanNode, query: "needle", json: true })) as Array<{ slug: string }>;
     expect(out.map((c) => c.slug)).toEqual(["probe"]);
     // The body match came from the point-read candidate, NOT from a scan: this
     // node refused every scan it was offered. Asserting the result rather than
