@@ -400,7 +400,7 @@ describe("MCP write tools return structuredContent", () => {
 
   test("fkanban_dep_add / fkanban_dep_rm echo { slug, dep, action, deps }", async () => {
     await client.callTool({ name: "fkanban_add", arguments: { slug: "ui", column: "todo", body: validPickupBody() } });
-    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "done", body: validPickupBody() } });
+    await client.callTool({ name: "fkanban_add", arguments: { slug: "api", column: "todo", body: validPickupBody() } });
 
     // `ui` is seeded in default/todo, so this call ALSO demotes it to backlog —
     // default/todo is the pickup claim lane. This test asserted the pre-2026-08-06
@@ -408,6 +408,18 @@ describe("MCP write tools return structuredContent", () => {
     // it moved a card out of the pickup lane on every run and asserted a payload
     // that could not say so. See
     // test/write-confirmations-name-every-field-changed.test.ts.
+    //
+    // `api` IS SEEDED UNFINISHED (`todo`), AND THAT IS NOW THE POINT. It used to
+    // be seeded in `done`, which made this fixture an instance of the defect
+    // rather than of the rule: the demote fired for a dependency that blocked
+    // nothing, and the text asserted below — "a card with an unfinished dep is
+    // not claimable there" — described a card whose dep was finished. Since
+    // 2026-08-06 the demote requires the dep to actually block
+    // (`dependencyBlocks`), so a `done` dep here would produce no `demoted`
+    // field at all and this test would stop covering the demote echo. Seeding
+    // it unfinished keeps the coverage AND makes the asserted sentence true.
+    // The done-dep arm now has its own home:
+    // test/dep-add-demote-tracks-dep-state.test.ts.
     const added = await client.callTool({ name: "fkanban_dep_add", arguments: { slug: "ui", dep: "api" } });
     expect(await findCard(node, cfg, "ui")).toMatchObject({ column: "backlog" });
     expect(added.structuredContent).toEqual({
