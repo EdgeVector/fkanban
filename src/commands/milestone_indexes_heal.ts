@@ -144,6 +144,12 @@ export type MilestoneIndexesHealResult = {
   milestone_card_upserts: number;
   milestone_card_removals: number;
   issued: number;
+  /**
+   * MilestoneCards repair writes the node REFUSED across every milestone healed
+   * this run. Non-zero means `issued` overstates the repair by this much and
+   * that drift survives — see `MilestoneRepairPlan.failed`.
+   */
+  write_failed: number;
   deferred: number;
   text: string;
   direct_milestone_card_payload_upsert: boolean;
@@ -358,6 +364,7 @@ export async function milestoneIndexesHealResult(opts: {
       removal_ceiling: opts.maxRemovals === undefined ? milestoneIndexesHealRemovalCeiling(0) : opts.maxRemovals,
       blocked: false,
       issued: 0,
+      write_failed: 0,
       deferred: 0,
       direct_milestone_card_payload_upsert: directMilestoneCardPayloadUpsert,
       text:
@@ -460,6 +467,7 @@ export async function milestoneIndexesHealResult(opts: {
   const applying = apply && !blocked;
 
   let issued = 0;
+  let writeFailed = 0;
   if (boardMsBound) {
     for (const op of boardOps) {
       if (!applying || !budgetAllowsAnother(budget, issued)) break;
@@ -485,6 +493,7 @@ export async function milestoneIndexesHealResult(opts: {
         directPayloadUpsert: directMilestoneCardPayloadUpsert,
       });
       issued += repaired.repairs.issued;
+      writeFailed += repaired.repairs.failed;
     }
   }
 
@@ -550,7 +559,7 @@ export async function milestoneIndexesHealResult(opts: {
     `  rows_examined=${rowsExamined} removals_classified=${removalsClassified} removal_ceiling=${removalCeiling === null ? "unlimited" : removalCeiling} blocked=${blocked}`,
     `  board_milestones bound=${boardMsBound} scanned=${milestones.length} (enumerated=${slugs.length} single_lead=${sweep.wideScanSlugs} husks_dropped=${husksDropped}) upserts=${boardMilestoneUpserts} removals=${boardMilestoneRemovals}`,
     `  milestone_cards bound=${msCardsBound} mode=${directMilestoneCardPayloadUpsert ? "direct-payload-upsert" : "protein-fold-request"} children_scanned=${milestoneCardChildrenScanned} upserts=${milestoneCardUpserts} removals=${milestoneCardRemovals}`,
-    `  issued=${issued} deferred=${deferred}`,
+    `  issued=${issued} written=${issued - writeFailed} write_failed=${writeFailed} deferred=${deferred}`,
   ].join("\n");
 
   return {
@@ -574,6 +583,7 @@ export async function milestoneIndexesHealResult(opts: {
     milestone_card_upserts: milestoneCardUpserts,
     milestone_card_removals: milestoneCardRemovals,
     issued,
+    write_failed: writeFailed,
     deferred,
     direct_milestone_card_payload_upsert: directMilestoneCardPayloadUpsert,
     text,
