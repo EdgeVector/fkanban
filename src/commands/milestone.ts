@@ -45,7 +45,7 @@ import {
   type Card,
   type Board,
 } from "../record.ts";
-import { cardFromMilestoneCardFields, findMilestoneCardBySk, listMilestoneCardsPartition, listMilestoneCardsPartitionSpine, type MilestoneCardRow, milestoneCardFieldsFromCard, milestoneCardSk, removeMilestoneCard, upsertMilestoneCard } from "../milestone-cards.ts";
+import { cardFromMilestoneCardFields, findMilestoneCardBySk, listMilestoneCardsPartition, listMilestoneCardsPartitionSpine, type MilestoneCardRow, milestoneCardFieldsFromCard, milestoneCardsHash, milestoneCardSk, removeMilestoneCard, upsertMilestoneCard } from "../milestone-cards.ts";
 
 export type MilestoneWarning = {
   code: string;
@@ -102,6 +102,57 @@ export type MilestoneRepairPlan = {
   budget: number | null;
   /** True when destination MilestoneCards payload writes are explicit. */
   direct_payload_upsert: boolean;
+  /**
+   * Which MilestoneCards read the node refused, or `null` when both answered.
+   *
+   * The counts above are only a claim about the DATA when this is `null`. Every
+   * other value means at least one read came back empty because it FAILED, and
+   * the classification it fed is short by an unknown amount. See
+   * {@link MilestoneIndexReadFailure}.
+   */
+  index_read_failed: MilestoneIndexReadFailure;
+};
+
+/**
+ * Which half of the MilestoneCards partition read was shed, if either.
+ *
+ * The reconcile wave issues two reads against the SAME partition — the wide
+ * payload read (`listMilestoneCardsPartition`, what the rows SAY) and the
+ * address enumeration (`listMilestoneCardsPartitionSpine`, which rows EXIST).
+ * Both return `null` from a bare `catch {}`, and each failure produces a
+ * different lie:
+ *
+ *  - `"payload"` — the classifier is skipped outright, `upserts`/`removals` are
+ *    hard-coded to zero, and `renderRepairPlan` prints NOTHING because
+ *    `classified === 0`. Measured on the live primary 2026-08-06
+ *    (`scripts/probe-milestone-reconcile-read-shed-silence.ts`): milestone
+ *    `lastdb-mutation-phase-observability` renders BYTE-IDENTICAL output shed
+ *    and healthy, and `operation-trinity-m0-charter` loses a real orphan
+ *    retirement (1 removal healthy, 0 shed) while still printing
+ *    `warnings: none`.
+ *  - `"addresses"` — `indexAddresses ?? []` makes every card look like it has
+ *    no index row, so all of them classify stale and queue an upsert with
+ *    `previous: null`, while every orphan removal is skipped because `rows[0]`
+ *    is undefined. Same probe: `lastdb-0231-read-regression-fixes` goes from 7
+ *    genuine upserts to 11 unverified ones, and `operation-trinity-m0-charter`
+ *    again reports 0 removals instead of 1.
+ *  - `"both"` — the payload branch wins; behaves as `"payload"`.
+ *
+ * `null` ALSO covers the case where `milestone_cards` is not bound in this
+ * config at all, which is why the flag is derived from the schema hash rather
+ * than from the `null` return alone: an unbound index has nothing to read and
+ * is not a failure, and a run that reported one on every milestone would be
+ * muted inside a week.
+ */
+export type MilestoneIndexReadFailure = null | "payload" | "addresses" | "both";
+
+/**
+ * The operator-facing name for each failure, used in the warning and the banner.
+ */
+const INDEX_READ_FAILURE_LABEL: Record<NonNullable<MilestoneIndexReadFailure>, string> = {
+  payload: "the payload read (what the index rows say)",
+  addresses: "the address enumeration (which index rows exist)",
+  both: "both the payload read and the address enumeration",
 };
 
 /**
@@ -558,7 +609,7 @@ async function reconcileMilestoneCardChildren(
   indexRows: Card[],
   indexAddresses: MilestoneCardRow[],
   boardRows: Card[],
-  repair: { apply: boolean; budget: number | null; directPayloadUpsert: boolean },
+  repair: { apply: boolean; budget: number | null; directPayloadUpsert: boolean; indexReadFailed: MilestoneIndexReadFailure },
 ): Promise<{ children: Card[]; repairs: MilestoneRepairPlan }> {
   // WHICH ROWS EXIST comes from the address enumeration; WHAT THEY SAY comes
   // from the payload read. Conflating the two is what made this function blind
@@ -695,6 +746,7 @@ async function reconcileMilestoneCardChildren(
       deferred: removals.length + upserts.length - issued,
       budget: repair.budget,
       direct_payload_upsert: repair.directPayloadUpsert || fallbackDirectPayloadUpsert,
+      index_read_failed: repair.indexReadFailed,
     },
   };
 }
@@ -768,8 +820,35 @@ export async function milestoneReconcileResult(opts: {
       : Promise.resolve(null),
   ]);
   const fromBoard = boardCards.filter((card) => card.milestone === milestone.slug);
+  // A `null` from either MilestoneCards read means one of two very different
+  // things and neither helper can tell them apart: the index is not bound in
+  // this config, or the node refused the query. Only the second is a failure,
+  // so the discriminator is the schema hash — bound + null == shed.
+  //
+  // This runs BEFORE the branch below deliberately. The `fromIndex === null`
+  // arm returns an all-zero repair plan, and without this flag that plan is
+  // indistinguishable from a converged milestone — measured byte-identical on
+  // the live primary, which is the defect this exists to close.
+  const indexBound = milestoneCardsHash(opts.cfg) !== null;
+  const indexReadFailed: MilestoneIndexReadFailure = !indexBound
+    ? null
+    : fromIndex === null && indexAddresses === null
+    ? "both"
+    : fromIndex === null
+    ? "payload"
+    : indexAddresses === null
+    ? "addresses"
+    : null;
   const reconciled = fromIndex !== null
-    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, indexAddresses ?? [], fromBoard, { apply, budget, directPayloadUpsert })
+    // `indexAddresses ?? []` still passes an empty address set on a shed spine
+    // read, and that is deliberately NOT changed here: the resulting upserts
+    // carry `previous: null`, which routes to `purgeOtherMilestoneCardRows` for
+    // the SAME slug only, so they are wasteful and unverified but not
+    // destructive. This repo's standing rule is that a heal which
+    // under-repairs is safe and a heal that does not run is not — so the fix
+    // is to REPORT the shed read, never to refuse the run. What the empty set
+    // costs is now named in the plan rather than laundered into the counts.
+    ? await reconcileMilestoneCardChildren(opts, milestone, fromIndex, indexAddresses ?? [], fromBoard, { apply, budget, directPayloadUpsert, indexReadFailed })
     : {
       // No MilestoneCards partition to reconcile against: membership came
       // straight from the board, so nothing was classified and nothing is
@@ -783,6 +862,7 @@ export async function milestoneReconcileResult(opts: {
         deferred: 0,
         budget,
         direct_payload_upsert: directPayloadUpsert,
+        index_read_failed: indexReadFailed,
       } satisfies MilestoneRepairPlan,
     };
   const children = reconciled.children;
@@ -794,7 +874,25 @@ export async function milestoneReconcileResult(opts: {
   // that is the only case where "absent" and "sparse" are in question.
   const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
     && (await cardExists(opts.node, opts.cfg, milestone.proof_card!));
-  const result = milestoneReconcileFromSnapshot(milestone, children, statuses, proofCard, proofCardSparse);
+  const snapshot = milestoneReconcileFromSnapshot(milestone, children, statuses, proofCard, proofCardSparse);
+  // A shed index read belongs in `warnings` as well as in the banner, because
+  // the two surfaces have different readers. The banner is for the human
+  // reading `reconcile`; `warnings` is the machine-readable array that
+  // `milestone groom`, the portfolio row (`warning_count`) and every `--json`
+  // consumer pattern-match on — and on a shed read every one of them was
+  // otherwise told `warnings: none` about a milestone nobody had looked at.
+  //
+  // Appended after the snapshot's own warnings rather than pushed inside it:
+  // this condition is a property of the READ, not of the milestone, and
+  // `milestoneReconcileFromSnapshot` is deliberately pure over what it was given.
+  const result: MilestoneReconcileResult = indexReadFailed === null ? snapshot : {
+    ...snapshot,
+    warnings: [...snapshot.warnings, {
+      code: "unreadable-milestone-index",
+      message: `The node refused ${INDEX_READ_FAILURE_LABEL[indexReadFailed]} for this milestone's MilestoneCards partition.`,
+      hint: "Index repair counts on this run are short by an unknown amount and are not evidence the milestone is converged. Re-run under lighter load.",
+    }],
+  };
   // `boards` travels out so a caller that needs the board list too — `detail`
   // renders one column group per column — can thread it instead of paying the
   // same read a second time in a wave of its own.
@@ -892,6 +990,28 @@ export function milestoneReconcileFromSnapshot(
  * command that finishes it, because a report of drift the reader cannot act on
  * is just noise.
  */
+/**
+ * The shed-read banner, on its own lines ABOVE every count it qualifies.
+ *
+ * Placement is the whole point and is pinned by a test. A caveat appended to a
+ * line that opens `index repair: 0 row(s) written` gets read as part of the
+ * good news — that is exactly how `board_cards_heal_scheduled` came to print
+ * the word `clean` for a run with no coverage. It also has to appear when
+ * `renderRepairPlan` returns nothing at all, which is the silent case: an
+ * all-zero plan from a shed read renders byte-identically to a converged
+ * milestone, measured on the live primary.
+ */
+function renderIndexReadFailure(slug: string, repairs: MilestoneRepairPlan): string[] {
+  if (repairs.index_read_failed === null) return [];
+  const what = INDEX_READ_FAILURE_LABEL[repairs.index_read_failed];
+  return [
+    `⚠ INDEX READ INCOMPLETE — the node refused ${what} for this milestone's`,
+    `  MilestoneCards partition. The repair counts below are NOT a claim about`,
+    `  the data: they are short by an unknown amount. Re-run under lighter load`,
+    `  before concluding this milestone is converged (\`kanban milestone reconcile ${slug}\`).`,
+  ];
+}
+
 function renderRepairPlan(slug: string, repairs: MilestoneRepairPlan): string[] {
   const classified = repairs.upserts + repairs.removals;
   if (classified === 0) return [];
@@ -912,6 +1032,7 @@ function renderMilestoneReconcile(result: MilestoneReconcileResult, repairs?: Mi
     `ready frontier: ${result.ready.length ? result.ready.map((card) => card.slug).join(", ") : "—"}`,
     `proof: ${result.proof ? `${result.proof.slug} · ${result.proof.terminal ? "terminal" : "not terminal"} · ${result.proof.passingEvidence ? "PASS" : "no PASS"}` : "—"}`,
     `proof verdict: ${result.proof_verdict}${result.proof_verdict === result.milestone.proof_status ? "" : ` (${result.proof_verdict_reason}; recorded "${result.milestone.proof_status}")`}`,
+    ...(repairs ? renderIndexReadFailure(result.milestone.slug, repairs) : []),
     ...(repairs ? renderRepairPlan(result.milestone.slug, repairs) : []),
     ...(result.warnings.length ? ["warnings:", ...result.warnings.map((warning) => `- ${warning.code}: ${warning.message} ${warning.hint}`)] : ["warnings: none"]),
   ].join("\n");
