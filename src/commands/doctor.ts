@@ -13,7 +13,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
-import { resolveRunningBuild, shortBuild } from "../host_track.ts";
+import { isOnDisk, resolveRunningBuild, shortBuild } from "../host_track.ts";
 import { readRecentRejections, rejectionsPath } from "../diagnostics.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
 import { listBoards, listCards, findCard, probeSchemaWritable, WRITE_PROBE_SLUG, type Board, type Card } from "../record.ts";
@@ -1172,6 +1172,34 @@ export function resolveKanbanShim(): { name: "kanban" | "fkanban"; path: string 
   return null;
 }
 
+/**
+ * How does a dev with no `kanban` on PATH get one? The remedy printed on the
+ * one line whose entire job is to answer that.
+ *
+ * From a source checkout: this repo's one-line installer, made copy-pasteable
+ * from any cwd (the `cd …` is what lets `bun run install-cli` resolve this
+ * repo's script).
+ *
+ * From the compiled artifact there is no repo and no installer script on disk.
+ * This module's URL is embedded, the regex below does not match, and the hint
+ * used to read `(cd "/$bunfs/root/kanban" && bun run install-cli)` — an
+ * impossible command, offered as the fix for the very thing it cannot fix. The
+ * binary needs no installer to be useful: it IS the CLI, so the honest remedy
+ * is to link it onto PATH.
+ *
+ * `isOnDisk` is the discriminator, not `existsSync` — both `existsSync` and
+ * `statSync` SUCCEED on embedded paths, so either would be a no-op that looks
+ * like a guard (see the measurement in src/host_track.ts).
+ *
+ * `repoRoot` and `execPath` are parameters so both branches are reachable from
+ * a test running in source mode; production callers pass the module's own root.
+ */
+export function shimInstallHint(repoRoot: string, execPath: string = process.execPath): string {
+  return isOnDisk(repoRoot)
+    ? `(cd "${repoRoot}" && bun run install-cli)`
+    : `ln -s "${execPath}" ~/.local/bin/kanban`;
+}
+
 // Is bare `kanban` resolvable on PATH? Purely informational — prints a ✓ if a
 // kanban shim is found, or a · hint with the one-line install if not. The legacy
 // fkanban shim remains accepted during the alias window.
@@ -1187,11 +1215,9 @@ async function reportShim(
     return;
   }
 
-  // Point at this repo's one-line installer so the hint is copy-pasteable from
-  // any cwd (the `cd …` makes `bun run install-cli` resolve this repo's script).
   const cliPath = fileURLToPath(import.meta.url); // .../src/commands/doctor.ts
   const repoRoot = cliPath.replace(/\/src\/commands\/doctor\.ts$/, "");
-  const hint = `(cd "${repoRoot}" && bun run install-cli)`;
+  const hint = shimInstallHint(repoRoot);
   print(`· no global \`kanban\` shim on PATH (optional) — install with: ` + hint);
   onCheck?.({
     name: "global `kanban` shim on PATH",
