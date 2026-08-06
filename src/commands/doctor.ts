@@ -1081,6 +1081,11 @@ function reportMcpEntrypoint(
 // distinction is the whole point: a long-lived `kanban mcp` server and the
 // shim on PATH can resolve to different version directories, and the honest
 // answer is the tree that is actually loaded.
+//
+// Under the compiled artifact this returns the module's EMBEDDED path
+// (`/$bunfs/root/kanban`), which is not a directory on disk. That is expected
+// and handled: `resolveRunningBuild` falls back to the executable whenever the
+// path it is handed does not exist. See src/host_track.ts.
 export function runningSourceRoot(): string {
   return fileURLToPath(import.meta.url).replace(/\/src\/commands\/doctor\.ts$/, "");
 }
@@ -1119,7 +1124,7 @@ export function reportRunningBuild(
       // A worktree or fresh clone. There is no `current` to be behind; saying
       // "stale" here would be false, and saying "✓ current" would be a claim
       // nothing was checked against.
-      info("running build", `${running.sourceRoot} (not a host-track install — nothing to compare)`);
+      info("running build", `${running.runningRoot} (not a host-track install — nothing to compare)`);
       return;
 
     case "indeterminate":
@@ -1132,11 +1137,11 @@ export function reportRunningBuild(
       return;
 
     case "current":
-      check(true, name, shortBuild(running.build, running.sourceRoot));
+      check(true, name, shortBuild(running.build, running.runningRoot));
       return;
 
     case "superseded": {
-      const mine = shortBuild(running.build, running.sourceRoot);
+      const mine = shortBuild(running.build, running.runningRoot);
       const installed = shortBuild(running.currentBuild, running.currentRoot);
       check(
         false,

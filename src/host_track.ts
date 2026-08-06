@@ -33,6 +33,28 @@
 //
 // See brain
 // `papercut-kanban-mcp-server-pins-a-version-path-at-spawn-so-refresh-never-reaches-it`.
+//
+// ## Two install shapes, and why the answer cannot come from `import.meta.url`
+//
+// The exec line above describes a SOURCE-PACK install, which is what host-track
+// served when this module was written (2026-08-04). It is no longer what ships.
+// `scripts/build-artifact.sh` produces `bun build --compile` executables and
+// host-track installs those, so the real exec line is:
+//
+//     ~/.host-track/apps/fkanban/versions/<oid>/dist/kanban …
+//
+// Inside such a binary every module's `import.meta.url` resolves into the
+// executable's EMBEDDED filesystem — `/$bunfs/root/kanban` — a path that exists
+// in no install root and never will. Asking containment about it answers
+// `unmanaged` for a correctly installed CLI, and `unmanaged` is precisely the
+// "nothing to compare, no problem here" verdict. Measured 2026-08-06 after
+// host-track flipped this app to the artifact install: a genuinely SUPERSEDED
+// compiled build reported `unmanaged`, so the ✗ this module exists to raise had
+// become unreachable on the only shape that ships.
+//
+// So the rule these helpers enforce: **the running tree must be identified by a
+// path that exists on disk.** When the module's own URL is embedded, the
+// executable is the only such path the process has, and it is the answer.
 
 import * as fs from "node:fs";
 import { isAbsolute, relative } from "node:path";
@@ -102,6 +124,61 @@ export function pathWithin(path: string, root: string): boolean {
   return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/**
+ * The `<root>/versions/<oid>` ancestor of a path — the unit host-track installs
+ * and that `current` points at — or null when the path has no such ancestor
+ * (a legacy flat checkout, a dev worktree).
+ *
+ * Needed because the two install shapes run from different DEPTHS of the same
+ * installed tree: a source pack runs `versions/<oid>/src/cli.ts` (the version
+ * directory itself) while the compiled artifact runs `versions/<oid>/dist/kanban`
+ * (two levels down). Both must compare equal to `realpath(<root>/current)`,
+ * which always names the version directory.
+ */
+export function versionRootOf(path: string | null): string | null {
+  if (!path) return null;
+  const m = /^(.*\/versions\/[^/]+)(?:\/.*)?$/.exec(path);
+  return m ? m[1]! : null;
+}
+
+/**
+ * Can this path be resolved to a real location on disk?
+ *
+ * NOT `existsSync`, and not `statSync` either — measured 2026-08-06, both
+ * SUCCEED for a module inside a compiled binary's embedded filesystem
+ * (`/$bunfs/root/kanban` stats clean, with `ino=0 dev=0`). An `existsSync`
+ * gate here is a no-op that looks like a fix. `realpathSync.native` is the one
+ * call that distinguishes them: it throws ENOENT on the embedded path and
+ * resolves on a real one.
+ *
+ * That is also the property the caller actually needs. An install root has to
+ * be a real directory that `current` can point at; a path that resolves to
+ * nothing cannot be one, whatever the reason.
+ */
+function isOnDisk(path: string): boolean {
+  try {
+    fs.realpathSync.native(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The on-disk path identifying the tree THIS process is running from.
+ *
+ * `sourceRootInput` is the caller's `import.meta.url`-derived root, which is
+ * the right answer for a source install and an unusable one for a compiled
+ * binary (see the embedded-filesystem note at the top of this file). The test
+ * is a property rather than a `/$bunfs/` prefix match: if the module path
+ * resolves nowhere on disk it cannot be an install root under any layout, and
+ * the executable is the only real artifact left to point at.
+ */
+export function runningTreePath(sourceRootInput: string, execPath: string = process.execPath): string {
+  if (isOnDisk(sourceRootInput)) return realpathOrSelf(sourceRootInput);
+  return realpathOrSelf(execPath);
+}
+
 export function pathWithinAnyHostTrack(path: string): { ok: boolean; root: string } {
   const roots = hostTrackInstallRoots();
   for (const root of roots) {
@@ -133,8 +210,14 @@ export function pathWithinAnyHostTrack(path: string): { ok: boolean; root: strin
  */
 export type RunningBuild = {
   status: "current" | "superseded" | "unmanaged" | "indeterminate";
-  /** realpath of the directory this process's source tree lives in */
-  sourceRoot: string;
+  /**
+   * realpath of the installed tree this process is running — the
+   * `versions/<oid>` directory when there is one, else the source tree.
+   * Named for what it is rather than `sourceRoot`: under the compiled artifact
+   * there is no source tree involved, and calling it one is how the previous
+   * version of this module came to ask containment about `/$bunfs/root/kanban`.
+   */
+  runningRoot: string;
   /** the host-track app root containing sourceRoot, or null when unmanaged */
   installRoot: string | null;
   /** realpath of `<installRoot>/current`, or null when unresolvable */
@@ -155,40 +238,51 @@ function buildIdOf(root: string | null): string | null {
 }
 
 /**
- * Resolve the running build for a source tree. `sourceRootInput` is the
- * repo/install root of the code that is executing — callers pass their own
- * `import.meta.url`-derived root so this reports the tree that is actually
- * loaded, not whatever `command -v kanban` would resolve today.
+ * Resolve the running build. `sourceRootInput` is the repo/install root of the
+ * code that is executing — callers pass their own `import.meta.url`-derived
+ * root so this reports the tree that is actually loaded, not whatever
+ * `command -v kanban` would resolve today. When that root is embedded rather
+ * than on disk (the compiled artifact), the executable answers instead; both
+ * are then normalised to the `versions/<oid>` directory so the comparison
+ * against `current` is between like and like.
+ *
+ * `execPath` is injectable for tests only; production callers must use the
+ * default, which is the executable this process was started from.
  */
-export function resolveRunningBuild(sourceRootInput: string): RunningBuild {
-  const sourceRoot = realpathOrSelf(sourceRootInput);
-  const match = pathWithinAnyHostTrack(sourceRoot);
+export function resolveRunningBuild(
+  sourceRootInput: string,
+  execPath: string = process.execPath,
+): RunningBuild {
+  const tree = runningTreePath(sourceRootInput, execPath);
+  const runningRoot = versionRootOf(tree) ?? tree;
+  const match = pathWithinAnyHostTrack(runningRoot);
   if (!match.ok) {
     return {
       status: "unmanaged",
-      sourceRoot,
+      runningRoot,
       installRoot: null,
       currentRoot: null,
-      build: buildIdOf(sourceRoot),
+      build: buildIdOf(runningRoot),
       currentBuild: null,
     };
   }
 
   const installRoot = match.root;
   const currentLink = `${installRoot}/current`;
-  const currentRoot = fs.existsSync(currentLink) ? realpathOrSelf(currentLink) : null;
-  const build = buildIdOf(sourceRoot);
+  const currentLinkTarget = fs.existsSync(currentLink) ? realpathOrSelf(currentLink) : null;
+  const currentRoot = currentLinkTarget ? versionRootOf(currentLinkTarget) ?? currentLinkTarget : null;
+  const build = buildIdOf(runningRoot);
   const currentBuild = buildIdOf(currentRoot);
 
   // No `current` at all: the legacy flat checkout layout, or a partially
   // installed root. Nothing to compare against — say so rather than implying
   // freshness we did not verify.
   if (!currentRoot) {
-    return { status: "indeterminate", sourceRoot, installRoot, currentRoot, build, currentBuild };
+    return { status: "indeterminate", runningRoot, installRoot, currentRoot, build, currentBuild };
   }
 
-  const status = currentRoot === sourceRoot ? "current" : "superseded";
-  return { status, sourceRoot, installRoot, currentRoot, build, currentBuild };
+  const status = currentRoot === runningRoot ? "current" : "superseded";
+  return { status, runningRoot, installRoot, currentRoot, build, currentBuild };
 }
 
 /** Short display form for a build: the oid, abbreviated, or the raw path. */
