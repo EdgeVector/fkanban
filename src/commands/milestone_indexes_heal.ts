@@ -123,16 +123,28 @@ export type MilestoneIndexesHealResult = {
   /** Enumerated slugs that point-read back to a live milestone. */
   milestones_scanned: number;
   milestone_card_children_scanned: number;
+  /**
+   * The four counters below name WHICH index and WHICH direction.
+   *
+   * `milestones_written` and `cards_written` were deprecated aliases of
+   * `board_milestone_upserts` / `milestone_card_upserts` (added 2026-08-01,
+   * removed 2026-08-06). Do not re-add them "for compatibility": the removal
+   * was gated on a consumer sweep, not on a deprecation clock. Nothing read
+   * them — not `~/.routines/prompts`, not last-stack scripts, not this repo's
+   * own tests/docs/scripts, and `milestone_indexes_heal` is CLI-only (it is not
+   * one of the MCP tools, so no declared outputSchema carried them). The only
+   * six occurrences in the fleet were their own definition.
+   *
+   * They were also lossy in the one way that matters here: both aliases carried
+   * only the UPSERT half, so a reader reaching for "how much did the heal
+   * write" silently missed every removal.
+   */
   board_milestone_upserts: number;
   board_milestone_removals: number;
   milestone_card_upserts: number;
   milestone_card_removals: number;
   issued: number;
   deferred: number;
-  /** @deprecated use board_milestone_upserts */
-  milestones_written: number;
-  /** @deprecated use milestone_card_upserts */
-  cards_written: number;
   text: string;
   direct_milestone_card_payload_upsert: boolean;
 };
@@ -347,8 +359,6 @@ export async function milestoneIndexesHealResult(opts: {
       blocked: false,
       issued: 0,
       deferred: 0,
-      milestones_written: 0,
-      cards_written: 0,
       direct_milestone_card_payload_upsert: directMilestoneCardPayloadUpsert,
       text:
         "milestone indexes heal: board_milestones and milestone_cards not bound in config — run `fkanban init` first",
@@ -565,8 +575,6 @@ export async function milestoneIndexesHealResult(opts: {
     milestone_card_removals: milestoneCardRemovals,
     issued,
     deferred,
-    milestones_written: boardMilestoneUpserts,
-    cards_written: milestoneCardUpserts,
     direct_milestone_card_payload_upsert: directMilestoneCardPayloadUpsert,
     text,
   };
