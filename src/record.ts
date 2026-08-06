@@ -5,6 +5,7 @@ import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, t
 import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
 import {
   patchCardListIndex,
+  patchBoardListIndex,
   readCardListIndex,
   writeCardListIndex,
   cardListIndexIsSuperseded,
@@ -4192,7 +4193,24 @@ export async function requireBoard(node: NodeClient, cfg: Config, slug: string):
 // Write paths can recover a missing board record when live cards still point at
 // that board: the cards prove the board slug is real user state, so recreate the
 // board metadata with default columns instead of stranding add/move.
-export async function ensureBoardRecord(node: NodeClient, cfg: Config, slug: string): Promise<Board> {
+//
+// A BOARD IS TWO WRITES, NOT ONE. The Board record is truth; `all_boards` is
+// what `listBoards` actually reads, and it re-seeds from truth only when the row
+// is ABSENT — a readable rollup that omits a live board is trusted forever. So
+// healing only the primary leaves the board permanently invisible to
+// `list`/`pickup`/`overlap`/the milestone portfolio while `show <slug>` keeps
+// working, which is the split that makes this kind of drift so hard to read.
+// Every other Board write in the repo patches both (`boardCreateCmd` on either
+// branch, `board rm` on removal); this one is not an exception.
+//
+// `warn` reports a rollup patch that could not be applied. It does NOT fail the
+// caller — see the catch below for why that direction is deliberate.
+export async function ensureBoardRecord(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+  opts: { warn?: (msg: string) => void } = {},
+): Promise<Board> {
   // The self-heal below infers a board's existence from cards that point at it,
   // so it is only as trustworthy as those pointers. An EMPTY board slug is not
   // a pointer: a card storing `board: ""` is a card that was never placed —
@@ -4226,6 +4244,32 @@ export async function ensureBoardRecord(node: NodeClient, cfg: Config, slug: str
     fields: boardToFields(healed),
     keyHash: healed.slug,
   });
+
+  // REPORT, NEVER REFUSE — the rule `test/milestone-reconcile-index-read-failure.test.ts`
+  // settled for heal paths, applied here in the direction the call site demands.
+  //
+  // `patchBoardListIndex` legitimately throws: `index_unreadable` when the row is
+  // there but its payload does not come back (an ordinary shed), `cas_conflict`
+  // after four losing retries. In `boardCreateCmd` letting that propagate is
+  // right — the user asked for a board, and an unlisted board is not one.
+  //
+  // Here the caller asked to move/add/remove a CARD and the heal is a side
+  // effect. Rethrowing would abort that write while keeping the Board record it
+  // just created, and the retry meets the same shed; swallowing would leave the
+  // board silently invisible, which is the bug this call exists to close. So the
+  // caller's write completes and the part that did not is named, with its repair.
+  try {
+    await patchBoardListIndex(node, cfg, toBoardSummary(healed), "upsert");
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    (opts.warn ?? console.error)(
+      `kanban: warning: board "${slug}" was recreated from live cards, but the ` +
+        `all_boards rollup could not be patched (${reason}). The board and its ` +
+        `cards stay invisible to \`kanban list\`, \`pickup\`, and \`overlap\` ` +
+        `(\`kanban show <slug>\` still works) until the rollup is repaired: ` +
+        `run \`kanban groom board-list-heal --apply\`.`,
+    );
+  }
   return healed;
 }
 
