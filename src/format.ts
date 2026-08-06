@@ -33,6 +33,17 @@ export interface DepResult {
   dep: string;
   action: "added" | "removed";
   deps: string[];
+  /**
+   * Set only when the edge write ALSO moved the card. `dep add` demotes a
+   * default/todo card to backlog, because default/todo is the pickup claim
+   * lane and a card with an unfinished dep is not claimable there.
+   *
+   * The demote is deliberate and pinned (test/add-update-board.test.ts), but it
+   * was invisible: the result type could not express a column change, so
+   * neither the CLI line nor the MCP payload mentioned that the card had just
+   * left the pickup lane. An operator who ran `dep add` saw only the edge.
+   */
+  demoted?: { from: string; to: string };
 }
 
 export interface TagResult {
@@ -119,7 +130,16 @@ export function formatMove(res: MoveResult, json?: boolean): string {
 export function formatDep(res: DepResult, json?: boolean): string {
   const verb = res.action === "added" ? "now depends on" : "no longer depends on";
   const deps = res.deps.join(", ") || "none";
-  return emit(res, `${res.slug} ${verb} ${res.dep} (deps: ${deps})`, json);
+  // Name the column change in the SAME line as the edge. A separate warning
+  // line is what `move` does for its lane clear, and the lesson from the
+  // overlap gate is that the conclusion line is the one that gets read: an
+  // operator who scans `... now depends on ...` and moves on must not be able
+  // to miss that the card left the pickup lane.
+  const demoted = res.demoted
+    ? `; demoted ${res.demoted.from} → ${res.demoted.to} ` +
+      "(default/todo is the pickup claim lane; a card with an unfinished dep is not claimable there)"
+    : "";
+  return emit(res, `${res.slug} ${verb} ${res.dep} (deps: ${deps})${demoted}`, json);
 }
 
 export function formatTag(res: TagResult, json?: boolean): string {

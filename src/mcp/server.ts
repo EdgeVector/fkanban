@@ -24,6 +24,23 @@ import { rmCmd } from "../commands/rm.ts";
 import { boardCreateCmd, boardListResult, boardRmCmd } from "../commands/board.ts";
 import { milestoneAddCmd, milestoneDetailResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../commands/milestone.ts";
 import { depAddCmd, depRmCmd } from "../commands/dep.ts";
+// Render write confirmations through the SAME formatters the CLI uses. Every
+// one of these was a hand-built template literal duplicating a `format*`
+// function, and two had already drifted: `move` dropped the `; promoted … to
+// todo` suffix, and `mark` said "marked X" where the CLI says "marked card X".
+// Duplicated prose meant an honesty fix to a formatter reached operators and
+// silently missed agents — the larger caller. One renderer, no second copy to
+// forget. Pinned by test/mcp-write-text-matches-cli-formatters.test.ts.
+import {
+  formatAdd,
+  formatBoardCreate,
+  formatBoardRm,
+  formatDep,
+  formatMark,
+  formatMove,
+  formatRm,
+  formatTag,
+} from "../format.ts";
 import { tagAddCmd, tagRmCmd } from "../commands/tag.ts";
 import { runDoctorStructured } from "../commands/doctor.ts";
 import { PICKUP_CATEGORIES } from "../pickup.ts";
@@ -912,7 +929,7 @@ export function createFkanbanMcpServer(
         if (args.pr_url !== undefined) o.prUrl = args.pr_url;
         if (args.branch !== undefined) o.branch = args.branch;
         const res = await addCmd(o);
-        return toolResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
+        return toolResult(formatAdd(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -943,7 +960,7 @@ export function createFkanbanMcpServer(
         const line = requireArg(args.line, "marker line", 'Pass a non-empty `line`, e.g. "PROGRESS 2026-08-03: …".');
         const { cfg, node } = requireConfig();
         const res = await markCmd({ cfg, node, slug, line });
-        return toolResult(`marked ${res.slug} → ${res.board}/${res.column}`, res);
+        return toolResult(formatMark(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1017,7 +1034,7 @@ export function createFkanbanMcpServer(
         if (args.pr_url !== undefined) o.prUrl = args.pr_url;
         if (args.branch !== undefined) o.branch = args.branch;
         const res = await setCmd(o);
-        return toolResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
+        return toolResult(formatAdd(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1043,6 +1060,11 @@ export function createFkanbanMcpServer(
         slug: z.string(),
         from: z.string(),
         to: z.string(),
+        // Moving a card into the terminal column promotes newly-unblocked
+        // default/backlog dependents to todo. The CLI has always said so; the
+        // MCP text dropped it and the schema never named it, so the field
+        // reached agents only as an undeclared passenger.
+        promotedDependents: z.array(z.string()).optional(),
       },
     },
     async (args) => {
@@ -1061,7 +1083,7 @@ export function createFkanbanMcpServer(
         if (args.position !== undefined) o.position = args.position;
         if (args.force !== undefined) o.force = args.force;
         const res = await moveCmd(o);
-        return toolResult(`moved ${res.slug}: ${res.from} → ${res.to}`, res);
+        return toolResult(formatMove(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1110,7 +1132,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add a dependency",
       description:
-        "Make `slug` depend on the existing live card `dep`, updating the canonical deps field without touching tags or body. `slug` is then blocked (cannot enter doing/done) until `dep` reaches the `done` column.",
+        "Make `slug` depend on the existing live card `dep`, updating the canonical deps field without touching tags or body. `slug` is then blocked (cannot enter doing/done) until `dep` reaches the `done` column. ALSO MOVES THE CARD when it is in default/todo: that is the pickup claim lane, so a card given an unfinished dep is demoted to backlog and will not be picked up. Read `demoted` — it is set only when this call moved the card.",
       annotations: { title: "Add a dependency", idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("The dependent card."),
@@ -1121,6 +1143,9 @@ export function createFkanbanMcpServer(
         dep: z.string(),
         action: z.enum(["added", "removed"]),
         deps: z.array(z.string()),
+        // Present only when the edge write also moved the card out of the
+        // pickup lane. Absent means the card stayed where it was.
+        demoted: z.object({ from: z.string(), to: z.string() }).optional(),
       },
     },
     async (args) => {
@@ -1129,7 +1154,7 @@ export function createFkanbanMcpServer(
         const dep = requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
         const res = await depAddCmd({ cfg, node, slug, dep });
-        return toolResult(`${res.slug} now depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
+        return toolResult(formatDep(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1159,7 +1184,7 @@ export function createFkanbanMcpServer(
         const dep = requireArg(args.dep, "dependency slug", "Pass a non-empty `dep`.");
         const { cfg, node } = requireConfig();
         const res = await depRmCmd({ cfg, node, slug, dep });
-        return toolResult(`${res.slug} no longer depends on ${res.dep} (deps: ${res.deps.join(", ") || "none"})`, res);
+        return toolResult(formatDep(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1192,7 +1217,7 @@ export function createFkanbanMcpServer(
         }
         const { cfg, node } = requireConfig();
         const res = await tagAddCmd({ cfg, node, slug, tag: args.tags });
-        return toolResult(`tagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
+        return toolResult(formatTag(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1225,7 +1250,7 @@ export function createFkanbanMcpServer(
         }
         const { cfg, node } = requireConfig();
         const res = await tagRmCmd({ cfg, node, slug, tag: args.tags });
-        return toolResult(`untagged ${res.slug} ${res.tag.join(", ") || "nothing"} (tags: ${res.tags.join(", ") || "none"})`, res);
+        return toolResult(formatTag(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1316,7 +1341,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const res = await rmCmd({ cfg, node, slug });
-        return toolResult(`removed card ${res.slug}`, res);
+        return toolResult(formatRm(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1349,7 +1374,7 @@ export function createFkanbanMcpServer(
         if (args.columns !== undefined) o.columns = args.columns;
         if (args.body !== undefined) o.body = args.body;
         const res = await boardCreateCmd(o);
-        return toolResult(`${res.action} board ${res.slug}`, res);
+        return toolResult(formatBoardCreate(res), res);
       } catch (err) {
         return errorResult(err);
       }
@@ -1408,7 +1433,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "board slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const res = await boardRmCmd({ cfg, node, slug, force: args.force });
-        return toolResult(`removed board ${res.slug}`, res);
+        return toolResult(formatBoardRm(res), res);
       } catch (err) {
         return errorResult(err);
       }

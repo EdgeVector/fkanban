@@ -13,6 +13,7 @@ import {
   assertDepUnblocked,
   assertLivePrMilestone,
   sanitizeDefaultTodoLaneMetadata,
+  warnClearedTodoLaneMetadata,
   applyDbLocatorForWrite,
   assertDbLocatorMatchesCard,
   depStatus,
@@ -170,14 +171,11 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   // A requeue into default/todo drops in-flight metadata by design. Say which
   // fields went: the operator moving a card back is exactly who needs to know
   // the PR link no longer hangs off it, and `move` prints nothing else about it.
-  const clearedLaneFields = sanitizeDefaultTodoLaneMetadata(updated);
-  if (clearedLaneFields.length > 0) {
-    console.error(
-      `warning: cleared ${clearedLaneFields.join(" and ")} on "${updated.slug}" — ` +
-        "default/todo is the pickup claim lane and in-flight metadata blocks the claim. " +
-        `Re-attach after moving it back to doing (previous pr_url: ${card.pr_url || "none"}).`,
-    );
-  }
+  warnClearedTodoLaneMetadata({
+    slug: updated.slug,
+    cleared: sanitizeDefaultTodoLaneMetadata(updated),
+    previousPrUrl: card.pr_url,
+  });
   let milestoneState = "";
   const msSlug = (updated.milestone ?? "").trim();
   if (msSlug) {
