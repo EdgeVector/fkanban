@@ -1,10 +1,19 @@
 /**
  * A live-but-SPARSE proof card must not read as a missing one.
  *
- * A LastDB query returns a row only when every projected field has an atom on
- * it, so a card missing one field is dropped from a wide read with no error —
- * indistinguishable from deleted. `findCard` projects ~20 fields, so using it to
- * answer "does this exist?" inherits that false negative.
+ * The node this fake models is DELIBERATELY STRICTER than the real one, and
+ * that is the point of the test rather than a bug in it. `projectionFaithful-
+ * Node` below implements `any_missing` — a row is returned only when every
+ * projected field has an atom — which `scripts/probe-card-projection-sparse.ts`
+ * measured to be FALSE on Card (a 5-of-23-atom live row comes back from the
+ * 23-field read; the gate is the hash field `slug`). So on today's node a wide
+ * `findCard` does NOT drop a sparse proof card, and these gates would hold even
+ * with no guard at all.
+ *
+ * They are still worth pinning under the strict rule: `hash_else_lead` is a
+ * measurement of one node build, not a contract fkanban is owed, and the cost
+ * of holding under a stricter node is one key-only read on a path that already
+ * decided to report failure. See `test/fake-node.ts` for the model of record.
  *
  * The destructive instance (board-cards-heal deleting the membership of a sparse
  * card) was fixed in fkanban 8702be5 and is covered by
@@ -14,10 +23,9 @@
  * for a card sitting right there.
  *
  * Existence is a key-only question, so it is asked with a key-only read
- * (`cardExists`, which projects `slug` alone and cannot false-negative).
- * Hydration still needs the fields — but when a hydrating read comes back empty,
- * absence is confirmed key-only before it is reported, so "sparse" and "absent"
- * get different errors.
+ * (`cardExists`, which projects `slug` alone). Hydration still needs the fields
+ * — but when a hydrating read comes back empty, absence is confirmed key-only
+ * before it is reported, so "sparse" and "absent" get different errors.
  */
 import { describe, expect, test } from "bun:test";
 
@@ -41,9 +49,10 @@ const cfg: Config = {
 type StoredRecord = { keyHash: string; rangeKey: string | null; fields: Record<string, unknown> };
 
 /**
- * A node that drops rows the way LastDB does: a row is returned only if EVERY
- * requested field is present on it. A fake that ignores `fields` cannot
- * reproduce any of this.
+ * A node stricter than LastDB: a row is returned only if EVERY requested field
+ * is present on it (`any_missing`). Not what the node was measured to do — see
+ * the file header — but a fake that ignores `fields` cannot reproduce any of
+ * this, and a guard that holds here holds under the measured rule too.
  */
 function projectionFaithfulNode(seed: {
   cards: Array<Record<string, unknown>>;

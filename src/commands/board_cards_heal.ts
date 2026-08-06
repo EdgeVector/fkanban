@@ -700,17 +700,17 @@ export async function boardCardsHealResult(
     if (!point) {
       if (rows.length === 0) continue;
 
-      // CONFIRM the absence before reaping. The point-read above projects ~20
-      // card fields, and LastDB drops a row from a result set when any
-      // projected field has no atom on it — so "no rows" means EITHER the card
-      // is gone OR it is alive and merely sparse. Those two are
-      // indistinguishable from a wide read, and this branch deletes board
-      // membership: guessing wrong takes a live card off the board.
+      // CONFIRM the absence before reaping. This branch deletes board
+      // membership, so it takes a second, independent read before acting.
       //
-      // `cardExists` projects the hash key alone, so it cannot false-negative.
-      // If it says the card is there, the row is not an orphan — it is a live
-      // card whose Card record is missing a field, which the upsert path
-      // repairs rather than deletes.
+      // It was written against a projection rule that is false on Card ("a wide
+      // read drops a sparse row"); `scripts/probe-card-projection-sparse.ts`
+      // measured a 5-of-23-atom live row coming back from the 23-field read, so
+      // the wide point-read above does NOT false-negative on sparseness. What
+      // the two reads still disagree about is the post-delete husk: the wide
+      // read drops it (`isKeyOnlyRow`), `cardExists` cannot see it as anything
+      // but a live card, and so this branch SKIPS inside the 113–1072ms window
+      // rather than reaping. The next run reaps it. See {@link cardExists}.
       if (await cardExists(opts.node, opts.cfg, slug)) {
         for (const row of rows) {
           actions.push({
@@ -723,7 +723,7 @@ export async function boardCardsHealResult(
             action: "noop-match",
             reason:
               "card is present on a slug-only read but absent from the wide " +
-              "projection — sparse Card record, NOT an orphan; refusing to delete membership",
+              "projection — most likely a delete still settling; refusing to delete membership",
           });
         }
         continue;

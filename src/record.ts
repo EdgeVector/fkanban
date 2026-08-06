@@ -2388,13 +2388,13 @@ export const CARD_HASH_FIELD = "slug";
  * would classify a live card with an unset `assignee` as a husk.
  *
  * The projection guard is the other half, and it is what keeps {@link cardExists}
- * honest. That read projects the hash field ALONE precisely so a merely SPARSE
- * card cannot read as absent and get its board membership reaped
- * (`board_cards_heal`). Under a hash-field-only projection a husk and a live
- * card are byte-identical, so there is no evidence to act on — this returns
- * `false` and `cardExists` keeps its existing semantics unchanged. Widening
- * that read to make it tombstone-aware would hand the reap path exactly the
- * false negative it was built to avoid.
+ * honest. Under a hash-field-only projection a husk and a live card are
+ * byte-identical, so there is no evidence to act on — this returns `false` and
+ * `cardExists` keeps its existing semantics unchanged. That is deliberate:
+ * `cardExists` authorizes the reap in `board_cards_heal`, and making it
+ * tombstone-aware would move the reap INTO the 113–1072ms window a deleted
+ * card is still readable in, with nothing to distinguish a husk from a card
+ * whose atoms have not landed yet.
  */
 export function isKeyOnlyRow(
   row: QueryRow,
@@ -3895,12 +3895,17 @@ export async function findCard(node: NodeClient, cfg: Config, slug: string): Pro
  * `isHiddenCard` needs them (drop `tags` and a tombstoned card reads as a live
  * proof card).
  *
- * Deliberately narrow, and not only to save bytes: LastDB returns a row only
- * when EVERY projected field has an atom on it, so a 23-field projection makes
- * a card that is merely missing one field read as ABSENT — the exact false
- * negative `cardExists` exists to undo. Six fields is six chances to miss
- * instead of twenty-three. Measured on the live primary 2026-07-31: the wide
- * proof read cost ~236ms, a 6-field read ~120ms.
+ * Deliberately narrow to save bytes and time: measured on the live primary
+ * 2026-07-31, the wide proof read cost ~236ms and a 6-field read ~120ms.
+ *
+ * It is NOT narrow to dodge a projection drop, though it said so until
+ * 2026-08-06. The rule this docstring used to assert — a row is returned only
+ * when EVERY projected field has an atom — is `any_missing`, which
+ * `test/fake-node.ts` marks superseded and which
+ * `scripts/probe-card-projection-sparse.ts` measured to be FALSE on Card: a
+ * live row carrying 5 of 23 atoms is returned by the full 23-field point read.
+ * The gate is HASH-ELSE-LEAD, and for Card the hash field is `slug`, which
+ * every card read projects. Widening a Card read costs latency, not recall.
  */
 export const PROOF_CARD_FIELDS = ["slug", "board", "column", "milestone", "tags", "body"];
 
@@ -3916,18 +3921,37 @@ export async function findProofCard(
 /**
  * Does a Card record exist for `slug`? Projects `slug` and nothing else.
  *
- * Every other card read projects ~20 fields, and LastDB returns a row only if
- * EVERY projected field has an atom on it — so a card missing one field reads
- * as ABSENT, with no error to distinguish it from a card that was deleted.
- * Anywhere that merely asks "does this exist?" that is a false negative, and
- * where the answer authorizes a DELETE it is a false negative that destroys
- * data: `board-cards-heal` treats a missed point-read as proof the card is
- * gone and reaps its board membership, which would silently drop a live card
- * off the board.
+ * ## The reason this was built is not the reason it is kept
  *
- * `slug` is the hash key, so it is present on every row that exists at all.
- * This read cannot produce that false negative. Use it to CONFIRM absence
- * before acting on absence — never to fetch a card.
+ * It was built against `any_missing` — "LastDB returns a row only if EVERY
+ * projected field has an atom on it" — under which a card missing one field
+ * reads as ABSENT from the ~20-field reads everything else uses, and
+ * `board-cards-heal` reaps the board membership of a live card.
+ *
+ * That rule is FALSE on Card, measured on the live primary 2026-08-06 with
+ * constructed witnesses (`scripts/probe-card-projection-sparse.ts`, 13
+ * projections x 4 rows: HASH-ELSE-LEAD 52/52, `any_missing` 41/52). A live row
+ * carrying 5 of 23 atoms — no `assignee` atom at all, not `assignee: ""` — is
+ * RETURNED by the full 23-field point read, and `findCard` finds it. The gate
+ * is the hash field `slug`, which every card read already projects, so a wide
+ * Card read cannot produce the false negative this guard was written to undo.
+ *
+ * ## What it still buys, which is why it stays
+ *
+ * Since {@link isKeyOnlyRow}, the wide reads drop the post-delete HUSK — a row
+ * whose atoms are gone but whose key still resolves — and this read does not,
+ * because under a hash-field-only projection a husk and a live card are
+ * byte-identical and the guard has no evidence to act on. Measured on the same
+ * run: for a hash-only row, `findCard` returns null and `cardExists` returns
+ * true.
+ *
+ * So the one shape the two reads disagree about is a delete that has been
+ * accepted and not yet applied (window 113–1072ms), and the disagreement makes
+ * `board-cards-heal` SKIP rather than reap inside that window. The next run
+ * reaps it. On a branch that deletes data, lagging is the right way to be
+ * wrong.
+ *
+ * Use it to CONFIRM absence before acting on absence — never to fetch a card.
  */
 export async function cardExists(
   node: NodeClient,

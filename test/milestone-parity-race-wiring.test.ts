@@ -49,11 +49,11 @@ const MC_LEAVES = milestoneCardSk("todo", "2", "leaves");
 const BM_STAYS = boardMilestoneSk("active", "1", "stays-ms");
 const BM_LEAVES = boardMilestoneSk("active", "2", "leaves-ms");
 
-// The fake defaults to `any_missing`, which drops a row when ANY projected
-// field lacks an atom — so a wide read of these partitions returns ZERO rows
-// and every test below would pass for the wrong reason. `hash_else_lead` is
-// the rule the node was measured to apply, and these tests are about the
-// projection, so they use it.
+// `hash_else_lead` is the rule the node was measured to apply, and also the
+// fake's default; it is named explicitly because these tests ARE about the
+// projection and the `hashFields` below only mean anything under it. Under the
+// superseded `any_missing` a wide read of these partitions returns ZERO rows
+// and every test below passes for the wrong reason.
 const measured = () =>
   fakeNode({
     projectionRule: "hash_else_lead",
