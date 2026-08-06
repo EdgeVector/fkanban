@@ -484,9 +484,3 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   }
   return renderJsonPage("cards", out, total, { jsonArray: opts.jsonArray });
 }
-
-export function summarize(cards: Card[]): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const c of cards) out[c.column] = (out[c.column] ?? 0) + 1;
-  return out;
-}
