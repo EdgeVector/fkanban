@@ -721,14 +721,16 @@ export async function deleteBoardCardRowsBySk(
 
 /**
  * Read exactly one BoardCards row, keyed by its full sk, at the WIDE
- * projection — and treat "not returned" as "not whole".
+ * projection — and treat "not returned" as "not safe to write narrowly".
  *
- * It works because of a LastDB projection rule that is normally a hazard: a
- * query returns a row only when EVERY projected field has an atom on it (see
- * {@link BOARD_CARDS_SPINE_FIELDS}). So asking for all 24 fields answers two
- * questions in one round trip — does the row exist, and is it whole — and a
- * `null` return deliberately does not distinguish them, because every caller's
- * response to both is the same.
+ * LastDB projections are filters under **HASH-ELSE-LEAD** (gate = hash field
+ * when projected, else leading field — see `test/fake-node.ts`). The
+ * superseded `any_missing` claim ("EVERY projected field has an atom") is not
+ * current node truth. On BoardCards the live catalog hash is often the sparse
+ * multi-key field `milestone`, so a wide projection that includes that gate can
+ * still drop under-projected rows (see {@link BOARD_CARDS_SPINE_FIELDS} and
+ * the 2026-07-23 incident). A `null` return means absent or ungated — every
+ * caller's response is the same: do not patch narrowly.
  *
  * Measured cost: **3-6ms** on the post-2026-08-05T15:40Z binary
  * (`scripts/probe-prewrite-read-vs-blind-wide.ts`, 24 samples). The 207ms

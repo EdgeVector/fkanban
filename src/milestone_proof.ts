@@ -39,11 +39,12 @@
  *
  * `proofGate` additionally requires `kind=validation`. This function does not,
  * and the omission is load-bearing rather than an oversight: `PROOF_CARD_FIELDS`
- * does not project `kind`, because LastDB returns a row only when EVERY
- * projected field has an atom on it, so widening the projection to fetch `kind`
- * would make a card merely missing that one field read as ABSENT — turning a
- * healthy proof into a false `missing-proof-card`. A read-time integrity check
- * that invents failures is worse than one with a stated blind spot.
+ * does not project `kind`. Under HASH-ELSE-LEAD (Card hash = `slug`) a sparse
+ * row missing only `kind` still returns from a wide read — so this is no longer
+ * a projection-drop dodge — but keeping the proof projection narrow still saves
+ * latency (measured ~120ms vs ~236ms wide) and avoids inventing a policy check
+ * this verdict deliberately does not own. A read-time integrity check that
+ * invents failures is worse than one with a stated blind spot.
  *
  * It is also the right cut on the merits. `kind=validation` is a POLICY property
  * — it keeps `pickup` from handing the proof card out as implementation work —
