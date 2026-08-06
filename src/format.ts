@@ -185,7 +185,11 @@ export function formatMark(res: MarkResult, json?: boolean): string {
 
 export function formatMove(res: MoveResult, json?: boolean): string {
   const promoted = res.promotedDependents ?? [];
-  const suffix = promoted.length > 0 ? `; promoted ${promoted.join(", ")} to todo` : "";
+  const parts: string[] = [];
+  if (res.claim === "stamped" && res.assignee) parts.push(`claimed @${res.assignee}`);
+  else if (res.claim === "unclaimed") parts.push("unclaimed");
+  if (promoted.length > 0) parts.push(`promoted ${promoted.join(", ")} to todo`);
+  const suffix = parts.length > 0 ? `; ${parts.join("; ")}` : "";
   return emit(res, `moved ${res.slug}: ${res.from} → ${res.to}${suffix}`, json);
 }
 

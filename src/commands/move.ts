@@ -33,6 +33,7 @@ import {
 } from "../record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
+import { planDoingClaim } from "../doing-claim.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -45,9 +46,27 @@ export type MoveOptions = {
   force?: boolean;
   dbLocator?: string;
   situationPreflight?: SituationPreflight;
+  /**
+   * Claim stamp when moving into `doing`. Prefer `pickup claim --worker`.
+   * Bare `move … doing` without assignee/env actor refuses unless
+   * `allowUnclaimed` is set (see `planDoingClaim`).
+   */
+  assignee?: string;
+  worker?: string;
+  allowUnclaimed?: boolean;
+  /** Test seam: override process.env for claim-actor resolution. */
+  env?: Record<string, string | undefined>;
 };
 
-export type MoveResult = { slug: string; from: string; to: string; promotedDependents?: string[] };
+export type MoveResult = {
+  slug: string;
+  from: string;
+  to: string;
+  promotedDependents?: string[];
+  /** Assignee after a claim stamp into doing (if any). */
+  assignee?: string;
+  claim?: "stamped" | "kept" | "unclaimed";
+};
 
 export class ClaimConflictError extends FkanbanError {
   readonly current: string;
@@ -156,10 +175,35 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   const position = opts.position !== undefined ? String(opts.position) : appendPosition();
   const now = nowIso();
 
+  // Claim contract: entering `doing` without durable ownership is how sweeps
+  // reopen a card under a second agent. Prefer `pickup claim --worker`.
+  let claimMeta: { assignee?: string; claim?: "stamped" | "kept" | "unclaimed" } = {};
+  let assigneeForWrite = card.assignee;
+  if (opts.column === "doing" && from !== "doing") {
+    const plan = planDoingClaim({
+      currentAssignee: card.assignee,
+      explicitActor: opts.worker ?? opts.assignee,
+      allowUnclaimed: opts.allowUnclaimed === true,
+      env: opts.env,
+    });
+    if (plan.kind === "refuse") {
+      throw new FkanbanError({ code: "move_into_doing_requires_claim", message: plan.message });
+    }
+    if (plan.kind === "stamp") {
+      assigneeForWrite = plan.assignee;
+      claimMeta = { assignee: plan.assignee, claim: "stamped" };
+    } else if (plan.assignee) {
+      claimMeta = { assignee: plan.assignee, claim: "kept" };
+    } else {
+      claimMeta = { claim: "unclaimed" };
+    }
+  }
+
   const updated: Card = {
     ...card,
     column: opts.column,
     position,
+    assignee: assigneeForWrite,
     updated_at: now,
     done_at: doneAtForColumnTransition(card, opts.column, columns, now),
   };
@@ -251,5 +295,6 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     from,
     to: opts.column,
     ...(promotedDependents.length > 0 ? { promotedDependents } : {}),
+    ...claimMeta,
   };
 }

@@ -330,4 +330,56 @@ describe("move claim guard", () => {
     expect(err.current).toBe("review");
     expect(err.expected).toBe("todo");
   });
+
+  test("move into doing stamps explicit worker so the card is not an empty zombie", async () => {
+    const node = fakeNode();
+    await seed(node);
+
+    const res = await moveCmd({
+      cfg,
+      node,
+      slug: "claim-me",
+      column: "doing",
+      expectColumn: "todo",
+      worker: "last-stack-fkanban-pickup",
+    });
+    expect(res.claim).toBe("stamped");
+    expect(res.assignee).toBe("last-stack-fkanban-pickup");
+    expect(await findCard(node, cfg, "claim-me")).toMatchObject({
+      column: "doing",
+      assignee: "last-stack-fkanban-pickup",
+    });
+  });
+
+  test("move into doing refuses silent unclaimed when no actor is available", async () => {
+    const node = fakeNode();
+    await seed(node);
+
+    await expect(
+      moveCmd({
+        cfg,
+        node,
+        slug: "claim-me",
+        column: "doing",
+        allowUnclaimed: false,
+        env: {}, // no USER / LASTGIT_ACTOR / AUTOMATION_ID
+      }),
+    ).rejects.toMatchObject({ code: "move_into_doing_requires_claim" });
+  });
+
+  test("allow-unclaimed keeps bare move into doing for intentional empty claims", async () => {
+    const node = fakeNode();
+    await seed(node);
+
+    const res = await moveCmd({
+      cfg,
+      node,
+      slug: "claim-me",
+      column: "doing",
+      allowUnclaimed: true,
+      env: {},
+    });
+    expect(res).toMatchObject({ to: "doing", claim: "unclaimed" });
+    expect(await findCard(node, cfg, "claim-me")).toMatchObject({ column: "doing", assignee: "" });
+  });
 });
