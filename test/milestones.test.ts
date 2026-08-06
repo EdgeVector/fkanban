@@ -6,8 +6,8 @@ import type { Config } from "../src/config.ts";
 import { classifyMilestoneGap, milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { listCmd } from "../src/commands/list.ts";
-import {
 import { cardsFromJson } from "./json_page.ts";
+import {
   boardToFields,
   findCard,
   listCards,
