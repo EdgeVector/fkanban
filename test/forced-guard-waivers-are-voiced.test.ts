@@ -609,6 +609,8 @@ describe("every --force-waived guard announces itself", () => {
       ["src/mcp/server.ts", "option plumbing: copies `force` into command opts"],
       ["src/commands/move.ts", "passes the flag to gates in record.ts/pipeline_status.ts; holds none"],
       ["src/commands/board.ts", "`board rm --force`, a different flag with its own delete semantics"],
+      // Metadata-only path: forwards force into addCmd; owns no silent bail of its own.
+      ["src/commands/set.ts", "forwards force to addCmd; holds no gate"],
     ]);
 
     // Comments are stripped first: `doctor.ts`, `milestone.ts` and `search.ts`
