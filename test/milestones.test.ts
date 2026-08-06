@@ -6,7 +6,6 @@ import type { Config } from "../src/config.ts";
 import { classifyMilestoneGap, milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { listCmd } from "../src/commands/list.ts";
-import { cardsFromJson } from "./json_page.ts";
 import {
   boardToFields,
   findCard,
@@ -217,8 +216,13 @@ describe("first-class milestones", () => {
     expect(grouped).toContain("HEALTHY OUTCOME");
     expect(grouped).toContain("UNASSIGNED / OPERATIONAL");
     expect(grouped).toContain("healthy-slice");
-    const groupedJson = cardsFromJson(await listCmd({ cfg, node, groupByMilestone: true, json: true }));
-    expect(groupedJson.groups.map((group: { slug: string }) => group.slug)).toEqual(["healthy-outcome", "unassigned-operational"]);
+    const groupedJson = JSON.parse(await listCmd({ cfg, node, groupByMilestone: true, json: true })) as {
+      groups: Array<{ slug: string }>;
+      total: number;
+      truncated: boolean;
+    };
+    expect(groupedJson.groups.map((group) => group.slug)).toEqual(["healthy-outcome", "unassigned-operational"]);
+    expect(groupedJson.truncated).toBe(false);
   });
 
   test("groom renders blocked and proving fixtures without false implementation-done", async () => {
