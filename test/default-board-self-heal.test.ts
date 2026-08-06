@@ -83,9 +83,16 @@ describe("missing referenced board self-heal", () => {
     const node = fakeNode();
     await seedCard(node, card({ slug: "moveme", board: "default", column: "todo" }));
 
-    const res = await moveCmd({ cfg, node, slug: "moveme", column: "doing" });
+    // allowUnclaimed: this test pins board self-heal, not the doing-claim stamp.
+    const res = await moveCmd({
+      cfg,
+      node,
+      slug: "moveme",
+      column: "doing",
+      allowUnclaimed: true,
+    });
 
-    expect(res).toEqual({ slug: "moveme", from: "todo", to: "doing" });
+    expect(res).toMatchObject({ slug: "moveme", from: "todo", to: "doing" });
     expect((await findBoard(node, cfg, "default"))?.columns).toEqual([...DEFAULT_COLUMNS]);
     expect((await findCard(node, cfg, "moveme"))?.column).toBe("doing");
   });
