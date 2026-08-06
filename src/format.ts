@@ -57,8 +57,22 @@ export interface TagResult {
 
 export interface RmResult {
   slug: string;
-  // Slugs of live cards that still listed `slug` in their deps — now dangling.
-  // Surfaced as a stderr warning by the CLI and echoed under --json.
+  /**
+   * VESTIGIAL — always `[]`, and structurally cannot be anything else.
+   *
+   * This described a `rm` that tombstoned the card and reported whose deps it
+   * had just left dangling. Since #149 (`e92d4a4`) `rmCmd` REFUSES that delete:
+   * it scans live cards first and throws `card_has_dependents`, so there is no
+   * surviving path on which an orphan is created and therefore none on which
+   * this can be non-empty.
+   *
+   * The comment here outlived the change and kept asserting a behaviour that
+   * had been deleted — "surfaced as a stderr warning by the CLI", of a warning
+   * (`orphanedDependentsWarning`) no caller invokes any more. Kept as a field
+   * because it is public `--json` / MCP output; retiring it is a compat break
+   * and wants its own card, with `orphanedDependentsWarning` and the non-empty
+   * branch of `formatRm`'s unit test, which now cover nothing reachable.
+   */
   orphanedDependents: string[];
 }
 
