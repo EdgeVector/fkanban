@@ -30,6 +30,7 @@ import {
   type Card,
   emptyStructuredFields,
 } from "../record.ts";
+import { renderSweepWrites } from "../sweep_report.ts";
 
 /**
  * Resolve Card truth for every candidate slug, bounded-parallel.
@@ -152,7 +153,27 @@ export type BoardCardsHealAction = {
 export type BoardCardsHealReport = {
   scanned_index_rows: number;
   drifted: number;
+  /**
+   * Repairs ISSUED. Incremented at the write, so a dry run reports 0 — always.
+   *
+   * It used to be `apply ? healed : drifted`, which made a dry run report a
+   * number that was wrong twice over. It claimed repairs on a run that wrote
+   * nothing (`healed=4 — DRY RUN, no writes`, on the DEFAULT invocation: this
+   * command applies only with `--apply`, and the ceiling-refusal text sends the
+   * operator to a bare dry run to inspect). And `drifted` is not even the same
+   * QUANTITY: it counts drifted (board, slug) keys, while `healed` counts
+   * repairs, and the orphan branch issues one repair per ROW. A slug with three
+   * orphan rows is `drifted=1` and heals 3, so the dry run under-reported the
+   * apply run it was supposed to be previewing.
+   */
   healed: number;
+  /**
+   * Repairs an `--apply` run WOULD issue, in `healed`'s units. The plan, kept in
+   * its own field so no consumer loses the signal that `healed` used to carry
+   * dishonestly — and the number a dry run should be compared against, because
+   * `dry.would_heal === apply.healed` for the same board state.
+   */
+  would_heal: number;
   missing_card: number;
   /**
    * False when `board_cards` is not bound in config. Every partition read then
@@ -292,6 +313,7 @@ export async function boardCardsHealResult(
         scanned_index_rows: 0,
         drifted: 0,
         healed: 0,
+        would_heal: 0,
         missing_card: 0,
         board_cards_bound: false,
         discovery_failed: null,
@@ -598,6 +620,11 @@ export async function boardCardsHealResult(
 
   const actions: BoardCardsHealAction[] = [];
   let healed = 0;
+  // The plan, counted where the write is decided rather than derived afterwards
+  // from `actions` or `drifted`. Both of those are in different units — actions
+  // include `noop-match`, `drifted` counts keys — and a derived plan is exactly
+  // the shape that let the dry run disagree with the apply run it previews.
+  let would_heal = 0;
   let missing_card = 0;
   let drifted = 0;
 
@@ -638,6 +665,11 @@ export async function boardCardsHealResult(
       scanned_index_rows: rawRows.length,
       drifted: 0,
       healed: 0,
+      // Not the classification either: the refusal's whole premise is that this
+      // run's classification is the thing in doubt, so publishing it as a repair
+      // plan would launder it. `removals_possible` carries the intent, under a
+      // name that does not promise the rows are really orphans.
+      would_heal: 0,
       missing_card: 0,
       board_cards_bound: true,
       discovery_failed: discoveryFailed,
@@ -710,6 +742,7 @@ export async function boardCardsHealResult(
           action: "delete-orphan",
           reason: "card point-read missing; BoardCards row is orphan",
         });
+        would_heal += 1;
         if (opts.apply) {
           // Same exhaustiveness claim the delete-stale branch below makes, and
           // for the same reason: `rows` is already every row this slug has on
@@ -792,6 +825,7 @@ export async function boardCardsHealResult(
           action: "refresh-thin-fields",
           reason: `thin field drift: ${drift.join(",")}`,
         });
+        would_heal += 1;
         if (opts.apply) {
           await upsertBoardCard(opts.node, opts.cfg, truth, null, {
             skipOrphanPurge: enumeratedBoards.has(truthBoard),
@@ -828,6 +862,7 @@ export async function boardCardsHealResult(
         action: "upsert-truth",
         reason: "missing BoardCards membership for truth column",
       });
+      would_heal += 1;
       if (opts.apply) {
         // rows.length === 0 on a partition heal listed in full: there is
         // provably nothing to purge, so skip the rescan. This is the bulk of a
@@ -858,6 +893,7 @@ export async function boardCardsHealResult(
           : "duplicate/mismatch BoardCards rows",
     });
 
+    would_heal += 1;
     if (opts.apply) {
       // Purge all sks for slug on any board seen, then write truth. `rows` is
       // already every row for this slug on the partitions heal enumerated, so
@@ -902,6 +938,7 @@ export async function boardCardsHealResult(
         `${dup.sparseSks.length} sparse duplicate row(s) [${dup.sparseSks.join(", ")}] ` +
         `— membership carried by whole row ${dup.keepSk}`,
     });
+    would_heal += 1;
     if (opts.apply) {
       // By address, not by purge: heal already holds the partition, and
       // `purgeOtherBoardCardRows` would re-list it once per duplicate slug.
@@ -913,7 +950,8 @@ export async function boardCardsHealResult(
   const report: BoardCardsHealReport = {
     scanned_index_rows: rawRows.length,
     drifted,
-    healed: opts.apply ? healed : drifted,
+    healed,
+    would_heal,
     missing_card,
     board_cards_bound: true,
     discovery_failed: discoveryFailed,
@@ -931,7 +969,11 @@ export async function boardCardsHealResult(
 
   const head =
     `board-cards heal: scanned=${report.scanned_index_rows} drifted=${report.drifted} ` +
-    `healed=${report.healed} missing_card=${report.missing_card}` +
+    `${renderSweepWrites({ applied: "healed", planned: "would_heal" }, {
+      dryRun: report.dryRun,
+      applied: report.healed,
+      planned: report.would_heal,
+    })} missing_card=${report.missing_card}` +
     `${report.dryRun ? " — DRY RUN, no writes" : ""}`;
   const lines = report.actions
     .filter((a) => a.action !== "noop-match")
