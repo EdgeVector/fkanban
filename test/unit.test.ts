@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { cardsFromJson } from "./json_page.ts";
 
 import {
@@ -60,7 +61,7 @@ import {
   formatError,
 } from "../src/format.ts";
 import { renderBoard, renderSearchResults, renderWideTable } from "../src/board.ts";
-import { doctor } from "../src/commands/doctor.ts";
+import { doctor, shimInstallHint } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
 import { TOP_HELP, COMMAND_HELP, commandHelpHint, resolveHelp, suggestFlag } from "../src/cli.ts";
 import { levenshtein, suggestClosest } from "../src/suggest.ts";
@@ -738,9 +739,18 @@ describe("mcp register helper (single source of truth)", () => {
   // byte-identical — both come from mcpAddCommand(). The entrypoint that
   // mcpEntrypointPath() resolves to must be the same file mcpAddCommand() names
   // (in the bun+path form). See card `doctor-verify-mcp-entrypoint-fkanban`.
+  // Scope note: `bun test` runs the SOURCE tree, so everything in this describe
+  // block only ever exercises the shim and source shapes. The third — a `bun
+  // build --compile` artifact, which is what actually ships — cannot be reached
+  // from here, and it is the one where this surface was broken: it printed
+  // `bun /$bunfs/root/kanban/src/mcp/main.ts`, a path inside the executable.
+  // `test/compiled-artifact-provenance.test.ts` covers that shape by running a
+  // compiled binary. Do not "fix" the compiled branch to satisfy the pattern
+  // below — the pattern is a description of what this process can observe, not
+  // of what the module is allowed to answer.
   test("mcpAddCommand uses the canonical `--` form", () => {
     expect(mcpAddCommand()).toMatch(
-      /^claude mcp add fkanban -- (kanban mcp|fkanban mcp|bun .+\/src\/mcp\/main\.ts)$/,
+      /^claude mcp add fkanban -- (kanban mcp|fkanban mcp|bun .+\/src\/mcp\/main\.ts|\/.+ mcp)$/,
     );
   });
 
@@ -779,7 +789,7 @@ describe("mcp register helper (single source of truth)", () => {
   // vice versa. Pin the property that holds in BOTH: whatever `mcpAddCommand()`
   // says to run, `mcpEntrypointPath()` names a real file on disk, and doctor's
   // existsSync check is therefore checking the file that will be served.
-  test("the entrypoint is the file the add command would execute, in either form", () => {
+  test("the entrypoint is the file the add command would execute, in every form this process can reach", () => {
     const cmd = mcpAddCommand();
     const entry = mcpEntrypointPath();
     expect(entry).not.toBeNull();
@@ -1558,5 +1568,29 @@ describe("command suggestion (did-you-mean)", () => {
     expect(suggestFlag("add", "frobnicate")).toBeNull();
     // An unknown command never suggests a flag.
     expect(suggestFlag("nosuchcmd", "titel")).toBeNull();
+  });
+});
+
+describe("the shim install hint is a command that can be run", () => {
+  // The third surface with the same root cause as `src/mcp/register.ts` and
+  // `src/host_track.ts`: a path derived from `import.meta.url`, correct in a
+  // source checkout and meaningless inside a `bun build --compile` executable.
+  // Here it is the remedy line for a missing shim — printed, by definition,
+  // only to someone who has no working `kanban` yet and is least placed to
+  // notice the fix is impossible.
+  test("from a source checkout it points at this repo's installer", () => {
+    const root = fileURLToPath(import.meta.url).replace(/\/test\/[^/]+$/, "");
+    expect(shimInstallHint(root)).toBe(`(cd "${root}" && bun run install-cli)`);
+  });
+
+  test("from a compiled artifact it links the executable instead of cd-ing nowhere", () => {
+    // The embedded root, verbatim as the shipped binary reports it. It passes
+    // `existsSync` and `statSync` alike, which is why the guard cannot be
+    // either of those.
+    const hint = shimInstallHint("/$bunfs/root/kanban", "/opt/kanban/bin/kanban");
+
+    expect(hint).toBe('ln -s "/opt/kanban/bin/kanban" ~/.local/bin/kanban');
+    expect(hint).not.toContain("$bunfs");
+    expect(hint).not.toContain("install-cli");
   });
 });

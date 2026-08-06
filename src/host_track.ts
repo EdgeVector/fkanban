@@ -154,8 +154,12 @@ export function versionRootOf(path: string | null): string | null {
  * That is also the property the caller actually needs. An install root has to
  * be a real directory that `current` can point at; a path that resolves to
  * nothing cannot be one, whatever the reason.
+ *
+ * Exported because `src/mcp/register.ts` needs the SAME question answered about
+ * its own module URL, and a second copy of this predicate is exactly the drift
+ * this module keeps being bitten by. One definition, several readers.
  */
-function isOnDisk(path: string): boolean {
+export function isOnDisk(path: string): boolean {
   try {
     fs.realpathSync.native(path);
     return true;

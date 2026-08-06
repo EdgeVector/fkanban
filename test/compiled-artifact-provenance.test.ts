@@ -28,10 +28,13 @@
  * artifact under test is the very one that gets published).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const REPO_ROOT = fileURLToPath(import.meta.url).replace(/\/test\/[^/]+$/, "");
 
@@ -171,4 +174,181 @@ describe("the compiled artifact reports its own install", () => {
     expect(String(report.source_root)).toContain("versions/bbb222");
     expect(String(report.bun_path)).toContain("versions/bbb222");
   });
+});
+
+/**
+ * Does the SHIPPED artifact print a registration command that can be run?
+ *
+ * Same root cause as the block above, one module over. `src/mcp/register.ts`
+ * derived the repo root from its own module URL, so under the compiled
+ * artifact — with no `kanban` shim on PATH — `kanban init`'s Next-steps block
+ * and `kanban doctor`'s entrypoint check both printed
+ *
+ *   claude mcp add fkanban -- bun /$bunfs/root/kanban/src/mcp/main.ts
+ *
+ * naming a file inside the executable's embedded filesystem. The two surfaces
+ * whose whole job is to tell you how to register the server were the two that
+ * could not, and the no-shim branch is not hypothetical here: sandboxed Bash on
+ * the primary loses `$PATH`, so `resolveKanbanShim()` returns null inside
+ * routine runs on a machine where the shim is installed and fine.
+ *
+ * These run a compiled probe (`test/register-probe-entry.ts`) rather than
+ * `dist/kanban`, because the only CLI surfaces that print the registration line
+ * are `init` (writes config) and `doctor` (write-probes the node). The probe
+ * reproduces the packaging, which is the whole of the defect — built from the
+ * pre-fix module it emits the broken line verbatim.
+ */
+describe("the compiled artifact prints a registration command that works", () => {
+  let probe = "";
+  let noShimPath = "";
+
+  beforeAll(() => {
+    const built = join(workdir, "register-probe");
+    const build = Bun.spawnSync(
+      ["bun", "build", join(REPO_ROOT, "test", "register-probe-entry.ts"), "--compile", "--outfile", built],
+      { cwd: REPO_ROOT },
+    );
+    if (build.exitCode !== 0) {
+      throw new Error(`could not compile the register probe: ${build.stderr.toString()}`);
+    }
+    // `process.execPath` inside the binary is fully resolved, and on macOS
+    // `$TMPDIR` lives under a symlinked `/var`. Compare against the same
+    // resolution the binary will report rather than the path we happened to
+    // write — otherwise this asserts a macOS path convention, not the fix.
+    probe = realpathSync.native(built);
+
+    // A PATH with a real `sh` (resolveKanbanShim shells out to `command -v`)
+    // and no `kanban`/`fkanban` on it. Built from a temp dir rather than by
+    // clearing PATH, so the shim lookup genuinely runs and genuinely misses.
+    noShimPath = mkdtempSync(join(tmpdir(), "fkanban-noshim-"));
+    installs.push(noShimPath);
+  });
+
+  function probeWith(path: string, env: Record<string, string> = {}, exe = probe): Record<string, unknown> {
+    const proc = Bun.spawnSync([exe], { env: { PATH: path, ...env } });
+    const stdout = proc.stdout.toString().trim();
+    if (!stdout.startsWith("{")) {
+      throw new Error(`probe produced no report (exit ${proc.exitCode}): ${proc.stderr.toString()}`);
+    }
+    return JSON.parse(stdout);
+  }
+
+  /** A host-track install of the probe at the depth build-artifact.sh uses. */
+  function probeInstall(builds: string[], currentBuild: string): { root: string; exe: (b: string) => string } {
+    const root = mkdtempSync(join(tmpdir(), "fkanban-probe-install-"));
+    installs.push(root);
+    for (const b of builds) {
+      mkdirSync(join(root, "versions", b, "dist"), { recursive: true });
+      copyFileSync(probe, join(root, "versions", b, "dist", "kanban"));
+    }
+    symlinkSync(join(root, "versions", currentBuild), join(root, "current"));
+    return { root: realpathSync.native(root), exe: (b) => join(root, "versions", b, "dist", "kanban") };
+  }
+
+  test("with no shim on PATH it registers the executable, not a path inside it", () => {
+    const report = probeWith(`${noShimPath}:/usr/bin:/bin`);
+
+    // The defect in one assertion: this used to be `bun /$bunfs/…/main.ts`.
+    expect(report.shape).toBe("compiled");
+    expect(report.command).toBe(`claude mcp add fkanban -- ${probe} mcp`);
+    expect(report.entrypoint).toBe(probe);
+
+    // The property that makes doctor's `existsSync` check meaningful, and the
+    // one `existsSync` itself cannot establish here: embedded paths pass
+    // `existsSync` and `statSync` alike, so the probe uses `realpathSync.native`.
+    expect(report.entrypoint_on_disk).toBe(true);
+    expect(String(report.command)).not.toContain("$bunfs");
+  });
+
+  test("the CLI invocation is runnable too — it was `bun run src/cli.ts`", () => {
+    // init's Next-steps `list`/`add` lines. Under the artifact there is no
+    // `src/cli.ts` on disk and no repo to be cd'd into, so the shipped binary
+    // told a first-time user to run a file that does not exist.
+    const report = probeWith(`${noShimPath}:/usr/bin:/bin`);
+    expect(report.invocation).toBe(probe);
+    expect(String(report.invocation)).not.toContain("$bunfs");
+  });
+
+  test("a shim on PATH still wins, and the entrypoint is that shim", () => {
+    // The fix must not answer "compiled" by construction. When a shim exists it
+    // is what `claude mcp add fkanban -- kanban mcp` executes, so it — not the
+    // running executable — is the honest entrypoint.
+    const shimDir = mkdtempSync(join(tmpdir(), "fkanban-shim-"));
+    installs.push(shimDir);
+    const shim = join(shimDir, "kanban");
+    writeFileSync(shim, "#!/bin/sh\nexit 0\n");
+    chmodSync(shim, 0o755);
+
+    const report = probeWith(`${shimDir}:/usr/bin:/bin`);
+
+    expect(report.shape).toBe("shim");
+    expect(report.command).toBe("claude mcp add fkanban -- kanban mcp");
+    expect(report.entrypoint).toBe(shim);
+    expect(report.entrypoint_on_disk).toBe(true);
+  });
+
+  test("run from source, the bun+path form is unchanged", () => {
+    // The shape that always worked. Pinned because the fix's whole risk is
+    // regressing it — a source checkout must still be told to run its own
+    // `src/mcp/main.ts`, not the `bun` binary that happens to be executing it.
+    const proc = Bun.spawnSync(
+      [process.execPath, join(REPO_ROOT, "test", "register-probe-entry.ts")],
+      { cwd: REPO_ROOT, env: { PATH: `${noShimPath}:/usr/bin:/bin` } },
+    );
+    const report = JSON.parse(proc.stdout.toString().trim());
+
+    expect(report.shape).toBe("source");
+    expect(report.command).toBe(`claude mcp add fkanban -- bun ${REPO_ROOT}/src/mcp/main.ts`);
+    expect(report.entrypoint).toBe(`${REPO_ROOT}/src/mcp/main.ts`);
+    expect(report.invocation).toBe("bun run src/cli.ts");
+  });
+
+  test("under host-track it registers `current`, not the version dir it resolved to", () => {
+    // `process.execPath` is fully resolved, so a binary invoked through
+    // `<root>/current/dist/kanban` reports `<root>/versions/<oid>/dist/kanban`.
+    // Registering THAT pins the MCP server to one build and guarantees it goes
+    // stale at the next upgrade — the exact shape of the 192-commit-stale
+    // `kanban-mcp` this module carries a note about.
+    const { root, exe } = probeInstall(["aaa111", "bbb222"], "bbb222");
+    const report = probeWith(`${noShimPath}:/usr/bin:/bin`, { FKANBAN_HOST_TRACK_DIR: root }, exe("bbb222"));
+
+    expect(report.shape).toBe("compiled");
+    expect(report.entrypoint).toBe(`${root}/current/dist/kanban`);
+    expect(report.command).toBe(`claude mcp add fkanban -- ${root}/current/dist/kanban mcp`);
+    expect(report.entrypoint_on_disk).toBe(true);
+    // The resolved path is what it RAN from; it must not be what it registers.
+    expect(String(report.exec_path)).toContain("versions/bbb222");
+    expect(String(report.entrypoint)).not.toContain("versions/");
+  });
+
+  test("a superseded build registers itself, not the `current` it is behind", () => {
+    // The other direction of the same honesty. `current` here is a DIFFERENT
+    // file from the running one, and quietly registering it would mean the
+    // printed command starts a build this process never verified.
+    const { root, exe } = probeInstall(["aaa111", "bbb222"], "bbb222");
+    const report = probeWith(`${noShimPath}:/usr/bin:/bin`, { FKANBAN_HOST_TRACK_DIR: root }, exe("aaa111"));
+
+    expect(report.entrypoint).toBe(`${root}/versions/aaa111/dist/kanban`);
+    expect(String(report.entrypoint)).not.toContain("/current/");
+  });
+
+  test("`<executable> mcp` actually serves MCP — the claim the compiled branch rests on", async () => {
+    // Asserted against the SHIPPED binary, not the probe. Everything above
+    // proves register.ts now NAMES the executable; this proves the name is
+    // worth printing. `test/mcp-cli-subcommand.test.ts` covers the same
+    // subcommand only as `bun src/cli.ts mcp` — the source shape — so without
+    // this the artifact's own MCP entrypoint has never been started.
+    const transport = new StdioClientTransport({
+      command: binary,
+      args: ["mcp"],
+      env: { ...(process.env as Record<string, string>), FKANBAN_CONFIG: "/nonexistent/fkanban-artifact-mcp/config.json" },
+    });
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await client.connect(transport);
+    try {
+      expect(client.getServerVersion()?.name).toBe("fkanban");
+    } finally {
+      await client.close();
+    }
+  }, 30_000);
 });
