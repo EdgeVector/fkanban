@@ -1470,7 +1470,17 @@ async function dispatch(
           board: values.board as string | undefined,
           state: values.state as string | undefined,
         });
-        console.log(values.json ? JSON.stringify(result.milestones, null, 2) : result.text);
+        // Envelope matches fkanban_list/fkanban_search: bare arrays made silent
+        // undercount look like a complete inventory (portfolio undercount
+        // recurrences 2026-08-02..04). `total`/`truncated` make a future page
+        // cap impossible to miss; today the list is uncapped so truncated=false.
+        console.log(values.json
+          ? JSON.stringify({
+            milestones: result.milestones,
+            total: result.milestones.length,
+            truncated: false,
+          }, null, 2)
+          : result.text);
         return 0;
       }
       if (action === "show") {
@@ -1524,7 +1534,14 @@ async function dispatch(
         const extra = rejectExtraPositionals(positionals, 2, "milestone portfolio");
         if (extra !== undefined) return extra;
         const result = await milestonePortfolioResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
-        console.log(values.json ? JSON.stringify(result.entries, null, 2) : result.text);
+        // Same completeness envelope as `milestone list --json` — see above.
+        console.log(values.json
+          ? JSON.stringify({
+            entries: result.entries,
+            total: result.entries.length,
+            truncated: false,
+          }, null, 2)
+          : result.text);
         return 0;
       }
       if (action === "detail") {

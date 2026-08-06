@@ -499,7 +499,15 @@ describe("first-class milestones", () => {
     expect(created.isError).not.toBe(true);
     expect(created.structuredContent).toEqual({ slug: "mcp-outcome", action: "created", state: "active" });
     const listed = await client.callTool({ name: "fkanban_milestone_list", arguments: {} });
-    expect((listed.structuredContent as { milestones: Array<{ slug: string }> }).milestones[0]?.slug).toBe("mcp-outcome");
+    const listedSc = listed.structuredContent as {
+      milestones: Array<{ slug: string }>;
+      total: number;
+      truncated: boolean;
+    };
+    expect(listedSc.milestones[0]?.slug).toBe("mcp-outcome");
+    // Completeness envelope: never let a short inventory look complete.
+    expect(listedSc.total).toBe(listedSc.milestones.length);
+    expect(listedSc.truncated).toBe(false);
     const shown = await client.callTool({ name: "fkanban_milestone_show", arguments: { slug: "mcp-outcome" } });
     expect((shown.structuredContent as { milestone: { driver: string } }).milestone.driver).toBe("last-stack-milestone-driver");
     await addCmd({ cfg, node, slug: "mcp-proof", title: "MCP proof", milestone: "mcp-outcome", kind: "validation", column: "backlog" });
@@ -517,5 +525,42 @@ describe("first-class milestones", () => {
       const result = await client.callTool({ name, arguments: args });
       expect(result.isError).not.toBe(true);
     }
+    const portfolioSc = (await client.callTool({ name: "fkanban_milestone_portfolio", arguments: {} }))
+      .structuredContent as { entries: Array<{ slug: string }>; total: number; truncated: boolean };
+    expect(portfolioSc.total).toBe(portfolioSc.entries.length);
+    expect(portfolioSc.truncated).toBe(false);
+    expect(portfolioSc.entries.some((e) => e.slug === "mcp-outcome")).toBe(true);
+  });
+
+  test("create + state transition keep every milestone visible in list and portfolio", async () => {
+    // END STATE 4 for the portfolio undercount papercut: every write path that
+    // mintes or rewrites a milestone must leave it in both inventory reads.
+    const node = fakeNode();
+    await seedBoard(node);
+
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-create-path", title: "Created fresh",
+      state: "active", driver: "last-stack-milestone-driver",
+    });
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-state-path", title: "Will transition",
+      state: "active", driver: "last-stack-milestone-driver",
+    });
+    await addCmd({
+      cfg, node, slug: "ms-state-path-proof", title: "Proof",
+      milestone: "ms-state-path", kind: "validation", column: "backlog",
+    });
+    await milestoneAddCmd({ cfg, node, slug: "ms-state-path", proofCard: "ms-state-path-proof" });
+    await milestoneStateCmd({ cfg, node, slug: "ms-state-path", state: "proving" });
+
+    const listed = await milestoneListResult({ cfg, node, board: "default" });
+    const portfolio = await milestonePortfolioResult({ cfg, node, board: "default" });
+    const listedSlugs = listed.milestones.map((m) => m.slug).sort();
+    const portfolioSlugs = portfolio.entries.map((e) => e.slug).sort();
+
+    expect(listedSlugs).toEqual(["ms-create-path", "ms-state-path"]);
+    expect(portfolioSlugs).toEqual(["ms-create-path", "ms-state-path"]);
+    expect(listed.milestones.find((m) => m.slug === "ms-state-path")?.state).toBe("proving");
+    expect(portfolio.entries.find((e) => e.slug === "ms-state-path")?.state).toBe("proving");
   });
 });
