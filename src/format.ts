@@ -76,6 +76,54 @@ export interface RmResult {
   orphanedDependents: string[];
 }
 
+export interface MilestoneAddResult {
+  slug: string;
+  action: "created" | "updated";
+  state: string;
+  /**
+   * Set only when this write MOVED the milestone's lifecycle state without the
+   * caller ever naming a state.
+   *
+   * `milestone add --proof-status failing` on a `proving` milestone silently
+   * transitions it to `active` (the failing-proof rule in `milestoneAddCmd`).
+   * The old confirmation printed the END state — `updated milestone m1
+   * (active)` — which is true and reads as if `active` is simply where the
+   * milestone already was. An operator recording a proof failure was not told
+   * they had also moved the outcome out of `proving`.
+   */
+  stateCoerced?: { from: string; to: string; reason: string };
+  /**
+   * Set only when this write rewrote an INHERITED superseded `driver`.
+   *
+   * `resolveMilestoneDriver` refuses a superseded driver the caller names, but
+   * silently heals one it merely inherited — so any unrelated write (a `--title`
+   * rename, a `milestone state` transition) rewrites the field that decides
+   * which routine reconciles the milestone, and said nothing.
+   */
+  driverHealed?: { from: string; to: string };
+}
+
+export interface MilestoneStateResult {
+  slug: string;
+  from: string;
+  to: string;
+  proof_status: string;
+  /**
+   * The proof status BEFORE this transition, so the confirmation can name a
+   * proof claim the write changed.
+   *
+   * Without it `milestone state m1 active --proof-status failing` on an already
+   * `active` milestone rendered as `milestone m1: active → active` — a line that
+   * reads as a no-op while the write had just flipped the milestone's proof
+   * claim to `failing`. That is the documented fix-forward path
+   * (`milestone_failed_proof_requires_active`'s own hint sends operators to it),
+   * so its confirmation is the one that most needs to be able to say what moved.
+   */
+  proof_status_from: string;
+  /** As {@link MilestoneAddResult.driverHealed} — a transition writes the record too. */
+  driverHealed?: { from: string; to: string };
+}
+
 export interface BoardCreateResult {
   slug: string;
   action: "created" | "updated";
@@ -165,6 +213,40 @@ export function formatTag(res: TagResult, json?: boolean): string {
 
 export function formatRm(res: RmResult, json?: boolean): string {
   return emit(res, `removed card ${res.slug}`, json);
+}
+
+// Name a silently-healed driver identically wherever it happened, so `milestone
+// add` and `milestone state` cannot drift into describing the same rewrite two
+// ways — the failure this file exists to prevent.
+function driverHealedClause(healed?: { from: string; to: string }): string {
+  return healed
+    ? `; driver ${healed.from} → ${healed.to} (superseded driver healed; it decides which routine reconciles this milestone)`
+    : "";
+}
+
+export function formatMilestoneAdd(res: MilestoneAddResult, json?: boolean): string {
+  const coerced = res.stateCoerced
+    ? `; state ${res.stateCoerced.from} → ${res.stateCoerced.to} (${res.stateCoerced.reason})`
+    : "";
+  return emit(
+    res,
+    `${res.action} milestone ${res.slug} (${res.state})${coerced}${driverHealedClause(res.driverHealed)}`,
+    json,
+  );
+}
+
+export function formatMilestoneState(res: MilestoneStateResult, json?: boolean): string {
+  // The proof clause is what keeps a `from === to` transition honest: the state
+  // half renders `active → active`, which is true and reads as "nothing
+  // happened", and the write may still have changed the proof claim.
+  const proof = res.proof_status_from !== res.proof_status
+    ? `; proof ${res.proof_status_from} → ${res.proof_status}`
+    : "";
+  return emit(
+    res,
+    `milestone ${res.slug}: ${res.from} → ${res.to}${proof}${driverHealedClause(res.driverHealed)}`,
+    json,
+  );
 }
 
 export function formatBoardCreate(res: BoardCreateResult, json?: boolean): string {

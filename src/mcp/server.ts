@@ -37,6 +37,8 @@ import {
   formatBoardRm,
   formatDep,
   formatMark,
+  formatMilestoneAdd,
+  formatMilestoneState,
   formatMove,
   formatRm,
   formatTag,
@@ -709,7 +711,16 @@ export function createFkanbanMcpServer(
         proof_status: z.enum(MILESTONE_PROOF_STATUSES).optional(),
         block_reason: z.string().optional(),
       },
-      outputSchema: { slug: z.string(), action: z.enum(["created", "updated"]), state: z.string() },
+      outputSchema: {
+        slug: z.string(),
+        action: z.enum(["created", "updated"]),
+        state: z.string(),
+        // Declared, not undeclared passengers: an agent that reads this payload
+        // must be able to SEE that a lifecycle move or a driver rewrite is a
+        // thing this tool can report.
+        stateCoerced: z.object({ from: z.string(), to: z.string(), reason: z.string() }).optional(),
+        driverHealed: z.object({ from: z.string(), to: z.string() }).optional(),
+      },
     },
     async (args) => {
       try {
@@ -721,7 +732,7 @@ export function createFkanbanMcpServer(
           driver: args.driver, deps: args.deps, proofCard: args.proof_card,
           proofStatus: args.proof_status, blockReason: args.block_reason,
         });
-        return toolResult(`${result.action} milestone ${result.slug} (${result.state})`, result);
+        return toolResult(formatMilestoneAdd(result), result);
       } catch (err) {
         return errorResult(err);
       }
@@ -735,7 +746,14 @@ export function createFkanbanMcpServer(
       description: "Move a milestone through its proof-gated supervisory lifecycle.",
       annotations: { title: "Transition milestone state", idempotentHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional(), state: z.enum(MILESTONE_STATES).optional(), proof_status: z.enum(MILESTONE_PROOF_STATUSES).optional() },
-      outputSchema: { slug: z.string(), from: z.string(), to: z.string(), proof_status: z.string() },
+      outputSchema: {
+        slug: z.string(),
+        from: z.string(),
+        to: z.string(),
+        proof_status: z.string(),
+        proof_status_from: z.string(),
+        driverHealed: z.object({ from: z.string(), to: z.string() }).optional(),
+      },
     },
     async (args) => {
       try {
@@ -743,7 +761,7 @@ export function createFkanbanMcpServer(
         const state = requireArg(args.state, "milestone state", `Pass one of: ${MILESTONE_STATES.join(", ")}.`);
         const { cfg, node } = requireConfig();
         const result = await milestoneStateCmd({ cfg, node, slug, state, proofStatus: args.proof_status });
-        return toolResult(`milestone ${slug}: ${result.from} → ${result.to}`, result);
+        return toolResult(formatMilestoneState(result), result);
       } catch (err) {
         return errorResult(err);
       }

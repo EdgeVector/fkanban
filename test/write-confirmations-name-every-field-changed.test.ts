@@ -243,15 +243,18 @@ describe("MCP write tools render through the CLI formatters", () => {
     // noticing that the CLI and the MCP surface had stopped agreeing.
     //
     // Scoped to `toolResult` calls whose text argument is a template literal.
-    // The milestone pair is exempt by construction: `milestone add`/`milestone
-    // state` have no CLI formatter to share, so there is no second copy of
-    // their prose to drift from.
+    //
+    // There is no exemption. `milestone add` / `milestone state` used to be one
+    // — "no CLI formatter to share, so no second copy to drift from" — which
+    // was true and was also the argument for leaving the last two write verbs
+    // outside the check that stops exactly this. They have `formatMilestoneAdd`
+    // / `formatMilestoneState` now, so every write tool in the server is
+    // covered and a fifteenth hand-rolled string fails here.
     const src = readFileSync(new URL("../src/mcp/server.ts", import.meta.url), "utf8");
     const handRolled = src
       .split("\n")
       .map((line, i) => ({ line: line.trim(), n: i + 1 }))
-      .filter(({ line }) => line.startsWith("return toolResult(`"))
-      .filter(({ line }) => !line.includes("milestone"));
+      .filter(({ line }) => line.startsWith("return toolResult(`"));
 
     expect(handRolled.map(({ line, n }) => `${n}: ${line}`)).toEqual([]);
   });
