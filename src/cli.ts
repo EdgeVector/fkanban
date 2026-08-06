@@ -1175,21 +1175,27 @@ type WhichReport = {
 function whichReport(): WhichReport {
   const sourcePath = fileURLToPath(import.meta.url);
   const argvPath = process.argv[1] ?? sourcePath;
-  const sourceRoot = realpathOrSelf(sourcePath.replace(/\/src\/cli\.ts$/, ""));
-  const match = pathWithinAnyHostTrack(sourceRoot);
-  const expectedHostTrack = match.ok ? match.root : expectedHostTrackRoot();
-  const inHostTrack = match.ok;
-  const issues = inHostTrack ? [] : [`fkanban is not running from ${expectedHostTrack}`];
+  const sourceRoot = sourcePath.replace(/\/src\/cli\.ts$/, "");
 
-  // Containment (`in_host_track`) is satisfied forever by any version directory
-  // that was ever installed, so it cannot tell the current build from a
-  // superseded one. Report the comparison against `current` separately — this
-  // is the field that catches a long-lived `kanban mcp` still serving the
-  // version directory it was spawned on. See src/host_track.ts.
+  // ONE resolution answers both questions this report asks — "is this install
+  // managed" and "is it the current build" — because they are the same question
+  // about the same tree. Asking `pathWithinAnyHostTrack` a second time here is
+  // what let the two halves disagree: under the compiled artifact this report
+  // printed `in_host_track: false` while its own `bun_path` line, three lines
+  // down, resolved into `~/.host-track/apps/fkanban/versions/<oid>/dist/kanban`.
+  //
+  // Containment (`in_host_track`) is still reported separately from
+  // `build_status`, because it is satisfied forever by any version directory
+  // that was ever installed and so cannot tell the current build from a
+  // superseded one — that is the field that catches a long-lived `kanban mcp`
+  // still serving the version directory it was spawned on. See src/host_track.ts.
   const running = resolveRunningBuild(sourceRoot);
+  const inHostTrack = running.installRoot !== null;
+  const expectedHostTrack = running.installRoot ?? expectedHostTrackRoot();
+  const issues = inHostTrack ? [] : [`fkanban is not running from ${expectedHostTrack}`];
   if (running.status === "superseded") {
     issues.push(
-      `running build ${shortBuild(running.build, running.sourceRoot)} is superseded — ` +
+      `running build ${shortBuild(running.build, running.runningRoot)} is superseded — ` +
         `current is ${shortBuild(running.currentBuild, running.currentRoot)}`,
     );
   }
@@ -1200,7 +1206,9 @@ function whichReport(): WhichReport {
     command: basename(argvPath),
     executable_path: realpathOrSelf(argvPath),
     source_path: sourcePath,
-    source_root: sourceRoot,
+    // The resolved install tree, which under the compiled artifact is NOT
+    // `source_path` (that one stays honest about the embedded module URL).
+    source_root: running.runningRoot,
     expected_host_track: expectedHostTrack,
     in_host_track: inHostTrack,
     build_status: running.status,
