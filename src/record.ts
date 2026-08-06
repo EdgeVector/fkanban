@@ -2085,6 +2085,36 @@ export function isDepEnforcedColumn(column: string): boolean {
   return isWorkingColumn(column) || column === TERMINAL_COLUMN;
 }
 
+/**
+ * Does ONE dependency edge block the card that points at it?
+ *
+ * The whole blocking rule for a single edge, in one place: a dep with no live
+ * card blocks (it can never reach the terminal column until the edge is
+ * repaired), a meta card never blocks (it is a grouping row, not work), and
+ * anything else blocks until it reaches `TERMINAL_COLUMN`.
+ *
+ * IT IS EXPORTED BECAUSE `dep add` ASKS THE SAME QUESTION ABOUT ONE EDGE.
+ * `depAddCmd` demotes a default/todo card to backlog when the edge it is
+ * writing would make that card non-claimable. Until 2026-08-06 it decided that
+ * by testing the CARD's placement and never looking at the DEP — so adding an
+ * edge to an already-`done` card demoted a ready card that `depStatus` then
+ * immediately reported unblocked, and nothing promoted it back (`move`'s
+ * `promoteUnblockedBacklogDependents` fires only when a dep TRANSITIONS into
+ * the terminal column, and this one was already there). The comment above that
+ * condition said "unfinished deps belong in backlog" while the code said
+ * "any dep at all". Sharing this predicate is what stops the two readings from
+ * drifting again: the demote and the block are now the same sentence about the
+ * same noun, so a card can only be demoted for an edge that will actually be
+ * reported as blocking it.
+ *
+ * Pinned by `test/dep-add-demote-tracks-dep-state.test.ts`.
+ */
+export function dependencyBlocks(dep: Card | undefined): boolean {
+  if (!dep) return true;
+  if (isMetaCardKind(dep.kind)) return false;
+  return dep.column !== TERMINAL_COLUMN;
+}
+
 // Resolve a card's deps against the full set of live cards. A dependency is
 // satisfied once its dep card reaches the terminal column.
 export function depStatus(
@@ -2096,14 +2126,8 @@ export function depStatus(
   const missing: string[] = [];
   for (const dep of card.deps) {
     const d = bySlug.get(dep);
-    if (!d) {
-      missing.push(dep);
-      blockedBy.push(dep);
-    } else if (isMetaCardKind(d.kind)) {
-      continue;
-    } else if (d.column !== TERMINAL_COLUMN) {
-      blockedBy.push(dep);
-    }
+    if (!d) missing.push(dep);
+    if (dependencyBlocks(d)) blockedBy.push(dep);
   }
   return { blockedBy, missing, blocked: blockedBy.length > 0 };
 }
