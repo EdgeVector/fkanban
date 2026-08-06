@@ -109,12 +109,15 @@ type IndexRow<T> = { entries: T[] | null; raw: string | null; present: boolean }
  *
  * The read used to project all three of `CARD_LIST_INDEX_FIELDS`; `key` is the
  * filter, not a result, and `updated_at` is never looked at. Width is not free
- * here and it is not only a cost: **LastDB returns a row only when every
- * projected field has an atom** (the rule this repo states at
- * board-cards.ts:105 and measured on the primary 2026-07-23, when one
- * unbackfilled field hid 135 BoardCards rows from every wide read). Asking for
- * three fields to use one gave a load-bearing row three ways to disappear
- * instead of one, in exchange for nothing.
+ * here and it is not only a cost: a projection is a filter under HASH-ELSE-LEAD
+ * (gate = hash field when projected, else leading field — see
+ * `test/fake-node.ts`). Extra projected fields are not free; on indexes whose
+ * live hash is a sparse multi-key expand field they can hide load-bearing rows
+ * (BoardCards 2026-07-23: one unbackfilled gate field hid 135 rows from every
+ * wide read). Asking for three fields to use one bought three ways to
+ * disappear instead of one, in exchange for nothing. Do not reassert the
+ * superseded `any_missing` model ("EVERY projected field has an atom") as
+ * current node truth.
  */
 const INDEX_PAYLOAD_FIELDS = ["payload_json"] as const;
 

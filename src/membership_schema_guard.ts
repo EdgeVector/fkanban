@@ -86,11 +86,17 @@ export type ProjectionParityResult =
  * Compare the NARROWEST spine read against the wide read the board actually
  * serves from.
  *
- * LastDB returns a row only when EVERY projected field has an atom on it. A
- * field absent from the schema errors loudly; a field absent from a ROW drops
- * that row with no error at all. So a wide projection is not a superset read —
- * it is a filter, and everything it filters out is invisible to the caller by
- * construction. This is the only check that can see the difference.
+ * A LastDB projection is a FILTER, not a superset read. The measured rule is
+ * **HASH-ELSE-LEAD** (`test/fake-node.ts`, probes 2026-08-04+): one gate — the
+ * schema hash field when the projection contains it, otherwise the leading
+ * projected field. A field absent from the SCHEMA errors loudly; a row missing
+ * the gate atom is dropped with no error at all. The superseded `any_missing`
+ * model ("EVERY projected field has an atom") is not current node truth.
+ *
+ * On membership indexes the live catalog hash can be a sparse multi-key field
+ * (BoardCards often gates on `milestone`), so a wide projection that includes
+ * that gate silently drops rows the spine still sees. That gap is what this
+ * check measures.
  *
  * Which is why the spine side must stay narrow, and why this check reported
  * `ok` for two days while 19 rows were missing from the live `default`

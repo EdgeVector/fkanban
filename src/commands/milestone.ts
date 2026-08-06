@@ -358,12 +358,12 @@ async function validateLinks(opts: MilestoneAddOptions, milestone: Milestone): P
     }
   }
   // Existence is a KEY-ONLY question, so ask it with a key-only read. `findCard`
-  // projects ~20 fields, and a LastDB keyed query returns a row only when EVERY
-  // projected field has an atom on it — so one missing field makes a live card
-  // read as ABSENT, indistinguishable from deleted. Gating a write on that
-  // false-negative made a live-but-sparse proof card unlinkable, with an error
-  // sending the operator to look for a card sitting right there. `cardExists`
-  // projects `slug` alone and cannot false-negative.
+  // projects ~20 fields. Under the measured HASH-ELSE-LEAD rule a sparse Card
+  // (hash `slug` present, optional fields absent) still returns from a wide
+  // read — the superseded `any_missing` model is not current node truth (see
+  // {@link cardExists}). `cardExists` still projects `slug` alone so a
+  // post-delete husk (hash key only) cannot false-negative as "gone" inside the
+  // settle window; gating a write on a wide-only miss was the old bug path.
   //
   // Still checked whenever the caller NAMES a proof card — linking a card that
   // is not there is a typo worth catching at the moment it is made, and that is

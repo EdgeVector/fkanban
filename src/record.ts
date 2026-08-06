@@ -3206,10 +3206,12 @@ export async function listCardsWithBodies(
  * against ~5.5s for the 50 wide point reads it replaces (~110ms each — on this
  * node a point read costs orders more per row than a scan amortizes).
  *
- * Projected narrow for CORRECTNESS as much as cost: LastDB returns a row only
- * when EVERY projected field has an atom on it, so each extra projected field
- * is another way for a live card to vanish from search results. Two fields is
- * the floor this match needs.
+ * Projected narrow for cost and for indexes whose gate is sparse under
+ * HASH-ELSE-LEAD (hash field when projected, else lead — not the superseded
+ * `any_missing` "EVERY field" model). On Card the hash is `slug`, which this
+ * read already projects, so extra non-gate fields do not drop live rows; two
+ * fields (`slug`+`body`) is still the floor this match needs and the cheapest
+ * full-board body surface.
  *
  * Pairs with the `BODY_OMITTED` contract — callers hydrate a body-free card
  * through `withLoadedBody`, which is the marker-clearing path.
@@ -3286,11 +3288,11 @@ export async function listBoardCardsWithBodies(
   if (!cards.some(isBodyOmitted)) return cards;
 
   // `listCardBodies`, not `listCardsWithBodies`: it projects two fields instead
-  // of the full card, so it is both cheaper and STRICTLY WIDER in coverage —
-  // LastDB returns a row only when every projected field has an atom, so the
-  // wide scan silently drops cards the narrow one returns (421 slugs vs 595 on
-  // the primary). This read wants bodies; asking for anything else only adds
-  // ways for a live card to go missing.
+  // of the full card, so it is cheaper. Under HASH-ELSE-LEAD on Card (gate =
+  // `slug`) both widths return the same live set when `slug` is projected; the
+  // older "wide is strictly narrower" claim was the superseded `any_missing`
+  // model. Prefer the narrow body scan anyway: cost, and habit for indexes
+  // where a multi-key hash gate really does drop sparse rows.
   const bodies = await listCardBodies(node, cfg);
   const covered = cards.map((c) => {
     if (!isBodyOmitted(c)) return c;
@@ -4600,15 +4602,16 @@ const CARD_LEGACY_FIELDS: readonly string[] = CARD_FIELDS.filter(
  * "not returned" as "not writable narrowly".
  *
  * Same safety gate, and the same reasoning, as
- * {@link readWholeBoardCardRow}: LastDB returns a row only when EVERY
- * projected field has an atom on it, so one wide read answers both questions a
- * narrow write must have answered — does the row exist (a narrow
- * `updateRecord` against a MISSING row does not fail; it silently stores just
- * the subset it was handed, leaving a row every wide reader then drops), and
- * is it whole (a hole must be repaired by a wide write, not patched around).
+ * {@link readWholeBoardCardRow}. Under HASH-ELSE-LEAD a wide read returns a
+ * row when the gate atom is present (Card hash = `slug`), even if non-gate
+ * fields are sparse — it is not the superseded `any_missing` model. Callers
+ * still treat `null` as "do not write narrowly": a narrow `updateRecord`
+ * against a MISSING row does not fail; it silently stores just the subset it
+ * was handed. `isKeyOnlyRow` on a returned wide row still distinguishes husks
+ * from live sparse cards.
  *
- * `null` conflates the two deliberately: the caller's answer to both is
- * "write wide", which heals either.
+ * `null` means absent or ungated; the caller's answer is "write wide", which
+ * heals either missing or partial.
  *
  * This does NOT reuse the `previous` card the callers already have. `previous`
  * is a Card object with no record of the projection it was read through —
