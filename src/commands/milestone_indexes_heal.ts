@@ -96,6 +96,28 @@ export type MilestoneIndexesHealResult = {
    * having seen every milestone.
    */
   enumeration_failed_leads: Array<{ field: string; error: string }>;
+  /**
+   * Boards whose BoardMilestones partition read FAILED. Non-empty means this
+   * run repaired nothing on those boards and cannot have measured drift there.
+   *
+   * ## Why this matters more than `enumeration_failed_leads`, which already warns
+   *
+   * The two reads that feed this command have wildly different recall, and the
+   * warning was on the smaller one. Measured on the primary 2026-08-06
+   * (`scripts/probe-milestone-heal-partition-read-blind.ts`): of **66** live
+   * milestones, the multi-lead enumeration sweep reaches **3**; the other
+   * **63** are reachable only because the index partition read offers them as
+   * candidates that are then point-read for truth. So the index read is ~95% of
+   * this command's reach, and it was the one whose failure produced no field, no
+   * warning line, and exit 0.
+   *
+   * A failed read is not merely lost repair. On that board every swept
+   * milestone is reclassified as an upsert (`rows === null` short-circuits the
+   * drift check), so the run also WRITES rows it never compared — and reports
+   * those writes as `upserts=N`, the same number a genuinely drifted index
+   * produces.
+   */
+  index_read_failed_boards: string[];
   /** Enumerated slugs whose point-read found nothing (deleted husks). */
   milestone_husks_dropped: number;
   /** Enumerated slugs that point-read back to a live milestone. */
@@ -147,17 +169,31 @@ async function classifyBoardMilestoneOps(opts: {
   node: NodeClient;
   boards: Array<{ slug: string }>;
   milestones: Milestone[];
-}): Promise<{ ops: BoardMilestoneOp[]; indexRows: number }> {
+}): Promise<{ ops: BoardMilestoneOp[]; indexRows: number; unreadableBoards: string[] }> {
   const bySlug = new Map(opts.milestones.map((milestone) => [milestone.slug, milestone]));
   const rowsByBoard = new Map<string, Milestone[] | null>();
   for (const board of opts.boards) {
     rowsByBoard.set(board.slug, await listBoardMilestonesPartition(opts.node, opts.cfg, board.slug));
+  }
+  // `listBoardMilestonesPartition` returns null from a bare `catch {}`, so null
+  // is indistinguishable from the `service_timeout` / "too many concurrent
+  // reads" backpressure CLAUDE.md documents as ordinary on this node. Every
+  // branch below degrades safely on it and NONE of them used to say so, which
+  // is the whole defect: the failure is invisible in the report.
+  const unreadableBoards: string[] = [];
+  for (const [board, rows] of rowsByBoard) {
+    if (rows === null) unreadableBoards.push(board);
   }
   // The removal ceiling's denominator: index rows actually read. A board whose
   // partition read FAILED (null) contributes nothing — counting its rows as 0
   // is the conservative direction, since a smaller denominator means a tighter
   // ceiling, and a run that could not read the index is exactly the run that
   // should not be trusted to delete much of it.
+  //
+  // Conservative, but not self-explaining: the refusal text tells the operator
+  // the CLASSIFIER is implausible and to consider `--max-removals`, which is
+  // the wrong lead when the real cause is a read that never landed. Hence
+  // `unreadableBoards` reaching the rendered report.
   let indexRows = 0;
   for (const rows of rowsByBoard.values()) indexRows += rows?.length ?? 0;
 
@@ -199,7 +235,7 @@ async function classifyBoardMilestoneOps(opts: {
       }
     }
   }
-  return { ops, indexRows };
+  return { ops, indexRows, unreadableBoards };
 }
 
 function remainingBudget(budget: number | null, issued: number): number | null {
@@ -297,6 +333,7 @@ export async function milestoneIndexesHealResult(opts: {
       milestones_enumerated: 0,
       milestones_enumerated_single_lead: 0,
       enumeration_failed_leads: [],
+      index_read_failed_boards: [],
       milestone_husks_dropped: 0,
       milestones_scanned: 0,
       milestone_card_children_scanned: 0,
@@ -363,8 +400,9 @@ export async function milestoneIndexesHealResult(opts: {
     : await listBoards(opts.node, opts.cfg);
   const classification = boardMsBound
     ? await classifyBoardMilestoneOps({ cfg: opts.cfg, node: opts.node, boards, milestones })
-    : { ops: [] as BoardMilestoneOp[], indexRows: 0 };
+    : { ops: [] as BoardMilestoneOp[], indexRows: 0, unreadableBoards: [] as string[] };
   const boardOps = classification.ops;
+  const indexReadFailedBoards = classification.unreadableBoards;
 
   const cardPlans = [];
   let milestoneCardChildrenScanned = 0;
@@ -454,6 +492,19 @@ export async function milestoneIndexesHealResult(opts: {
         "  This is a plausibility refusal, not a repair failure: a run that wants to delete this much",
         "  of the index is more likely misclassifying than finding real orphans. Re-run with --dry-run",
         "  to read the classification, and only raise --max-removals once the removals are confirmed.",
+        // ...unless a read failed, in which case the advice above points away
+        // from the cause. `rows_examined` is the ceiling's denominator and an
+        // unreadable board contributes 0 to it, so a refused read can tighten
+        // the ceiling until an ordinary run trips it. Raising --max-removals
+        // there would be overriding a brake with a correct verdict for a reason
+        // the operator has not been told.
+        ...(indexReadFailedBoards.length > 0
+          ? [
+              `  READ THIS FIRST: ${indexReadFailedBoards.length} board partition read(s) FAILED this run, so`,
+              `  rows_examined=${rowsExamined} is short and the ceiling above is tighter than the index warrants.`,
+              "  Retry under lighter load before touching --max-removals — the classifier may be fine.",
+            ]
+          : []),
       ]
     : [];
   // A refused lead means the enumeration is a lower bound. Say so where the
@@ -467,9 +518,23 @@ export async function milestoneIndexesHealResult(opts: {
         "    A milestone missing from this run's candidates may exist and simply not have been reached.",
       ]
     : [];
+  // The sibling of `leadLine`, for the read with ~20x the recall. Separate
+  // block rather than a clause on the `board_milestones` line: a caveat tacked
+  // onto a line that opens `bound=true scanned=N` reads as part of the good
+  // news, which is the mistake `board_cards_heal_scheduled` made with `clean`.
+  const indexReadLine = indexReadFailedBoards.length > 0
+    ? [
+        `  ⚠ INDEX READ INCOMPLETE: BoardMilestones partition read FAILED on ${indexReadFailedBoards.length} board(s): ${indexReadFailedBoards.join(", ")}.`,
+        "    Nothing on those boards was repaired, and no drift there was measured — the index is the only",
+        "    candidate source for milestones the enumeration sweep misses, which on this node is most of them.",
+        `    Any upserts counted below for those boards are UNVERIFIED rewrites, not observed drift, and`,
+        "    rows_examined excludes their rows. This is load, not corruption: retry when the node is quieter.",
+      ]
+    : [];
   const text = [
     "milestone indexes heal:",
     ...ceilingLine,
+    ...indexReadLine,
     ...leadLine,
     `  applied=${applying} budget=${budget === null ? "unlimited" : budget}`,
     `  rows_examined=${rowsExamined} removals_classified=${removalsClassified} removal_ceiling=${removalCeiling === null ? "unlimited" : removalCeiling} blocked=${blocked}`,
@@ -490,6 +555,7 @@ export async function milestoneIndexesHealResult(opts: {
     milestones_enumerated: slugs.length,
     milestones_enumerated_single_lead: sweep.wideScanSlugs,
     enumeration_failed_leads: sweep.failedLeads,
+    index_read_failed_boards: indexReadFailedBoards,
     milestone_husks_dropped: husksDropped,
     milestones_scanned: milestones.length,
     milestone_card_children_scanned: milestoneCardChildrenScanned,
