@@ -114,10 +114,6 @@ export function situationFenceNeedsBody(card: Card): boolean {
   return repo.ok && repo.repo === FENCED_REPO;
 }
 
-export function inferSituationPreflightAction(card: Card): string | null {
-  return inferSituationPreflightActions(card)[0] ?? null;
-}
-
 function situationSlug(result: SituationPreflightResponse): string {
   return result.blocks?.find((block) => block.situation?.slug)?.situation?.slug ?? "unknown-situation";
 }
