@@ -30,7 +30,6 @@ import {
   ensureBoardMilestoneMembership,
   listAllBoardMilestones,
   listBoardMilestonesPartition,
-  removeBoardMilestone,
   retireBoardMilestoneMembership,
   upsertBoardMilestone,
 } from "./board-milestones.ts";
@@ -4372,19 +4371,6 @@ export async function upsertMilestoneRecord(
   } else {
     await upsertBoardMilestone(node, cfg, milestone, previous ?? null);
   }
-}
-
-/** Remove fat Milestone + BoardMilestones dual index. */
-export async function deleteMilestoneRecord(
-  node: NodeClient,
-  cfg: Config,
-  milestone: Milestone,
-): Promise<void> {
-  await node.deleteRecord({
-    schemaHash: schemaHashFor("milestone", cfg),
-    keyHash: milestone.slug,
-  });
-  await removeBoardMilestone(node, cfg, milestone);
 }
 
 function cardToLegacyOptionalFields(c: Card): Record<string, unknown> {
