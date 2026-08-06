@@ -637,13 +637,23 @@ export function createFkanbanMcpServer(
         board: z.string().optional(),
         state: z.enum(MILESTONE_STATES).optional(),
       },
-      outputSchema: { milestones: z.array(milestoneSchema) },
+      outputSchema: {
+        milestones: z.array(milestoneSchema),
+        total: z.number().describe("Total milestones before any future page cap."),
+        truncated: z.boolean().describe("True when a cap dropped milestones — today always false (uncapped)."),
+      },
     },
     async (args) => {
       try {
         const { cfg, node } = requireConfig();
         const result = await milestoneListResult({ cfg, node, board: args.board, state: args.state });
-        return toolResult(result.text, { milestones: result.milestones });
+        // Completeness envelope: never let a short inventory look complete.
+        // (Papercut: portfolio/list undercount looked like a full census.)
+        return toolResult(result.text, {
+          milestones: result.milestones,
+          total: result.milestones.length,
+          truncated: false,
+        });
       } catch (err) {
         return errorResult(err);
       }
@@ -787,13 +797,22 @@ export function createFkanbanMcpServer(
       description: "List milestone health with North Star, lifecycle, proof, ready frontier, blocker, and warning count.",
       annotations: { title: "Milestone portfolio", readOnlyHint: true, openWorldHint: false },
       inputSchema: { board: z.string().optional() },
-      outputSchema: { entries: z.array(z.object({ slug: z.string(), title: z.string(), north_star: z.string(), state: z.string(), driver: z.string(), proof_card: z.string(), proof_status: z.string(), proof_verdict: z.string(), proof_verdict_reason: z.string(), ready: z.array(z.string()), blocker: z.string(), warning_count: z.number() })) },
+      outputSchema: {
+        entries: z.array(z.object({ slug: z.string(), title: z.string(), north_star: z.string(), state: z.string(), driver: z.string(), proof_card: z.string(), proof_status: z.string(), proof_verdict: z.string(), proof_verdict_reason: z.string(), ready: z.array(z.string()), blocker: z.string(), warning_count: z.number() })),
+        total: z.number().describe("Total portfolio entries before any future page cap."),
+        truncated: z.boolean().describe("True when a cap dropped entries — today always false (uncapped)."),
+      },
     },
     async (args) => {
       try {
         const { cfg, node } = requireConfig();
         const result = await milestonePortfolioResult({ cfg, node, board: args.board });
-        return toolResult(result.text, { entries: result.entries });
+        // Completeness envelope (same contract as fkanban_milestone_list).
+        return toolResult(result.text, {
+          entries: result.entries,
+          total: result.entries.length,
+          truncated: false,
+        });
       } catch (err) {
         return errorResult(err);
       }
