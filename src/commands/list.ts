@@ -38,7 +38,7 @@ import {
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
-import { type WarnSink, warnIfTruncated } from "../truncation_notice.ts";
+import { type WarnSink, renderJsonPage, warnIfTruncated } from "../truncation_notice.ts";
 import { type CardDetail } from "./show.ts";
 
 // Cards shown per column before the rest collapse to a "… N more" line.
@@ -157,9 +157,14 @@ export type ListOptions = {
   // unpreviewed JSON surface. MCP has its own `full_body` option.
   fullBody?: boolean;
   groupByMilestone?: boolean;
-  // Sink for the capped-page notice on the CLI `--json` path (defaults to
+  // Legacy bare-array stdout (`--json-array`). Default is the
+  // `{cards, total, truncated}` envelope. When true, re-emit the stderr
+  // truncation notice on an implicit cap so that path stays non-silent.
+  jsonArray?: boolean;
+  // Sink for the capped-page notice on the CLI `--json-array` path (defaults to
   // `console.error`, matching record.ts's `opts.warn ?? console.error`
   // convention). Injected by tests so the notice is asserted, not printed.
+  // The default envelope path does not warn on stderr (truncation is structural).
   warn?: WarnSink;
 };
 
@@ -455,11 +460,11 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     implicitJsonDefault && broadJson ? DEFAULT_COLUMN_LIMIT : 0;
   const effectiveJsonLimit = jsonLimit > 0 ? jsonLimit : implicitJsonLimit;
   const capped = effectiveJsonLimit > 0 ? capPerColumn(board, cards, effectiveJsonLimit, opts.column) : cards;
-  // The implicit cap is the silent one — see truncation_notice.ts. Compare the
-  // capped page against the full filtered set (`cards`), which is already in
-  // hand, so the total is exact rather than estimated.
-  if (implicitJsonLimit > 0 && jsonLimit === 0) {
-    warnIfTruncated("list", capped.length, cards.length, opts.warn ?? console.error);
+  const total = cards.length;
+  // Bare-array escape hatch keeps the stderr notice; the envelope path reports
+  // truncation structurally and must not also noise fd 2.
+  if (opts.jsonArray && implicitJsonLimit > 0 && jsonLimit === 0) {
+    warnIfTruncated("list", capped.length, total, opts.warn ?? console.error);
   }
   // Bodies are never loaded for board-wide list (BoardCards thin projection).
   // --full-body is the explicit opt-in to the expensive surface: it suppresses
@@ -473,9 +478,11 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     ? previewCardBodies(withBodies, opts.fullBody ?? false)
     : withBodies;
   if (opts.groupByMilestone && milestones) {
-    return JSON.stringify({ groups: buildMilestoneCardGroups(out, milestones) }, null, 2);
+    const groups = buildMilestoneCardGroups(out, milestones);
+    if (opts.jsonArray) return JSON.stringify({ groups }, null, 2);
+    return JSON.stringify({ groups, total, truncated: out.length < total }, null, 2);
   }
-  return JSON.stringify(out, null, 2);
+  return renderJsonPage("cards", out, total, { jsonArray: opts.jsonArray });
 }
 
 export function summarize(cards: Card[]): Record<string, number> {

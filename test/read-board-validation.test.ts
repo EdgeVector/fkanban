@@ -238,7 +238,10 @@ describe("list validates an explicit --column", () => {
 
   test("list --column <valid> --json returns the filtered cards", async () => {
     const out = await listCmd({ cfg, node, column: "todo", json: true });
-    expect(JSON.parse(out)).toHaveLength(1);
+    const parsed = JSON.parse(out);
+    expect(parsed.cards ?? parsed).toHaveLength(1);
+    expect(parsed.total).toBe(1);
+    expect(parsed.truncated).toBe(false);
   });
 
   test("list with no --column still succeeds (unchanged hot path)", async () => {
@@ -294,7 +297,10 @@ describe("search validates an explicit --column", () => {
 
   test("search --column <valid> --json returns the filtered cards", async () => {
     const out = await searchCmd({ cfg, node, query: "card", column: "todo", json: true });
-    expect(JSON.parse(out)).toHaveLength(1);
+    const parsed = JSON.parse(out);
+    expect(parsed.cards ?? parsed).toHaveLength(1);
+    expect(parsed.total).toBe(1);
+    expect(parsed.truncated).toBe(false);
   });
 
   test("search with no --column still succeeds (unchanged hot path)", async () => {
