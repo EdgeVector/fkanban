@@ -25,6 +25,7 @@ import { loadAppCtx, loadCtx } from "./context.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
 import { markCmd } from "./commands/mark.ts";
+import { setCmd } from "./commands/set.ts";
 import { ClaimConflictError, moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
 import { rankCmd } from "./commands/rank.ts";
@@ -101,6 +102,7 @@ Commands:
   init                 bootstrap a node + register schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --created-by --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
+  set <slug>           metadata-only update (north-star/milestone/tags/…); NEVER touches body or stdin
   mark <slug> <line>   append one marker line to a card body, idempotently
   move <slug> <col>    move a card to a column (--from/--expect COL claim guard, --position N, --force past a block)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
@@ -232,6 +234,8 @@ Options:
   --body <text>         card body (Markdown); replaces the whole body.
                         Also reads the body from piped stdin when no --body
                         is given (recommended for multi-line/Markdown bodies).
+                        Metadata-only stamps (north-star/milestone/tags) should
+                        use \`fkanban set\` instead — that verb cannot touch body.
   --force               explicit operator override for dependency blocks and
                         default/todo pickup-readiness policy
   --json                echo the write result as JSON
@@ -322,6 +326,41 @@ Options:
 
 Example:
   fkanban mark ship-login "NEEDS-HUMAN: missing DONE-WHEN"`),
+
+  set: withFooter(`fkanban set — metadata-only update (never touches body)
+
+Usage:
+  fkanban set <slug> [options]
+
+Update structured / display fields on an EXISTING card. This verb has no
+\`--body\` flag and never reads stdin, so a grooming/backfill loop that only
+stamps north_star, milestone, tags, priority, or similar cannot destroy the
+card's GOAL/END STATE brief as a side effect of a whole-body replace.
+
+Use this for NS/MS assignment and other metadata stamps. Use \`add --body\` (or
+piped stdin) only when you intentionally rewrite the brief; use \`mark\` to
+append one line.
+
+Options (at least one required):
+  --title <text>        card title
+  --assignee <name>     who owns the card
+  --tags a,b,c          replace the freeform tag list
+  --priority <P0-P3>    priority tier (stored as a p0–p3 tag)
+  --repo <owner/name>   repo a build agent clones
+  --base <branch>       base branch a PR targets
+  --kind <k>            pr|registry|tracker|umbrella|meta|program|capstone|validation
+  --block-status <s>    none|needs_human|design_first|deferred
+  --block-reason <text> why, when --block-status is set
+  --north-star <slug>   fbrain North Star this card advances
+  --milestone <slug>    fkanban Milestone this card advances
+  --pr-url <url>        the PR driving this card (when in flight)
+  --branch <name>       worktree/feature branch
+  --surfaces a,b        path globs / subsystem names this card expects to touch
+  --force               operator override for dependency / pickup-readiness gates
+  --json                echo the write result as JSON
+
+Example:
+  fkanban set ship-login --north-star ns-auth --milestone ms-login-v1`),
 
   move: withFooter(`fkanban move — move a card to another column
 
@@ -1065,6 +1104,13 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
   ]),
+  // Metadata-only: no body, no stdin, no placement (board/column), no deps list
+  // replace. Grooming scripts that stamp NS/MS/tags must use this so they
+  // cannot clobber a brief via accidental body/stdin.
+  set: new Set([
+    "title", "assignee", "tags", "surfaces", "priority", "force",
+    "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
+  ]),
   // reconcile repairs MilestoneCards as it reads; --dry-run classifies without
   // writing and --max-repairs bounds how much it writes in one invocation.
   milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert"]),
@@ -1681,6 +1727,64 @@ async function dispatch(
         return 0;
       } catch (err) {
         if (err instanceof FkanbanError && err.code === "invalid_mark_line") {
+          if (values.json) {
+            console.log(formatError(err));
+          } else {
+            console.error(`kanban: ${err.message}`);
+            if (err.hint) console.error(`  hint: ${err.hint}`);
+          }
+          return 2;
+        }
+        throw err;
+      }
+    }
+
+    case "set": {
+      const slug = requirePositional(positionals[1], "set <slug>");
+      const extra = rejectExtraPositionals(positionals, 2, "set <slug>");
+      if (extra !== undefined) return extra;
+      const ctx = loadCtx({ verbose });
+      try {
+        // Never read stdin. Never accept --body. Metadata-only by construction.
+        const dbLocator = ambientDbLocator(values);
+        const priority =
+          values.priority !== undefined ? parsePriorityFlag(values.priority as string, "set") : undefined;
+        const res = await setCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug,
+          title: values.title as string | undefined,
+          assignee: values.assignee as string | undefined,
+          tags: parseTags(values.tags as string | undefined),
+          surfaces: parseTags(values.surfaces as string | undefined),
+          priority,
+          force: values.force as boolean | undefined,
+          repo: values.repo as string | undefined,
+          base: values.base as string | undefined,
+          kind: values.kind as string | undefined,
+          blockStatus: values["block-status"] as string | undefined,
+          blockReason: values["block-reason"] as string | undefined,
+          northStar: values["north-star"] as string | undefined,
+          milestone: values.milestone as string | undefined,
+          prUrl: values["pr-url"] as string | undefined,
+          branch: values.branch as string | undefined,
+          dbLocator,
+        });
+        console.log(formatAdd(res, values.json as boolean | undefined));
+        return 0;
+      } catch (err) {
+        if (
+          err instanceof FkanbanError &&
+          (
+            err.code === "set_no_fields" ||
+            err.code === "invalid_kind" ||
+            err.code === "invalid_block_status" ||
+            err.code === "card_not_found" ||
+            err.code === "milestone_not_found" ||
+            err.code === "milestone_north_star_mismatch" ||
+            err.code === "milestone_board_mismatch"
+          )
+        ) {
           if (values.json) {
             console.log(formatError(err));
           } else {
@@ -2406,10 +2510,20 @@ function safeRealpath(path: string): string {
 }
 
 /** Stamp `Db: <locator>` when org/kanban --db (or LASTDB_DB) provides a write target. */
+/**
+ * Stamp a `Db:` header onto a body that is ALREADY being written.
+ *
+ * When `body` is undefined this must stay undefined: inventing `"Db: …"` from
+ * an ambient LASTDB_DB / `--db` turns a metadata-only `add` into a full-body
+ * replace (empty brief + Db header), which is how NS/MS backfill loops can
+ * destroy GOAL/END STATE briefs without ever passing `--body`. Structured
+ * `db` still lands via `applyDbLocatorForWrite` on the card row; the body
+ * header is only for intentional body writes (create or explicit replace).
+ */
 export function ensureDbHeader(body: string | undefined, dbLocator: string | undefined): string | undefined {
+  if (body === undefined) return undefined;
   if (!dbLocator || dbLocator.length === 0) return body;
-  const b = body ?? "";
-  return writeBodyHeader(b, "Db", dbLocator);
+  return writeBodyHeader(body, "Db", dbLocator);
 }
 
 function rejectExtraPositionals(positionals: string[], max: number, usage: string): number | undefined {

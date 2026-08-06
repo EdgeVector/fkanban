@@ -11,6 +11,7 @@ import { FkanbanError, newNodeClient, type NodeClient, type Verbose } from "../c
 import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
 import { markCmd } from "../commands/mark.ts";
+import { setCmd } from "../commands/set.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
 import { pickupStatusResult } from "../commands/pickup_status.ts";
@@ -64,6 +65,9 @@ export const FKANBAN_WRITE_TOOLS = [
   // callers to "use `fkanban mark`"; until this tool existed that hint named a
   // CLI-only command an MCP agent could not run.
   "fkanban_mark",
+  // Metadata-only update: north_star/milestone/tags/etc without a body field.
+  // Grooming/backfill loops must use this so they cannot clobber a brief.
+  "fkanban_set",
   "fkanban_move",
   "fkanban_rank",
   "fkanban_pickup_claim",
@@ -113,6 +117,7 @@ export const FKANBAN_MCP_INSTRUCTIONS = [
   "",
   "Bodies: fkanban_add's `body` REPLACES the whole body — never write back a preview.",
   "To append a line (HANDOFF/PROGRESS), use fkanban_mark.",
+  "To stamp north_star/milestone/tags without touching body, use fkanban_set.",
   "",
   "Health check: fkanban_ping (one cheap status read) — not fkanban_list.",
   "Discovery: if anything seems misconfigured, start with fkanban_doctor.",
@@ -939,6 +944,80 @@ export function createFkanbanMcpServer(
         const { cfg, node } = requireConfig();
         const res = await markCmd({ cfg, node, slug, line });
         return toolResult(`marked ${res.slug} → ${res.board}/${res.column}`, res);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_set",
+    {
+      title: "Metadata-only card update",
+      description:
+        "Update structured/display fields on an EXISTING card without ever writing `body`. Use this for north_star, milestone, tags, priority, repo, base, kind, block_status, pr_url, branch, surfaces, title, or assignee stamps. There is no `body` parameter — grooming/backfill loops that only need metadata must use this tool so a whole-body replace cannot destroy a GOAL/END STATE brief. To rewrite the brief use `fkanban_add`; to append one line use `fkanban_mark`.",
+      annotations: {
+        title: "Metadata-only card update",
+        idempotentHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        slug: z.string().optional().describe("Existing card slug (set does not create)."),
+        title: z.string().optional().describe("Card title."),
+        assignee: z.string().optional().describe("Who owns the card."),
+        tags: z
+          .array(z.string())
+          .optional()
+          .describe("Freeform labels (replaces the existing tag list). Prefer fkanban_tag_add/rm for incremental edits."),
+        surfaces: z
+          .array(z.string())
+          .optional()
+          .describe("Repo-relative path globs or subsystem names this card expects to touch."),
+        priority: z
+          .enum(PRIORITY_TIERS)
+          .optional()
+          .describe("Card priority (P0–P3). Stored as a p0–p3 tag."),
+        force: z.boolean().optional().describe("Operator override for dependency / pickup-readiness gates."),
+        repo: z.string().optional().describe("Repo a build agent clones (owner/name)."),
+        base: z.string().optional().describe("Base branch a PR targets."),
+        kind: z.enum(CARD_KINDS).optional().describe("pr drives to a merged PR; non-pr kinds are never picked up."),
+        block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional(),
+        block_reason: z.string().optional(),
+        north_star: z.string().optional().describe("fbrain North Star slug this card advances."),
+        milestone: z.string().optional().describe("fkanban Milestone slug this card advances."),
+        pr_url: z.string().optional(),
+        branch: z.string().optional(),
+      },
+      outputSchema: {
+        slug: z.string(),
+        action: z.enum(["created", "updated"]),
+        board: z.string(),
+        column: z.string(),
+      },
+    },
+    async (args) => {
+      try {
+        const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
+        const { cfg, node } = requireConfig();
+        const o: Parameters<typeof setCmd>[0] = { cfg, node, slug };
+        if (args.title !== undefined) o.title = args.title;
+        if (args.assignee !== undefined) o.assignee = args.assignee;
+        if (args.tags !== undefined) o.tags = args.tags;
+        if (args.surfaces !== undefined) o.surfaces = args.surfaces;
+        if (args.priority !== undefined) o.priority = args.priority;
+        if (args.force !== undefined) o.force = args.force;
+        if (args.repo !== undefined) o.repo = args.repo;
+        if (args.base !== undefined) o.base = args.base;
+        if (args.kind !== undefined) o.kind = args.kind;
+        if (args.block_status !== undefined) o.blockStatus = args.block_status;
+        if (args.block_reason !== undefined) o.blockReason = args.block_reason;
+        if (args.north_star !== undefined) o.northStar = args.north_star;
+        if (args.milestone !== undefined) o.milestone = args.milestone;
+        if (args.pr_url !== undefined) o.prUrl = args.pr_url;
+        if (args.branch !== undefined) o.branch = args.branch;
+        const res = await setCmd(o);
+        return toolResult(`${res.action} card ${res.slug} → ${res.board}/${res.column}`, res);
       } catch (err) {
         return errorResult(err);
       }
