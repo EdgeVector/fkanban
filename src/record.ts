@@ -45,10 +45,8 @@ import {
   CARD_FIELDS,
   CARD_OPTIONAL_SCHEMA_FIELDS,
   fieldsFor,
-  isDefaultColumn,
   resolveColumns,
   type AddSchemaRequest,
-  type Column,
   type RecordType,
 } from "./schemas.ts";
 
@@ -4897,10 +4895,6 @@ export function ensureColumn(column: string, boardColumns?: string[]): void {
       hint: `Valid columns: ${valid.join(" | ")}`,
     });
   }
-}
-
-export function isColumn(s: string): s is Column {
-  return isDefaultColumn(s);
 }
 
 // Position for a card appended to a column: current epoch millis. Positions
