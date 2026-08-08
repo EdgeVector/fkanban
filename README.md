@@ -247,6 +247,7 @@ DONE  (0)
 | `kanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for kanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
 | `kanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
 | `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json --full-body`) |
+| `kanban search <query> --semantic` | rank cards by MEANING via the LastSeek plane — returns cards that do not contain the query's words |
 | `kanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
 | `kanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
 | `kanban board create <slug>` | create/update a board (`--title`; `--columns` may be omitted or set to `backlog,todo,doing,done`) |

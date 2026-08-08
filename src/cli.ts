@@ -132,6 +132,7 @@ Commands:
                        (--apply --min-age-hours N --pileup-threshold N --json)
   rank                 hard todo ranker: p0 → program/MS frontier → unlaned → papercut (--board --column --mode hard|priority)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json --full-body)
+                       --semantic ranks by MEANING via the LastSeek plane instead of substring
   gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            soft-delete a card (refuses if live cards depend on it)
@@ -1137,7 +1138,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   move: new Set(["from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone", "json-array"]),
   rank: new Set(["board", "column", "mode"]),
-  search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body", "json-array"]),
+  search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body", "json-array", "semantic"]),
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
@@ -1330,6 +1331,7 @@ async function main(argv: string[]): Promise<number> {
         limit: { type: "string" },
         "full-body": { type: "boolean" },
         full_body: { type: "boolean" },
+        semantic: { type: "boolean" },
         field: { type: "string", multiple: true },
         wide: { type: "boolean" },
         all: { type: "boolean" },
@@ -2407,6 +2409,7 @@ async function dispatch(
         all: values.all as boolean | undefined,
         fullBody: fullBodySearch,
         jsonArray: Boolean(values["json-array"]),
+        semantic: Boolean(values.semantic),
       });
       console.log(out);
       return 0;

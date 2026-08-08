@@ -54,10 +54,20 @@ export type SearchOptions = {
   fullBody?: boolean;
   // Sink for the capped-page notice on the CLI `--json-array` path. See list.ts.
   warn?: WarnSink;
+  // Meaning-based search instead of substring: rank by the semantic plane and
+  // do NOT re-filter through `cardMatchesQuery`.
+  //
+  // A separate mode rather than a change to the default, deliberately. The
+  // default path's contract is literal substring recall, and quietly widening
+  // it to "cards that mean something similar" would change every existing
+  // caller's results underneath them. This mode is the capability; whether it
+  // becomes the default is a product decision with evidence behind it, not a
+  // side effect of the plane getting good.
+  semantic?: boolean;
 };
 
 
-type SearchPlan = "complete-scan" | "indexed-candidates";
+type SearchPlan = "complete-scan" | "indexed-candidates" | "semantic";
 
 function debugSearchPlan(plan: SearchPlan, detail: Record<string, unknown>): void {
   if (!process.env.FKANBAN_DEBUG_QUERY_PLAN) return;
@@ -120,11 +130,22 @@ function legacyNativeHitToAppSearchHit(hit: unknown): AppSearchHit | null {
 
 async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: string[]; saturated: boolean } | null> {
   const cardHash = opts.cfg.schemaHashes.card ?? "";
-  // Primary: first-party Search app plane (shared with brain).
+  // Primary: the first-party semantic plane (shared with brain).
+  //
+  // Scope on the configured hash ALONE. The old call also passed
+  // `"fkanban/Card"` and `"Card"` as extra spellings to try, which was
+  // harmless against a plane that silently dropped terms it could not resolve
+  // — and is exactly wrong against one that does not. LastSeek fails a query
+  // whose scope term resolves to nothing, on purpose, so a speculative
+  // spelling is no longer a free guess: it would fail every card search.
+  //
+  // Nothing is lost. LastSeek resolves `bc941dbc…` through its Schema Service
+  // table and answers with every identity that key names, which is what the
+  // extra spellings were reaching for.
   const plane = await querySearchPlane({
     query: opts.query,
     k: NATIVE_INDEX_RESULT_CAP,
-    schemas: cardHash ? [cardHash, "fkanban/Card", "Card"] : undefined,
+    schemas: cardHash ? [cardHash] : undefined,
   });
   if (plane !== null && plane.length > 0) {
     const slugs: string[] = [];
@@ -203,6 +224,73 @@ async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: 
  * 50 point reads to not contribute it. Semantic RANKING is a real feature, but
  * it needs a path that can actually return semantic matches.
  */
+/**
+ * Meaning-based search: the semantic plane ranks, and its hits are NOT
+ * re-filtered by `cardMatchesQuery`.
+ *
+ * That single sentence is the whole reason this function exists separately.
+ * `indexedSearchCards` passes every plane candidate through a literal substring
+ * test, so a semantically-similar card that does not contain the query's words
+ * is discarded — which is why the comment above that function records that the
+ * plane "never contributed recall beyond substring matching" and that semantic
+ * ranking "needs a path that can actually return semantic matches". This is that
+ * path. A hit from a schema-scoped k-NN query IS a match; re-asking whether the
+ * words appear is asking the question the ranker was called to answer.
+ *
+ * Measured on the live board: `--semantic "stop the database from being wiped"`
+ * ranks the purge/delete cards first, and none of them contains the word
+ * "wiped". The default path returns nothing for that query.
+ *
+ * Scoped to the Card schema, so this only ever searches kanban's own records.
+ * An unresolvable scope term propagates as an error rather than an empty
+ * result — see `lastseek-plane.ts`.
+ */
+async function semanticSearchCards(
+  opts: SearchOptions,
+): Promise<{ cards: Card[]; allCards: Card[]; fallbackReason?: string }> {
+  const native = await nativeIndexCandidateSlugs(opts);
+  const inScope = (c: Card): boolean =>
+    (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column);
+
+  // Plane order IS the ranking, so hydrate in it and keep it. `sortCards` is
+  // deliberately not applied: it would re-order by board position and throw
+  // away the only thing this mode is for.
+  const hydrated = await mapWithConcurrency(native?.slugs ?? [], (slug) =>
+    findCard(opts.node, opts.cfg, slug),
+  );
+  const matches: Card[] = [];
+  const seen = new Set<string>();
+  for (const card of hydrated) {
+    if (!card || !inScope(card) || seen.has(card.slug)) continue;
+    seen.add(card.slug);
+    matches.push(card);
+  }
+
+  const statusCards = await listDependencyStatusesForCards(
+    opts.node,
+    opts.cfg,
+    matches,
+    matches,
+  );
+
+  debugSearchPlan("semantic", {
+    planeCandidates: native?.slugs.length ?? 0,
+    matches: matches.length,
+    saturated: native?.saturated ?? false,
+  });
+
+  return {
+    cards: matches,
+    allCards: statusCards,
+    fallbackReason:
+      native === null
+        ? "semantic plane unavailable — install lastseek or drop --semantic"
+        : native.saturated
+          ? "semantic plane returned its cap"
+          : undefined,
+  };
+}
+
 async function indexedSearchCards(
   opts: SearchOptions,
 ): Promise<{ cards: Card[]; allCards: Card[]; fallbackReason?: string }> {
@@ -399,6 +487,16 @@ export async function searchResult(
       filterIndexed: false,
       fullBodyScan: true,
     });
+  } else if (opts.semantic) {
+    const sem = await semanticSearchCards(opts);
+    allCards = sem.allCards;
+    matches = sem.cards;
+    if (sem.fallbackReason !== undefined) {
+      // Surfaced rather than swallowed: "no cards match" and "the plane you
+      // asked for isn't there" are different answers, and this mode exists
+      // because conflating them is the family of bug it was built to close.
+      opts.warn?.(`note: ${sem.fallbackReason}`);
+    }
   } else {
     const indexed = await indexedSearchCards(opts);
     if (indexed.fallbackReason !== undefined) {
@@ -421,6 +519,10 @@ export async function searchResult(
   const text = renderSearchResults(matches, opts.query, {
     blocked: blockedSlugSet(matches, allCards),
     limit: textLimit,
+    // Semantic order is the answer, not an artifact of how the cards were
+    // fetched. Re-sorting it by board position and then capping would print a
+    // top-10 of the wrong ten.
+    preserveOrder: Boolean(opts.semantic),
   });
   return { text, cards: matches, jsonLimit };
 }

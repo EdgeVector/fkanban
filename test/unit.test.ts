@@ -460,6 +460,34 @@ describe("search", () => {
     expect(renderSearchResults([], "ghost", { color: false })).toBe('No cards match "ghost".');
   });
 
+  test("renderSearchResults keeps the caller order under preserveOrder, and only then", () => {
+    // Meaning-based search hands over a RELEVANCE ranking. Re-sorting it by
+    // board position and then applying the display cap prints a top-N of the
+    // wrong N, which is how a working ranker looks broken.
+    //
+    // The ranking here is the exact reverse of `position` order, so neither
+    // assertion can pass by coincidence on a stable sort.
+    const ranked = [
+      card({ slug: "best", title: "auth a", position: "30" }),
+      card({ slug: "middling", title: "auth b", position: "20" }),
+      card({ slug: "weakest", title: "auth c", position: "10" }),
+    ];
+    const bullets = (out: string): string[] =>
+      out.split("\n").filter((l) => l.trim().startsWith("\u2022"));
+
+    const preserved = bullets(
+      renderSearchResults(ranked, "auth", { color: false, preserveOrder: true }),
+    );
+    expect(preserved[0]).toContain("best");
+    expect(preserved[1]).toContain("middling");
+    expect(preserved[2]).toContain("weakest");
+
+    // Default stays position-ordered: substring search has no ranking to keep.
+    const positionOrdered = bullets(renderSearchResults(ranked, "auth", { color: false }));
+    expect(positionOrdered[0]).toContain("weakest");
+    expect(positionOrdered[2]).toContain("best");
+  });
+
   test("renderSearchResults caps rendered matches and prints an overflow line", () => {
     // 5 matching cards, capped at 2 → 2 bullet lines + a "… 3 more" overflow.
     const many = Array.from({ length: 5 }, (_, i) =>
