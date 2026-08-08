@@ -1772,6 +1772,84 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
 }
 
 /**
+ * Warn when a card is FILED into default/backlog in a shape that can never
+ * reach default/todo.
+ *
+ * {@link assertDefaultTodoPickupReady} returns immediately unless the card is
+ * already landing in `default/todo`, which means the pickup contract is
+ * enforced at the EXIT of backlog and nowhere else. That asymmetry is what
+ * turned backlog into a silent black hole: on 2026-08-08 the board read
+ * `pickup-ready: 2 of 78`, and running `pickup explain` over the 21 ungated
+ * backlog cards returned the same verdict for every one of them —
+ * `Kind:pr card "…" cannot enter todo without a milestone`. They had been filed
+ * by `last-stack-papercut-reconciler` and by ad-hoc agent sessions, accepted
+ * without complaint, and left unreachable for up to three days. Nothing failed.
+ * They simply looked filed.
+ *
+ * So this is deliberately a WARNING and not a refusal. Backlog is the correct,
+ * documented park for gated, tracker, capstone and validation work, and
+ * `defaultTodoPickupGate`'s own hint tells operators to use it. Refusing here
+ * would break the park. What was missing is not permission — it is the signal
+ * that a card claiming to be runnable work is not, at the moment someone can
+ * still do something about it.
+ *
+ * Scoped tightly to the black-hole shape, because a warning that fires on the
+ * legitimate park is a warning everyone learns to ignore:
+ *   - `kind` is `pr` — the card claims to be executable work, not a tracker.
+ *   - `block_status` is `none` — nobody parked it on purpose.
+ *   - it has no dependencies — a dependency wait is a real, self-clearing reason
+ *     to sit in backlog, and the dep guard already voices it.
+ * Everything left over is a card that says "I am ready to be worked" while
+ * being structurally unable to be worked.
+ *
+ * Call with the card's FINAL resolved board/column, before the record write —
+ * same contract as {@link assertNoExplicitTodoLaneMetadata}.
+ */
+export function warnUnreachableDefaultBacklogCard(
+  card: Card,
+  rawBody?: string,
+  opts?: {
+    milestoneState?: string;
+    enforce?: boolean;
+    warn?: (message: string) => void;
+  },
+): void {
+  if (card.board !== DEFAULT_BOARD_SLUG || card.column !== "backlog") return;
+  if (normalizeKind(card.kind) !== "pr") return;
+  if (normalizeBlockStatus(card.block_status) !== "none") return;
+  if (card.deps.length > 0) return;
+
+  // Ask the real gates rather than re-deriving their conditions here. A second
+  // copy of the pickup contract would drift from the first, and then the
+  // warning would be confidently wrong about why a card is stuck — the
+  // lying-instrument failure this codebase keeps paying for.
+  //
+  // BOTH gates, in the order `move` runs them. The 21 cards that went missing
+  // on 2026-08-08 were refused by `livePrMilestoneGate`, not by
+  // `defaultTodoPickupGate` — checking only the latter would have stayed silent
+  // through the exact incident this function exists to prevent.
+  const probe = { ...card, column: "todo" };
+  const blocked =
+    captureFkanbanError(() =>
+      livePrMilestoneGate(probe, {
+        milestoneState: opts?.milestoneState,
+        enforce: opts?.enforce,
+      }),
+    ) ?? captureFkanbanError(() => defaultTodoPickupGate(probe, rawBody));
+  if (!blocked) return;
+  const warn = opts?.warn;
+
+  const emit = warn ?? ((message: string) => console.error(message));
+  emit(
+    `warning: "${card.slug}" was filed in default/backlog as ungated Kind:pr work, ` +
+      `but it cannot reach default/todo: ${blocked.message} ` +
+      "Nothing will pick it up and nothing else will report it — `pickup status` " +
+      "counts it as parked. Fix it now, or park it honestly with " +
+      "--block-status/--kind so the hold is visible.",
+  );
+}
+
+/**
  * The verdict half of {@link assertDefaultTodoPickupReady}: pure, and it throws
  * rather than returning a verdict object so the forced and unforced readings
  * cannot drift into disagreeing about what the gate decided.
