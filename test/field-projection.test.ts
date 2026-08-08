@@ -177,6 +177,15 @@ describe("--field projection", () => {
   // semantic-index candidate path is retained as the fallback for exactly this
   // case — it is the only way to reach a body match here.
   test("search still answers via native candidates when the Card scan is refused", async () => {
+    // This test is about the NATIVE candidate path. Left enabled, the LastSeek
+    // plane answers first from the host index — which knows nothing about this
+    // stub node's `probe` card — so the assertion got [] after ~7s of real
+    // subprocess work. LASTSEEK_DISABLE is the plane's own documented switch
+    // (checked in both queryLastSeek and the availability probe); using it
+    // makes the test hermetic instead of dependent on host index contents.
+    const prevDisable = process.env.LASTSEEK_DISABLE;
+    process.env.LASTSEEK_DISABLE = "1";
+    try {
     const probe = card({ slug: "probe", title: "Probe", body: "needle body", position: "10" });
     const calls: Array<{ schemaHash: string; filter?: unknown; allowFullScan?: boolean }> = [];
     const noIndexCfg: Config = {
@@ -230,6 +239,10 @@ describe("--field projection", () => {
     // degrades correctly, whereas never attempting would cost every healthy
     // node the recall that scan buys.
     expect(calls.some((c) => c.schemaHash === "cardhash" && c.filter !== undefined)).toBe(true);
+    } finally {
+      if (prevDisable === undefined) delete process.env.LASTSEEK_DISABLE;
+      else process.env.LASTSEEK_DISABLE = prevDisable;
+    }
   }, 10000);
 
   test("projection allowlist is seeded from the card schema fields", () => {
