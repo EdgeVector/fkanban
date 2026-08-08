@@ -19,6 +19,7 @@ import {
   assertUnlessAlreadyViolating,
   sanitizeDefaultTodoLaneMetadata,
   warnClearedTodoLaneMetadata,
+  warnUnreachableDefaultBacklogCard,
   applyDbLocatorForWrite,
   captureFkanbanError,
   forcedGuardWaiverWarning,
@@ -476,6 +477,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       () => assertDefaultTodoPickupReady(updated, opts.force, rawBody),
       () => assertDefaultTodoPickupReady({ ...existing }, opts.force, existing.body),
     );
+    // Unforced by design: this warns, it never refuses, so there is nothing for
+    // --force to waive. See warnUnreachableDefaultBacklogCard.
+    warnUnreachableDefaultBacklogCard(updated, rawBody, {
+      milestoneState:
+        (existing.milestone ?? "") === (updated.milestone ?? "") ? resolvedMilestoneState : "",
+      enforce: opts.cfg.enforceLivePrMilestone === true,
+    });
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
     await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
     await updateCardRecord(opts, updated, undefined, existing);
@@ -545,6 +553,12 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     previousPrUrl: prUrlBeforeSanitize,
   });
   assertDefaultTodoPickupReady(card, opts.force, rawBody);
+  // The filing path this whole guard exists for: a brand-new Kind:pr card that
+  // lands in the default column and would never be claimable from it.
+  warnUnreachableDefaultBacklogCard(card, rawBody, {
+    milestoneState: resolvedMilestoneState,
+    enforce: opts.cfg.enforceLivePrMilestone === true,
+  });
   await assertSituationPreflightAllowed(card, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
   await createCardRecord(opts, card);
