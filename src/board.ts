@@ -397,13 +397,26 @@ export function previewCardBodies<T extends Card>(
 export function renderSearchResults(
   cards: Card[],
   query: string,
-  opts: { color?: boolean; blocked?: Set<string>; limit?: number } = {},
+  opts: {
+    color?: boolean;
+    blocked?: Set<string>;
+    limit?: number;
+    /**
+     * Keep the caller's order instead of re-sorting by board position.
+     *
+     * Set by meaning-based search, where the incoming order IS the relevance
+     * ranking. Re-sorting it discards the ranking and then the display cap
+     * shows an arbitrary slice of it — a top-10 of the wrong ten. Substring
+     * search has no ranking to preserve, so it keeps board order (the default).
+     */
+    preserveOrder?: boolean;
+  } = {},
 ): string {
   const color = opts.color ?? defaultColor();
   if (cards.length === 0) return paint(color, "dim", `No cards match "${query}".`);
 
   const cap = opts.limit ?? DEFAULT_SEARCH_LIMIT;
-  const sorted = sortCards(cards);
+  const sorted = opts.preserveOrder ? cards : sortCards(cards);
   const hidden = cap > 0 && sorted.length > cap ? sorted.length - cap : 0;
   const visible = hidden === 0 ? sorted : sorted.slice(0, cap);
 

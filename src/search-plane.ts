@@ -1,13 +1,23 @@
 /**
- * Shared Search app plane client for fkanban.
- * Semantic Search plane only (schema-scoped MiniLM vectors).
+ * Shared semantic search plane client for fkanban (schema-scoped vectors).
  *
- * Resolution: LASTDB_SEARCH_SEMANTIC_MODULE → host-track semantic → semantic CLI.
+ * Resolution: LastSeek → LASTDB_SEARCH_SEMANTIC_MODULE → host-track semantic
+ * → semantic CLI.
+ *
+ * LastSeek (`lastdb:///lastseek`) is the Rust successor to the TypeScript
+ * Search app. It goes first rather than replacing the rest, so the cutover is a
+ * property of what is installed rather than a flag day; `LASTSEEK_DISABLE=1`
+ * pins the incumbent.
+ *
+ * The `card` hash in fkanban's own config (`bc941dbc…`) is a registry name
+ * LastSeek's Schema Service table resolves directly, so this tier passes it
+ * unchanged and needs no translation.
  */
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { lastSeekAvailable, queryLastSeek } from "./lastseek-plane.ts";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -111,6 +121,30 @@ export async function querySearchPlane(opts: {
   schemas?: string[];
   searchHome?: string;
 }): Promise<SearchPlaneHit[] | null> {
+  // LastSeek first, when installed with a non-empty index.
+  //
+  // An unresolvable schema throws out of here on purpose. Catching it and
+  // falling through would land on the incumbent, which answers the same query
+  // with `[]` — and the confident-empty answer LastSeek exists to remove would
+  // be back, reintroduced by the fallback meant to be safe.
+  if (lastSeekAvailable()) {
+    const seek = queryLastSeek({
+      query: opts.query,
+      k: opts.k ?? 50,
+      schemas: opts.schemas,
+    });
+    if (seek !== null) {
+      return seek.map((h) => ({
+        // Callers compare `schema_name` against the hashes they passed, so it
+        // carries the identity, not the readable label.
+        schema_name: h.schema_identity,
+        key_hash: h.key_hash,
+        key_range: h.key_range,
+        score: h.score,
+        text: h.text,
+      }));
+    }
+  }
   // Semantic only — empty hits still count as a live plane (return []).
   const sem = await querySemantic(opts);
   if (sem !== null) return sem;
