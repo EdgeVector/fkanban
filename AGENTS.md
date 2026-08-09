@@ -31,21 +31,10 @@ F-Brain, and create or update a matching F-Kanban card when the issue is
 actionable. Prefer dedupe/update over duplicate records. Do this
 opportunistically, unless filing it would materially derail urgent user work.
 
-## Body-free card projections (read this before touching a list path)
-
-`listCards` serves the board from the BoardCards partitions, which carry no
-`body` — so the Card it returns is `body: ""` whether or not the stored card
-has a brief. Cards from that path are marked `body_omitted`; `assertBodyLoaded`
-refuses them at the card WRITE choke point and in body-judging policy code
-(`groomCard`, `assertDefaultTodoPickupReady`), because a card write carries
-every field and would blank the stored brief.
-
-- Judging or rewriting a body → `listCardsWithBodies` (one admin scan) for a
-  whole-board sweep, `findCard`/`requireCard` for one card.
-- Reading real fields (column, deps, repo, base, kind, block_status, surfaces)
-  → `listCards`, which is what those fields are for. Do not hydrate for them.
-- A test fake whose `queryAll` ignores the requested `fields` cannot catch this
-  class. See `test/body-omitted-projection.test.ts` for a faithful one.
+Read this before touching a list path: `fbrain get
+concepts-kanban-body-free-card-projections` — `listCards` serves the board
+from body-free BoardCards partitions; judging/rewriting a body needs
+`listCardsWithBodies`/`findCard`, not `listCards`.
 
 ## Build / test
 
@@ -60,14 +49,11 @@ CI runs the same two checks plus a `ci-required` umbrella and CodeQL (~1 min,
 
 ## Card worktrees — start WARM (APFS CoW target/)
 
-When an agent works a card in a Rust repo (fold, fold_db_node, …), create the
-card worktree with the `bin/fkanban-worktree` helper instead of a bare
-`git worktree add`. It clones the parent checkout's `target/` via APFS
-clonefile(2) (`cp -Rc`), so the first `cargo build/check/test` reuses the whole
-dependency graph (warm, minutes) instead of cold-compiling it (~30-60 min +
-15-30 GB). The clone is copy-on-write: instant, ~zero extra disk until files
-diverge, and an **independent** target/ per worktree (never a shared dir/symlink
-— concurrent agents must not share cargo's build lock).
+Create card worktrees in a Rust repo (fold, fold_db_node, …) with the
+`bin/fkanban-worktree` helper instead of a bare `git worktree add` — it clones
+the parent's `target/` via APFS CoW so the first build is warm, not a 30-60 min
+cold compile. Mechanics/rationale: `fbrain get
+concepts-fkanban-card-worktree-warm-target-apfs-cow`.
 
 ```bash
 bin/fkanban-worktree <repo-root> <worktree-dir> <branch> [base-ref]
@@ -75,11 +61,6 @@ bin/fkanban-worktree <repo-root> <worktree-dir> <branch> [base-ref]
 bin/fkanban-worktree ~/code/edgevector/fold \
   ~/.kanban/worktrees/<slug> kanban/<slug> origin/main
 ```
-
-Best-effort: if the parent has no `target/`, or the FS isn't APFS, the worktree
-just starts cold like a bare `git worktree add` — the helper still succeeds.
-(The 3 AM `clean-up-stale-worktrees` routine prunes these cloned targets exactly
-like organic ones; undiverged CoW files make pruning even cheaper.)
 
 ## Run / dogfood
 
