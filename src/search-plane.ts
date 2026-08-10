@@ -17,7 +17,7 @@ import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { lastSeekAvailable, queryLastSeek } from "./lastseek-plane.ts";
+import { queryLastSeek } from "./lastseek-plane.ts";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -121,29 +121,27 @@ export async function querySearchPlane(opts: {
   schemas?: string[];
   searchHome?: string;
 }): Promise<SearchPlaneHit[] | null> {
-  // LastSeek first, when installed with a non-empty index.
+  // LastSeek first, when its query can answer.
   //
   // An unresolvable schema throws out of here on purpose. Catching it and
   // falling through would land on the incumbent, which answers the same query
   // with `[]` — and the confident-empty answer LastSeek exists to remove would
   // be back, reintroduced by the fallback meant to be safe.
-  if (lastSeekAvailable()) {
-    const seek = queryLastSeek({
-      query: opts.query,
-      k: opts.k ?? 50,
-      schemas: opts.schemas,
-    });
-    if (seek !== null) {
-      return seek.map((h) => ({
-        // Callers compare `schema_name` against the hashes they passed, so it
-        // carries the identity, not the readable label.
-        schema_name: h.schema_identity,
-        key_hash: h.key_hash,
-        key_range: h.key_range,
-        score: h.score,
-        text: h.text,
-      }));
-    }
+  const seek = queryLastSeek({
+    query: opts.query,
+    k: opts.k ?? 50,
+    schemas: opts.schemas,
+  });
+  if (seek !== null) {
+    return seek.map((h) => ({
+      // Callers compare `schema_name` against the hashes they passed, so it
+      // carries the identity, not the readable label.
+      schema_name: h.schema_identity,
+      key_hash: h.key_hash,
+      key_range: h.key_range,
+      score: h.score,
+      text: h.text,
+    }));
   }
   // Semantic only — empty hits still count as a live plane (return []).
   const sem = await querySemantic(opts);
