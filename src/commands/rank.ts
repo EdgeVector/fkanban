@@ -20,6 +20,7 @@ import { type Config } from "../config.ts";
 import {
   RANK_POSITION_STEP,
   ensureColumn,
+  isBodyOmitted,
   isMetaCardKind,
   listBoardCardsWithBodies,
   listMilestonesOnBoard,
@@ -72,7 +73,18 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
   // card is written back whole — the body-free list silently demoted every
   // header-only card to P2 and blanked the brief it rewrote.
   const all = await listBoardCardsWithBodies(opts.node, opts.cfg);
-  const inColumn = all.filter((c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind));
+  const candidates = all.filter(
+    (c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind),
+  );
+  // A BoardCards orphan has no Card primary to hydrate. Keep rank fail-open:
+  // the row remains visible to the explicit board-cards healer, while every
+  // real card can still be ordered. Passing the orphan through would make the
+  // first required position rewrite hit the body-loaded write guard and abort
+  // the entire pickup factory.
+  const skipped = candidates
+    .filter(isBodyOmitted)
+    .map((card) => ({ slug: card.slug, reason: "card-primary-missing" }));
+  const inColumn = candidates.filter((card) => !isBodyOmitted(card));
 
   let ctx: HardTodoRankContext | undefined;
   if (mode === "hard") {
@@ -117,5 +129,5 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
     await writeCardPatch(opts, card, { position: String(position) });
     reordered++;
   }
-  return { board: boardSlug, column, total: ranked.length, reordered, order, mode };
+  return { board: boardSlug, column, total: ranked.length, reordered, order, mode, skipped };
 }

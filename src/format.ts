@@ -146,6 +146,8 @@ export interface RankResult {
   order: { slug: string; priority: string; position: number; lane?: string; hard_tier?: number }[];
   /** hard = lane+frontier (default); priority = legacy P0→P3 only */
   mode?: "hard" | "priority";
+  /** Body-free BoardCards rows whose Card primary could not be hydrated. */
+  skipped?: { slug: string; reason: string }[];
 }
 
 export interface MigrateAreaTagsResult {
@@ -266,7 +268,7 @@ export function formatBoardRm(res: BoardRmResult, json?: boolean): string {
 
 export function formatRank(res: RankResult, json?: boolean): string {
   const mode = res.mode ?? "hard";
-  const human =
+  const ranked =
     res.total === 0
       ? `ranked ${res.board}/${res.column}: no cards`
       : `ranked ${res.board}/${res.column}: ${res.reordered} of ${res.total} reordered ` +
@@ -278,6 +280,11 @@ export function formatRank(res: RankResult, json?: boolean): string {
               : `${c.slug}[${c.priority}]`,
           )
           .join(", ")})`;
+  const skipped = res.skipped ?? [];
+  const human = skipped.length === 0
+    ? ranked
+    : `${ranked}; skipped ${skipped.length} unhydratable BoardCards row(s): ` +
+      skipped.map((card) => `${card.slug}[${card.reason}]`).join(", ");
   return emit(res, human, json);
 }
 
