@@ -34,6 +34,7 @@ import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import { classifyPickupCard, pickupClassificationNeedsBody } from "../src/pickup.ts";
 import { groomStaleBlockersResult, groomStructuredRoutingResult } from "../src/commands/groom.ts";
 import { rankCmd } from "../src/commands/rank.ts";
+import { formatRank } from "../src/format.ts";
 import { moveCmd } from "../src/commands/move.ts";
 import { overlapAgainstCards, overlapCmd } from "../src/commands/overlap.ts";
 import { pickupClaimResult } from "../src/commands/pickup_claim.ts";
@@ -102,7 +103,7 @@ type Row = { fields: Record<string, unknown>; hash: string; range: string | null
  * every stored field. That last point is the reason this fake exists —
  * without it a projection bug cannot fail a test.
  */
-function fakeNode(cards: Card[], boards: Board[] = [board()]) {
+function fakeNode(cards: Card[], boards: Board[] = [board()], ghostBoardCards: Card[] = []) {
   const tables = new Map<string, Row[]>();
   const rowsOf = (schemaHash: string): Row[] => {
     let t = tables.get(schemaHash);
@@ -116,6 +117,13 @@ function fakeNode(cards: Card[], boards: Board[] = [board()]) {
   for (const b of boards) rowsOf("boardhash").push({ fields: boardToFields(b), hash: b.slug, range: null });
   for (const c of cards) {
     rowsOf("cardhash").push({ fields: cardToFields(c), hash: c.slug, range: null });
+    rowsOf("boardcardshash").push({
+      fields: boardCardFieldsFromCard(c),
+      hash: c.board,
+      range: boardCardSk(c.column, c.position, c.slug),
+    });
+  }
+  for (const c of ghostBoardCards) {
     rowsOf("boardcardshash").push({
       fields: boardCardFieldsFromCard(c),
       hash: c.board,
@@ -258,6 +266,31 @@ describe("rank", () => {
     expect(result.order.map((c) => c.slug)).toEqual(["header-p0", "tagged-p1"]);
     expect(node.stored("header-p0")!.body).toContain("## GOAL");
     expect(node.stored("tagged-p1")!.body).toBe(BRIEF);
+  });
+
+  test("skips and reports a BoardCards row whose Card primary cannot hydrate", async () => {
+    const node = fakeNode(
+      [
+        card({ slug: "live-p1", position: "1", tags: ["p1"] }),
+        card({ slug: "live-p2", position: "2", tags: ["p2"] }),
+      ],
+      [board()],
+      [card({ slug: "ghost-p0", position: "3", tags: ["p0"] })],
+    );
+
+    const result = await rankCmd({ cfg, node, board: "default", column: "todo" });
+
+    expect(result.order.map((c) => c.slug)).toEqual(["live-p1", "live-p2"]);
+    expect(result.reordered).toBe(0);
+    expect(result.skipped).toEqual([
+      { slug: "ghost-p0", reason: "card-primary-missing" },
+    ]);
+    expect(formatRank(result)).toContain(
+      "skipped 1 unhydratable BoardCards row(s): ghost-p0[card-primary-missing]",
+    );
+    expect(node.stored("ghost-p0")).toBeNull();
+    expect(node.stored("live-p1")!.body).toBe(BRIEF);
+    expect(node.stored("live-p2")!.body).toBe(BRIEF);
   });
 });
 

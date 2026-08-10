@@ -1164,6 +1164,7 @@ export function createFkanbanMcpServer(
         total: z.number().int(),
         reordered: z.number().int(),
         order: z.array(z.object({ slug: z.string(), priority: z.string(), position: z.number().int() })),
+        skipped: z.array(z.object({ slug: z.string(), reason: z.string() })).optional(),
       },
     },
     async (args) => {
