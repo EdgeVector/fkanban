@@ -895,17 +895,27 @@ export async function boardCardsHealResult(
 
     would_heal += 1;
     if (opts.apply) {
-      // Purge all sks for slug on any board seen, then write truth. `rows` is
-      // already every row for this slug on the partitions heal enumerated, so
-      // the targeted deletes below are exhaustive and neither the deletes nor
-      // the upsert need to re-list the partition to hunt for more.
-      for (const row of rows) {
-        await removeBoardCard(
-          opts.node,
-          opts.cfg,
-          thinCard({ ...truth, board: row.board, column: row.column, position: row.position }),
-          { skipOrphanPurge: enumeratedBoards.has(row.board) },
-        );
+      // Delete by the REAL range keys captured by the completeness sweep, not
+      // by rebuilding keys from the row's copied payload fields. Protein
+      // folding can refresh an old row's copied `position` while the physical
+      // key stays at its prior column/position. Rebuilding then targets a key
+      // that never existed, reports a successful repair, and leaves the stale
+      // membership behind forever.
+      const exactSks = spineSksBySlug.get(`${boardFromKey}\0${slug}`) ?? [];
+      if (exactSks.length > 0) {
+        await deleteBoardCardRowsBySk(opts.node, opts.cfg, boardFromKey, exactSks);
+      } else {
+        // A refused sweep lead can leave a row visible only to the wide read.
+        // Preserve the prior best-effort fallback for that incomplete case;
+        // incompleteLeads keeps the run from claiming full convergence.
+        for (const row of rows) {
+          await removeBoardCard(
+            opts.node,
+            opts.cfg,
+            thinCard({ ...truth, board: row.board, column: row.column, position: row.position }),
+            { skipOrphanPurge: enumeratedBoards.has(row.board) },
+          );
+        }
       }
       await upsertBoardCard(opts.node, opts.cfg, truth, null, {
         skipOrphanPurge: enumeratedBoards.has(truthBoard),

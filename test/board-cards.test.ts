@@ -411,6 +411,51 @@ describe("board-cards membership integrity", () => {
     expect(listed![0]!.column).toBe("done");
   });
 
+  test("board-cards-heal deletes stale membership by its real range key", async () => {
+    const node = fakeNode();
+    const doing = card({ column: "doing", position: "1", updated_at: "2026-01-01T00:00:00.000Z" });
+    const done = card({ column: "done", position: "2", updated_at: "2026-01-02T00:00:00.000Z" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: {
+        slug: "default",
+        title: "Default",
+        body: "",
+        columns: ["backlog", "todo", "doing", "done"],
+        created_at: done.created_at,
+        updated_at: done.updated_at,
+      },
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card!,
+      keyHash: done.slug,
+      fields: { ...done, body: done.body },
+    });
+
+    // The row still lives at the old physical key, but protein folding has
+    // refreshed its copied payload fields from current Card truth. Rebuilding
+    // the delete address from those copies targets `doing#2`, not the real
+    // `doing#1` key, and used to leave this row behind forever.
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board_cards!,
+      keyHash: "default",
+      rangeKey: boardCardSk(doing.column, doing.position, doing.slug),
+      fields: boardCardFieldsFromCard(done),
+    });
+
+    const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
+    expect(applied.report.healed).toBe(1);
+
+    const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
+    expect(listed).toHaveLength(1);
+    expect(listed![0]!.column).toBe("done");
+
+    const clean = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    expect(clean.report.drifted).toBe(0);
+    expect(clean.report.would_heal).toBe(0);
+  });
+
   test("board-cards-heal trusts point-read card over stale CardListIndex", async () => {
     const node = fakeNode();
     const doing = card({ column: "doing", position: "1", updated_at: "2026-01-01T00:00:00.000Z" });
