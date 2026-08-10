@@ -5,6 +5,7 @@ import {
   depStatus,
   hasPrWorkBrief,
   hydrateCardBodies,
+  includePointReadableReferencedMilestones,
   isBodyOmitted,
   isCardKind,
   isRegistryCard,
@@ -512,7 +513,12 @@ export async function buildPickupStatusReportWithSituations(
     // One portfolio list per status/claim scan — cheap vs per-card point reads,
     // and required so abandoned milestones classify as unattached-outcome.
     try {
-      const milestones = await listMilestones(depsContext.node, depsContext.cfg);
+      const milestones = await includePointReadableReferencedMilestones(
+        depsContext.node,
+        depsContext.cfg,
+        await listMilestones(depsContext.node, depsContext.cfg),
+        cardsWithDeps,
+      );
       milestoneStateBySlug = new Map(
         milestones.map((m) => [m.slug, (m.state ?? "").trim()]),
       );

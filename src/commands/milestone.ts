@@ -32,6 +32,7 @@ import {
   listMilestones,
   listMilestonesOnBoard,
   hasPrWorkBrief,
+  includePointReadableReferencedMilestones,
   isBodyOmitted,
   isSubstantiveCardBody,
   normalizeBlockStatus,
@@ -567,9 +568,36 @@ export function renderMilestone(milestone: Milestone, verdict?: MilestoneProofVe
 
 export async function milestoneListResult(opts: { cfg: Config; node: NodeClient; board?: string; state?: string }): Promise<{ text: string; milestones: Milestone[] }> {
   if (opts.state) validateState(opts.state);
-  const source = opts.board
-    ? await listMilestonesOnBoard(opts.node, opts.cfg, opts.board)
-    : await listMilestones(opts.node, opts.cfg);
+  let source: Milestone[];
+  if (opts.board) {
+    const [indexed, cards] = await Promise.all([
+      listMilestonesOnBoard(opts.node, opts.cfg, opts.board),
+      listCardsOnBoard(opts.node, opts.cfg, opts.board),
+    ]);
+    source = await includePointReadableReferencedMilestones(
+      opts.node,
+      opts.cfg,
+      indexed,
+      cards,
+      { board: opts.board },
+    );
+  } else {
+    const boards = await listBoards(opts.node, opts.cfg);
+    const [indexed, cardParts] = await Promise.all([
+      listMilestones(opts.node, opts.cfg, { boards }),
+      mapWithConcurrency(
+        boards,
+        (board) => listCardsOnBoard(opts.node, opts.cfg, board.slug),
+        PARTITION_READ_CONCURRENCY,
+      ),
+    ]);
+    source = await includePointReadableReferencedMilestones(
+      opts.node,
+      opts.cfg,
+      indexed,
+      cardParts.flat(),
+    );
+  }
   const milestones = source.filter((m) => !opts.state || m.state === opts.state);
   const text = milestones.length
     ? milestones.map((m) => `${m.state.padEnd(9)} ${m.slug} — ${m.title}${m.proof_card ? ` [proof:${m.proof_status}]` : ""}`).join("\n")
@@ -1278,7 +1306,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
     PARTITION_READ_CONCURRENCY,
   );
 
-  const milestones = opts.board
+  let milestones = opts.board
     ? await listMilestonesOnBoard(opts.node, opts.cfg, opts.board)
     : await listMilestones(opts.node, opts.cfg, { boards });
   // Membership comes from the board, not from MilestoneCards.
@@ -1316,6 +1344,15 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   // the milestone list alone, so they have no reason to queue behind board
   // membership. Left sequential, the board read would simply be added to the
   // command's critical path.
+  const boardCards = new Map<string, Card[]>(await boardCardsPending);
+  const knownCards = [...boardCards.values()].flat();
+  milestones = await includePointReadableReferencedMilestones(
+    opts.node,
+    opts.cfg,
+    milestones,
+    knownCards,
+    opts.board ? { board: opts.board } : {},
+  );
   const proofSlugs = [...new Set(milestones.map((milestone) => milestone.proof_card).filter((slug) => slug))];
   //
   // Pooled for the same reason, at the POINT width rather than the partition
@@ -1330,13 +1367,11 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
     POINT_READ_CONCURRENCY,
   );
 
-  const boardCards = new Map<string, Card[]>(await boardCardsPending);
   const childLists = milestones.map((milestone) =>
     (boardCards.get(milestone.board) ?? []).filter((card) => card.milestone === milestone.slug));
   const cards = childLists.flat();
   // Every board card is already in hand, so a dep edge pointing at a same-board
   // card costs no point read.
-  const knownCards = [...boardCards.values()].flat();
   const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, cards, knownCards);
   const proofs = new Map<string, Card | null>(await proofsPending);
   // Slugs whose wide read missed but whose key-only read found them: sparse, not

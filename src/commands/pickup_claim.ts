@@ -12,6 +12,7 @@ import {
   boardToFields,
   findCard,
   isBodyOmitted,
+  includePointReadableReferencedMilestones,
   findBoard,
   listBoards,
   listCards,
@@ -457,7 +458,13 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   let hardCtx: HardTodoRankContext | undefined;
   try {
     // Reuse already-fetched `boards` — never re-list all_boards for milestones.
-    const milestones = (await listMilestones(opts.node, opts.cfg, { boards })).filter(
+    const milestones = (await includePointReadableReferencedMilestones(
+      opts.node,
+      opts.cfg,
+      await listMilestones(opts.node, opts.cfg, { boards }),
+      cardsForSelection,
+      { board },
+    )).filter(
       (m) => m.board === board,
     );
     hardCtx = {

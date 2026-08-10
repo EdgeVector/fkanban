@@ -6,6 +6,7 @@ import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
 import { rankCmd } from "../src/commands/rank.ts";
 import { tagAddCmd } from "../src/commands/tag.ts";
+import { pickupStatusResult } from "../src/commands/pickup_status.ts";
 import {
   boardToFields,
   type Card,
@@ -377,6 +378,69 @@ describe("milestone HashRange indexes", () => {
       status: "in_flight",
     });
     expect(fullScanAttempts).toEqual([]);
+  });
+
+  test("point-readable milestone references fill an empty membership list and keep pickup ready", async () => {
+    const base = fakeNode();
+    await seedBoard(base);
+    await milestoneAddCmd({
+      cfg,
+      node: base,
+      slug: "ms-point-readable",
+      title: "Point-readable outcome",
+      state: "active",
+      northStar: "north-star-point-readable",
+      driver: "last-stack-milestone-driver",
+    });
+    await addCmd({
+      cfg,
+      node: base,
+      slug: "point-readable-pr",
+      title: "Point-readable child",
+      milestone: "ms-point-readable",
+      northStar: "north-star-point-readable",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      column: "todo",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+
+    const pointReads: string[] = [];
+    const node: NodeClient = {
+      ...base,
+      async queryAll(opts) {
+        // Reproduce the live failure: the membership view answers an empty
+        // partition while the primary Milestone HashKey remains readable.
+        if (opts.schemaHash === cfg.schemaHashes.board_milestones && opts.filter?.HashKey) {
+          return { ok: true, results: [] };
+        }
+        if (opts.schemaHash === cfg.schemaHashes.milestone && opts.filter?.HashKey) {
+          pointReads.push(String(opts.filter.HashKey));
+        }
+        if (opts.schemaHash === cfg.schemaHashes.milestone && !opts.filter && opts.allowFullScan) {
+          throw new Error("product scan is forbidden");
+        }
+        return base.queryAll(opts);
+      },
+    };
+
+    const listed = await milestoneListResult({ cfg, node, board: "default" });
+    expect(listed.milestones.map((milestone) => milestone.slug)).toEqual(["ms-point-readable"]);
+
+    const portfolio = await milestonePortfolioResult({ cfg, node, board: "default" });
+    expect(portfolio.entries.find((entry) => entry.slug === "ms-point-readable")).toMatchObject({
+      ready: ["point-readable-pr"],
+    });
+
+    const enforcedCfg = { ...cfg, enforceLivePrMilestone: true };
+    const { report } = await pickupStatusResult({ cfg: enforcedCfg, node });
+    expect(report.ready).toBeGreaterThan(0);
+    expect(report.cards.find((card) => card.slug === "point-readable-pr")).toMatchObject({
+      category: "pickup-ready",
+      ready: true,
+    });
+    expect(pointReads).toContain("ms-point-readable");
   });
 
   test("folds MilestoneCards from the BoardCards write; reconcile uses partition", async () => {
