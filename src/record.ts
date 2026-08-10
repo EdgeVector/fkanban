@@ -2,7 +2,7 @@
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
-import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
+import { mapWithConcurrency, PARTITION_READ_CONCURRENCY, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import {
   patchCardListIndex,
   patchBoardListIndex,
@@ -4500,6 +4500,44 @@ export async function listMilestones(
     });
   }
   return sortMilestones(milestones);
+}
+
+/**
+ * Add milestones that the keyed card set references and Milestone point reads
+ * can resolve, even when the BoardMilestones membership view missed them.
+ *
+ * This is a bounded keyed join, not a product scan and not a hot-path heal:
+ * callers already hold the relevant BoardCards rows, so the fan-out is only
+ * over distinct referenced milestone slugs absent from the membership view.
+ * No index row is written or deleted here. BoardMilestones backfill remains the
+ * background/heal operator's job.
+ */
+export async function includePointReadableReferencedMilestones(
+  node: NodeClient,
+  cfg: Config,
+  milestones: Milestone[],
+  cards: Card[],
+  opts: { board?: string } = {},
+): Promise<Milestone[]> {
+  const bySlug = new Map(milestones.map((milestone) => [milestone.slug, milestone]));
+  const missing = new Set<string>();
+  for (const card of cards) {
+    const slug = (card.milestone ?? "").trim();
+    if (slug && !bySlug.has(slug)) missing.add(slug);
+  }
+  if (missing.size === 0) return sortMilestones([...bySlug.values()]);
+
+  const resolved = await mapWithConcurrency(
+    [...missing],
+    (slug) => findMilestone(node, cfg, slug),
+    POINT_READ_CONCURRENCY,
+  );
+  for (const milestone of resolved) {
+    if (!milestone) continue;
+    if (opts.board && milestone.board !== opts.board) continue;
+    bySlug.set(milestone.slug, milestone);
+  }
+  return sortMilestones([...bySlug.values()]);
 }
 
 /** The result of {@link sweepMilestoneSlugs}: slugs reached, and leads refused. */
