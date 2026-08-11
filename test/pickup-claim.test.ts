@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryResponse, type QueryRow } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { formatPickupClaim, isTrueIdlePickupClaim, pickupClaimResult } from "../src/commands/pickup_claim.ts";
+import { pickupStatusResult } from "../src/commands/pickup_status.ts";
 import { showResult } from "../src/commands/show.ts";
 import {
   boardToFields,
@@ -1019,6 +1020,81 @@ describe("pickup claim", () => {
     expect(result.claimed).toBe(true);
     expect(result.card?.slug).toBe("second");
     expect(result.skipped.some((s) => s.slug === "first" && s.reason === "claim_conflict")).toBe(true);
+  });
+
+  test("two workers racing one surface produce one claim and a concrete non-idle loser", async () => {
+    await seedCard(node, card({
+      slug: "first",
+      tags: ["p0"],
+      surfaces: ["src/commands/pickup_claim.ts"],
+      created_at: "2026-01-01T00:00:00.000Z",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nPriority: P0\n\nFirst.",
+    }));
+    await seedCard(node, card({
+      slug: "second",
+      tags: ["p1"],
+      surfaces: ["src/commands/pickup_claim.ts"],
+      created_at: "2026-01-02T00:00:00.000Z",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nPriority: P1\n\nSecond.",
+    }));
+
+    const before = await pickupStatusResult({ cfg, node });
+    expect(before.report.ready).toBe(2);
+
+    // Hold both workers at the same first-card CAS. Releasing them together
+    // makes one move win and the other observe claim_conflict, independent of
+    // scheduler timing; the loser must then see the winner as an overlapping
+    // doing card instead of reporting a false empty queue.
+    const baseUpdate = node.updateRecord.bind(node);
+    let contenders = 0;
+    let releaseContenders!: () => void;
+    const contendersReady = new Promise<void>((resolve) => {
+      releaseContenders = resolve;
+    });
+    node.updateRecord = async (args) => {
+      if (
+        args.keyHash === "first" &&
+        args.expected?.type === "value" &&
+        args.expected.field === "column" &&
+        args.expected.value === "todo"
+      ) {
+        contenders += 1;
+        if (contenders === 2) releaseContenders();
+        await contendersReady;
+      }
+      return baseUpdate(args);
+    };
+
+    const results = await Promise.all([
+      pickupClaimResult({ cfg, node, worker: "worker-a" }),
+      pickupClaimResult({ cfg, node, worker: "worker-b" }),
+    ]);
+
+    const winners = results.filter((result) => result.claimed);
+    const losers = results.filter((result) => !result.claimed);
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    expect(winners[0]?.card?.slug).toBe("first");
+    expect(winners[0]?.card?.assignee).toBe(winners[0]?.worker);
+
+    const loser = losers[0]!;
+    expect(loser.scanned_ready).toBe(2);
+    expect(loser.reason).toBe("no-eligible");
+    expect(loser.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ slug: "first", reason: "claim_conflict" }),
+      expect.objectContaining({ slug: "second", reason: "surface-overlap" }),
+    ]));
+    expect(loser.skipped.every((skip) => skip.reason.trim().length > 0)).toBe(true);
+    expect(isTrueIdlePickupClaim(loser)).toBe(false);
+    expect(formatPickupClaim(loser)).toContain(
+      "idle: false (ready candidates were skipped or blocked; do not enter idle mode)",
+    );
+
+    const first = await findCard(node, cfg, "first");
+    const second = await findCard(node, cfg, "second");
+    expect(first?.column).toBe("doing");
+    expect(second?.column).toBe("todo");
+    expect([first?.assignee, second?.assignee].filter(Boolean)).toHaveLength(1);
   });
 });
 
