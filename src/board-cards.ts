@@ -285,6 +285,27 @@ export function boardCardsHash(cfg: Config): string | null {
   return h && h.length > 0 ? h : null;
 }
 
+/** Config key used while a board-keyed BoardCards identity is being backfilled. */
+export const BOARD_CARDS_REKEY_TARGET = "board_cards_rekey_target";
+
+/**
+ * Every BoardCards identity a mutation must maintain during a staged rekey.
+ * Reads intentionally continue through `board_cards` until the background
+ * backfill proves the target complete and atomically swaps the config pin.
+ */
+export function boardCardsWriteHashes(cfg: Config): string[] {
+  const active = boardCardsHash(cfg);
+  const target = cfg.schemaHashes?.[BOARD_CARDS_REKEY_TARGET];
+  return [...new Set([active, target].filter((h): h is string => Boolean(h && h.length > 0)))];
+}
+
+/** One-hash view used by write helpers so a staged target never recurses. */
+function boardCardsConfigForHash(cfg: Config, hash: string): Config {
+  const schemaHashes: Record<string, string> = { ...cfg.schemaHashes, board_cards: hash };
+  delete schemaHashes[BOARD_CARDS_REKEY_TARGET];
+  return { ...cfg, schemaHashes };
+}
+
 export function boardCardFieldsFromCard(card: Card | CardSummary): Record<string, unknown> {
   const summary = toCardSummary(card as Card);
   const sk = boardCardSk(summary.column, summary.position, summary.slug);
@@ -941,7 +962,7 @@ export type BoardCardWriteOptions = {
  * callers, one branch above a path that did it. Pinned by
  * `test/board-cards-wide-write.test.ts`.
  */
-export async function upsertBoardCard(
+async function upsertBoardCardOnHash(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
@@ -1075,6 +1096,24 @@ export async function upsertBoardCard(
   await retireSupersededRows();
 }
 
+export async function upsertBoardCard(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+  previous?: Card | CardSummary | null,
+  opts: BoardCardWriteOptions = {},
+): Promise<void> {
+  for (const hash of boardCardsWriteHashes(cfg)) {
+    await upsertBoardCardOnHash(
+      node,
+      boardCardsConfigForHash(cfg, hash),
+      card,
+      previous,
+      opts,
+    );
+  }
+}
+
 /**
  * How many BoardCards rows ride in one `/api/mutations/batch` request.
  *
@@ -1146,37 +1185,42 @@ export async function upsertBoardCardsBatch(
   cards: Array<Card | CardSummary>,
   onError?: (card: Card | CardSummary, err: unknown) => void,
 ): Promise<void> {
-  const schemaHash = boardCardsHash(cfg);
-  if (!schemaHash || cards.length === 0) return;
+  const schemaHashes = boardCardsWriteHashes(cfg);
+  if (schemaHashes.length === 0 || cards.length === 0) return;
 
   // A client with no batch verb (the ad-hoc test fakes) still has to write.
   // Per-row is what this used to do everywhere, so falling back to it is a loss
   // of speed and nothing else.
   const batch = node.updateRecords?.bind(node);
 
-  for (let i = 0; i < cards.length; i += BOARD_CARDS_WRITE_BATCH) {
-    const chunk = cards.slice(i, i + BOARD_CARDS_WRITE_BATCH);
-    try {
-      if (!batch) throw new Error("node client exposes no batch write");
-      await batch(
-        chunk.map((card) => {
-          const fields = boardCardFieldsFromCard(card);
-          return {
-            schemaHash,
-            fields,
-            keyHash: String(fields.board),
-            rangeKey: String(fields.sk),
-          };
-        }),
-      );
-    } catch {
-      // Per-row from here. The batch told us the CHUNK failed, never which row,
-      // so the only way to write the other 47 is to ask for them separately.
-      for (const card of chunk) {
-        try {
-          await upsertBoardCard(node, cfg, card, null, { skipOrphanPurge: true });
-        } catch (err) {
-          onError?.(card, err);
+  for (const schemaHash of schemaHashes) {
+    const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
+    for (let i = 0; i < cards.length; i += BOARD_CARDS_WRITE_BATCH) {
+      const chunk = cards.slice(i, i + BOARD_CARDS_WRITE_BATCH);
+      try {
+        if (!batch) throw new Error("node client exposes no batch write");
+        await batch(
+          chunk.map((card) => {
+            const fields = boardCardFieldsFromCard(card);
+            return {
+              schemaHash,
+              fields,
+              keyHash: String(fields.board),
+              rangeKey: String(fields.sk),
+            };
+          }),
+        );
+      } catch {
+        // Per-row from here. The batch told us the CHUNK failed, never which row,
+        // so the only way to write the other 47 is to ask for them separately.
+        for (const card of chunk) {
+          try {
+            await upsertBoardCardOnHash(node, oneHashCfg, card, null, {
+              skipOrphanPurge: true,
+            });
+          } catch (err) {
+            onError?.(card, err);
+          }
         }
       }
     }
@@ -1189,14 +1233,15 @@ export async function removeBoardCard(
   card: Card | CardSummary,
   opts: BoardCardWriteOptions = {},
 ): Promise<void> {
-  const schemaHash = boardCardsHash(cfg);
-  if (!schemaHash) return;
   const board = card.board || "default";
   const sk = boardCardSk(card.column, card.position, card.slug);
-  await deleteBoardCardSk(node, schemaHash, board, sk);
-  // Also purge any orphan sks for the same slug (stale column membership).
-  if (card.slug && !opts.skipOrphanPurge) {
-    await purgeOtherBoardCardRows(node, cfg, board, card.slug, null);
+  for (const schemaHash of boardCardsWriteHashes(cfg)) {
+    const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
+    await deleteBoardCardSk(node, schemaHash, board, sk);
+    // Also purge any orphan sks for the same slug (stale column membership).
+    if (card.slug && !opts.skipOrphanPurge) {
+      await purgeOtherBoardCardRows(node, oneHashCfg, board, card.slug, null);
+    }
   }
 }
 

@@ -58,6 +58,7 @@ import {
   DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO,
 } from "./commands/board_cards_heal.ts";
 import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
+import { boardCardsRekeyCmd } from "./commands/board_cards_rekey.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
 import {
   milestoneIndexesHealResult,
@@ -121,6 +122,7 @@ Commands:
   groom body-clobber-scan report bodies matching generated/script clobber signatures (--json)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
+  groom board-cards-rekey backfill/cut over a staged board-keyed BoardCards identity
   groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
   groom parity-check   READ-ONLY: is any row invisible to the reads the board serves? (--json)
   groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
@@ -691,6 +693,7 @@ Usage:
   fkanban groom body-clobber-scan [--json]
   fkanban groom stale-blockers [--apply] [--json]
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]... [--max-removals N|unlimited]
+  fkanban groom board-cards-rekey [--apply] [--json] [--board SLUG]
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
   fkanban groom parity-check [--json] [--board SLUG]
   fkanban groom board-list-heal [--apply] [--json]
@@ -2310,6 +2313,18 @@ async function dispatch(
           maxDrift,
           dryRunOnly: values["dry-run"] as boolean | undefined,
           json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      if (sub === "board-cards-rekey") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom board-cards-rekey");
+        if (extra !== undefined) return extra;
+        console.log(await boardCardsRekeyCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          apply: values.apply as boolean | undefined,
+          json: values.json as boolean | undefined,
+          board: typeof values.board === "string" ? values.board : undefined,
         }));
         return 0;
       }

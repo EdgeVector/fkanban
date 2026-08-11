@@ -36,6 +36,7 @@ export const GROOM_SUBCOMMANDS = [
   "body-clobber-scan",
   "stale-blockers",
   "board-cards-heal",
+  "board-cards-rekey",
   "board-cards-heal-scheduled",
   "board-list-heal",
   "milestone-indexes-heal",
