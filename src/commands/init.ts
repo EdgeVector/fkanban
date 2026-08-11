@@ -49,6 +49,7 @@ import {
   probeSchemaWritable,
   type Board,
 } from "../record.ts";
+import { BOARD_CARDS_REKEY_TARGET } from "../board-cards.ts";
 
 // A local LastDB node is reached over its Unix-domain control socket, NOT over
 // TCP. DEFAULT_NODE_URL is a loopback *marker* (hostname only) so clients select
@@ -255,6 +256,15 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // (fkanban #94: declare hands back a stale narrower Card), "the node will not
   // accept these fields, here are the missing ones" is the more actionable of
   // the two. Ordering against `writeConfig` is the part that is load-bearing.
+  const stagedBoardCards = stageBoardCardsRekey(existing, schemaHashes);
+  schemaHashes = stagedBoardCards.schemaHashes;
+  if (stagedBoardCards.staged) {
+    print(
+      `        ** board_cards rekey STAGED: reads stay on ${stagedBoardCards.active!.slice(0, 16)}…; ` +
+        `mutations dual-write ${stagedBoardCards.target!.slice(0, 16)}… until ` +
+        `\`kanban groom board-cards-rekey --apply\` converges **`,
+    );
+  }
   const pinMoves = schemaPinMoves(existing, schemaHashes);
   for (const m of pinMoves) {
     print(`        ** ${m.key} pin would MOVE: ${m.from.slice(0, 16)}… → ${m.to.slice(0, 16)}… **`);
@@ -313,6 +323,54 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
 /** One schema pin `init` would change: `from` is what config holds today. */
 export type SchemaPinMove = { key: string; from: string; to: string };
+
+export type BoardCardsRekeyStage = {
+  schemaHashes: Record<string, string>;
+  staged: boolean;
+  active?: string;
+  target?: string;
+};
+
+/**
+ * A newly resolved BoardCards identity is not safe to adopt as an ordinary pin
+ * move: it is empty until Card truth has regenerated its board-keyed tips.
+ * Preserve the incumbent read pin and record the new identity as a dual-write
+ * target. The idempotent background groomer owns backfill and cutover.
+ */
+export function stageBoardCardsRekey(
+  existing: Config | null,
+  resolved: Record<string, string>,
+): BoardCardsRekeyStage {
+  const active = existing?.schemaHashes.board_cards;
+  const target = resolved.board_cards;
+  if (!active || !target || active === target) {
+    return { schemaHashes: { ...resolved }, staged: false };
+  }
+
+  const incumbentTarget = existing?.schemaHashes[BOARD_CARDS_REKEY_TARGET];
+  if (incumbentTarget && incumbentTarget !== target) {
+    throw new FkanbanError({
+      code: "board_cards_rekey_target_changed",
+      message:
+        `BoardCards rekey is already staged for ${incumbentTarget}, but schema declaration now ` +
+        `resolved ${target}. Refusing to replace an in-flight migration target.`,
+      hint:
+        "Inspect the staged target and finish or explicitly roll back that migration before " +
+        "declaring another BoardCards identity.",
+    });
+  }
+
+  return {
+    schemaHashes: {
+      ...resolved,
+      board_cards: active,
+      [BOARD_CARDS_REKEY_TARGET]: target,
+    },
+    staged: true,
+    active,
+    target,
+  };
+}
 
 /**
  * Which pins would this init MOVE?
