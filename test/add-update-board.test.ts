@@ -30,6 +30,7 @@ import {
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { markCmd } from "../src/commands/mark.ts";
+import { moveCmd } from "../src/commands/move.ts";
 import { depAddCmd } from "../src/commands/dep.ts";
 import { showCmd } from "../src/commands/show.ts";
 import { readStdinBodyForAdd } from "../src/cli.ts";
@@ -535,6 +536,31 @@ describe("mark command and add --body slug-list tripwire", () => {
     expect(after?.column).toBe("todo");
     expect(after?.tags).toEqual(["fkanban", "p1"]);
     expect(after?.kind).toBe("pr");
+  });
+
+  test("mark annotates a blocked doing card but a real move stays guarded", async () => {
+    await addCmd({ cfg, node, slug: "unfinished", column: "todo", body: validPickupBody });
+    await addCmd({
+      cfg,
+      node,
+      slug: "blocked-doing",
+      column: "doing",
+      assignee: "worker-a",
+      body: validPickupBody,
+      deps: ["unfinished"],
+      force: true,
+    });
+
+    await markCmd({ cfg, node, slug: "blocked-doing", line: "BLOCKED: awaiting unfinished" });
+
+    const afterMark = await findCard(node, cfg, "blocked-doing");
+    expect(afterMark?.body).toContain("BLOCKED: awaiting unfinished");
+    expect(afterMark?.column).toBe("doing");
+    expect(afterMark?.assignee).toBe("worker-a");
+    await expect(
+      moveCmd({ cfg, node, slug: "blocked-doing", column: "done" }),
+    ).rejects.toMatchObject({ code: "card_blocked" });
+    expect((await findCard(node, cfg, "blocked-doing"))?.column).toBe("doing");
   });
 
   test("mark refuses a provenance-only legacy body instead of making truncation harder to repair", async () => {

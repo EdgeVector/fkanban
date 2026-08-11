@@ -485,7 +485,15 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       enforce: opts.cfg.enforceLivePrMilestone === true,
     });
     await assertSituationPreflightAllowed(updated, opts.situationPreflight);
-    await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
+    // Dependency blocking is an ENTRY guard, just like the lane guards above.
+    // `mark`, `tag`, and structured metadata updates all route through `add`,
+    // preserving the card's placement and dependency edges. Re-checking the
+    // transition guard on those writes made an already-blocked doing card
+    // impossible to annotate without the broad `--force` override. Keep the
+    // guard strict for real board/column moves and for writes that change deps.
+    if (!placementUnchanged || !sameDeps(existing.deps, updated.deps)) {
+      await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
+    }
     await updateCardRecord(opts, updated, undefined, existing);
     // AFTER the write — see the note on the create path below.
     await checkpointCardCompletion({
