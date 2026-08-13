@@ -304,9 +304,12 @@ fi
 # 9. delete -> read-back
 if [ "$N" -ge 3 ]; then
   d="$RUN-c3"
-  "$FK" rm "$d" >/dev/null 2>&1
-  if [ -n "$(field "$d" '.slug')" ]; then
-    finding "delete-not-persisted" "$d: rm ACKed but card still readable via show"
+  if "$FK" rm "$d" >/dev/null 2>&1; then
+    if [ -n "$(field "$d" '.slug')" ]; then
+      finding "delete-not-persisted" "$d: rm ACKed but card still readable via show"
+    fi
+  else
+    errlog "delete test rm failed for $d"
   fi
 fi
 
