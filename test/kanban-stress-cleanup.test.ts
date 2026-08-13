@@ -58,12 +58,27 @@ case "$1 $2" in
     grep -vxF "$3" "$state" > "$state.tmp" 2>/dev/null || : > "$state.tmp"
     mv "$state.tmp" "$state"
     ;;
+  "add "*)
+    printf '{"slug":"%s"}\n' "$2"
+    ;;
+  "show "*)
+    printf '{"slug":"%s"}\n' "$2"
+    ;;
+  "rm "*)
+    # Model the live 2026-08-13 failure: the delete did NOT ACK, while the card
+    # remains readable. The harness must report an ERROR, not claim that an
+    # acknowledged delete failed to persist.
+    case "$2" in *-c3) exit 1;; esac
+    ;;
   *) : ;;
 esac
 exit 0
 `;
 
-function runHarness(killOn?: string): { log: string[]; boards: string[]; stdout: string; exitCode: number } {
+function runHarness(
+  killOn?: string,
+  n = "0",
+): { log: string[]; boards: string[]; stdout: string; exitCode: number } {
   const dir = mkdtempSync(join(tmpdir(), "kstress-cleanup-"));
   const stub = join(dir, "kanban");
   const log = join(dir, "calls.log");
@@ -84,7 +99,7 @@ function runHarness(killOn?: string): { log: string[]; boards: string[]; stdout:
       KSTUB_STATE: state,
       KSTUB_PIDFILE: pidfile,
       ...(killOn ? { KSTUB_KILL_ON: killOn } : {}),
-      KSTRESS_N: "0",
+      KSTRESS_N: n,
       KSTRESS_BURST: "0",
       // Declare an isolated socket. These tests drive a STUB cli and never dial
       // a node, but the harness now refuses to run against the primary socket,
@@ -139,6 +154,14 @@ describe("kanban-stress scratch cleanup", () => {
 
     expect(log.some((line) => line.startsWith("board rm agent-dogfood-scratch"))).toBe(false);
     expect(boards).toContain("agent-dogfood-scratch");
+  });
+
+  test.if(hasJq)("does not call a rejected delete a persisted-delete finding", () => {
+    const { stdout, exitCode } = runHarness(undefined, "3");
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("ERROR: delete test rm failed for ");
+    expect(stdout).not.toContain("FINDING: delete-not-persisted");
   });
 });
 

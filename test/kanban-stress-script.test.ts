@@ -69,4 +69,16 @@ describe("kanban-stress harness schema drift guards", () => {
     expect(script).toContain("first stress add failed - aborting run");
     expect(script).toMatch(/if \[ "\$i" -eq 1 \]; then/);
   });
+
+  test("delete read-back is checked only after rm actually ACKs", () => {
+    const deleteLeg = script.slice(
+      script.indexOf("# 9. delete -> read-back"),
+      script.indexOf("# 10. board-record durability"),
+    );
+
+    expect(deleteLeg).toContain('if "$FK" rm "$d" >/dev/null 2>&1; then');
+    expect(deleteLeg).toContain('finding "delete-not-persisted"');
+    expect(deleteLeg).toContain('errlog "delete test rm failed for $d"');
+    expect(deleteLeg).not.toMatch(/^\s*"\$FK" rm "\$d"/m);
+  });
 });
