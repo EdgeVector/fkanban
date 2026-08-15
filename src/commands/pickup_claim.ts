@@ -391,7 +391,14 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   const skipped: PickupClaimSkip[] = [];
 
   const boards = await listBoards(opts.node, opts.cfg);
-  const cards = await listCards(opts.node, opts.cfg, { boards });
+  // Same `activeOnly` contract as `pickup status`: claim classifies active
+  // cards (todo/doing/backlog) and resolves finished deps via
+  // `listDependencyStatusesForCards` point-reads, not a whole-partition
+  // BoardCards hydrate of the append-only `done` archive. Live ops (2026-08-15)
+  // showed BoardCards HashKey pages of ~1000 rows at ~600–1800ms hydrate —
+  // most of those rows were finished work claim never classifies. Mirrors
+  // `pickup_status.ts` and `BoardListOpt.activeOnly`.
+  const cards = await listCards(opts.node, opts.cfg, { boards, activeOnly: true });
   const cardsForSelection = await selfHealTargetTodoBlockers({
     cfg: opts.cfg,
     node: opts.node,

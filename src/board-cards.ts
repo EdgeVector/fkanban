@@ -1281,14 +1281,16 @@ function excludeColumnRanges(board: string, column: string): [QueryFilter, Query
  * HashRangePrefix must surface as an error (or empty fields → empty list),
  * not silently degrade to a full partition scan that papers over the bug.
  *
- * `opts.fields` narrows the projection for a caller that does not render the
- * rows (see {@link BOARD_CARDS_DEP_SEED_FIELDS}). Narrowing is strictly
- * cheaper. It is NOT strictly less droppable, which this said until
- * 2026-08-01: the row set is decided by the LEADING field, so dropping trailing
- * fields changes nothing about which rows come back, and reordering the list
- * changes everything. The one exception is `milestone`, which gates from any
- * position — removing it can only ADD rows. See
- * {@link listBoardCardsPartitionComplete}.
+ * `opts.fields` narrows (or widens) the projection. Default is
+ * {@link BOARD_CARDS_LIST_FIELDS} — the product list shape — not the full
+ * 24-field write set. Callers that need every atom (parity vs all-leads
+ * sweep, heal orphan catalog) must pass {@link BOARD_CARDS_FIELDS}
+ * explicitly. Narrowing is strictly cheaper. It is NOT strictly less
+ * droppable, which this said until 2026-08-01: the row set is decided by the
+ * LEADING field, so dropping trailing fields changes nothing about which rows
+ * come back, and reordering the list changes everything. The one exception is
+ * `milestone`, which gates from any position — removing it can only ADD rows.
+ * See {@link listBoardCardsPartitionComplete}.
  */
 export async function listBoardCardsPartition(
   node: NodeClient,
@@ -1300,7 +1302,12 @@ export async function listBoardCardsPartition(
   if (!schemaHash) return null;
   const column = opts?.column?.trim();
   const excluded = opts?.excludeColumn?.trim();
-  const projection = opts?.fields;
+  // Default = product list projection. Full write shape was a silent cost
+  // trap: heal/parity/doctor (and any bare call) paid for `layout`/`db` on
+  // every row of ~1000-row partitions while list consumers never render them.
+  // Measured BoardCards hydrate avg ~607ms on HashKey pages of rows≈1000
+  // (lastdb ops 2026-08-15); prefer LIST width unless the caller opts in.
+  const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
   // HashRangePrefix / HashRangeRange are fold HashRangeFilter objects;
   // QueryFilter's TS type is string-map only — cast at the edge (runtime
   // accepts the object).
@@ -1314,7 +1321,7 @@ export async function listBoardCardsPartition(
     try {
       return await node.queryAll({
         schemaHash,
-        fields: boardCardsWireProjection([...(projection ?? BOARD_CARDS_FIELDS)]),
+        fields: boardCardsWireProjection([...projection]),
         filter,
       });
     } catch (err) {
@@ -1323,9 +1330,7 @@ export async function listBoardCardsPartition(
       return await node.queryAll({
         schemaHash,
         fields: boardCardsWireProjection(
-          [...(projection ?? LEGACY_BOARD_CARDS_FIELDS)].filter(
-            (field) => field !== "created_by",
-          ),
+          [...projection].filter((field) => field !== "created_by"),
         ),
         filter,
       });

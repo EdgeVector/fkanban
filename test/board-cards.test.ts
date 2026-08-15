@@ -17,6 +17,7 @@ import {
   boardCardsProjectionForCardFields,
   cardFromBoardCardFields,
   listAllBoardCards,
+  listBoardCardsPartition,
   parseBoardCardSk,
   preferFresherBoardCard,
   purgeOtherBoardCardRows,
@@ -232,6 +233,28 @@ describe("board-cards projection", () => {
     expect(proj).not.toContain("slug");
     expect(proj[0]).toBe("board");
     expect(proj).toContain("position");
+  });
+
+  test("listBoardCardsPartition defaults to product list projection (not full write shape)", async () => {
+    const node = fakeNode();
+    await upsertBoardCard(node, cfgWithBoardCards, card({ slug: "a" }), null, {
+      skipOrphanPurge: true,
+    });
+    const fieldsLog: string[][] = [];
+    const orig = node.queryAll.bind(node);
+    node.queryAll = async (opts) => {
+      fieldsLog.push([...opts.fields]);
+      return orig(opts);
+    };
+    await listBoardCardsPartition(node, cfgWithBoardCards, "default");
+    expect(fieldsLog.length).toBeGreaterThan(0);
+    const proj = fieldsLog[0]!;
+    // Default must match listAllBoardCards — never silently hydrate layout/db.
+    expect(proj).not.toContain("layout");
+    expect(proj).not.toContain("db");
+    expect(proj).not.toContain("body");
+    expect(proj).toContain("block_status");
+    expect(proj).toContain("title");
   });
 });
 
