@@ -21,6 +21,7 @@ import {
   sweepBoardCardsPartition,
   upsertBoardCard,
 } from "../board-cards.ts";
+import { BOARD_CARDS_FIELDS } from "../schemas.ts";
 import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "../card-list-index.ts";
 import {
   cardExists,
@@ -429,7 +430,13 @@ export async function boardCardsHealResult(
   // scale with rows repaired (see heal-orphan-reap-partition-rescan.test.ts).
   const spineSksBySlug = new Map<string, string[]>();
   for (const b of targetBoards) {
-    const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug);
+    // Explicit full write shape: heal's wide pass must project every atom so
+    // sparse/partial rows are catalogued against the product drop gate (see
+    // the SPARSE ROWS block below). Default partition projection is list-width
+    // only and would under-report fields heal rewrites.
+    const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug, {
+      fields: BOARD_CARDS_FIELDS,
+    });
     if (!part) continue;
     enumeratedBoards.add(b.slug);
     const seenSlugs = new Set<string>();

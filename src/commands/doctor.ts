@@ -40,6 +40,7 @@ import {
 } from "../milestone-cards.ts";
 import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
 import {
+  BOARD_CARDS_FIELDS,
   OWNER_APP_ID,
   UNIQUE_SCHEMAS,
   allPinnedSchemas,
@@ -603,7 +604,11 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         );
         continue;
       }
-      const wide = await listBoardCardsPartition(node, cfg, b.slug);
+      // Full write shape: doctor projection-parity compares product drop rate
+      // against the all-leads sweep (same contract as groom parity-check).
+      const wide = await listBoardCardsPartition(node, cfg, b.slug, {
+        fields: BOARD_CARDS_FIELDS,
+      });
       if (wide === null) {
         boardsWithUnharvestedCards.push(b.slug);
         check(false, `BoardCards partition probe (${b.slug})`, "wide partition read returned no result");

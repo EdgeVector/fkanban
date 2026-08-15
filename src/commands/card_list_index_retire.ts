@@ -15,7 +15,11 @@
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
-import { listBoardCardsPartition, boardCardsHash } from "../board-cards.ts";
+import {
+  BOARD_CARDS_ADDRESS_FIELDS,
+  listBoardCardsPartition,
+  boardCardsHash,
+} from "../board-cards.ts";
 import {
   readCardListIndex,
   clearCardListIndex,
@@ -89,7 +93,10 @@ export async function cardListIndexRetireResult(
   const boards = await listBoards(opts.node, opts.cfg);
   const boardCardSlugs = new Set<string>();
   for (const b of boards) {
-    const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug);
+    // Slug census only — address projection is enough (and cheaper than list).
+    const part = await listBoardCardsPartition(opts.node, opts.cfg, b.slug, {
+      fields: BOARD_CARDS_ADDRESS_FIELDS,
+    });
     if (!part) continue;
     for (const c of part) if (c.slug) boardCardSlugs.add(c.slug);
   }

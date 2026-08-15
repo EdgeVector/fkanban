@@ -80,6 +80,7 @@ import {
   sweepMilestoneCardsPartition,
 } from "../milestone-cards.ts";
 import { parityWithConfirmation } from "../membership_schema_guard.ts";
+import { BOARD_CARDS_FIELDS } from "../schemas.ts";
 // No pool imported on purpose: every fan-out this file needs already happens
 // one level down, inside the per-partition sweeps. See the milestone loop.
 
@@ -232,7 +233,11 @@ export async function parityCheckResult(
       });
       continue;
     }
-    const wide = await listBoardCardsPartition(node, cfg, b.slug);
+    // Full write shape: parity compares product drop rate against the
+    // all-leads sweep, so the wide read must project every BoardCards field.
+    const wide = await listBoardCardsPartition(node, cfg, b.slug, {
+      fields: BOARD_CARDS_FIELDS,
+    });
     if (wide === null) {
       results.push({ ...empty("BoardCards", b.slug), incomplete: ["<wide read returned nothing>"] });
       continue;
