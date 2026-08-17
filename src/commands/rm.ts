@@ -1,4 +1,4 @@
-// `fkanban rm <slug>` — delete a card with the node's native tombstone mutation.
+// `fkanban rm <slug>` — delete a card (hard erase; no trash / undo).
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
@@ -14,7 +14,7 @@ export async function rmCmd(opts: {
   slug: string;
 }): Promise<{ slug: string; orphanedDependents: string[] }> {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
-  // Before tombstoning, scan live cards for dependents. A deleted dep becomes
+  // Before deleting, scan live cards for dependents. A deleted dep becomes
   // unresolvable to normal reads, so refuse the delete instead of creating a
   // missing dependency slug that later board readers have to repair.
   const all = await listCardStatuses(opts.node, opts.cfg);

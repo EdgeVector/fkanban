@@ -249,10 +249,10 @@ DONE  (0)
 | `kanban search <query>` | find cards by text across slug/title/body/assignee/tags (`--board --column --limit N --all --json --full-body`) |
 | `kanban search <query> --semantic` | rank cards by MEANING via the LastSeek plane — returns cards that do not contain the query's words |
 | `kanban show <slug>` | print one card in detail incl. deps + blocked state (`--json`) |
-| `kanban rm <slug>` | delete a card with fold_db's native tombstone mutation |
+| `kanban rm <slug>` | delete a card (hard erase; no trash / undo); refuses if live cards depend on it |
 | `kanban board create <slug>` | create/update a board (`--title`; `--columns` may be omitted or set to `backlog,todo,doing,done`) |
 | `kanban board list` | list boards (`--json`) |
-| `kanban board rm <slug>` | delete a board with native tombstones; always refuses `default`, and refuses non-default boards with live cards unless `--force` |
+| `kanban board rm <slug>` | delete a board (hard erase; no trash / undo); always refuses `default`, and refuses non-default boards with live cards unless `--force` |
 | `kanban milestone add <slug>` | create/update a first-class outcome milestone (`--state --north-star --driver --deps --proof-card --proof-status`) |
 | `kanban milestone list` | list the milestone portfolio (`--board --state --json`) |
 | `kanban milestone show <slug>` | show one milestone's outcome, lifecycle, dependencies, driver, and proof linkage (`--json`) |
@@ -501,7 +501,7 @@ existing live card before writing. Generic card updates preserve existing deps
 unless `--replace-deps` is set, so a cleanup call with `deps: []` cannot
 silently erase real dependency edges. If older data already contains a missing
 dep, read paths surface it in `missingDeps` and treat it as blocking until the
-edge is repaired. `rm` refuses to delete/tombstone a card while any live card
+edge is repaired. `rm` refuses to delete a card while any live card
 still depends on it, so normal operations cannot create new missing dependency
 slugs.
 
@@ -548,9 +548,9 @@ not in the new set. `tag add`/`tag rm` edit a card's labels **incrementally**,
 so a groomer can add `p1` without first reading and re-sending every existing
 tag (the same distinction `dep add`/`dep rm` have to `add --deps`). Adding a tag
 the card already carries is a no-op; removing one it lacks warns but succeeds.
-Reserved tags (`dep:<slug>` legacy dependency tags, the delete tombstone) are
-rejected — use `dep add`/`dep rm` and `rm` for those. Dependency edges live in
-the card's separate `deps` field, not in tags.
+Reserved tags (`dep:<slug>` legacy dependency tags, the historical
+`__fkanban_deleted__` tag) are rejected — use `dep add`/`dep rm` and `rm` for
+those. Dependency edges live in the card's separate `deps` field, not in tags.
 
 ## Priority
 
@@ -655,12 +655,11 @@ its schemas, but registration with Schema Service is still mandatory.
   for a local / ephemeral node with `APP_IDENTITY_ENFORCE` off. Under
   enforcement the app would need a consent handshake (see `fbrain`'s
   `capability.ts`); that's intentionally out of scope here.
-- **Delete.** `rm` uses fold_db's native delete mutation, so tombstoned records
-  are skipped by the node before scans. To preserve dependency resolution, card
-  deletion refuses while live dependents still point at the card; `board rm
-  --force` has the same guard for cards outside the board being removed. Read
-  paths still hide the historical `__fkanban_deleted__` tag written by older
-  kanban builds.
+- **Delete.** `rm` deletes the card (hard erase; no trash / undo). To preserve
+  dependency resolution, card deletion refuses while live dependents still
+  point at the card; `board rm --force` has the same guard for cards outside
+  the board being removed. Read paths still hide the historical
+  `__fkanban_deleted__` tag written by older kanban builds.
 - **Append-with-gaps positions.** New cards land at `maxPosition + 10` so a
   card can later be inserted between two others.
 - **Priority is a signal over `position`.** A card's priority (`Priority:` header

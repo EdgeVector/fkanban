@@ -292,8 +292,8 @@ async function readBoardOccupancy(
   return { slugs: [...slugs], sksBySlug };
 }
 
-// `fkanban board rm <slug>` — delete a board with the node's native tombstone
-// mutation. Forced removal deletes the live cards on that board first.
+// `fkanban board rm <slug>` — delete a board (hard erase; no trash / undo).
+// Forced removal deletes the live cards on that board first.
 export async function boardRmCmd(opts: {
   cfg: Config;
   node: NodeClient;
@@ -314,7 +314,7 @@ export async function boardRmCmd(opts: {
     throw new FkanbanError({ code: "board_not_found", message: `No board with slug "${opts.slug}".` });
   }
   // Don't silently orphan cards: a board with live cards is only removable with
-  // --force. Forced removal tombstones those cards first, so short-lived harness
+  // --force. Forced removal deletes those cards first, so short-lived harness
   // boards can be torn down without leaving hidden live records behind.
   //
   // `cards` is the projected board-wide list. It is the right read for the

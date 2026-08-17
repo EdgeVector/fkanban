@@ -1254,7 +1254,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add tags",
       description:
-        "Add one or more tags to a card WITHOUT replacing its existing tags (the incremental counterpart to `fkanban_add`'s `tags`, which replaces the whole list). Adding a tag the card already carries is a no-op. Reserved tags (`dep:<slug>` legacy dependency tags, the delete tombstone) are rejected — use `fkanban_dep_add`/`fkanban_rm` for those. Dependency edges live in the separate `deps` field, not in tags.",
+        "Add one or more tags to a card WITHOUT replacing its existing tags (the incremental counterpart to `fkanban_add`'s `tags`, which replaces the whole list). Adding a tag the card already carries is a no-op. Reserved tags (`dep:<slug>` legacy dependency tags, the historical `__fkanban_deleted__` tag) are rejected — use `fkanban_dep_add`/`fkanban_rm` for those. Dependency edges live in the separate `deps` field, not in tags.",
       annotations: { title: "Add tags", idempotentHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("The card to tag."),
@@ -1384,14 +1384,14 @@ export function createFkanbanMcpServer(
     "fkanban_rm",
     {
       title: "Delete a card",
-      description: "Soft-delete a card, refusing if live cards still depend on it.",
+      description: "Delete a card (hard erase; no trash / undo). Refuses if live cards still depend on it.",
       annotations: { title: "Delete a card", destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional().describe("Card slug.") },
       outputSchema: {
         slug: z.string(),
         orphanedDependents: z
           .array(z.string())
-          .describe("Always empty on successful deletes; dependent cards are rejected before tombstoning."),
+          .describe("Always empty on successful deletes; dependent cards are rejected before deletion."),
       },
     },
     async (args) => {
@@ -1477,12 +1477,12 @@ export function createFkanbanMcpServer(
     {
       title: "Delete a board",
       description:
-        "Soft-delete a board (fold_db is append-only; the board is tombstoned and hidden). " +
-        "Refuses the default board, and refuses a board with live cards unless force is set; forced removal also tombstones those cards.",
+        "Delete a board (hard erase; no trash / undo). " +
+        "Refuses the default board, and refuses a board with live cards unless force is set; forced removal also deletes those cards.",
       annotations: { title: "Delete a board", destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("Board slug."),
-        force: z.boolean().optional().describe("Remove even if the board still has live cards, tombstoning them too."),
+        force: z.boolean().optional().describe("Remove even if the board still has live cards, deleting them too."),
       },
       outputSchema: { slug: z.string(), deletedCards: z.array(z.string()) },
     },

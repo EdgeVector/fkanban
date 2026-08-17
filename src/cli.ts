@@ -137,11 +137,12 @@ Commands:
                        --semantic ranks by MEANING via the LastSeek plane instead of substring
   gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
-  rm <slug>            soft-delete a card (refuses if live cards depend on it)
+  rm <slug>            delete a card (hard erase, no undo; refuses if live
+                       cards depend on it)
   board create <slug>  create/update a board (--title; columns fixed)
   board list           list boards (--json)
-  board rm <slug>      soft-delete a board (always refuses default; refuses
-                       live cards unless --force)
+  board rm <slug>      delete a board (hard erase, no undo; always refuses
+                       default; refuses live cards unless --force)
   milestone add <slug> create/update a first-class outcome milestone
   milestone list       list milestone portfolio (--board --state --json)
   milestone show <slug> show one milestone (--json)
@@ -422,8 +423,9 @@ Options:
 Unlike \`add --tags a,b,c\` (which REPLACES the whole tag list), \`tag add\`/
 \`tag rm\` edit one tag at a time without disturbing the rest. Adding a tag the
 card already carries is a no-op; removing one it lacks warns but succeeds.
-Reserved tags (\`dep:<slug>\` legacy dependency tags, the delete tombstone) are
-rejected — use \`dep\`/\`rm\`. Dependency edges live in the separate deps field.
+Reserved tags (\`dep:<slug>\` legacy dependency tags, the historical
+\`__fkanban_deleted__\` tag) are rejected — use \`dep\`/\`rm\`. Dependency
+edges live in the separate deps field.
 
 Example:
   fkanban tag add ship-login p1
@@ -612,7 +614,7 @@ Options:
 Example:
   fkanban show ship-login`),
 
-  rm: withFooter(`fkanban rm — soft-delete a card (refuses while live cards depend on it)
+  rm: withFooter(`fkanban rm — delete a card (hard erase; no trash / undo)
 
 Usage:
   fkanban rm <slug> [options]
@@ -620,8 +622,9 @@ Usage:
 Options:
   --json                echo the write result as JSON
 
-Deletion uses the node's native tombstone path. It refuses if any live card still
-depends on the target; remove or retarget those dependency edges first.
+Deletes the card permanently. There is no trash or undo. It refuses if any live
+card still depends on the target; remove or retarget those dependency edges
+first.
 
 Example:
   fkanban rm ship-login`),
@@ -637,7 +640,7 @@ Options:
   --title <text>        board title (create)
   --columns a,b,c       must be exactly backlog,todo,doing,done (or omit)
   --body <text>         board body (create)
-  --force               soft-delete a board with live cards (rm); refuses if
+  --force               delete a board with live cards (rm); refuses if
                         outside live cards depend on cards being deleted
   --json                machine-readable list: {boards, total, truncated}
   --json-array          legacy bare-array stdout for board list
