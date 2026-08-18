@@ -5,6 +5,7 @@ import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, t
 import { mapWithConcurrency, PARTITION_READ_CONCURRENCY, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import {
   patchCardListIndex,
+  patchCardListIndexRemoveMany,
   patchBoardListIndex,
   readCardListIndex,
   writeCardListIndex,
@@ -22,6 +23,7 @@ import {
   listBoardCardsPartition,
   preferFresherBoardCard,
   removeBoardCard,
+  removeBoardCardsBatch,
   upsertBoardCard,
   upsertBoardCardsBatch,
   type BoardCardWriteOptions,
@@ -36,6 +38,7 @@ import {
 } from "./board-milestones.ts";
 import {
   removeMilestoneCard,
+  removeMilestoneCardsBatch,
   retireMilestoneCardMembership,
 } from "./milestone-cards.ts";
 import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
@@ -5373,4 +5376,120 @@ export function applyBodyPriorityTag(card: Pick<Card, "body" | "tags">, explicit
   const tier = normalizePriority(parseBodyHeader(card.body, "Priority"));
   if (!tier) return;
   card.tags = withPriorityTag(card.tags, tier);
+}
+
+/**
+ * Card records retired per `/api/mutations/batch` request.
+ *
+ * Matched to `BOARD_CARDS_WRITE_BATCH` deliberately: both are bounded by the
+ * same thing, which is how long one request may hold a schema's exclusive purge
+ * barrier, not by any wire limit.
+ */
+export const CARD_DELETE_BATCH = 48;
+
+/**
+ * Delete MANY cards and their membership rows in as few node requests as
+ * possible — the sweep-shaped twin of {@link deleteCardRecord}.
+ *
+ * ## Why this exists rather than a loop over `deleteCardRecord`
+ *
+ * `deleteCardRecord` is shaped for a single interactive `rm`, and every step it
+ * takes is per-card: one point read for provenance, one Card delete, one whole
+ * `all_cards` read-modify-write, one BoardCards partition spine read plus a
+ * delete, and the same again per milestone partition. A sweep multiplies all of
+ * it by the card count.
+ *
+ * The dominant cost is not the row work, it is the per-REQUEST purge. The node
+ * splits hard erasures off and calls `purge_records_bulk` ONCE per (schema,
+ * verb) for a whole request (`mutation_manager/write.rs:266`,
+ * `purge/mod.rs:604`), and that one call runs
+ * `refresh_runtime_field_molecules` once, restoring EVERY runtime field
+ * molecule for the schema (`purge/helpers.rs:532`). BoardCards has 24 fields
+ * and molecules are evicted between requests, so a per-card delete re-pays the
+ * whole restore each time.
+ *
+ * Measured on the live primary 2026-08-18 (`lastdb ops`, client label
+ * `kanban-groom-archive-done`, `lastdbd 0.23.3-880-g2e7775fe2`): 54 archives
+ * cost 108 purges and **120.2 s** of materialize (Card 63.6 s / BoardCards
+ * 56.6 s, ~1.11 s each), all of it inside the exclusive purge barrier that
+ * blocks every other writer of those two schemas. Batched, the same work is
+ * a handful of materializes. See
+ * `papercut-kanban-archive-done-purges-one-card-per-request`.
+ *
+ * ## Ordering
+ *
+ * Identical to {@link deleteCardRecord}, widened from per-card to per-batch:
+ * Card records first, then `all_cards`, then BoardCards, then MilestoneCards.
+ *
+ * ## Failure attribution
+ *
+ * The node rejects a whole batch on any item's failure and never names the
+ * item, so a rejected chunk is retried ONE ROW AT A TIME — which restores
+ * exactly the per-card isolation the batch gives up, and only for the chunk
+ * that actually failed. `onError` sees each individually-failed card so a
+ * caller keeps its own per-card accounting.
+ *
+ * A card whose Card record could not be deleted is EXCLUDED from the index
+ * cleanup below, because that is what a throwing `deleteCardRecord` did: its
+ * membership rows must outlive a Card that is still there, or `list` loses a
+ * card that still exists.
+ */
+export async function deleteCardRecordsBatch(
+  opts: { cfg: Config; node: NodeClient },
+  cards: Card[],
+  onError?: (card: Card, err: unknown) => void,
+): Promise<void> {
+  if (cards.length === 0) return;
+  const hash = schemaHashFor("card", opts.cfg);
+
+  // Provenance first, and CONCURRENTLY: these are independent point reads, and
+  // the reason they cannot be skipped is `deleteCardRecord`'s — a thin caller
+  // row cannot state its own milestone, and a delete that trusts it leaves a
+  // MilestoneCards orphan nothing can ever key.
+  const truths = await mapWithConcurrency(
+    cards,
+    (card) => readCardMembershipKeys(opts.node, opts.cfg, card),
+    POINT_READ_CONCURRENCY,
+  );
+
+  const batch = opts.node.deleteRecords?.bind(opts.node);
+  const retired: Array<{ card: Card; truth: Card }> = [];
+
+  for (let i = 0; i < cards.length; i += CARD_DELETE_BATCH) {
+    const chunk = cards.slice(i, i + CARD_DELETE_BATCH);
+    try {
+      // A client with no batch delete verb (the ad-hoc test fakes) still has to
+      // delete. Per-card is what this used to do everywhere, so falling back to
+      // it is a loss of speed and nothing else.
+      if (!batch) throw new Error("node client exposes no batch delete");
+      await batch(chunk.map((card) => ({ schemaHash: hash, keyHash: card.slug })));
+      for (const [j, card] of chunk.entries()) retired.push({ card, truth: truths[i + j]! });
+    } catch {
+      for (const [j, card] of chunk.entries()) {
+        try {
+          await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
+          retired.push({ card, truth: truths[i + j]! });
+        } catch (err) {
+          onError?.(card, err);
+        }
+      }
+    }
+  }
+
+  if (retired.length === 0) return;
+
+  await patchCardListIndexRemoveMany(opts.node, opts.cfg, retired.map((r) => r.card.slug));
+  await removeBoardCardsBatch(opts.node, opts.cfg, retired.map((r) => r.truth));
+
+  // Both the partition the Card names and the one the caller's object named —
+  // the same "retire both, never the better one" rule `deleteCardRecord`
+  // applies, for the same reason: a stale hint costs a no-op delete, discarding
+  // one costs a permanent orphan.
+  const milestoneRows: Card[] = [];
+  for (const { card, truth } of retired) {
+    for (const milestone of membershipPartitionsToRetire(card, truth)) {
+      milestoneRows.push({ ...truth, milestone });
+    }
+  }
+  await removeMilestoneCardsBatch(opts.node, opts.cfg, milestoneRows);
 }

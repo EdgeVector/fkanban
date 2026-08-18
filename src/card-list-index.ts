@@ -387,3 +387,30 @@ export async function patchBoardListIndex(
     }
   }
 }
+
+/**
+ * Drop MANY slugs from `all_cards` in one read-modify-write.
+ *
+ * {@link patchCardListIndex} re-reads and re-writes the whole rollup per card.
+ * A sweep that retires 200 cards therefore paid 200 whole-document
+ * read-modify-writes of a payload measured at ~272 KB — the exact write this
+ * index was retired for. Removing them together costs one.
+ *
+ * Returns early on a superseded index for the same reason `patchCardListIndex`
+ * does: BoardCards is authoritative and a retired rollup must never be
+ * re-inflated.
+ */
+export async function patchCardListIndexRemoveMany(
+  node: NodeClient,
+  cfg: Config,
+  slugs: readonly string[],
+): Promise<void> {
+  if (!cardListIndexHash(cfg)) return;
+  if (cardListIndexIsSuperseded(cfg)) return;
+  if (slugs.length === 0) return;
+  const drop = new Set(slugs);
+  const current = (await readCardListIndex(node, cfg)) ?? [];
+  const next = current.filter((c) => !drop.has(c.slug));
+  if (next.length === current.length) return;
+  await writeIndexPayload(node, cfg, CARD_LIST_INDEX_KEY, next);
+}

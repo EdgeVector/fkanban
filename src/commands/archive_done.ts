@@ -34,7 +34,7 @@ import type { Config } from "../config.ts";
 import type { NodeClient } from "../client.ts";
 import { FkanbanError } from "../client.ts";
 import {
-  deleteCardRecord,
+  deleteCardRecordsBatch,
   listBoards,
   listCardsByColumn,
   TERMINAL_COLUMN,
@@ -131,6 +131,17 @@ export type ArchiveDoneOptions = {
     board: string,
   ) => Promise<Card[]>;
   remove?: (opts: { cfg: Config; node: NodeClient }, card: Card) => Promise<void>;
+  /**
+   * Retire a whole batch. This is the real delete path; `remove` is kept for the
+   * tests that inject a per-card spy and is adapted onto this one below, so
+   * there is a SINGLE call path through the sweep rather than a batched
+   * production path and a serial tested one.
+   */
+  removeMany?: (
+    opts: { cfg: Config; node: NodeClient },
+    cards: Card[],
+    onError?: (card: Card, err: unknown) => void,
+  ) => Promise<void>;
   milestonesFor?: (node: NodeClient, cfg: Config, boards: Board[]) => Promise<Milestone[]>;
 };
 
@@ -188,7 +199,24 @@ export async function archiveDoneResult(
     opts.cardsIn ??
     ((node, cfg, column, board) =>
       listCardsByColumn(node, cfg, column, ARCHIVE_AGE_FIELDS, board));
-  const remove = opts.remove ?? deleteCardRecord;
+  const perCard = opts.remove;
+  const removeMany =
+    opts.removeMany ??
+    (perCard
+      ? async (
+          o: { cfg: Config; node: NodeClient },
+          batch: Card[],
+          onError?: (card: Card, err: unknown) => void,
+        ): Promise<void> => {
+          for (const c of batch) {
+            try {
+              await perCard(o, c);
+            } catch (err) {
+              onError?.(c, err);
+            }
+          }
+        }
+      : deleteCardRecordsBatch);
 
   const allBoards = await boardsFor(opts.node, opts.cfg);
   const wanted = opts.board?.trim();
@@ -301,6 +329,13 @@ export async function archiveDoneResult(
   let deferred = 0;
   /** Cards this run took into scope (archived, failed, or previewed) — the cap's subject. */
   let attempted = 0;
+  /**
+   * Cards accepted for deletion, paired with the action already recorded for
+   * them. The action objects are pushed to `actions` in eligible order during
+   * the loop and RESOLVED after the batch, so batching cannot reorder the
+   * report relative to the per-card loop it replaced.
+   */
+  const pending: Array<{ card: Card; action: ArchiveDoneAction }> = [];
 
   for (const { card, ageHours: age } of eligible) {
     if (stillDependedOn.has(card.slug)) {
@@ -345,25 +380,36 @@ export async function archiveDoneResult(
       });
       continue;
     }
-    try {
-      await remove({ cfg: opts.cfg, node: opts.node }, card);
-      archived += 1;
-      actions.push({
-        slug: card.slug,
-        board: card.board,
-        age_hours: Math.round(age),
-        action: "archived",
-        reason: `in ${card.column} for ${Math.round(age)}h`,
-      });
-    } catch (err) {
+    const action: ArchiveDoneAction = {
+      slug: card.slug,
+      board: card.board,
+      age_hours: Math.round(age),
+      action: "archived",
+      reason: `in ${card.column} for ${Math.round(age)}h`,
+    };
+    actions.push(action);
+    pending.push({ card, action });
+  }
+
+  if (pending.length > 0) {
+    // Keyed by object IDENTITY, not slug: `eligible` spans every board, and a
+    // slug holding membership on two boards would collide in a slug-keyed map
+    // and mis-attribute one board's failure to the other's row.
+    const failures = new Map<Card, unknown>();
+    await removeMany(
+      { cfg: opts.cfg, node: opts.node },
+      pending.map((p) => p.card),
+      (card, err) => failures.set(card, err),
+    );
+    for (const { card, action } of pending) {
+      if (!failures.has(card)) {
+        archived += 1;
+        continue;
+      }
+      const err = failures.get(card);
       failed += 1;
-      actions.push({
-        slug: card.slug,
-        board: card.board,
-        age_hours: Math.round(age),
-        action: "failed",
-        reason: err instanceof Error ? err.message.split("\n")[0]! : String(err),
-      });
+      action.action = "failed";
+      action.reason = err instanceof Error ? err.message.split("\n")[0]! : String(err);
     }
   }
 

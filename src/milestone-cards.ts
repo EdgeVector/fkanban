@@ -737,3 +737,88 @@ export async function sweepMilestoneCardsPartition(
   }
   return { rows: [...bySk.values()], failedLeads };
 }
+
+/** Chunk size for batched MilestoneCards reaps. Matches `BOARD_CARDS_WRITE_BATCH`. */
+const MILESTONE_CARDS_DELETE_BATCH = 48;
+
+/**
+ * Retire many sks from ONE milestone partition in as few requests as possible —
+ * the delete-side twin of {@link deleteBoardCardSksBatched}'s board version.
+ *
+ * Same reasoning: the node collapses a batch into one `purge_records_bulk` with
+ * one `refresh_runtime_field_molecules`, so the materialize cost is paid per
+ * REQUEST. Falls back to per-row on a rejected chunk because the node names the
+ * batch and never the item, and swallows per-row failure exactly as
+ * {@link deleteMilestoneCardSk} does — every caller is reaping rows that are
+ * already superseded.
+ */
+async function deleteMilestoneCardSksBatched(
+  node: NodeClient,
+  schemaHash: string,
+  milestone: string,
+  sks: readonly string[],
+): Promise<number> {
+  const targets = sks.filter((sk) => sk);
+  if (targets.length === 0) return 0;
+
+  const batch = node.deleteRecords?.bind(node);
+  for (let i = 0; i < targets.length; i += MILESTONE_CARDS_DELETE_BATCH) {
+    const chunk = targets.slice(i, i + MILESTONE_CARDS_DELETE_BATCH);
+    try {
+      if (!batch) throw new Error("node client exposes no batch delete");
+      await batch(chunk.map((sk) => ({ schemaHash, keyHash: milestone, rangeKey: sk })));
+    } catch {
+      for (const sk of chunk) {
+        await deleteMilestoneCardSk(node, schemaHash, milestone, sk);
+      }
+    }
+  }
+  return targets.length;
+}
+
+/**
+ * Retire the MilestoneCards rows of MANY cards with one partition read and one
+ * batched delete per milestone — the multi-card twin of
+ * {@link removeMilestoneCard}.
+ *
+ * See `removeBoardCardsBatch` for the measurement; this is the same shape on
+ * the other membership index. Cards carrying no milestone are dropped here
+ * rather than by the caller, mirroring `removeMilestoneCard`'s own `if (!ms)
+ * return` guard.
+ */
+export async function removeMilestoneCardsBatch(
+  node: NodeClient,
+  cfg: Config,
+  cards: Array<Card | CardSummary>,
+): Promise<void> {
+  const schemaHash = milestoneCardsHash(cfg);
+  if (!schemaHash || cards.length === 0) return;
+
+  const byMilestone = new Map<string, Array<Card | CardSummary>>();
+  for (const card of cards) {
+    const ms = (card.milestone ?? "").trim();
+    if (!ms) continue;
+    const group = byMilestone.get(ms);
+    if (group) group.push(card);
+    else byMilestone.set(ms, [card]);
+  }
+
+  for (const [milestone, group] of byMilestone) {
+    const doomed = new Set<string>();
+    const slugs = new Set<string>();
+    for (const card of group) {
+      if (card.slug) slugs.add(card.slug);
+      const sk = milestoneCardSk(card.column, card.position, card.slug);
+      if (sk) doomed.add(sk);
+    }
+    if (slugs.size > 0) {
+      const part = await listMilestoneCardsPartitionSpine(node, cfg, milestone);
+      if (part) {
+        for (const row of part) {
+          if (slugs.has(row.slug) && row.sk) doomed.add(row.sk);
+        }
+      }
+    }
+    await deleteMilestoneCardSksBatched(node, schemaHash, milestone, [...doomed]);
+  }
+}
