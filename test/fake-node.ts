@@ -417,6 +417,29 @@ export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
       }
     },
 
+    async listRecordKeys(schemaHash, opts = {}) {
+      const limit = Math.max(1, Math.trunc(opts.limit ?? 1000));
+      const ordered = [...tableFor(schemaHash).values()].sort((a, b) =>
+        storeKey(a.keyHash, a.rangeKey).localeCompare(storeKey(b.keyHash, b.rangeKey)),
+      );
+      const cursor = opts.cursor ?? null;
+      const start = cursor === null
+        ? 0
+        : ordered.findIndex((row) => storeKey(row.keyHash, row.rangeKey) > cursor);
+      const offset = start < 0 ? ordered.length : start;
+      const page = ordered.slice(offset, offset + limit);
+      const hasMore = offset + page.length < ordered.length;
+      return {
+        schema: schemaHash,
+        keys: page.map((row) => ({ hash: row.keyHash, range: row.rangeKey })),
+        has_more: hasMore,
+        next_cursor: hasMore && page.length > 0
+          ? storeKey(page[page.length - 1]!.keyHash, page[page.length - 1]!.rangeKey)
+          : null,
+        truncated: hasMore,
+      };
+    },
+
     async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
       reads.push({ schemaHash, fields, filter });
       // BEFORE the loop, deliberately: a malformed filter has to fail on an

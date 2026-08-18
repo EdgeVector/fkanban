@@ -338,6 +338,20 @@ const server = Bun.serve({
         });
       }
     }
+    if (url.pathname === "/api/list") {
+      return Response.json({
+        list: {
+          schema: url.searchParams.get("schema"),
+          keys: [
+            { hash: "alpha", range: null },
+            { hash: "beta", range: null },
+          ],
+          has_more: false,
+          next_cursor: null,
+          truncated: false,
+        },
+      });
+    }
     if (url.pathname === "/api/query") {
       const filter = (body as Record<string, unknown>).filter as { HashKey?: string } | undefined;
       const results =
@@ -607,14 +621,17 @@ describe("queryAll filter", () => {
     expect(token.scope).toEqual({ wildcard: "fkanban/*" });
   });
 
-  test("allowFullScan sends the node's explicit admin full-scan header", async () => {
+  test("listRecordKeys uses GET /api/list without the retired scan header", async () => {
     const node = newNodeClient({ baseUrl, userHash: "test-user", appId: "fkanban" });
-    await node.queryAll({ schemaHash: "cardhash", fields: ["slug"], allowFullScan: true });
+    const page = await node.listRecordKeys!("cardhash", { limit: 2 });
     const last = seen.at(-1)!;
-    expect(last.path).toBe("/api/query");
-    expect(last.headers.get("x-lastdb-allow-full-scan")).toBe("1");
-    expect((last.body as Record<string, unknown>).schema_name).toBe("cardhash");
-    expect((last.body as Record<string, unknown>).limit).toBe(1000);
+    expect(last.path).toBe("/api/list");
+    expect(last.headers.get("x-lastdb-allow-full-scan")).toBeNull();
+    expect(page.keys).toEqual([
+      { hash: "alpha", range: null },
+      { hash: "beta", range: null },
+    ]);
+    expect(page.has_more).toBe(false);
     expect(last.headers.get("x-app-capability")).toBeTruthy();
   });
 });
