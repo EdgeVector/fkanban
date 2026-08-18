@@ -1655,3 +1655,84 @@ export async function listAllBoardCards(
   for (const c of bySlug.values()) out.push(c);
   return out;
 }
+
+/**
+ * Retire the membership rows of MANY cards with one partition read and one
+ * batched delete per board — the multi-card twin of {@link removeBoardCard}.
+ *
+ * ## The measurement this exists for
+ *
+ * `removeBoardCard` is shaped for a single interactive `rm`: it deletes the
+ * card's own sk, then calls {@link purgeOtherBoardCardRows}, which reads the
+ * WHOLE partition spine to find stale duplicates. That is the right trade for
+ * one card and the wrong one for a sweep — `archive-done` archives up to
+ * `DEFAULT_ARCHIVE_MAX` (200) cards per run, so it paid 200 whole-partition
+ * spine reads and 200 separate write-gate acquisitions to reap rows that
+ * overwhelmingly live in the SAME partition.
+ *
+ * Measured on the live primary 2026-08-18 (`lastdb ops`, client label
+ * `kanban-groom-archive-done`, `lastdbd 0.23.3-880-g2e7775fe2`): 54 archives
+ * cost 54 BoardCards purges holding the schema's exclusive purge barrier for
+ * 56.6 s — 1.047 s each, nearly all of it
+ * `refresh_runtime_field_molecules` restoring all 24 runtime field molecules
+ * per request, because molecules are evicted between requests. The node
+ * already collapses a batch into ONE `purge_records_bulk` with ONE
+ * materialize (`purge/mod.rs:604`), so that cost is per-REQUEST, not per-row.
+ * See `papercut-kanban-archive-done-purges-one-card-per-request`.
+ *
+ * So this groups by board, reads each partition spine ONCE, and hands every
+ * doomed sk to {@link deleteBoardCardSksBatched} in one call.
+ *
+ * ## Why it unions two sources of sk
+ *
+ * The address the caller believes the card occupies AND every row the
+ * partition actually holds for that slug. Both are needed for the same reason
+ * `removeBoardCard` does both: the spine read denies a row missing an atom for
+ * a projected field, and the caller's `column`/`position` can be stale. Taking
+ * the union reaps in both directions and de-duplicates, so a row named twice
+ * costs one delete, not two.
+ *
+ * Best-effort per row, like every other BoardCards reap path: callers are
+ * retiring rows that are already superseded, and a row that is missing is the
+ * outcome they wanted.
+ */
+export async function removeBoardCardsBatch(
+  node: NodeClient,
+  cfg: Config,
+  cards: Array<Card | CardSummary>,
+): Promise<void> {
+  if (cards.length === 0) return;
+
+  const byBoard = new Map<string, Array<Card | CardSummary>>();
+  for (const card of cards) {
+    const board = card.board || "default";
+    const group = byBoard.get(board);
+    if (group) group.push(card);
+    else byBoard.set(board, [card]);
+  }
+
+  for (const schemaHash of boardCardsWriteHashes(cfg)) {
+    const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
+    for (const [board, group] of byBoard) {
+      const doomed = new Set<string>();
+      const slugs = new Set<string>();
+      for (const card of group) {
+        if (card.slug) slugs.add(card.slug);
+        const sk = boardCardSk(card.column, card.position, card.slug);
+        if (sk) doomed.add(sk);
+      }
+      // One spine read for the whole group, standing in for the per-card
+      // `purgeOtherBoardCardRows` this replaces. `row.sk` is the row's real
+      // range key, not a rebuild of it — see `purgeOtherBoardCardRows`.
+      if (slugs.size > 0) {
+        const part = await listBoardCardsPartitionSpine(node, oneHashCfg, board);
+        if (part) {
+          for (const row of part) {
+            if (slugs.has(row.slug) && row.sk) doomed.add(row.sk);
+          }
+        }
+      }
+      await deleteBoardCardSksBatched(node, schemaHash, board, [...doomed]);
+    }
+  }
+}
