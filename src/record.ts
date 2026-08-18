@@ -2803,6 +2803,94 @@ function cardFieldWeight(card: Card): number {
   return (card.column ? 2 : 0) + (card.position ? 1 : 0) + (card.board ? 1 : 0);
 }
 
+/** Drain `/api/list` for one primary schema without hydrating field atoms. */
+async function listAllRecordHashes(node: NodeClient, schemaHash: string): Promise<string[]> {
+  if (!node.listRecordKeys) {
+    throw new FkanbanError({
+      code: "record_key_list_unavailable",
+      message: `This node client cannot enumerate live keys for schema ${schemaHash}.`,
+      hint: "Use a current fkanban client backed by LastDB GET /api/list.",
+    });
+  }
+
+  const hashes = new Set<string>();
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  for (;;) {
+    const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
+    for (const key of page.keys) {
+      if (key.range !== null) {
+        throw new FkanbanError({
+          code: "unexpected_range_key",
+          message: `Schema ${schemaHash} returned a range key from a primary-key enumeration.`,
+          hint: "Enumerate the primary Hash schema, not a HashRange membership projection.",
+        });
+      }
+      hashes.add(key.hash);
+    }
+    if (!page.has_more) break;
+    if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
+      throw new FkanbanError({
+        code: "record_key_list_stalled",
+        message: `LastDB /api/list did not advance its cursor for schema ${schemaHash}.`,
+      });
+    }
+    seenCursors.add(page.next_cursor);
+    cursor = page.next_cursor;
+  }
+  return [...hashes];
+}
+
+/** Enumerate Card identities, then hydrate each live row by exact HashKey. */
+async function listCardsFromKeyList(
+  node: NodeClient,
+  cfg: Config,
+  requestedFields: string[],
+): Promise<Card[]> {
+  const schemaHash = schemaHashFor("card", cfg);
+  if (!node.listRecordKeys) {
+    // Temporary compatibility for injected test clients. Production
+    // `newNodeClient` always exposes `/api/list`; the follow-up fixture slice
+    // removes this scan fallback together with the old query capability.
+    let res;
+    try {
+      res = await node.queryAll({ schemaHash, fields: requestedFields, allowFullScan: true });
+    } catch (err) {
+      if (!isOnlyOptionalFieldMiss(err, requestedFields)) throw err;
+      res = await node.queryAll({
+        schemaHash,
+        fields: requestedFields.filter(
+          (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
+        ),
+        allowFullScan: true,
+      });
+    }
+    return res.results.map(rowToCard).filter((card) => card.slug.length > 0 && !isHiddenCard(card));
+  }
+
+  const hashes = await listAllRecordHashes(node, schemaHash);
+  const read = async (fields: string[]): Promise<Card[]> => {
+    const rows = await mapWithConcurrency(
+      hashes,
+      async (hash) => {
+        const res = await node.queryAll({ schemaHash, fields, filter: { HashKey: hash } });
+        return res.results;
+      },
+      POINT_READ_CONCURRENCY,
+    );
+    return rows.flat().map(rowToCard).filter((card) => card.slug.length > 0 && !isHiddenCard(card));
+  };
+
+  try {
+    return await read(requestedFields);
+  } catch (err) {
+    if (!isOnlyOptionalFieldMiss(err, requestedFields)) throw err;
+    return read(requestedFields.filter(
+      (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
+    ));
+  }
+}
+
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
 // Native deletes are hidden by the node before this point.
@@ -3239,38 +3327,13 @@ export async function listCardsWithBodies(
   node: NodeClient,
   cfg: Config,
 ): Promise<Card[]> {
-  const hash = schemaHashFor("card", cfg);
-  let res;
-  try {
-    res = await node.queryAll({
-      schemaHash: hash,
-      fields: fieldsFor("card"),
-      allowFullScan: true,
-    });
-  } catch (err) {
-    if (!isOnlyOptionalFieldMiss(err, fieldsFor("card"))) throw err;
-    res = await node.queryAll({
-      schemaHash: hash,
-      fields: fieldsFor("card").filter(
-        (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
-      ),
-      allowFullScan: true,
-    });
-  }
+  const cards = await listCardsFromKeyList(node, cfg, fieldsFor("card"));
   const bySlug = new Map<string, Card>();
-  const unkeyed: Card[] = [];
-  for (const card of res.results.map(rowToCard)) {
-    if (isHiddenCard(card)) continue;
-    // A row with no slug cannot be a duplicate OF anything (nothing addresses
-    // it by key), so it is passed through rather than collapsed with its peers.
-    if (card.slug.length === 0) {
-      unkeyed.push(card);
-      continue;
-    }
+  for (const card of cards) {
     const seen = bySlug.get(card.slug);
     if (seen === undefined || seen.body.length < card.body.length) bySlug.set(card.slug, card);
   }
-  return [...bySlug.values(), ...unkeyed];
+  return [...bySlug.values()];
 }
 
 /**

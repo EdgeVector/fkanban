@@ -83,6 +83,19 @@ export type QueryResponse = {
   returned_count?: number;
 };
 
+export type RecordKey = {
+  hash: string;
+  range: string | null;
+};
+
+export type ListRecordKeysPage = {
+  schema: string;
+  keys: RecordKey[];
+  has_more: boolean;
+  next_cursor: string | null;
+  truncated: boolean;
+};
+
 export type RawResponse = {
   status: number;
   headers: Headers;
@@ -501,6 +514,19 @@ export type NodeClient = {
     keyHash: string;
     rangeKey?: string | null;
   }>): Promise<void>;
+  /**
+   * Page live record identities without hydrating field atoms.
+   *
+   * Optional only so narrow test doubles that never enumerate a schema do not
+   * all need a dead method. Production clients always implement it, and every
+   * enumeration path requires it explicitly instead of falling back to query.
+   */
+  listRecordKeys?(schemaHash: string, opts?: { limit?: number; cursor?: string | null }): Promise<ListRecordKeysPage>;
+  /**
+   * `allowFullScan` is retained temporarily for injected legacy test clients.
+   * Production enumeration uses `listRecordKeys`; the fixture-migration slice
+   * removes this compatibility field after every fake implements `/api/list`.
+   */
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse>;
   search?(query: string, opts?: AppSearchOptions): Promise<AppSearchHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
@@ -1336,6 +1362,44 @@ export function newNodeClient(opts: {
         fields: {},
         mutationType: "delete" as const,
       })));
+    },
+    async listRecordKeys(schemaHash, opts = {}) {
+      const limit = Math.max(1, Math.min(1000, Math.trunc(opts.limit ?? 1000)));
+      let path = `/api/list?schema=${encodeURIComponent(schemaHash)}&limit=${limit}`;
+      if (opts.cursor) path += `&cursor=${encodeURIComponent(opts.cursor)}`;
+      const res = await rawCallImpl("GET", path);
+      if (res.status !== 200) {
+        throw mapNodeError(res.status, res.json ?? res.body, "/api/list");
+      }
+      const root = res.json;
+      const list = root && typeof root === "object"
+        ? (root as Record<string, unknown>).list
+        : undefined;
+      if (!list || typeof list !== "object") {
+        throw new FkanbanError({
+          code: "invalid_list_response",
+          message: "LastDB /api/list response is missing its list envelope.",
+        });
+      }
+      const value = list as Record<string, unknown>;
+      const keys = Array.isArray(value.keys)
+        ? value.keys.flatMap((entry): RecordKey[] => {
+            if (!entry || typeof entry !== "object") return [];
+            const key = entry as Record<string, unknown>;
+            if (typeof key.hash !== "string" || key.hash.length === 0) return [];
+            return [{
+              hash: key.hash,
+              range: typeof key.range === "string" ? key.range : null,
+            }];
+          })
+        : [];
+      return {
+        schema: typeof value.schema === "string" ? value.schema : schemaHash,
+        keys,
+        has_more: value.has_more === true,
+        next_cursor: typeof value.next_cursor === "string" ? value.next_cursor : null,
+        truncated: value.truncated === true,
+      };
     },
     // Both branches page through `queryAllPaged`. The vendored SDK's own
     // `queryAll` (0.2.0) prefers a returned cursor over the offset and has no
