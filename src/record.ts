@@ -3689,22 +3689,37 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
     );
   }
 
-  // First-run / missing rollup: HashKey(default), never a Board schema census.
-  // LastDB rejects unfiltered `/api/query` and `/api/list` as
-  // `full_schema_scan_not_allowed` — the same class as the 2026-07-19
-  // `situations list` 400 on a fresh node. `kanban init` seeds this slug; other
-  // boards are recovered by `groom board-list-heal`, which owns
-  // `scanBoardsForReconcile`.
-  const defaultBoard = await findBoard(node, cfg, DEFAULT_BOARD_SLUG);
-  const boards = defaultBoard ? live([defaultBoard]) : [];
-  if (boards.length > 0) {
-    try {
-      await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
-    } catch {
-      // best-effort; the point-read already answered this list
+  // Missing rollup: recover Board truth without taking down first-run list.
+  // Tests and admin-shaped fakes still answer `scanBoardsForReconcile`. Live
+  // Mini rejects unfiltered `/api/list` and `/api/query` as
+  // `full_schema_scan_not_allowed` (2026-07-19 situations list; 2026-08-19
+  // first-run `kanban list`). Catch that 400 and answer HashKey(default);
+  // `groom board-list-heal` still owns repairing extra boards on that node.
+  try {
+    const boards = live(await scanBoardsForReconcile(node, cfg));
+    if (boards.length > 0) {
+      try {
+        await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
+      } catch {
+        // best-effort; the drain already answered this list
+      }
     }
+    return boards;
+  } catch (err) {
+    const scanRejected =
+      err instanceof FkanbanError && err.code === "full_schema_scan_not_allowed";
+    if (!scanRejected) throw err;
+    const defaultBoard = await findBoard(node, cfg, DEFAULT_BOARD_SLUG);
+    const boards = defaultBoard ? live([defaultBoard]) : [];
+    if (boards.length > 0) {
+      try {
+        await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
+      } catch {
+        // best-effort; the point-read already answered this list
+      }
+    }
+    return boards;
   }
-  return boards;
 }
 
 export function toBoardSummary(b: Board): BoardSummary {
