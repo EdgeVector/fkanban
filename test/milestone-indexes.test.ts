@@ -348,7 +348,7 @@ describe("milestone HashRange indexes", () => {
     const node: NodeClient = {
       ...base,
       async queryAll(opts) {
-        if (opts.schemaHash === cfg.schemaHashes.milestone && !opts.filter && opts.allowFullScan) {
+        if (opts.schemaHash === cfg.schemaHashes.milestone && !opts.filter) {
           fullScanAttempts.push(opts.schemaHash);
           throw new Error("Milestone full scan is forbidden in indexed milestone read paths");
         }
@@ -418,7 +418,7 @@ describe("milestone HashRange indexes", () => {
         if (opts.schemaHash === cfg.schemaHashes.milestone && opts.filter?.HashKey) {
           pointReads.push(String(opts.filter.HashKey));
         }
-        if (opts.schemaHash === cfg.schemaHashes.milestone && !opts.filter && opts.allowFullScan) {
+        if (opts.schemaHash === cfg.schemaHashes.milestone && !opts.filter) {
           throw new Error("product scan is forbidden");
         }
         return base.queryAll(opts);

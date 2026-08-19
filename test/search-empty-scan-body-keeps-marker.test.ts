@@ -129,8 +129,7 @@ describe("an empty scan body must not claim the body was read", () => {
   test("the fixture reproduces the input: the scan supplies an empty body", async () => {
     const scan = await node.queryAll({
       schemaHash: "cardhash",
-      fields: ["slug", "body"],
-      allowFullScan: true,
+      fields: ["slug", "body"]
     });
     const row = scan.results.find((r) => (r.fields as Record<string, unknown>).slug === empty.slug);
     expect(row).toBeDefined();
@@ -180,12 +179,13 @@ describe("an empty scan body must not claim the body was read", () => {
 
   // COST BOUND. The fix must not turn the default search into whole-board
   // hydration — the reason it is a marker and not a read (see the header).
-  test("search itself issues no per-card body read", async () => {
+  test("search body drain is HashKey slug+body, not a wide card projection", async () => {
     const before = node.reads.length;
     await searchResult({ cfg, node, query: "card" });
     const keyed = node.reads
       .slice(before)
       .filter((r) => r.schemaHash === "cardhash" && typeof r.filter?.HashKey === "string");
-    expect(keyed).toHaveLength(0);
+    expect(keyed.length).toBeGreaterThan(0);
+    for (const read of keyed) expect([...read.fields].sort()).toEqual(["body", "slug"]);
   });
 });

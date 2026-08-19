@@ -25,6 +25,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
+import { listRecordKeysFromRows } from "./fake-node.ts";
 import type { Config } from "../src/config.ts";
 import { CARD_LIST_INDEX_KEY, type CardSummary } from "../src/card-list-index.ts";
 import {
@@ -159,6 +160,9 @@ function fakeNode(cards: Card[], opts: { rejectSurfaces?: boolean } = {}) {
       write(schemaHash, fields, keyHash);
     },
     async deleteRecord() {},
+    listRecordKeys: listRecordKeysFromRows((schemaHash) =>
+      rowsOf(schemaHash).map((row) => ({ keyHash: row.hash, rangeKey: row.range })),
+    ),
     async queryAll(q: { schemaHash: string; fields?: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
       if (!tables.has(q.schemaHash)) throw new Error(`unbound schema ${q.schemaHash}`);
       if (q.schemaHash === "cardhash") {

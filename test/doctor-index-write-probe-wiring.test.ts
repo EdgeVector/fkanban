@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { doctor } from "../src/commands/doctor.ts";
 import { WRITE_PROBE_SLUG } from "../src/record.ts";
 import { EXTRA_SCHEMAS, allPinnedSchemas } from "../src/schemas.ts";
+import { handleApiList } from "./http-list.ts";
 
 // One loaded-schema row per pinned key, each at its DECLARED identity, so
 // `checkPinnedSchemaIdentity` returns `ok` for all seven and the probe gate
@@ -78,6 +79,7 @@ function makeNode() {
         else store.set(addr, (body!.fields_and_values ?? {}) as Record<string, unknown>);
         return Response.json({ ok: true, success: true });
       }
+      if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") {
         const schema = body!.schema_name as string;
         const filter = body!.filter as { HashKey?: string } | undefined;

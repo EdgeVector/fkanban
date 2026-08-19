@@ -1,7 +1,7 @@
 // `groom milestone-indexes-heal` must never DELETE a BoardMilestones row on the
 // authority of the fat-`Milestone` full scan.
 //
-// The heal rebuilds from `Milestone` with `allowFullScan: true` and then treats
+// The heal rebuilds from `Milestone` with `` and then treats
 // "slug absent from that scan" as authority to remove the slug's index row. But
 // that scan is documented-unreliable on the live primary: it returns husks of
 // DELETED milestones and MISSES live ones
@@ -120,8 +120,7 @@ describe("milestone-indexes-heal: scan absence is not deletion evidence", () => 
     // read can. Without this the test could pass for the wrong reason.
     const scan = await node.queryAll({
       schemaHash: cfg.schemaHashes.milestone!,
-      fields: ["slug"],
-      allowFullScan: true,
+      fields: ["slug"]
     });
     const scanned = scan.results.map((r) => String((r.fields as Record<string, unknown>).slug ?? ""));
     expect(scanned).toContain("ms-visible");
@@ -199,8 +198,7 @@ describe("milestone-indexes-heal: a scan-invisible milestone is still repairable
     // this the test could pass for the wrong reason.
     const scan = await node.queryAll({
       schemaHash: cfg.schemaHashes.milestone!,
-      fields: ["slug"],
-      allowFullScan: true,
+      fields: ["slug"]
     });
     const scanned = scan.results.map((r) => String((r.fields as Record<string, unknown>).slug ?? ""));
     expect(scanned).not.toContain("ms-scan-invisible");

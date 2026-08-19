@@ -18,6 +18,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { FkanbanError, newNodeClient, type LoadedSchema } from "../src/client.ts";
 import { listCards, probeSchemaWritable, WRITE_PROBE_SLUG } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
+import { handleApiListFromPrefixedStore } from "./http-list.ts";
 import { CARD_OPTIONAL_SCHEMA_FIELDS, UNIQUE_SCHEMAS, fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
 
 // The catalog entry the probe now takes (it reads the DECLARED definition, so it
@@ -299,6 +300,7 @@ const server = Bun.serve({
       return Response.json({ ok: true, success: true });
     }
 
+    if (url.pathname === "/api/list") return handleApiListFromPrefixedStore(url, store);
     if (url.pathname === "/api/query") {
       const schema = body!.schema_name as string;
       const filter = body!.filter as { HashKey?: string } | undefined;

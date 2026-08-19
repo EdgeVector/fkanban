@@ -2,7 +2,7 @@
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
-import { mapWithConcurrency, PARTITION_READ_CONCURRENCY, POINT_READ_CONCURRENCY } from "./concurrency.ts";
+import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import {
   patchCardListIndex,
   patchCardListIndexRemoveMany,
@@ -2806,40 +2806,63 @@ function cardFieldWeight(card: Card): number {
   return (card.column ? 2 : 0) + (card.position ? 1 : 0) + (card.board ? 1 : 0);
 }
 
+/** Prefer the row that can actually state membership, then the longer body. */
+function richerCard(a: Card, b: Card): Card {
+  const byWeight = cardFieldWeight(a) - cardFieldWeight(b);
+  if (byWeight !== 0) return byWeight > 0 ? a : b;
+  return (a.body?.length ?? 0) >= (b.body?.length ?? 0) ? a : b;
+}
+
+function dedupeCardsBySlug(cards: Card[]): Card[] {
+  const bySlug = new Map<string, Card>();
+  for (const card of cards) {
+    const prev = bySlug.get(card.slug);
+    bySlug.set(card.slug, prev ? richerCard(prev, card) : card);
+  }
+  return [...bySlug.values()];
+}
+
 /** Drain `/api/list` for one primary schema without hydrating field atoms. */
 async function listAllRecordHashes(node: NodeClient, schemaHash: string): Promise<string[]> {
-  if (!node.listRecordKeys) {
-    throw new FkanbanError({
-      code: "record_key_list_unavailable",
-      message: `This node client cannot enumerate live keys for schema ${schemaHash}.`,
-      hint: "Use a current fkanban client backed by LastDB GET /api/list.",
-    });
-  }
-
-  const hashes = new Set<string>();
-  const seenCursors = new Set<string>();
-  let cursor: string | null = null;
-  for (;;) {
-    const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
-    for (const key of page.keys) {
-      if (key.range !== null) {
+  if (node.listRecordKeys) {
+    const hashes = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    for (;;) {
+      const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
+      for (const key of page.keys) {
+        if (key.range !== null) {
+          throw new FkanbanError({
+            code: "unexpected_range_key",
+            message: `Schema ${schemaHash} returned a range key from a primary-key enumeration.`,
+            hint: "Enumerate the primary Hash schema, not a HashRange membership projection.",
+          });
+        }
+        hashes.add(key.hash);
+      }
+      if (!page.has_more) break;
+      if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
         throw new FkanbanError({
-          code: "unexpected_range_key",
-          message: `Schema ${schemaHash} returned a range key from a primary-key enumeration.`,
-          hint: "Enumerate the primary Hash schema, not a HashRange membership projection.",
+          code: "record_key_list_stalled",
+          message: `LastDB /api/list did not advance its cursor for schema ${schemaHash}.`,
         });
       }
-      hashes.add(key.hash);
+      seenCursors.add(page.next_cursor);
+      cursor = page.next_cursor;
     }
-    if (!page.has_more) break;
-    if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
-      throw new FkanbanError({
-        code: "record_key_list_stalled",
-        message: `LastDB /api/list did not advance its cursor for schema ${schemaHash}.`,
-      });
-    }
-    seenCursors.add(page.next_cursor);
-    cursor = page.next_cursor;
+    return [...hashes];
+  }
+
+  // Injected test doubles that predate `/api/list` still answer an unfiltered
+  // queryAll. Production `newNodeClient` always implements listRecordKeys; a
+  // live LastDB node rejects unfiltered queries, so this branch cannot
+  // enumerate production rows.
+  const res = await node.queryAll({ schemaHash, fields: ["slug"] });
+  const hashes = new Set<string>();
+  for (const row of res.results ?? []) {
+    const keyed = typeof row.key?.hash === "string" ? row.key.hash : "";
+    const slug = keyed || stringField((row.fields ?? {}) as Record<string, unknown>, "slug");
+    if (slug.length > 0) hashes.add(slug);
   }
   return [...hashes];
 }
@@ -2851,47 +2874,22 @@ async function listCardsFromKeyList(
   requestedFields: string[],
 ): Promise<Card[]> {
   const schemaHash = schemaHashFor("card", cfg);
-  if (!node.listRecordKeys) {
-    // Temporary compatibility for injected test clients. Production
-    // `newNodeClient` always exposes `/api/list`; the follow-up fixture slice
-    // removes this scan fallback together with the old query capability.
-    let res;
-    try {
-      res = await node.queryAll({ schemaHash, fields: requestedFields, allowFullScan: true });
-    } catch (err) {
-      if (!isOnlyOptionalFieldMiss(err, requestedFields)) throw err;
-      res = await node.queryAll({
-        schemaHash,
-        fields: requestedFields.filter(
-          (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
-        ),
-        allowFullScan: true,
-      });
-    }
-    return res.results.map(rowToCard).filter((card) => card.slug.length > 0 && !isHiddenCard(card));
-  }
-
   const hashes = await listAllRecordHashes(node, schemaHash);
-  const read = async (fields: string[]): Promise<Card[]> => {
-    const rows = await mapWithConcurrency(
-      hashes,
-      async (hash) => {
-        const res = await node.queryAll({ schemaHash, fields, filter: { HashKey: hash } });
-        return res.results;
-      },
-      POINT_READ_CONCURRENCY,
-    );
-    return rows.flat().map(rowToCard).filter((card) => card.slug.length > 0 && !isHiddenCard(card));
-  };
-
-  try {
-    return await read(requestedFields);
-  } catch (err) {
-    if (!isOnlyOptionalFieldMiss(err, requestedFields)) throw err;
-    return read(requestedFields.filter(
-      (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
-    ));
-  }
+  const rows = await mapWithConcurrency(
+    hashes,
+    async (hash) => {
+      const res = await node.queryAll({ schemaHash, fields: requestedFields, filter: { HashKey: hash } });
+      return res.results;
+    },
+    POINT_READ_CONCURRENCY,
+  );
+  return dedupeCardsBySlug(
+    rows
+      .flat()
+      .filter((row) => !isKeyOnlyRow(row, requestedFields))
+      .map(rowToCard)
+      .filter((card) => card.slug.length > 0 && !isHiddenCard(card)),
+  );
 }
 
 // Shared body of the three card list paths below: query the card schema for the
@@ -2925,7 +2923,7 @@ export type CardListServedBy =
   | "card-list-index"
   /** Admin full scan over Card; also seeds the indexes. Rare and expensive. */
   | "full-scan"
-  /** No index answered and `allowFullScanFallback: false` declined the scan. */
+  /** No index answered and `allowKeyListFallback: false` declined key-list drain. */
   | "refused"
   /** A `HashKey` filter — a Card point read, not a list at all. */
   | "card-point-read";
@@ -2935,7 +2933,7 @@ async function listCardsWithFields(
   cfg: Config,
   fields: string[],
   filter?: QueryFilter,
-  opts: { allowFullScanFallback?: boolean } & BoardListOpt = {},
+  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
 ): Promise<Card[]> {
   return (await listCardsWithFieldsTraced(node, cfg, fields, filter, opts)).cards;
 }
@@ -2952,7 +2950,7 @@ async function listCardsWithFieldsTraced(
   cfg: Config,
   fields: string[],
   filter?: QueryFilter,
-  opts: { allowFullScanFallback?: boolean } & BoardListOpt = {},
+  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   // Prefer BoardCards HashRange partitions (hash=board) — Dynamo-style list.
   // Never hydrate body for board-wide lists (that was the N+1 storm). Callers
@@ -3061,60 +3059,25 @@ async function listCardsWithFieldsTraced(
         servedBy: "card-list-index",
       };
     }
-    if (opts.allowFullScanFallback === false) {
+    if (opts.allowKeyListFallback === false) {
       return { cards: [], servedBy: "refused" };
     }
-    // Index missing: one admin full scan seeds indexes (keeps body for this
-    // rare path only — still not N+1). Prefer BoardCards after dual-write.
-    const hash = schemaHashFor("card", cfg);
-    let res;
-    // What the scan actually READ, which stops being `fields` the moment the
-    // optional-field retry fires. Both seeds below are gated on "never write a
-    // field this scan did not read" — `seedBoardCards` even names its parameter
-    // `scannedFields` — and handing them the caller's REQUESTED list is the one
-    // input that makes that contract state something false.
-    //
-    // The gap is not theoretical, because the retry is all-or-nothing across a
-    // set that is not all-or-nothing on the node. `isOnlyOptionalFieldMiss`
-    // fires when the node names ANY ONE of `CARD_OPTIONAL_SCHEMA_FIELDS`, and
-    // the retry then drops ALL FOUR. Three of them — `surfaces`, `created_by`,
-    // `milestone` — are in `CARD_SEED_FIELDS`, so on a node missing only `db`
-    // the scan silently stops reading three fields that are present and
-    // populated, `scanCoversSeed(fields)` still answers "covered" because the
-    // caller asked for them, and the seed writes `""` over each one.
-    //
-    // `milestone` is the one that bites: membership drives `milestone
-    // portfolio`, MilestoneCards parity, and the live-PR milestone gate, so a
-    // blanked value is precisely the "board that stops being pickupable after a
-    // READ" symptom `seedBoardCards`' own comment describes. Passing the
-    // scanned list makes the guard decline instead, which is the conservative
-    // half it was written to take.
+    // Index missing: enumerate live Card keys via /api/list, then HashKey
+    // point-get each row. Prefer BoardCards after dual-write.
+    // `scannedFields` remains the caller's requested projection (or the
+    // optional-field retry subset) so seed guards still refuse to write fields
+    // this drain did not read.
     let scannedFields = fields;
+    let cards: Card[];
     try {
-      res = await node.queryAll({ schemaHash: hash, fields, allowFullScan: true });
+      cards = await listCardsFromKeyList(node, cfg, fields);
     } catch (err) {
       if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
       scannedFields = fields.filter(
         (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
       );
-      res = await node.queryAll({
-        schemaHash: hash,
-        fields: scannedFields,
-        allowFullScan: true,
-      });
+      cards = await listCardsFromKeyList(node, cfg, scannedFields);
     }
-    // Drop delete-husks BEFORE they become writes. This branch does not merely
-    // return `cards` — it feeds `writeCardListIndex` and `seedBoardCards` below,
-    // so a husk mapped to an all-`""` Card is seeded as board membership for a
-    // card that no longer exists (`board` `""` resolves to the default board).
-    // The scan is also where husks actually accumulate: measured 2026-08-06, an
-    // unfiltered Card scan on the live primary returned 14 rows with a slug and
-    // no title/board/column, while HashKey point reads for those same slugs
-    // correctly returned nothing.
-    const cards = res.results
-      .filter((row) => !isKeyOnlyRow(row, scannedFields))
-      .map(rowToCard)
-      .filter((c) => !isHiddenCard(c));
     if (!scannedFields.includes("body")) markBodyOmitted(cards);
     // Never write a field this scan did not read — the same contract
     // `seedBoardCards` states below, at the other index, from the same scan.
@@ -3207,7 +3170,7 @@ async function listCardsClientFiltered(
   cfg: Config,
   fields: string[],
   predicate: Record<string, string>,
-  opts: { allowFullScanFallback?: boolean } = {},
+  opts: { allowKeyListFallback?: boolean } = {},
 ): Promise<Card[]> {
   return (await listCardsClientFilteredTraced(node, cfg, fields, predicate, opts)).cards;
 }
@@ -3218,7 +3181,7 @@ async function listCardsClientFilteredTraced(
   cfg: Config,
   fields: string[],
   predicate: Record<string, string>,
-  opts: { allowFullScanFallback?: boolean } = {},
+  opts: { allowKeyListFallback?: boolean } = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const required = Object.keys(predicate);
   const matches = (c: Card): boolean =>
@@ -3305,8 +3268,7 @@ export async function listCards(
 }
 
 /**
- * Complete-body card set: ONE admin full-scan of Card (allowFullScan), not N
- * point-gets. Prefer the native index / thin list for hot paths — this is for
+ * Complete-body card set: key list + HashKey point-gets over Card. Prefer the native index / thin list for hot paths — this is for
  * free-text search and for whole-board sweeps that JUDGE or REWRITE bodies
  * (`groom stale-blockers`, `rank`, `migrate area-tags`), which cannot use the
  * body-free list without deciding on a body they never read.
@@ -3364,30 +3326,13 @@ export async function listCardBodies(
   node: NodeClient,
   cfg: Config,
 ): Promise<Map<string, string>> {
-  const res = await node.queryAll({
-    schemaHash: schemaHashFor("card", cfg),
-    fields: ["slug", "body"],
-    allowFullScan: true,
-  });
+  // Key list + HashKey point-get (slug+body). Keep-longest still applies if a
+  // keyed read ever returned duplicates; production HashKey returns one row.
+  const cards = await listCardsFromKeyList(node, cfg, ["slug", "body"]);
   const bodies = new Map<string, string>();
-  for (const row of res.results) {
-    const f = (row.fields ?? {}) as Record<string, unknown>;
-    const slug = stringField(f, "slug");
-    if (slug.length === 0) continue;
-    const body = stringField(f, "body");
-    // A scan of Card returns MORE THAN ONE row for some slugs on the live
-    // primary — measured 47 of 593 distinct slugs, of which 44 disagree about
-    // the body and 33 carry the EMPTY one last. A plain last-write-wins
-    // `set(slug, body)` therefore silently discards the real brief for those
-    // cards and they stop matching on body text.
-    //
-    // Keep the longest, which is order-independent: an empty row carries no
-    // text a substring search could match, so it must never displace one that
-    // does. (Ordering by `updated_at` instead would mean projecting a third
-    // field, and any card missing that atom would drop out of the read
-    // entirely — a worse failure than picking the richer of two bodies.)
-    const seen = bodies.get(slug);
-    if (seen === undefined || seen.length < body.length) bodies.set(slug, body);
+  for (const card of cards) {
+    const seen = bodies.get(card.slug);
+    if (seen === undefined || seen.length < card.body.length) bodies.set(card.slug, card.body);
   }
   return bodies;
 }
@@ -3576,8 +3521,8 @@ export async function listCardsByColumn(
  * Every card slug the Card schema holds, body-free — the reconciler's discovery
  * source for membership that no index knows about.
  *
- * This is a deliberate `allowFullScan` and the no-scan contract permits it: the
- * contract bans scans on *hot read paths*, and repairs drift with an explicit
+ * This is a deliberate admin key-list drain and the no-scan contract permits it:
+ * the contract bans scans on *hot read paths*, and repairs drift with an explicit
  * reconciler that reads the primary (`concepts-lastdb-agent-access-model`).
  * `groom board-cards-heal` is that reconciler — manual/scheduled, never a list.
  *
@@ -3612,25 +3557,12 @@ export async function scanCardSummariesForReconcile(
   node: NodeClient,
   cfg: Config,
 ): Promise<ScannedCardRow[]> {
-  const hash = schemaHashFor("card", cfg);
   const projection = cardListProjectionFields(fieldsFor("card"));
-  let res;
-  try {
-    res = await node.queryAll({ schemaHash: hash, fields: projection, allowFullScan: true });
-  } catch (err) {
-    if (!isOnlyOptionalFieldMiss(err, projection)) throw err;
-    res = await node.queryAll({
-      schemaHash: hash,
-      fields: projection.filter(
-        (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
-      ),
-      allowFullScan: true,
-    });
-  }
-  return res.results
-    .map(rowToCard)
-    .filter((c) => c.slug.length > 0 && !isHiddenCard(c))
-    .map((c) => scannedCardRow(c));
+  // Key list establishes which slugs exist; each HashKey point-get is truth.
+  // Keep ScannedCardRow semantics: only treat established non-empty fields as
+  // known (blank still collapses to undefined via scannedCardRow).
+  const cards = await listCardsFromKeyList(node, cfg, projection);
+  return cards.map((c) => scannedCardRow(c));
 }
 
 /**
@@ -3729,7 +3661,7 @@ export async function listCardsByFilter(
   cfg: Config,
   filter: QueryFilter,
   fields: string[],
-  opts: { allowFullScanFallback?: boolean } = {},
+  opts: { allowKeyListFallback?: boolean } = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const entries = Object.entries(filter).filter(([, value]) => value.length > 0);
   if (entries.length === 0) {
@@ -3782,9 +3714,9 @@ export function toBoardSummary(b: Board): BoardSummary {
  * from the `all_boards` rollup. Discovery source for the `listBoards` cold-seed
  * and for `groom board-list-heal`.
  *
- * A full scan here is a deliberate `allowFullScan` and the no-scan contract
- * permits it: boards are bounded (a handful), and this is a seed/reconciler path,
- * never a hot read (`concepts-lastdb-agent-access-model`).
+ * Board discovery here is a deliberate admin key-list drain and the no-scan
+ * contract permits it: boards are bounded (a handful), and this is a
+ * seed/reconciler path, never a hot read (`concepts-lastdb-agent-access-model`).
  *
  * TWO RULES, BOTH LEARNED THE HARD WAY (measured read-only on the primary
  * 2026-07-28 — papercut-lastdb-full-scan-drops-fields-on-conflicted-records):
@@ -3810,23 +3742,14 @@ export function toBoardSummary(b: Board): BoardSummary {
 export async function scanBoardsForReconcile(
   node: NodeClient,
   cfg: Config,
-  /** Extra slugs to verify by point read even if the scan never listed them. */
+  /** Extra slugs to verify by point read even if key list never listed them. */
   alsoConsider?: Iterable<string>,
 ): Promise<Board[]> {
   const hash = schemaHashFor("board", cfg);
-  const res = await node.queryAll({
-    schemaHash: hash,
-    fields: fieldsFor("board"),
-    allowFullScan: true,
-  });
-
-  // Slugs only — see rule 1.
-  const slugs = new Set<string>();
-  for (const row of res.results) {
-    const slug = rowToBoard(row).slug;
-    if (slug.length > 0) slugs.add(slug);
-  }
-  // Rule 2: candidates the scan cannot be trusted to have listed.
+  // /api/list supplies identities only; every board is still hydrated by
+  // findBoard (point read). alsoConsider covers callers that already know a
+  // slug the key list might race with (index entries under heal).
+  const slugs = new Set<string>(await listAllRecordHashes(node, hash));
   for (const slug of alsoConsider ?? []) {
     if (slug.length > 0) slugs.add(slug);
   }
@@ -4540,31 +4463,16 @@ export async function listMilestones(
     );
   }
 
-  // Index UNBOUND (fresh node, pre-backfill) — the case this fallback was
-  // written for. Full-scan + sparse hydrate.
-  const res = await node.queryAll({
-    schemaHash: schemaHashFor("milestone", cfg),
-    fields: fieldsFor("milestone"),
-    allowFullScan: true,
-  });
-  const sparse = res.results.some((row) =>
-    milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>),
-  );
-  let milestones: Milestone[];
-  if (!sparse) {
-    milestones = res.results.map(rowToMilestone);
-  } else {
-    milestones = await mapWithConcurrency(res.results, async (row) => {
-      const mapped = rowToMilestone(row);
-      if (!milestoneQueryFieldsLookSparse((row.fields ?? {}) as Record<string, unknown>)) {
-        return mapped;
-      }
-      const slug = mapped.slug || stringField((row.fields ?? {}) as Record<string, unknown>, "slug");
-      if (!slug) return mapped;
-      const full = await findMilestone(node, cfg, slug);
-      return full ?? mapped;
-    });
-  }
+  // Index UNBOUND (fresh node, pre-backfill) — enumerate Milestone keys, then
+  // HashKey point-get each live row (same hydrate contract as sparse scan).
+  const hashes = await listAllRecordHashes(node, schemaHashFor("milestone", cfg));
+  const milestones = (
+    await mapWithConcurrency(
+      hashes,
+      (slug) => findMilestone(node, cfg, slug),
+      POINT_READ_CONCURRENCY,
+    )
+  ).filter((m): m is Milestone => m !== null);
   return sortMilestones(milestones);
 }
 
@@ -4659,50 +4567,23 @@ export async function sweepMilestoneSlugs(
   cfg: Config,
 ): Promise<MilestoneSlugSweep> {
   const schemaHash = schemaHashFor("milestone", cfg);
-  const leads = fieldsFor("milestone");
-
-  const slugsFrom = (rows: QueryRow[]): string[] => {
-    const out: string[] = [];
-    for (const r of rows) {
-      // The HashKey IS the slug; the payload copy is a copy, and under a lead
-      // that is not `slug` the copy is exactly what the node did not return.
-      const keyed = typeof r.key?.hash === "string" ? r.key.hash : "";
-      const slug = keyed || stringField((r.fields ?? {}) as Record<string, unknown>, "slug");
-      if (slug.length > 0) out.push(slug);
-    }
-    return out;
-  };
-
-  const perLead = await mapWithConcurrency(leads, async (lead) => {
-    try {
-      const res = await node.queryAll({ schemaHash, fields: [lead], allowFullScan: true });
-      return { slugs: slugsFrom(res.results ?? []), failure: null };
-    } catch (err) {
-      // Reported, never swallowed — a swallowed lead hands back a short
-      // enumeration labelled complete, which is the failure this removes.
-      return {
-        slugs: [] as string[],
-        failure: { field: lead, error: err instanceof Error ? err.message : String(err) },
-      };
-    }
-  }, PARTITION_READ_CONCURRENCY);
-
-  const all = new Set<string>();
-  const failedLeads: MilestoneSlugSweep["failedLeads"] = [];
-  for (const lead of perLead) {
-    if (lead.failure) failedLeads.push(lead.failure);
-    for (const s of lead.slugs) all.add(s);
+  // /api/list returns live keys without field-atom gates, so one key drain
+  // replaces the old union-of-lead full scans (which under-counted whenever a
+  // lead atom was missing). failedLeads stays for heal completeness reporting
+  // if the key list itself is unavailable.
+  try {
+    const slugs = await listAllRecordHashes(node, schemaHash);
+    return { slugs, wideScanSlugs: slugs.length, failedLeads: [] };
+  } catch (err) {
+    return {
+      slugs: [],
+      wideScanSlugs: 0,
+      failedLeads: [{
+        field: "listRecordKeys",
+        error: err instanceof Error ? err.message : String(err),
+      }],
+    };
   }
-
-  // `slug` is the gate the old scan hit, so its lead reproduces exactly what
-  // the widest projection reached. Reported so the recall gain stays visible
-  // in the heal's own output instead of living only in this comment.
-  const slugLeadIndex = leads.indexOf("slug");
-  const wideScanSlugs = slugLeadIndex >= 0
-    ? new Set(perLead[slugLeadIndex]!.slugs).size
-    : 0;
-
-  return { slugs: [...all], wideScanSlugs, failedLeads };
 }
 
 export async function findMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone | null> {

@@ -23,7 +23,7 @@
 // The four branches are deliberately not collapsed to healthy/unhealthy.
 // `refused` and `full-scan` are both "no index answered", and they want
 // opposite responses: `refused` is a caller that declined the scan on purpose
-// (`allowFullScanFallback: false`) and got an empty list, while `full-scan` is
+// (`allowKeyListFallback: false`) and got an empty list, while `full-scan` is
 // an admin scan of Card that also rewrites the indexes. A boolean cannot tell
 // an operator which one they are looking at, which is how the field this
 // replaces became useless in the first place.
@@ -168,6 +168,26 @@ function fakeNode(
     async createRecord() {},
     async updateRecord() {},
     async deleteRecord() {},
+    async listRecordKeys(schemaHash: string, opts: { limit?: number; cursor?: string | null } = {}) {
+      if (!tables.has(schemaHash)) throw new Error(`unbound schema ${schemaHash}`);
+      const all = rowsOf(schemaHash)
+        .filter((r) => r.range === null)
+        .sort((a, b) => a.hash.localeCompare(b.hash));
+      const limit = Math.max(1, Math.trunc(opts.limit ?? 1000));
+      const start = opts.cursor
+        ? all.findIndex((r) => r.hash > opts.cursor!) 
+        : 0;
+      const offset = start < 0 ? all.length : start;
+      const page = all.slice(offset, offset + limit);
+      const hasMore = offset + page.length < all.length;
+      return {
+        schema: schemaHash,
+        keys: page.map((r) => ({ hash: r.hash, range: null })),
+        has_more: hasMore,
+        next_cursor: hasMore && page.length > 0 ? page[page.length - 1]!.hash : null,
+        truncated: hasMore,
+      };
+    },
     async queryAll(q: { schemaHash: string; fields?: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
       // An UNBOUND schema is not an empty table — the node rejects the query,
       // which is what drives `boardCardsThrew` and the legacy fall-through.
@@ -221,11 +241,11 @@ describe("a card list reports which read answered it", () => {
     // Same node, same absent indexes — only the caller's policy differs. If
     // these two collapsed to one value the plan line could not tell an operator
     // whether the empty list was a decision or a failure. `search` is exactly
-    // this caller: it passes `allowFullScanFallback: false`.
+    // this caller: it passes `allowKeyListFallback: false`.
     const node = fakeNode([card()], { boardCards: false, cardListIndex: false });
 
     const read = await listCardsByFilter(node, MODERN, {}, FIELDS, {
-      allowFullScanFallback: false,
+      allowKeyListFallback: false,
     });
 
     expect(read.servedBy).toBe("refused");

@@ -213,20 +213,16 @@ describe("board rm occupancy", () => {
     expect(node.rowAt(BOARD_HASH, "scratch")).toBeDefined();
   });
 
-  test("an unreadable Card scan refuses rather than trusting the index", async () => {
+  test("an unreadable Card key list refuses rather than trusting the index", async () => {
     const node = fakeNode();
     seedPopulatedDefault(node);
     seedBoard(node, "scratch");
-    const inner = node.queryAll.bind(node);
-    node.queryAll = async (q: {
-      schemaHash: string;
-      fields: string[];
-      filter?: QueryFilter;
-    }) => {
-      // The Card full scan (no filter) is how this command learns about cards
-      // with no membership row. Without it there is no sound answer.
-      if (q.schemaHash === CARD_HASH && !q.filter) throw new Error("scan shed under load");
-      return inner(q);
+    const listInner = node.listRecordKeys!.bind(node);
+    node.listRecordKeys = async (schemaHash, opts) => {
+      // Key-list discovery is how this command learns about cards with no
+      // membership row. Without it there is no sound answer.
+      if (schemaHash === CARD_HASH) throw new Error("key list shed under load");
+      return listInner(schemaHash, opts);
     };
 
     const err = await boardRmCmd({ cfg, node, slug: "scratch" }).catch((e: unknown) => e);

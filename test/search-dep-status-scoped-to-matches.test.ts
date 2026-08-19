@@ -101,10 +101,14 @@ function seedOffBoardCard(node: FakeNode, c: Card): void {
   node.seed({ schemaHash: "cardhash", keyHash: c.slug, fields: cardToFields(c) });
 }
 
-/** Point reads issued against Card — the cost this change is about. */
+/** Dep-status point reads against Card (not the slug+body key-list drain). */
 function cardPointReads(node: FakeNode): Array<Record<string, unknown>> {
   return node.reads
-    .filter((r) => r.schemaHash === "cardhash" && r.filter !== undefined)
+    .filter((r) =>
+      r.schemaHash === "cardhash" &&
+      r.filter !== undefined &&
+      r.fields.includes("deps"),
+    )
     .map((r) => r.filter as unknown as Record<string, unknown>);
 }
 

@@ -46,7 +46,7 @@ const node = newNodeClient({
 // Exactly what `indexedSearchCards` reads on an unscoped search.
 const t0 = performance.now();
 const [displayRead, bodies] = await Promise.all([
-  listCardsByFilter(node, cfg, {}, CARD_DISPLAY_FIELDS, { allowFullScanFallback: false }),
+  listCardsByFilter(node, cfg, {}, CARD_DISPLAY_FIELDS, { allowKeyListFallback: false }),
   listCardBodies(node, cfg),
 ]);
 const readMs = Math.round(performance.now() - t0);

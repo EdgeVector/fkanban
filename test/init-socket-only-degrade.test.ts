@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { FkanbanError } from "../src/client.ts";
 import { assertSafePrimaryConfigRepoint, runInit } from "../src/commands/init.ts";
 import { allPinnedSchemas, OWNER_APP_ID } from "../src/schemas.ts";
+import { handleApiListFromPrefixedStore, requestUrl } from "./http-list.ts";
 
 // One identity per declared schema, as a real node reports. The stub used to
 // answer `CARD_HASH` for everything except Board and list only those two, so
@@ -64,7 +65,7 @@ function makeSocketNode(
   const server = Bun.serve({
     unix: socketPath,
     async fetch(req) {
-      const url = new URL(req.url);
+      const url = requestUrl(req);
       seen.push(url.pathname);
       let body: Record<string, unknown> | undefined;
       if (req.method === "POST") {
@@ -119,6 +120,7 @@ function makeSocketNode(
         else store.set(`${schema}::${keyHash}`, fields);
         return Response.json({ ok: true, success: true });
       }
+      if (url.pathname === "/api/list") return handleApiListFromPrefixedStore(url, store);
       if (url.pathname === "/api/query") {
         const schema = body!.schema_name as string;
         const filter = body!.filter as { HashKey?: string } | undefined;

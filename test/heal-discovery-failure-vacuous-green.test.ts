@@ -151,21 +151,19 @@ function seedMembership(node: FakeNode, c: Card, at?: { column: string; position
 }
 
 /**
- * A node that refuses the Card FULL SCAN and answers every keyed read normally.
+ * A node that refuses Card key-list discovery and answers every keyed read normally.
  *
  * Narrow on purpose: the point-reads that authorize repairs must keep working,
  * so the only thing this run loses is candidate DISCOVERY. A fake that failed
  * every Card read would prove something else entirely.
  */
 function withFailingCardScan(node: FakeNode): FakeNode {
-  const inner = node.queryAll.bind(node);
   return {
     ...node,
-    queryAll: (async (req: Parameters<FakeNode["queryAll"]>[0]) => {
-      const r = req as { schemaHash: string; allowFullScan?: boolean };
-      if (r.allowFullScan && r.schemaHash === "cardhash") throw new Error(LOAD_ERROR);
-      return inner(req);
-    }) as FakeNode["queryAll"],
+    listRecordKeys: (async (schemaHash: string) => {
+      if (schemaHash === "cardhash") throw new Error(LOAD_ERROR);
+      return node.listRecordKeys!(schemaHash);
+    }) as FakeNode["listRecordKeys"],
   };
 }
 

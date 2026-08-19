@@ -211,7 +211,7 @@ async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: 
  * board, so every match is found and every match is whole.
  *
  * The semantic-index candidate path is KEPT, demoted to the fallback for a node
- * that refuses the scan (no `allowFullScan` capability, or no display indexes
+ * that refuses the key-list drain (no `listRecordKeys`, or no display indexes
  * provisioned). On such a node it is the only way to reach a body match at all,
  * so removing it would cost a real capability in exactly the degraded
  * configuration that can least afford it. When the scan is available the
@@ -302,7 +302,7 @@ async function indexedSearchCards(
   // the critical path (the mistake run (j) made with the portfolio board read).
   const [displayRead, bodies] = await Promise.all([
     listCardsByFilter(opts.node, opts.cfg, filter, CARD_DISPLAY_FIELDS, {
-      allowFullScanFallback: false,
+      allowKeyListFallback: false,
     }),
     listCardBodies(opts.node, opts.cfg).catch(() => null),
   ]);

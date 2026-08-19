@@ -33,6 +33,7 @@ import { join } from "node:path";
 import { doctor } from "../src/commands/doctor.ts";
 import { BOARD_CARDS_FIELDS, fieldsFor } from "../src/schemas.ts";
 import { BOARD_LIST_INDEX_KEY, CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
+import { handleApiList } from "./http-list.ts";
 
 const CARD_HASH = "ampcardhash";
 const BOARD_HASH = "ampboardhash";
@@ -144,6 +145,7 @@ function makeCountingNode(opts: { boards: string[]; cardsPerBoard: number }) {
         else store.set(`${schema}::${keyHash}`, fields);
         return Response.json({ ok: true, success: true });
       }
+      if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") {
         const schema = body!.schema_name as string;
         const filter = body!.filter as

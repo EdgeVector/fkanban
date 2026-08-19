@@ -21,6 +21,7 @@ import {
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
+import { listRecordKeysFromRows } from "./fake-node.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -77,6 +78,9 @@ function fakeNode(opts: { rejectColumnFilter?: boolean } = {}): NodeClient & {
     async deleteRecord({ schemaHash, keyHash }) {
       tableFor(schemaHash).delete(keyHash);
     },
+    listRecordKeys: listRecordKeysFromRows((schemaHash) =>
+      [...tableFor(schemaHash).entries()].map(([keyHash]) => ({ keyHash, rangeKey: null })),
+    ),
     async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
       if (schemaHash === cfg.schemaHashes.card!) cardQueries.push({ fields, filter });
       if (schemaHash === cfg.schemaHashes.card! && opts.rejectColumnFilter && filter?.column !== undefined) {
@@ -226,14 +230,12 @@ describe("pickup overlap: dep serialization + explicit clear (addCmd e2e)", () =
     });
 
     // Field filters are never sent (the live node 400s them); the peer read
-    // is ONE unfiltered body-free scan of the minimal peer fields, filtered
+    // hydrates body-free peer fields via key-list + HashKey, then filters
     // client-side to the active columns.
     expect(node.cardQueries.some((q) => q.filter?.column !== undefined)).toBe(false);
-    const peerScans = node.cardQueries.filter(
-      (q) => q.filter === undefined && !q.fields.includes("body"),
-    );
-    expect(peerScans.length).toBeGreaterThan(0);
-    for (const q of peerScans) {
+    const peerReads = node.cardQueries.filter((q) => !q.fields.includes("body"));
+    expect(peerReads.length).toBeGreaterThan(0);
+    for (const q of peerReads) {
       expect(q.fields).toEqual([...PICKUP_AREA_PEER_FIELDS]);
     }
 

@@ -322,6 +322,37 @@ function matchesFilter(rec: StoredRecord, filter?: QueryFilter): boolean {
   return Object.entries(f).every(([field, value]) => rec.fields[field] === value);
 }
 
+
+/** Build a `listRecordKeys` implementation over an in-memory row list. */
+export function listRecordKeysFromRows(
+  rowsFor: (schemaHash: string) => Array<{ keyHash: string; rangeKey?: string | null }>,
+): NonNullable<NodeClient["listRecordKeys"]> {
+  return async (schemaHash, opts = {}) => {
+    const limit = Math.max(1, Math.trunc(opts.limit ?? 1000));
+    const ordered = [...rowsFor(schemaHash)].sort((a, b) => {
+      const ak = `${a.keyHash}\u0000${a.rangeKey ?? ""}`;
+      const bk = `${b.keyHash}\u0000${b.rangeKey ?? ""}`;
+      return ak.localeCompare(bk);
+    });
+    const cursor = opts.cursor ?? null;
+    const start = cursor === null
+      ? 0
+      : ordered.findIndex((row) => `${row.keyHash}\u0000${row.rangeKey ?? ""}` > cursor);
+    const offset = start < 0 ? ordered.length : start;
+    const page = ordered.slice(offset, offset + limit);
+    const hasMore = offset + page.length < ordered.length;
+    return {
+      schema: schemaHash,
+      keys: page.map((row) => ({ hash: row.keyHash, range: row.rangeKey ?? null })),
+      has_more: hasMore,
+      next_cursor: hasMore && page.length > 0
+        ? `${page[page.length - 1]!.keyHash}\u0000${page[page.length - 1]!.rangeKey ?? ""}`
+        : null,
+      truncated: hasMore,
+    };
+  };
+}
+
 export function fakeNode(opts: FakeNodeOptions = {}): FakeNode {
   const store = new Map<string, Map<string, StoredRecord>>();
   const writes: RecordedWrite[] = [];

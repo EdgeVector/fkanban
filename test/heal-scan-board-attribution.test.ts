@@ -111,8 +111,9 @@ function seedMembership(node: FakeNode, c: Card): void {
 /**
  * The shape the primary actually returns: a second Card row under a DIFFERENT
  * key, carrying the same `slug` and a BLANK `board`. `HashKey(slug)` misses it;
- * only `allowFullScan` sees it. Seeded after truth so it also lands last in
- * scan order — which is what made a last-write-wins map pick it.
+ * only a whole-schema key list that includes every hash would see it. Seeded
+ * after truth so it also lands last in scan order — which is what made a
+ * last-write-wins map pick it.
  */
 function seedBlankBoardScanRow(node: FakeNode, c: Card): void {
   node.seed({
@@ -149,8 +150,7 @@ describe("heal must not take a card's board from the scan", () => {
   test("the fixture reproduces the node: scan says board=\"\", keyed read says team", async () => {
     const scan = await node.queryAll({
       schemaHash: "cardhash",
-      fields: ["slug", "board"],
-      allowFullScan: true,
+      fields: ["slug", "board"]
     });
     const rows = scan.results.filter(
       (r) => (r.fields as Record<string, unknown>).slug === unmembered.slug,
@@ -222,12 +222,9 @@ describe("heal must not take a card's board from the scan", () => {
     await boardCardsHealResult({ cfg, node, board: "default", json: true });
     const fresh = node.reads.slice(before);
 
-    const pointReads = fresh.filter(
-      (r) =>
-        r.schemaHash === "cardhash" &&
-        (r.filter as { HashKey?: string } | undefined)?.HashKey === healthy.slug,
-    );
-    expect(pointReads).toHaveLength(0);
+    // Key-list hydrates every live Card hash, including `healthy`. The
+    // membership filter must still be answered by the TEAM partition spine,
+    // not by adopting the ghost scan-row's blank board.
 
     // And the cheap census really is what ruled it out.
     const teamPartitionReads = fresh.filter(

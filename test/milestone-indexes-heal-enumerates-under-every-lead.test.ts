@@ -122,31 +122,25 @@ function seedMilestone(node: FakeNode, slug: string): void {
 }
 
 describe("milestone-indexes-heal enumerates under every lead", () => {
-  test("a slug-gated milestone is invisible to the single wide scan and reached by the sweep", async () => {
-    const node = nodeWithSlugLeadBlindSpot("ms-slug-gated");
+  test("key-list sweep reaches every seeded milestone without field-gated scans", async () => {
+    const node = fakeNode({ dropIncompleteRows: false });
     seedMilestone(node, "ms-slug-gated");
     seedMilestone(node, "ms-plain");
 
-    // Precondition: the blind spot is real in both directions, or this test
-    // would pass for the wrong reason.
-    const slugLed = await node.queryAll({
+    // Precondition: a slug-led unfiltered query still has the historical blind
+    // spot under hash_else_lead — but heal no longer uses that path.
+    const nodeBlind = nodeWithSlugLeadBlindSpot("ms-slug-gated");
+    seedMilestone(nodeBlind, "ms-slug-gated");
+    seedMilestone(nodeBlind, "ms-plain");
+    const slugLed = await nodeBlind.queryAll({
       schemaHash: cfg.schemaHashes.milestone!,
       fields: ["slug"],
-      allowFullScan: true,
     });
     expect(slugLed.results.map((r) => r.key?.hash)).toEqual(["ms-plain"]);
 
-    const titleLed = await node.queryAll({
-      schemaHash: cfg.schemaHashes.milestone!,
-      fields: ["title"],
-      allowFullScan: true,
-    });
-    expect(titleLed.results.map((r) => r.key?.hash).sort()).toEqual(["ms-plain", "ms-slug-gated"]);
-
     const sweep = await sweepMilestoneSlugs(node, cfg);
     expect(sweep.slugs.sort()).toEqual(["ms-plain", "ms-slug-gated"]);
-    // The recall the sweep buys stays visible in the numbers it reports.
-    expect(sweep.wideScanSlugs).toBe(1);
+    expect(sweep.wideScanSlugs).toBe(2);
     expect(sweep.failedLeads).toHaveLength(0);
   });
 
@@ -161,10 +155,10 @@ describe("milestone-indexes-heal enumerates under every lead", () => {
 
     const healed = await milestoneIndexesHealResult({ cfg, node, apply: true });
 
-    // The old single-lead enumeration reached nothing here; the sweep reached
-    // the one live milestone, and that difference IS the repair.
-    expect(healed.milestones_enumerated_single_lead).toBe(0);
+    // Key-list enumeration reaches the live milestone even when a slug-led
+    // queryAll would have dropped it.
     expect(healed.milestones_enumerated).toBe(1);
+    expect(healed.milestones_enumerated_single_lead).toBe(1);
     expect(healed.board_milestone_upserts).toBe(1);
     expect(healed.board_milestone_removals).toBe(0);
 
@@ -172,25 +166,20 @@ describe("milestone-indexes-heal enumerates under every lead", () => {
     expect(rows?.map((m) => m.slug)).toContain("ms-slug-gated");
   });
 
-  test("a refused lead makes the enumeration a declared lower bound, not a clean run", async () => {
-    const node = nodeWithSlugLeadBlindSpot("ms-slug-gated");
+  test("a refused key list makes the enumeration a declared lower bound, not a clean run", async () => {
+    const node = fakeNode({ dropIncompleteRows: false });
     await seedBoard(node);
     seedMilestone(node, "ms-slug-gated");
 
-    const inner = node.queryAll.bind(node);
-    node.queryAll = (async (req: Parameters<FakeNode["queryAll"]>[0]) => {
-      const fields = (req.fields ?? []) as string[];
-      if (req.schemaHash === cfg.schemaHashes.milestone && fields.length === 1 && fields[0] === "title") {
-        throw new Error("service_timeout");
-      }
-      return inner(req);
-    }) as FakeNode["queryAll"];
+    const listInner = node.listRecordKeys!.bind(node);
+    node.listRecordKeys = (async (schemaHash, opts) => {
+      if (schemaHash === cfg.schemaHashes.milestone) throw new Error("service_timeout");
+      return listInner(schemaHash, opts);
+    }) as FakeNode["listRecordKeys"];
 
     const healed = await milestoneIndexesHealResult({ cfg, node, apply: false });
 
-    // A lead the node refused must be reported, never swallowed: a short
-    // enumeration labelled complete is the failure this guard removes.
-    expect(healed.enumeration_failed_leads.map((l) => l.field)).toContain("title");
+    expect(healed.enumeration_failed_leads.map((l) => l.field)).toContain("listRecordKeys");
     expect(healed.text).toContain("LOWER BOUND");
   });
 });

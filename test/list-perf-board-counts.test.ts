@@ -76,7 +76,8 @@ function card(partial: Partial<Card>): Card {
 // Records the `fields` of every CARD (cardhash) queryAll so a test can assert
 // what the list path actually fetched. `cardScanError` makes the unfiltered
 // (full-scan) card query throw, to exercise graceful degradation.
-type CardQueryLog = { fields: string[]; filter?: QueryFilter; allowFullScan?: boolean };
+type CardQueryLog = { fields: string[]; filter?: QueryFilter };
+type ListKeysLog = { schemaHash: string };
 
 function fakeNode(opts: {
   boards: Board[];
@@ -85,11 +86,11 @@ function fakeNode(opts: {
   rejectUnallowedCardScan?: boolean;
   rejectColumnFilter?: boolean;
   nativeSearchSlugs?: string[];
-  // Extra rows the Card SCAN returns beyond the modelled cards — the live
-  // primary returns more than one row for some slugs, and they disagree.
-  // Appended after the real rows so a last-write-wins reader picks these.
+  // Extra rows the Card key-list / point-get path returns beyond the modelled
+  // cards — the live primary historically returned more than one scan row for
+  // some slugs. Kept for ghost-row coverage via seeded extras.
   extraCardScanRows?: Array<Record<string, unknown>>;
-}): NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[] } {
+}): NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[]; listKeysCalls: ListKeysLog[] } {
   const boardRows = opts.boards.map((b) => ({ fields: boardToFields(b), key: { hash: b.slug, range: null } }));
   const cardRows = [
     ...opts.cards.map((c) => ({ fields: cardToFields(c) as Record<string, unknown>, key: { hash: c.slug, range: null } })),
@@ -104,14 +105,16 @@ function fakeNode(opts: {
   }));
   const cardScanFields: string[][] = [];
   const cardQueries: CardQueryLog[] = [];
+  const listKeysCalls: ListKeysLog[] = [];
   const stub = () => {
     throw new Error("not implemented in fake node");
   };
-  const node: NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[] } = {
+  const node: NodeClient & { cardScanFields: string[][]; cardQueries: CardQueryLog[]; listKeysCalls: ListKeysLog[] } = {
     baseUrl: "http://fake",
     userHash: "test-user",
     cardScanFields,
     cardQueries,
+    listKeysCalls,
     autoIdentity: stub as never,
     bootstrap: stub as never,
     loadSchemas: stub as never,
@@ -141,7 +144,36 @@ function fakeNode(opts: {
       return stub() as never;
     },
     nodeTransport: stub as never,
-    async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse> {
+    async listRecordKeys(schemaHash, _opts = {}) {
+      listKeysCalls.push({ schemaHash });
+      if (schemaHash === "cardhash" && opts.cardScanError) {
+        throw new Error("node shed the card key list (load)");
+      }
+      const hashes = [
+        ...opts.cards.map((c) => c.slug),
+        ...((opts.extraCardScanRows ?? [])
+          .map((fields) => String(fields.slug ?? ""))
+          .filter((slug) => slug.length > 0)),
+      ];
+      // Boards / milestones not needed by these tests.
+      if (schemaHash === "boardhash") {
+        return {
+          schema: schemaHash,
+          keys: opts.boards.map((b) => ({ hash: b.slug, range: null })),
+          has_more: false,
+          next_cursor: null,
+          truncated: false,
+        };
+      }
+      return {
+        schema: schemaHash,
+        keys: [...new Set(hashes)].map((hash) => ({ hash, range: null })),
+        has_more: false,
+        next_cursor: null,
+        truncated: false,
+      };
+    },
+    async queryAll(q: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse> {
       if (q.schemaHash === "indexhash") {
         const key = q.filter?.HashKey;
         if (key === BOARD_LIST_INDEX_KEY) {
@@ -175,12 +207,12 @@ function fakeNode(opts: {
         return { ok: true, results: rows };
       }
       if (q.schemaHash === "cardhash") {
-        cardQueries.push({ fields: q.fields, filter: q.filter, allowFullScan: q.allowFullScan });
-        // Only the unfiltered full-board scan is the list/count payload; the
-        // point-read (HashKey) findCard is not relevant here.
+        cardQueries.push({ fields: q.fields, filter: q.filter });
+        // Unfiltered Card queries are forbidden. Body/admin drains use
+        // listRecordKeys + HashKey point-gets.
         if (!q.filter) {
           cardScanFields.push(q.fields);
-          if (opts.rejectUnallowedCardScan && !q.allowFullScan) {
+          if (opts.rejectUnallowedCardScan) {
             throw new FkanbanError({
               code: "full_schema_scan_not_allowed",
               message: "full_schema_scan_not_allowed: unfiltered query is deprecated for product apps",
@@ -283,20 +315,10 @@ describe("board list — per-board live-card counts", () => {
   });
 });
 
-// The default search path matches against REAL bodies, read in ONE narrow
-// slug+body scan over the approved admin path (`allowFullScan: true`) — the
-// same path `--complete` uses and the sibling test below calls "approved".
-//
-// It used to match a body-free display read and hydrate up to 50 semantic-index
-// candidates with a wide point-read each. Measured on the live primary, that
-// was worse on every axis it traded between: 35-65% of live matching cards
-// silently missed, 62 queries / 7.3s of node time against 2 queries / 1.1s for
-// the scan it avoided, and 127 of 153 matches returned with `body: ""`.
-//
-// So these assert the shape that costs less AND answers correctly: one scan, no
-// per-candidate point reads, and never the DEPRECATED unallowed scan.
-describe("search — default text path matches real bodies via one narrow scan", () => {
-  test("default search uses the approved admin scan, never a deprecated unallowed one", async () => {
+// The default search path matches against REAL bodies via key list + HashKey
+// point-gets (slug+body). Never an unfiltered Card query.
+describe("search — default text path matches real bodies via key list", () => {
+  test("default search uses key list + point-get, never an unfiltered Card query", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -313,13 +335,9 @@ describe("search — default text path matches real bodies via one narrow scan",
     const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "feature-ship" });
 
     expect(cards.map((c) => c.slug)).toEqual(["feature-ready"]);
-    // `rejectUnallowedCardScan` throws on any unfiltered Card query that did NOT
-    // ask for allowFullScan. Reaching this line at all proves the body scan took
-    // the approved path; assert it explicitly so a future unallowed scan fails
-    // loudly rather than by exception.
-    const unfiltered = node.cardQueries.filter((q) => q.filter === undefined);
-    expect(unfiltered.length).toBeGreaterThan(0);
-    expect(unfiltered.every((q) => q.allowFullScan === true)).toBe(true);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toEqual([]);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
+    expect(node.cardQueries.every((q) => typeof q.filter?.HashKey === "string")).toBe(true);
   });
 
   test("a body-only match is found — the recall the candidate path silently lost", async () => {
@@ -370,8 +388,9 @@ describe("search — default text path matches real bodies via one narrow scan",
     const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "needle" });
 
     expect(cards).toHaveLength(10);
-    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
-    expect(node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"))).toHaveLength(1);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined && q.fields.includes("body")).length).toBeGreaterThan(0);
   });
 
   test("a duplicate empty Card row does not erase the body it matches on", async () => {
@@ -413,13 +432,12 @@ describe("search — default text path matches real bodies via one narrow scan",
     // the DEGRADED path and has its own test.
     const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle" });
     expect(out).toContain("body-hit");
-    // The body now arrives from one narrow scan rather than a point read per
-    // candidate — cheaper here (~1.7ms/row vs ~110ms/read on the live primary)
-    // and, unlike the candidate path, it cannot miss a card the index skipped.
-    expect(node.cardQueries.filter((q) => q.filter?.HashKey === "body-hit")).toHaveLength(0);
-    const bodyScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
-    expect(bodyScans).toHaveLength(1);
-    expect(bodyScans[0]!.fields).toEqual(["slug", "body"]);
+    // Bodies arrive via key list + HashKey point-gets, never an unfiltered scan.
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"))).toBe(true);
+    const bodyPoint = node.cardQueries.find((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"));
+    expect(bodyPoint!.fields).toEqual(["slug", "body"]);
   });
 
   test("--json uses indexed/native candidates by default while returning capped body previews", async () => {
@@ -441,11 +459,9 @@ describe("search — default text path matches real bodies via one narrow scan",
     expect(parsed).toHaveLength(20);
     expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
     expect(parsed[0]!.bodyTruncated).toBe(true);
-    // Body previews are a RENDER cap, independent of how bodies were read: one
-    // narrow scan now, not 25 wide point reads.
-    const bodyScans = node.cardQueries.filter((q) => q.filter === undefined && q.fields.includes("body"));
-    expect(bodyScans).toHaveLength(1);
-    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
+    // Body previews are a RENDER cap; bodies come from key list + HashKey reads.
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
   });
 
   test("--json stays on indexed card reads when the node rejects unallowed Card scans", async () => {
@@ -472,14 +488,10 @@ describe("search — default text path matches real bodies via one narrow scan",
     const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
 
     expect(parsed.map((c) => c.slug)).toEqual(["feature-ready"]);
-    // The DEPRECATED unallowed scan stays forbidden; the approved admin scan
-    // (allowFullScan: true) is how bodies are read.
-    expect(
-      node.cardQueries.filter((q) => q.filter === undefined && q.allowFullScan !== true),
-    ).toHaveLength(0);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
   });
 
-  test("complete search explicitly opts into the approved admin full-scan path", async () => {
+  test("complete search also uses key list + point-get, never an unfiltered Card query", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -496,10 +508,8 @@ describe("search — default text path matches real bodies via one narrow scan",
     const { cards } = await searchResult({ cfg, node, query: "feature-ship", complete: true });
 
     expect(cards.map((c) => c.slug)).toEqual(["feature-ready"]);
-    expect(node.cardQueries).toContainEqual(expect.objectContaining({
-      filter: undefined,
-      allowFullScan: true,
-    }));
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
   });
 
   test("search --all removes the broad JSON row cap but keeps body previews", async () => {
@@ -521,15 +531,10 @@ describe("search — default text path matches real bodies via one narrow scan",
     const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(25);
     expect(parsed[0]!.bodyTruncated).toBe(true);
-    // The DEPRECATED unallowed scan stays forbidden; the approved admin scan
-    // (allowFullScan: true) is how bodies are read.
-    expect(
-      node.cardQueries.filter((q) => q.filter === undefined && q.allowFullScan !== true),
-    ).toHaveLength(0);
-    // `--all` lifts the ROW cap; it does not change how bodies are read. Still
-    // exactly one narrow scan, still no per-candidate point reads.
-    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(1);
-    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    // `--all` lifts the ROW cap; bodies still come from key list + HashKey reads.
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
+    expect(node.cardQueries.every((q) => typeof q.filter?.HashKey === "string")).toBe(true);
   });
 
   test("search --full-body restores the complete-body JSON surface", async () => {
@@ -554,11 +559,13 @@ describe("list — text path fetches body-free fields, structured views keep ful
     });
     const out = await listCmd({ cfg, node });
     expect(out).toContain("Card A");
-    // The full-board card scan for the text path omitted `body`.
-    const scan = node.cardScanFields.at(-1)!;
-    expect(scan).not.toContain("body");
-    expect(scan).toContain("title");
-    expect(scan).toContain("column");
+    // No board_cards in cfg → key-list drain + HashKey point-gets (no body).
+    expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
+    const point = node.cardQueries.find((q) => q.filter?.HashKey === "a");
+    expect(point).toBeDefined();
+    expect(point!.fields).not.toContain("body");
+    expect(point!.fields).toContain("title");
+    expect(point!.fields).toContain("column");
   });
 
   test("--json list stays body-free over the wire (no board-wide body fetch)", async () => {
@@ -603,13 +610,14 @@ describe("list — text path fetches body-free fields, structured views keep ful
     const out = await listCmd({ cfg, node, wide: true });
     expect(out).toContain("EdgeVector/fkanban");
     expect(out).toContain("https://github.com/EdgeVector/fkanban/pull/1");
-    const scan = node.cardScanFields.at(-1)!;
-    // Wide is body-free (BoardCards); product list fields only — never body.
-    expect(scan).not.toContain("body");
-    expect(scan).toContain("repo");
-    expect(scan).toContain("base");
-    expect(scan).toContain("pr_url");
-    expect(scan).toContain("updated_at");
+    // Wide without board_cards uses key-list + HashKey; product list fields only.
+    const point = node.cardQueries.find((q) => q.filter?.HashKey === "a");
+    expect(point).toBeDefined();
+    expect(point!.fields).not.toContain("body");
+    expect(point!.fields).toContain("repo");
+    expect(point!.fields).toContain("base");
+    expect(point!.fields).toContain("pr_url");
+    expect(point!.fields).toContain("updated_at");
   });
 
   // Column list primary path is BoardCards HashRangePrefix only — never a
