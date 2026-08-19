@@ -143,16 +143,57 @@ describe("Sentry observability helper", () => {
 
   test("no-ops without calling Sentry.init when DSN is a lastsecrets locator", async () => {
     const sentry = mockSentry();
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+      return originalWrite(chunk, ...(args as []));
+    }) as typeof process.stderr.write;
 
-    const result = await initSentry({
-      service: "fkanban-cli",
-      env: { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines" },
-      sentryModule: sentry.module,
-      installProcessHandlers: false,
-    });
+    try {
+      const result = await initSentry({
+        service: "fkanban-cli",
+        env: { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines" },
+        sentryModule: sentry.module,
+        installProcessHandlers: false,
+      });
 
-    expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
-    expect(sentry.initCalls).toHaveLength(0);
+      expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
+      expect(sentry.initCalls).toHaveLength(0);
+      expect(writes.join("")).not.toContain("observability:");
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
+
+  test("warns on lastsecrets locators only when OBS_SENTRY_DEBUG=1", async () => {
+    const sentry = mockSentry();
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+      return originalWrite(chunk, ...(args as []));
+    }) as typeof process.stderr.write;
+
+    try {
+      const result = await initSentry({
+        service: "fkanban-cli",
+        env: {
+          OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines",
+          OBS_SENTRY_DEBUG: "1",
+        },
+        sentryModule: sentry.module,
+        installProcessHandlers: false,
+      });
+
+      expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
+      expect(sentry.initCalls).toHaveLength(0);
+      expect(writes.join("")).toContain(
+        "observability: OBS_SENTRY_DSN is lastsecrets locator (not a Sentry DSN)",
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
   });
 
   test("no-ops without calling Sentry.init when DSN is garbage", async () => {
