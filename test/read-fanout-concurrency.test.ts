@@ -236,8 +236,8 @@ describe("list overlaps the board lookup with the board-list read", () => {
     const b = board();
     const node = baseNode(async (q): Promise<QueryResponse> => {
       if (q.schemaHash === "boardhash") {
-        // findBoard(default) and listBoards' rollup seed both land here; the
-        // BoardCards partition read must NOT, or the gate count is wrong.
+        // findBoard(default) and listBoards' keyed default seed both land here;
+        // the BoardCards partition read must NOT, or the gate count is wrong.
         await gate.wait();
         return { ok: true, results: [{ fields: boardToFields(b), key: { hash: b.slug, range: null } }] };
       }
@@ -249,7 +249,7 @@ describe("list overlaps the board lookup with the board-list read", () => {
     });
 
     // No card_list_index hash configured, so listBoards falls through to its
-    // Board scan — still a second, independent read off the Board schema.
+    // HashKey(default) seed — still a second, independent read off the Board schema.
     const res = await listResult({ node, cfg, displayOnly: true });
     expect(gate.arrived).toBeGreaterThanOrEqual(2);
     expect(res.board.slug).toBe("default");
@@ -272,7 +272,7 @@ describe("list overlaps the board lookup with the board-list read", () => {
     // median): bare `list` 552ms serial -> 291ms overlapped, 0.53x, 7/7 reps.
     //
     // Three readers must arrive before the gate opens: findBoard's point read,
-    // listBoards' scan, and the BoardCards partition. Serial code only ever
+    // listBoards' keyed default seed, and the BoardCards partition. Serial code only ever
     // gets two of them there — it is still awaiting the pair — so it parks
     // forever and this test times out. That is the regression signal.
     const gate = rendezvous(3);
@@ -318,7 +318,8 @@ describe("list overlaps the board lookup with the board-list read", () => {
         const hash = (q.filter as QueryFilter | undefined)?.HashKey;
         // The point-read (requireBoard) returns nothing → board_not_found.
         if (hash) return { ok: true, results: [] };
-        // The unfiltered read is listBoards' scan → make it fail.
+        // A Board schema census (or any non-HashKey Board read) is not the
+        // first-run listBoards path anymore; if it still fires, fail loudly.
         throw new Error("rollup read blew up");
       }
       return { ok: true, results: [] };
@@ -338,7 +339,7 @@ describe("overlap reads the candidate and the board list in one wave", () => {
     // candidate is NOT taken from the list (it may sit in a column the list
     // drops), so nothing sequenced them.
     //
-    // Two readers must arrive: the Card point read and listBoards' scan. (The
+    // Two readers must arrive: the Card point read and listBoards' keyed seed. (The
     // BoardCards partition genuinely waits on the board set, so it is a second
     // wave inside `listCards` and not part of this gate.) Serial code parks the
     // candidate read forever and never issues the second.

@@ -140,7 +140,7 @@ async function listedSlugs(node: NodeClient): Promise<string[]> {
  * `ensureBoardRecord` path a read refusal alone does NOT reach
  * `patchBoardListIndex`. The `listCardStatuses` call that proves the board is
  * referenced runs first and goes through `listBoards`, which treats an
- * unreadable rollup as "not seeded yet" and cold-seeds it from a truth scan — so
+ * unreadable rollup as "not seeded yet" and cold-seeds it from HashKey(default) — so
  * by the time the patch reads the row, the row is readable and the patch
  * succeeds. Three index writes, not one (probed 2026-08-06). Pair this with
  * {@link failIndexWrites} to model a node that is actually shedding.
