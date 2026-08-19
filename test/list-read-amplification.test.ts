@@ -17,8 +17,9 @@ import { cardsFromJson } from "./json_page.ts";
 
 import { listCmd } from "../src/commands/list.ts";
 import type { NodeClient, QueryFilter, QueryResponse } from "../src/client.ts";
-import { TOMBSTONE_TAG, boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
+import { TOMBSTONE_TAG, boardToFields, cardToFields, emptyStructuredFields, toBoardSummary, type Board, type Card } from "../src/record.ts";
 import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
+import { BOARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
 import type { Config } from "../src/config.ts";
 
 const cfgWithIndexes: Config = {
@@ -26,7 +27,12 @@ const cfgWithIndexes: Config = {
   nodeUrl: "http://unused.invalid",
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
-  schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
+  schemaHashes: {
+    card: "cardhash",
+    board: "boardhash",
+    board_cards: "boardcardshash",
+    card_list_index: "indexhash",
+  },
 };
 
 function board(partial: Partial<Board> = {}): Board {
@@ -133,6 +139,22 @@ function fakeNode(cards: Card[], boards: Board[] = [board()]): NodeClient & {
           return { ok: true, results: boardRows.filter((r) => r.key.hash === q.filter!.HashKey) };
         }
         return { ok: true, results: boardRows };
+      }
+      if (q.schemaHash === "indexhash") {
+        if (q.filter?.HashKey === BOARD_LIST_INDEX_KEY) {
+          return {
+            ok: true,
+            results: [{
+              key: { hash: BOARD_LIST_INDEX_KEY, range: null },
+              fields: {
+                key: BOARD_LIST_INDEX_KEY,
+                payload_json: JSON.stringify(boards.map(toBoardSummary)),
+                updated_at: "2026-01-01T00:00:00.000Z",
+              },
+            }],
+          };
+        }
+        return { ok: true, results: [] };
       }
       return { ok: true, results: [] };
     },

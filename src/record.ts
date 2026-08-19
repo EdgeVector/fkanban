@@ -18,6 +18,7 @@ import {
 import {
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
+  boardCardsHash,
   boardCardsProjectionForCardFields,
   listAllBoardCards,
   listBoardCardsPartition,
@@ -3688,12 +3689,20 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
     );
   }
 
-  // Seed once via admin full scan when the index row is not declared/seeded yet.
-  const boards = await scanBoardsForReconcile(node, cfg);
-  try {
-    await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
-  } catch {
-    // best-effort
+  // First-run / missing rollup: HashKey(default), never a Board schema census.
+  // LastDB rejects unfiltered `/api/query` and `/api/list` as
+  // `full_schema_scan_not_allowed` — the same class as the 2026-07-19
+  // `situations list` 400 on a fresh node. `kanban init` seeds this slug; other
+  // boards are recovered by `groom board-list-heal`, which owns
+  // `scanBoardsForReconcile`.
+  const defaultBoard = await findBoard(node, cfg, DEFAULT_BOARD_SLUG);
+  const boards = defaultBoard ? live([defaultBoard]) : [];
+  if (boards.length > 0) {
+    try {
+      await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
+    } catch {
+      // best-effort; the point-read already answered this list
+    }
   }
   return boards;
 }
@@ -3917,11 +3926,14 @@ export async function listOtherBoardCardsForFooter(
   viewedBoard: string,
   boards: Array<{ slug: string }>,
 ): Promise<{ cards: Card[]; unreadable: string[] } | null> {
-  // An EMPTY board list is "I don't know", not "there are no other boards".
-  // The legacy shape (no `board_cards` hash, Board index unserved) discovers
-  // other boards from the Card rows themselves, so returning [] here would
-  // silently delete the footer for exactly those installs. Fall back instead.
-  if (boards.length === 0) return null;
+  // An EMPTY board list is "I don't know", not "there are no other boards" —
+  // but only on the legacy shape (no `board_cards` hash). With BoardCards
+  // bound, first-run `kanban list` after `init` has exactly one board (or none
+  // yet); falling through to a cross-board Card census is the
+  // `full_schema_scan_not_allowed` 400 that takes the whole command down.
+  if (boards.length === 0) {
+    return boardCardsHash(cfg) ? { cards: [], unreadable: [] } : null;
+  }
   const others = boards.filter((b) => b.slug !== viewedBoard);
   // A genuine single-board install has nothing to advertise, and the footer
   // renders "" for an empty set. Costs zero reads.

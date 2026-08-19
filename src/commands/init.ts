@@ -47,8 +47,10 @@ import {
   listBoards,
   nowIso,
   probeSchemaWritable,
+  toBoardSummary,
   type Board,
 } from "../record.ts";
+import { patchBoardListIndex } from "../card-list-index.ts";
 import { BOARD_CARDS_REKEY_TARGET } from "../board-cards.ts";
 
 // A local LastDB node is reached over its Unix-domain control socket, NOT over
@@ -78,6 +80,45 @@ export type InitOptions = {
 export type InitResult = { config: Config; bootstrapped: boolean };
 
 const STEPS = 5;
+
+/**
+ * Create the default Board record if missing, then dual-write `all_boards`.
+ *
+ * `kanban board create` already patches the rollup; `init` used to write only
+ * the primary record. First-run `kanban list` then found no `all_boards` row
+ * and enumerated the Board schema — LastDB 400s that as
+ * `full_schema_scan_not_allowed`. The patch is idempotent; re-init of an
+ * existing default board still repairs a missing rollup row.
+ */
+export async function seedDefaultBoard(
+  node: NodeClient,
+  config: Config,
+  print: (line: string) => void,
+): Promise<Board> {
+  const boardHash = schemaHashFor("board", config);
+  const existingBoard = await findBoard(node, config, DEFAULT_BOARD_SLUG);
+  const now = nowIso();
+  const board: Board = existingBoard ?? {
+    slug: DEFAULT_BOARD_SLUG,
+    title: "Default board",
+    body: "",
+    columns: [...DEFAULT_COLUMNS],
+    created_at: now,
+    updated_at: now,
+  };
+  if (!existingBoard) {
+    await node.createRecord({
+      schemaHash: boardHash,
+      fields: boardToFields(board),
+      keyHash: board.slug,
+    });
+    print(`        created board "${DEFAULT_BOARD_SLUG}" with columns ${DEFAULT_COLUMNS.join(", ")}`);
+  } else {
+    print(`        board "${DEFAULT_BOARD_SLUG}" already exists — leaving as-is`);
+  }
+  await patchBoardListIndex(node, config, toBoardSummary(board), "upsert");
+  return board;
+}
 
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = opts.print ?? ((line: string) => console.log(line));
@@ -287,25 +328,9 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   };
   writeConfig(config, configPath);
 
-  // Step 5: seed the default board (idempotent upsert).
+  // Step 5: seed the default board (idempotent upsert) and dual-write all_boards.
   print(`[5/${STEPS}] seeding default board "${DEFAULT_BOARD_SLUG}"`);
-  const boardHash = schemaHashFor("board", config);
-  const existingBoard = await findBoard(node, config, DEFAULT_BOARD_SLUG);
-  if (!existingBoard) {
-    const now = nowIso();
-    const board: Board = {
-      slug: DEFAULT_BOARD_SLUG,
-      title: "Default board",
-      body: "",
-      columns: [...DEFAULT_COLUMNS],
-      created_at: now,
-      updated_at: now,
-    };
-    await node.createRecord({ schemaHash: boardHash, fields: boardToFields(board), keyHash: board.slug });
-    print(`        created board "${DEFAULT_BOARD_SLUG}" with columns ${DEFAULT_COLUMNS.join(", ")}`);
-  } else {
-    print(`        board "${DEFAULT_BOARD_SLUG}" already exists — leaving as-is`);
-  }
+  await seedDefaultBoard(node, config, print);
 
   print(`[init] ok`);
   // Surface the full Next steps block (incl. the `claude mcp add` registration
@@ -658,23 +683,7 @@ async function tryInitSocketOnly(args: {
   // Seed the default board over the socket (idempotent) — `/api/mutation` +
   // `/api/query` are exactly the routes the data-plane socket serves.
   print(`[5/${STEPS}] seeding default board "${DEFAULT_BOARD_SLUG}" (over the socket)`);
-  const boardHash = schemaHashFor("board", config);
-  const existingBoard = await findBoard(node, config, DEFAULT_BOARD_SLUG);
-  if (!existingBoard) {
-    const now = nowIso();
-    const board: Board = {
-      slug: DEFAULT_BOARD_SLUG,
-      title: "Default board",
-      body: "",
-      columns: [...DEFAULT_COLUMNS],
-      created_at: now,
-      updated_at: now,
-    };
-    await node.createRecord({ schemaHash: boardHash, fields: boardToFields(board), keyHash: board.slug });
-    print(`        created board "${DEFAULT_BOARD_SLUG}" with columns ${DEFAULT_COLUMNS.join(", ")}`);
-  } else {
-    print(`        board "${DEFAULT_BOARD_SLUG}" already exists — leaving as-is`);
-  }
+  await seedDefaultBoard(node, config, print);
 
   print(`[init] ok (socket-only — TCP control-plane unavailable)`);
   // A degraded re-init over an existing config is, by definition, not a

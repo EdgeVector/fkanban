@@ -455,14 +455,19 @@ describe("Board truth discovery does not trust scan projections", () => {
   });
 
   test("the cold-seed path never writes hollow, column-less boards into all_boards", async () => {
-    const fake = fakeNode({ boards: [board({ slug: "a", title: "Alpha" })], index: null });
+    // First-run listBoards point-gets HashKey(default) rather than enumerating
+    // the Board schema. Use the default slug so this still exercises the seed.
+    const fake = fakeNode({
+      boards: [board({ slug: "default", title: "Default board" })],
+      index: null,
+    });
 
     const listed = await listBoards(fake.node, cfg);
 
-    expect(listed.map((b) => b.slug)).toEqual(["a"]);
+    expect(listed.map((b) => b.slug)).toEqual(["default"]);
     const seeded = fake.indexEntries() as Array<{ slug: string; title: string; columns: string[] }> | null;
     expect(seeded).not.toBeNull();
-    expect(seeded![0]!.title).toBe("Alpha");
+    expect(seeded![0]!.title).toBe("Default board");
     expect(seeded![0]!.columns).toEqual(["backlog", "todo", "doing", "done"]);
   });
 

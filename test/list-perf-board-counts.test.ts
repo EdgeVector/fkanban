@@ -255,7 +255,7 @@ describe("board list — per-board live-card counts", () => {
         card({ slug: "d", board: "scratch" }),
       ],
     });
-    const out = await boardListCmd({ cfg, node });
+    const out = await boardListCmd({ cfg: cfgWithIndexes, node });
     expect(out).toContain("default              Default board  (3 cards)");
     // scratch has exactly one live card → singular.
     expect(out).toContain("scratch              Scratch  (1 card)");
@@ -266,7 +266,7 @@ describe("board list — per-board live-card counts", () => {
       boards: [board({ slug: "default", title: "Default board" }), board({ slug: "fresh", title: "Fresh" })],
       cards: [card({ slug: "a", board: "default" })],
     });
-    const out = await boardListCmd({ cfg, node });
+    const out = await boardListCmd({ cfg: cfgWithIndexes, node });
     expect(out).toContain("default              Default board  (1 card)");
     expect(out).toContain("fresh                Fresh  (empty)");
   });
@@ -279,7 +279,7 @@ describe("board list — per-board live-card counts", () => {
         card({ slug: "dead", board: "default", tags: ["__fkanban_deleted__"] }),
       ],
     });
-    const { boards } = await boardListResult({ cfg, node });
+    const { boards } = await boardListResult({ cfg: cfgWithIndexes, node });
     expect(boards[0]!.cardCount).toBe(1);
   });
 
@@ -288,7 +288,7 @@ describe("board list — per-board live-card counts", () => {
       boards: [board({ slug: "default", title: "Default board" }), board({ slug: "scratch", title: "Scratch" })],
       cards: [card({ slug: "a", board: "default" }), card({ slug: "b", board: "default" })],
     });
-    const out = await boardListCmd({ cfg, node, json: true });
+    const out = await boardListCmd({ cfg: cfgWithIndexes, node, json: true });
     const parsed = cardsFromJson(out) as Array<Board & { cardCount: number | null }>;
     const bySlug = new Map(parsed.map((b) => [b.slug, b]));
     expect(bySlug.get("default")!.cardCount).toBe(2);
