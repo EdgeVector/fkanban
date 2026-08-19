@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { FkanbanError } from "../src/client.ts";
 import { runInit } from "../src/commands/init.ts";
 import { allPinnedSchemas, fieldsFor } from "../src/schemas.ts";
+import { handleApiList } from "./http-list.ts";
 
 // The stub used to hand `declaredCardHash` back for every schema that wasn't
 // Board, and list only Card + Board as loaded — so five of the seven declared
@@ -128,6 +129,7 @@ function makeNode(declaredCardHash: string, opts: { legacyDeclareResponse?: bool
         else store.set(`${schema}::${keyHash}`, fields);
         return Response.json({ ok: true, success: true });
       }
+      if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") {
         const schema = body!.schema_name as string;
         const filter = body!.filter as { HashKey?: string } | undefined;

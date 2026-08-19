@@ -22,6 +22,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { newNodeClient } from "../src/client.ts";
 import { probeSchemaWritable, WRITE_PROBE_SLUG } from "../src/record.ts";
 import { CARD_OPTIONAL_SCHEMA_FIELDS, EXTRA_SCHEMAS, allPinnedSchemas } from "../src/schemas.ts";
+import { handleApiList } from "./http-list.ts";
 
 // Rows keyed by their FULL address — schema, hash key AND range key — because
 // the whole question for a HashRange index is which partition the row landed in.
@@ -72,6 +73,7 @@ const server = Bun.serve({
       return Response.json({ ok: true, success: true });
     }
 
+    if (url.pathname === "/api/list") return handleApiList(url);
     return Response.json({ error: "unexpected_path", path: url.pathname }, { status: 500 });
   },
 });

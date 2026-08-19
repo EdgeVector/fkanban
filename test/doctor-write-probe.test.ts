@@ -18,6 +18,7 @@ import { join } from "node:path";
 
 import { doctor } from "../src/commands/doctor.ts";
 import { CARD_OPTIONAL_SCHEMA_FIELDS, fieldsFor } from "../src/schemas.ts";
+import { handleApiList, handleApiListFromPrefixedStore } from "./http-list.ts";
 
 const FULL_CARD_HASH = "doctorfullhash18";
 const STALE_CARD_HASH = "doctorstalehash10";
@@ -92,6 +93,7 @@ function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
         else store.set(`${schema}::${keyHash}`, fields);
         return Response.json({ ok: true, success: true });
       }
+      if (url.pathname === "/api/list") return handleApiListFromPrefixedStore(url, store);
       if (url.pathname === "/api/query") {
         const schema = body!.schema_name as string;
         const filter = body!.filter as { HashKey?: string } | undefined;
@@ -260,7 +262,8 @@ describe("doctor write-probe", () => {
     const socketNode = Bun.serve({
       unix: socketPath,
       async fetch(req) {
-        const path = new URL(req.url).pathname;
+        const url = new URL(req.url, "http://localhost");
+        const path = url.pathname;
         socketSeen.push(path);
         if (path === "/control/browser-pairing-code") return Response.json({ pairing_code: "socket-only" });
         if (path === "/api/system/auto-identity") return Response.json({ user_hash: "u" });
@@ -273,6 +276,7 @@ describe("doctor write-probe", () => {
             ],
           });
         }
+        if (path === "/api/list") return handleApiList(url);
         if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
         if (path === "/api/mutation") return Response.json({ ok: true });
         return Response.json({ error: "unexpected_socket_path" }, { status: 500 });
@@ -296,7 +300,7 @@ describe("doctor write-probe", () => {
       expect(report).not.toContain("node schema list unavailable over TCP");
       expect(report).not.toContain("Start one");
       expect(report).not.toContain("re-run `fkanban init`");
-      expect(socketSeen).toContain("/api/query");
+      expect(socketSeen).toContain("/api/list");
       expect(socketSeen).toContain("/api/system/auto-identity");
       expect(socketSeen).toContain("/api/schemas");
     } finally {
@@ -310,12 +314,14 @@ describe("doctor write-probe", () => {
     const socketNode = Bun.serve({
       unix: socketPath,
       async fetch(req) {
-        const path = new URL(req.url).pathname;
+        const url = new URL(req.url, "http://localhost");
+        const path = url.pathname;
         socketSeen.push(path);
         if (path === "/api/system/auto-identity") return Response.json({ user_hash: "u" });
         if (path === "/api/schemas") {
           return Response.json({ error: "unexpected_socket_path", path }, { status: 404 });
         }
+        if (path === "/api/list") return handleApiList(url);
         if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
         return Response.json({ error: "unexpected_socket_path", path }, { status: 500 });
       },
@@ -333,7 +339,7 @@ describe("doctor write-probe", () => {
       expect(report).not.toContain("node not reachable");
       expect(report).not.toContain("brew services start folddb");
       expect(report).not.toContain("Is a folddb node running?");
-      expect(socketSeen).toContain("/api/query");
+      expect(socketSeen).toContain("/api/list");
       expect(socketSeen).toContain("/api/system/auto-identity");
       expect(socketSeen).toContain("/api/schemas");
     } finally {

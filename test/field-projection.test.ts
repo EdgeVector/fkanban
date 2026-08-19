@@ -173,7 +173,7 @@ describe("--field projection", () => {
 
   // The DEGRADED configuration: no display indexes AND a node that refuses the
   // Card scan outright (this stub throws for any non-point-read Card query,
-  // even the approved allowFullScan one). Search still has to answer, so the
+  // even an unfiltered Card query). Search still has to answer, so the
   // semantic-index candidate path is retained as the fallback for exactly this
   // case — it is the only way to reach a body match here.
   test("search still answers via native candidates when the Card scan is refused", async () => {
@@ -187,7 +187,7 @@ describe("--field projection", () => {
     process.env.LASTSEEK_DISABLE = "1";
     try {
     const probe = card({ slug: "probe", title: "Probe", body: "needle body", position: "10" });
-    const calls: Array<{ schemaHash: string; filter?: unknown; allowFullScan?: boolean }> = [];
+    const calls: Array<{ schemaHash: string; filter?: unknown }> = [];
     const noIndexCfg: Config = {
       ...cfg,
       schemaHashes: { card: "cardhash", board: "boardhash" },
@@ -202,7 +202,7 @@ describe("--field projection", () => {
       createRecord: async () => {},
       updateRecord: async () => {},
       deleteRecord: async () => {},
-      queryAll: async (q: { schemaHash: string; filter?: unknown; allowFullScan?: boolean }): Promise<QueryResponse> => {
+      queryAll: async (q: { schemaHash: string; filter?: unknown }): Promise<QueryResponse> => {
         calls.push(q);
         if (q.schemaHash === "boardhash") {
           return { ok: true, results: [board()].map((b) => ({ key: { hash: b.slug, range: null }, fields: boardToFields(b) })) };

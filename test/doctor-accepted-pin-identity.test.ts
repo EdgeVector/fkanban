@@ -32,6 +32,7 @@ import { join } from "node:path";
 
 import { doctor } from "../src/commands/doctor.ts";
 import { allPinnedSchemas, milestoneSchema } from "../src/schemas.ts";
+import { handleApiList } from "./http-list.ts";
 
 const HASH_FOR: Record<string, string> = Object.fromEntries(
   allPinnedSchemas().map((e) => [e.key, `hash-${e.key}`]),
@@ -94,6 +95,7 @@ function makeNode() {
         return Response.json({ schema: schemaRowFor(key) });
       }
       if (url.pathname === "/api/mutation") return Response.json({ ok: true, success: true });
+      if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
       return Response.json({ error: "unexpected", path: url.pathname }, { status: 500 });
     },

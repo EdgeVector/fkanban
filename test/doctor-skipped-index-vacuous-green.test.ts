@@ -58,6 +58,7 @@ import { join } from "node:path";
 
 import { type DoctorCheck, runDoctorStructured } from "../src/commands/doctor.ts";
 import { boardCardSk } from "../src/board-cards.ts";
+import { handleApiList, handleApiListFromPrefixedStore } from "./http-list.ts";
 import {
   BOARD_CARDS_LAYOUT,
   MILESTONE_CARDS_LAYOUT,
@@ -163,6 +164,16 @@ function makeNode(cards: CardSpec[]) {
         if ((body!.mutation_type as string) === "delete") store.delete(`${schema}::${keyHash}`);
         else store.set(`${schema}::${keyHash}`, (body!.fields_and_values ?? {}) as Record<string, unknown>);
         return Response.json({ ok: true, success: true });
+      }
+      if (url.pathname === "/api/list") {
+        const schema = url.searchParams.get("schema") ?? "";
+        if (schema === BOARD_CARDS_HASH) {
+          return handleApiList(url, rows.map((r) => ({ hash: BOARD, range: r.sk })));
+        }
+        if (schema === MILESTONE_CARDS_HASH) {
+          return handleApiList(url, rows.map((r) => ({ hash: r.milestone, range: r.sk })));
+        }
+        return handleApiListFromPrefixedStore(url, store);
       }
       if (url.pathname === "/api/query") {
         const schema = body!.schema_name as string;

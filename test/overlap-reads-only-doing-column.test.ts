@@ -88,8 +88,7 @@ function card(partial: Partial<Card>): Card {
 type QueryLog = {
   schemaHash: string;
   filter?: QueryFilter;
-  fields: string[];
-  allowFullScan?: boolean;
+  fields: string[]
 };
 
 function fakeNode(
@@ -137,14 +136,12 @@ function fakeNode(
     async queryAll(q: {
       schemaHash: string;
       fields: string[];
-      filter?: QueryFilter;
-      allowFullScan?: boolean;
+      filter?: QueryFilter
     }): Promise<QueryResponse> {
       queries.push({
         schemaHash: q.schemaHash,
         filter: q.filter,
-        fields: q.fields,
-        allowFullScan: q.allowFullScan,
+        fields: q.fields
       });
       if (q.schemaHash === "cardlistindexhash") {
         const key = q.filter?.HashKey;
@@ -262,7 +259,7 @@ describe("overlap reads only the doing column", () => {
     const result = await overlapResult({ cfg, node, slug: "candidate" });
 
     expect(result.conflicts).toEqual([]);
-    expect(node.queries.filter((q) => q.allowFullScan === true)).toEqual([]);
+    expect(node.queries.filter((q) => q.filter === undefined)).toEqual([]);
     expect(node.writes).toEqual([]);
   });
 });

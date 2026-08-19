@@ -40,6 +40,7 @@ import {
   type Card,
 } from "../src/record.ts";
 import { FkanbanError, type NodeClient, type QueryResponse, type QueryRow } from "../src/client.ts";
+import { listRecordKeysFromRows } from "./fake-node.ts";
 import type { QueryFilter } from "../src/client.ts";
 import { boardCardFieldsFromCard } from "../src/board-cards.ts";
 import { DEFAULT_COLUMN_LIMIT, listCmd, otherBoardsFooter, type ListOptions } from "../src/commands/list.ts";
@@ -1505,8 +1506,18 @@ describe("listCmd multi-board footer", () => {
       createRecord: async () => {},
       updateRecord: async () => {},
       deleteRecord: async () => {},
-      queryAll: async (q: { schemaHash: string }): Promise<QueryResponse> =>
-        q.schemaHash === "cardhash" ? { ok: true, results: cards.map(cardRow) } : empty,
+      listRecordKeys: listRecordKeysFromRows((schemaHash) =>
+        schemaHash === "cardhash"
+          ? cards.map((c) => ({ keyHash: c.slug, rangeKey: null }))
+          : [],
+      ),
+      queryAll: async (q: { schemaHash: string; filter?: { HashKey?: string } }): Promise<QueryResponse> => {
+        if (q.schemaHash !== "cardhash") return empty;
+        const wanted = q.filter?.HashKey
+          ? cards.filter((c) => c.slug === q.filter!.HashKey)
+          : cards;
+        return { ok: true, results: wanted.map(cardRow) };
+      },
       rawCall: async () => ({ status: 200, body: "" }),
     } as unknown as NodeClient;
   }

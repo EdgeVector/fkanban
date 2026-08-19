@@ -39,6 +39,7 @@ import { GROOM_SUBCOMMANDS } from "../src/commands/groom.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 import { allPinnedSchemas } from "../src/schemas.ts";
+import { handleApiList } from "./http-list.ts";
 
 const HASH_FOR: Record<string, string> = Object.fromEntries(
   allPinnedSchemas().map((e) => [e.key, `hash-${e.key}`]),
@@ -91,6 +92,7 @@ function makeNode() {
         else store.set(addr, (body!.fields_and_values ?? {}) as Record<string, unknown>);
         return Response.json({ ok: true, success: true });
       }
+      if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") {
         const schema = body!.schema_name as string;
         const filter = body!.filter as { HashKey?: string } | undefined;

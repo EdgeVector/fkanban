@@ -37,7 +37,7 @@ const node = newNodeClient({
 });
 
 const [displayRead, bodies] = await Promise.all([
-  listCardsByFilter(node, cfg, {}, CARD_DISPLAY_FIELDS, { allowFullScanFallback: false }),
+  listCardsByFilter(node, cfg, {}, CARD_DISPLAY_FIELDS, { allowKeyListFallback: false }),
   listCardBodies(node, cfg).catch(() => null),
 ]);
 const scopedDisplay = displayRead.cards;

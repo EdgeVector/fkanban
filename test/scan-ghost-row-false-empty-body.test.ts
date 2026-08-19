@@ -11,8 +11,8 @@
 // real brief and the other held `""`. The two rows are keyed DIFFERENTLY —
 // the real one under the node's derived key, the ghost under the bare slug —
 // which is why `HashKey(slug)` returns exactly one row, always the real one
-// (verified across 12 affected slugs, bodies 70–4389 chars). Only
-// `allowFullScan` sees the ghosts.
+// (verified across 12 affected slugs, bodies 70–4389 chars). Only a
+// whole-schema key list that includes every hash sees the ghosts.
 //
 // That made presence-in-the-scan a bad proxy for coverage.
 // `listBoardCardsWithBodies` asked `bodies.has(slug)` and got `true` for the
@@ -155,8 +155,7 @@ describe("a scan's ghost row must never deny a card its body", () => {
   test("the fixture reproduces the node: scan sees two rows, keyed read sees one", async () => {
     const scan = await node.queryAll({
       schemaHash: "cardhash",
-      fields: ["slug", "body"],
-      allowFullScan: true,
+      fields: ["slug", "body"]
     });
     const rows = scan.results.filter((r) => (r.fields as Record<string, unknown>).slug === briefed.slug);
     expect(rows).toHaveLength(2);
@@ -215,11 +214,11 @@ describe("a scan's ghost row must never deny a card its body", () => {
     // returned 421 slugs where slug+body returned 595. This read wants bodies.
     const before = node.reads.length;
     await listBoardCardsWithBodies(node, cfg);
-    const scans = node.reads
+    const hydrations = node.reads
       .slice(before)
-      .filter((r) => r.schemaHash === "cardhash" && r.filter === undefined);
-    expect(scans.length).toBeGreaterThan(0);
-    for (const scan of scans) expect([...scan.fields].sort()).toEqual(["body", "slug"]);
+      .filter((r) => r.schemaHash === "cardhash" && typeof (r.filter as { HashKey?: string } | undefined)?.HashKey === "string");
+    expect(hydrations.length).toBeGreaterThan(0);
+    for (const read of hydrations) expect([...read.fields].sort()).toEqual(["body", "slug"]);
   });
 
   test("the real body survives even when the ghost row is the one the scan yields first", async () => {

@@ -522,12 +522,7 @@ export type NodeClient = {
    * enumeration path requires it explicitly instead of falling back to query.
    */
   listRecordKeys?(schemaHash: string, opts?: { limit?: number; cursor?: string | null }): Promise<ListRecordKeysPage>;
-  /**
-   * `allowFullScan` is retained temporarily for injected legacy test clients.
-   * Production enumeration uses `listRecordKeys`; the fixture-migration slice
-   * removes this compatibility field after every fake implements `/api/list`.
-   */
-  queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; allowFullScan?: boolean }): Promise<QueryResponse>;
+  queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
   search?(query: string, opts?: AppSearchOptions): Promise<AppSearchHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
   // Which transport local node requests take RIGHT NOW: `socket` when an owner
@@ -921,7 +916,6 @@ export function newNodeClient(opts: {
     schemaHash: string;
     fields: string[];
     filter?: QueryFilter;
-    allowFullScan?: boolean;
   }): Promise<QueryResponse> => {
     const rows: SdkQueryResult["rows"] = [];
     let schema = "";
@@ -949,9 +943,6 @@ export function newNodeClient(opts: {
           ...(cursor === null ? { offset } : { cursor }),
         };
         const res = await sdkTransport.send("POST", "/api/query", {
-          ...(opts.allowFullScan === true
-            ? { headers: { "X-LastDB-Allow-Full-Scan": "1" } }
-            : {}),
           body,
         });
         if (res.status !== 200) {
@@ -1407,9 +1398,9 @@ export function newNodeClient(opts: {
     // partition past one page — and the partition closest to that cliff is
     // BoardCards `HashKey(default)`, the board-wide list every surface uses.
     // The guard lives in one place rather than being re-derived per caller.
-    async queryAll({ schemaHash, fields, filter, allowFullScan }) {
+    async queryAll({ schemaHash, fields, filter }) {
       try {
-        return await queryAllPaged({ schemaHash, fields, filter, allowFullScan });
+        return await queryAllPaged({ schemaHash, fields, filter });
       } catch (err) {
         // The ONE place every kanban read can be seen refused. A 400 here means
         // the node understood us and rejected the query WE built — the only
@@ -1647,6 +1638,7 @@ function isConnectError(err: unknown): boolean {
 const SOCKET_OWNER_ROUTES = [
   { method: "POST", path: "/api/query" },
   { method: "POST", path: "/api/mutation" },
+  { method: "GET", path: "/api/list" },
   { method: "GET", path: "/api/schemas" },
   // Prefix match: GET /api/schema/{hash} for membership key-layout doctor checks.
   { method: "GET", path: "/api/schema" },
@@ -1675,13 +1667,23 @@ function socketServesEveryNodeRoute(socketPath: string): boolean {
   return isFullSurfaceSocket(socketPath) || isCollapsedFullSurfaceSocket(socketPath);
 }
 
-function isSocketRoute(method: string, path: string, socketPath: string): boolean {
-  if (socketServesEveryNodeRoute(socketPath)) return true;
+function routePathname(path: string): string {
+  const q = path.indexOf("?");
+  return q === -1 ? path : path.slice(0, q);
+}
+
+function isSocketOwnerRoute(method: string, path: string): boolean {
+  const pathname = routePathname(path);
   return SOCKET_OWNER_ROUTES.some((r) => {
     if (r.method !== method) return false;
     // Exact match, or nested under a declared prefix (GET /api/schema/{hash}).
-    return path === r.path || path.startsWith(`${r.path}/`);
+    return pathname === r.path || pathname.startsWith(`${r.path}/`);
   });
+}
+
+function isSocketRoute(method: string, path: string, socketPath: string): boolean {
+  if (socketServesEveryNodeRoute(socketPath)) return true;
+  return isSocketOwnerRoute(method, path);
 }
 
 // A LOCAL node is reached only over its Unix socket — the loopback TCP listener
@@ -1847,7 +1849,7 @@ export async function pingNode(opts: {
 // setup routes keep using it for back-compat.
 function routeSocketPathFor(method: string, path: string, socketPath: string): string {
   if (socketServesEveryNodeRoute(socketPath)) return socketPath;
-  if (SOCKET_OWNER_ROUTES.some((r) => r.method === method && r.path === path)) return socketPath;
+  if (isSocketOwnerRoute(method, path)) return socketPath;
   return legacyFullSurfaceSocketPath(socketPath);
 }
 
