@@ -981,7 +981,6 @@ async function upsertBoardCardOnHash(
   const nextFields = boardCardFieldsFromCard(card);
   const nextBoard = String(nextFields.board);
   const nextSk = String(nextFields.sk);
-  const slug = String(nextFields.slug);
 
   // Retire the rows this write supersedes — AFTER the destination row is
   // durable, never before.
