@@ -12,14 +12,16 @@
  * BoardCards-backed read (`list`, `pickup`, `overlap`, `rank`, `milestone
  * portfolio`, dep seeding, the footer) renders as a card that does not exist.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
   boardCardFieldsFromCard,
   boardCardSk,
   listAllBoardCards,
+  sweepBoardCardJanitor,
   upsertBoardCard,
 } from "../src/board-cards.ts";
+import { resetBoardCardJanitorForTests } from "../src/board-card-janitor.ts";
 import type { Config } from "../src/config.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
 import { fakeNode, type FakeNode } from "./fake-node.ts";
@@ -85,6 +87,10 @@ function failWritesAt(node: FakeNode, sk: string): void {
 const slugsOf = (rows: Card[] | null) => (rows ?? []).map((c) => c.slug);
 
 describe("BoardCards move durability", () => {
+  beforeEach(() => {
+    resetBoardCardJanitorForTests();
+  });
+
   test("a failed destination write leaves the card on the board, where it was", async () => {
     // The regression this whole file exists for. Retiring the source row first
     // made this case delete the only membership row the card had, and the
@@ -103,10 +109,8 @@ describe("BoardCards move durability", () => {
     expect(rows![0]!.column).toBe("todo"); // still at the source, not vanished
   });
 
-  test("the destination write is issued before the source delete", async () => {
-    // The ordering itself, asserted directly — the durability property above is
-    // a consequence of it, and an "optimisation" that reorders these two would
-    // otherwise only show up as a rare lost card in production.
+  test("the destination write is issued and the source is not deleted on that request", async () => {
+    resetBoardCardJanitorForTests();
     const node = fakeNode();
     const prev = card({ column: "todo", position: "1" });
     const next = card({ column: "doing", position: "2", updated_at: "2026-01-03T00:00:00.000Z" });
@@ -122,8 +126,7 @@ describe("BoardCards move durability", () => {
       (w) => w.op === "delete" && w.rangeKey === boardCardSk(prev.column, prev.position, prev.slug),
     );
     expect(wroteDest).toBeGreaterThanOrEqual(0);
-    expect(deletedSource).toBeGreaterThanOrEqual(0);
-    expect(wroteDest).toBeLessThan(deletedSource);
+    expect(deletedSource).toBe(-1);
   });
 
   test("the source delete is not issued until the destination write has RESOLVED", async () => {
@@ -185,16 +188,24 @@ describe("BoardCards move durability", () => {
     const deletedAfter = node.writes.some(
       (w) => w.schemaHash === BC && w.op === "delete" && w.rangeKey === srcSk,
     );
-    expect(deletedAfter).toBe(true);
+    expect(deletedAfter).toBe(false);
+    await sweepBoardCardJanitor(node);
+    expect(
+      node.writes.some(
+        (w) => w.schemaHash === BC && w.op === "delete" && w.rangeKey === srcSk,
+      ),
+    ).toBe(true);
   });
 
   test("a completed move still leaves exactly one row, at the destination", async () => {
+    resetBoardCardJanitorForTests();
     const node = fakeNode();
     const prev = card({ column: "todo", position: "1" });
     const next = card({ column: "doing", position: "2", updated_at: "2026-01-03T00:00:00.000Z" });
     seedRow(node, prev);
 
     await upsertBoardCard(node, cfg, next, prev);
+    await sweepBoardCardJanitor(node);
 
     const rows = await listAllBoardCards(node, cfg, [{ slug: "default" }]);
     expect(rows).toHaveLength(1);
@@ -243,8 +254,8 @@ describe("BoardCards move durability", () => {
     expect(rows![0]!.column).toBe("todo");
   });
 
-  test("the no-previous orphan purge still drops stale sks on success", async () => {
-    // Deferring the purge must not cancel it: the end state is unchanged.
+  test("the no-previous path does not scan or purge on the write", async () => {
+    resetBoardCardJanitorForTests();
     const node = fakeNode();
     seedRow(node, card({ column: "todo", position: "1" }));
     seedRow(node, card({ column: "review", position: "9" }));
@@ -252,7 +263,7 @@ describe("BoardCards move durability", () => {
 
     await upsertBoardCard(node, cfg, next, null);
 
-    expect(node.rowsOf(BC)).toHaveLength(1);
+    expect(node.writes.some((w) => w.op === "delete")).toBe(false);
     expect(node.rowAt(BC, "default", boardCardSk("doing", "2", "move-me"))).toBeDefined();
   });
 });

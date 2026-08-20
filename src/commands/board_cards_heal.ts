@@ -13,11 +13,11 @@ import {
   boardCardSk,
   boardCardsHash,
   classifyBoardCardDuplicateRows,
-  deleteBoardCardRowsBySk,
+  enqueueBoardCardJanitor,
   listBoardCardsPartition,
   listBoardCardsPartitionSpine,
   parseBoardCardSk,
-  removeBoardCard,
+  sweepBoardCardJanitor,
   sweepBoardCardsPartition,
   upsertBoardCard,
 } from "../board-cards.ts";
@@ -760,29 +760,14 @@ export async function boardCardsHealResult(
           // DROPS sparse rows, and sparse orphans are what delete-orphan
           // exists to reap. It hunts, at a whole partition per row, for
           // exactly the rows it cannot see.
-          await removeBoardCard(opts.node, opts.cfg, thinCard({
-            slug,
-            title: "",
-            body: "",
-            board,
-            column: row.column,
-            position: row.position,
-            assignee: "",
-            tags: [],
-            deps: [],
-            surfaces: [],
-            created_at: "",
-            updated_at: "",
-            db: "",
-            repo: "",
-            base: "",
-            kind: "",
-            block_status: "",
-            block_reason: "",
-            north_star: "",
-            pr_url: "",
-            branch: "",
-          }), { skipOrphanPurge: enumeratedBoards.has(board) });
+          const schemaHash = boardCardsHash(opts.cfg);
+          if (schemaHash) {
+            enqueueBoardCardJanitor([{
+              schemaHash,
+              board,
+              sk: boardCardSk(row.column, row.position, slug),
+            }]);
+          }
           healed += 1;
         }
       }
@@ -909,20 +894,21 @@ export async function boardCardsHealResult(
       // that never existed, reports a successful repair, and leaves the stale
       // membership behind forever.
       const exactSks = spineSksBySlug.get(`${boardFromKey}\0${slug}`) ?? [];
-      if (exactSks.length > 0) {
-        await deleteBoardCardRowsBySk(opts.node, opts.cfg, boardFromKey, exactSks);
-      } else {
+      const schemaHash = boardCardsHash(opts.cfg);
+      if (schemaHash && exactSks.length > 0) {
+        enqueueBoardCardJanitor(
+          exactSks.map((sk) => ({ schemaHash, board: boardFromKey, sk })),
+        );
+      } else if (schemaHash) {
         // A refused sweep lead can leave a row visible only to the wide read.
-        // Preserve the prior best-effort fallback for that incomplete case;
-        // incompleteLeads keeps the run from claiming full convergence.
-        for (const row of rows) {
-          await removeBoardCard(
-            opts.node,
-            opts.cfg,
-            thinCard({ ...truth, board: row.board, column: row.column, position: row.position }),
-            { skipOrphanPurge: enumeratedBoards.has(row.board) },
-          );
-        }
+        // Enqueue the rows this pass already listed — no partition rescan.
+        enqueueBoardCardJanitor(
+          rows.map((row) => ({
+            schemaHash,
+            board: row.board || boardFromKey,
+            sk: boardCardSk(row.column, row.position, slug),
+          })),
+        );
       }
       await upsertBoardCard(opts.node, opts.cfg, truth, null, {
         skipOrphanPurge: enumeratedBoards.has(truthBoard),
@@ -959,9 +945,18 @@ export async function boardCardsHealResult(
     if (opts.apply) {
       // By address, not by purge: heal already holds the partition, and
       // `purgeOtherBoardCardRows` would re-list it once per duplicate slug.
-      await deleteBoardCardRowsBySk(opts.node, opts.cfg, board, dup.sparseSks);
+      const schemaHash = boardCardsHash(opts.cfg);
+      if (schemaHash) {
+        enqueueBoardCardJanitor(
+          dup.sparseSks.map((sk) => ({ schemaHash, board, sk })),
+        );
+      }
       healed += 1;
     }
+  }
+
+  if (opts.apply) {
+    await sweepBoardCardJanitor(opts.node);
   }
 
   const report: BoardCardsHealReport = {

@@ -21,8 +21,10 @@ import {
   parseBoardCardSk,
   preferFresherBoardCard,
   purgeOtherBoardCardRows,
+  sweepBoardCardJanitor,
   upsertBoardCard,
 } from "../src/board-cards.ts";
+import { resetBoardCardJanitorForTests } from "../src/board-card-janitor.ts";
 import { CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
 import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
@@ -341,6 +343,7 @@ describe("board-cards membership integrity", () => {
     };
     await upsertBoardCard(node, cfgWithBoardCards, next, prev);
     expect(partitionQueries).toBe(0);
+    await sweepBoardCardJanitor(node);
     const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
     expect(listed).toHaveLength(1);
     expect(listed![0]!.column).toBe("doing");
@@ -833,6 +836,7 @@ describe("board-cards wide write", () => {
     reads.length = 0;
 
     const moved = card({ slug: "wide", column: "doing", position: "3" });
+    resetBoardCardJanitorForTests();
     await upsertBoardCard(node, cfgWithBoardCards, moved, before);
 
     // A move with a known `previous` retires the source sk by address, so it
@@ -846,6 +850,7 @@ describe("board-cards wide write", () => {
     for (const w of bc) {
       expect(w.fields.length).toBe(Object.keys(boardCardFieldsFromCard(moved)).length);
     }
+    await sweepBoardCardJanitor(node);
     // And the card is where it was moved to, exactly once.
     const rows = (await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }])) ?? [];
     expect(rows).toHaveLength(1);
