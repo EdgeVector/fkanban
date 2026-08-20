@@ -5,7 +5,8 @@ import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, t
 import type { Config } from "../src/config.ts";
 import { ClaimConflictError, moveCmd } from "../src/commands/move.ts";
 import { listCmd } from "../src/commands/list.ts";
-import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
+import { boardCardFieldsFromCard, boardCardSk, sweepBoardCardJanitor } from "../src/board-cards.ts";
+import { resetBoardCardJanitorForTests } from "../src/board-card-janitor.ts";
 import {
   boardToFields,
   cardToFields,
@@ -216,7 +217,9 @@ describe("move claim guard", () => {
     });
     await seedBoardCard(node, initial);
 
+    resetBoardCardJanitorForTests();
     await moveCmd({ cfg: cfgWithBoardCards, node, slug: initial.slug, column: "done" });
+    await sweepBoardCardJanitor(node);
 
     expect(await findCard(node, cfgWithBoardCards, initial.slug)).toMatchObject({ column: "done" });
     const doing = cardsFromJson(await listCmd({ cfg: cfgWithBoardCards, node, column: "doing", json: true }));

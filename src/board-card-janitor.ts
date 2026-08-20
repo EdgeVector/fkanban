@@ -18,6 +18,9 @@ export type BoardCardJanitorTarget = {
 
 const queue: BoardCardJanitorTarget[] = [];
 
+/** Matches `BOARD_CARDS_WRITE_BATCH` in board-cards.ts (avoid a cycle). */
+const JANITOR_DELETE_BATCH = 48;
+
 export function enqueueBoardCardJanitor(targets: readonly BoardCardJanitorTarget[]): void {
   for (const t of targets) {
     if (!t.schemaHash || !t.board || !t.sk) continue;
@@ -65,25 +68,28 @@ export async function sweepBoardCardJanitor(node: NodeClient): Promise<number> {
       return true;
     });
     attempted += unique.length;
-    try {
-      if (!batch) throw new Error("node client exposes no batch delete");
-      await batch(
-        unique.map((t) => ({
-          schemaHash: t.schemaHash,
-          keyHash: t.board,
-          rangeKey: t.sk,
-        })),
-      );
-    } catch {
-      for (const t of unique) {
-        try {
-          await node.deleteRecord({
+    for (let i = 0; i < unique.length; i += JANITOR_DELETE_BATCH) {
+      const chunk = unique.slice(i, i + JANITOR_DELETE_BATCH);
+      try {
+        if (!batch) throw new Error("node client exposes no batch delete");
+        await batch(
+          chunk.map((t) => ({
             schemaHash: t.schemaHash,
             keyHash: t.board,
             rangeKey: t.sk,
-          });
-        } catch {
-          // best-effort: stale sk may already be gone
+          })),
+        );
+      } catch {
+        for (const t of chunk) {
+          try {
+            await node.deleteRecord({
+              schemaHash: t.schemaHash,
+              keyHash: t.board,
+              rangeKey: t.sk,
+            });
+          } catch {
+            // best-effort: stale sk may already be gone
+          }
         }
       }
     }

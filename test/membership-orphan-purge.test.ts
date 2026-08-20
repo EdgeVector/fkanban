@@ -165,7 +165,7 @@ describe("membership orphan purge (BoardCards invariant)", () => {
     expect(hits[0]!.column).toBe("doing");
   });
 
-  test("updateCardRecord without previous purges the orphan it cannot name", async () => {
+  test("updateCardRecord without previous does not scan; unnamed orphan stays until heal", async () => {
     const node = fakeStoreNode();
     const boardHash = "board-cards-hash";
     const slug = "orphan-card";
@@ -214,12 +214,12 @@ describe("membership orphan purge (BoardCards invariant)", () => {
     });
 
     const next = baseCard({ column: "doing", position: "9", slug });
-    // CRITICAL: omit previous — the production bug path.
+    // Omit previous: the write path must not scan the partition. The unnamed
+    // stale sk stays until heal / a sweeper that already listed the partition.
     await updateCardRecord({ cfg, node }, next);
 
     const rows = node.boardRows().filter((r) => r.fields.slug === slug);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.rangeKey).toBe(nextSk);
-    expect(rows[0]!.fields.column).toBe("doing");
+    expect(rows.map((r) => r.rangeKey).sort()).toEqual([nextSk, staleSk].sort());
+    expect(rows.some((r) => r.rangeKey === nextSk && r.fields.column === "doing")).toBe(true);
   });
 });
