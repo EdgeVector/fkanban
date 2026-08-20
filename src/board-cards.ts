@@ -25,6 +25,12 @@ import {
 import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
 import type { Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
+import {
+  enqueueBoardCardJanitor,
+  sweepBoardCardJanitor,
+} from "./board-card-janitor.ts";
+
+export { sweepBoardCardJanitor, enqueueBoardCardJanitor } from "./board-card-janitor.ts";
 
 export { BOARD_CARDS_LAYOUT };
 
@@ -975,7 +981,6 @@ async function upsertBoardCardOnHash(
   const nextFields = boardCardFieldsFromCard(card);
   const nextBoard = String(nextFields.board);
   const nextSk = String(nextFields.sk);
-  const slug = String(nextFields.slug);
 
   // Retire the rows this write supersedes — AFTER the destination row is
   // durable, never before.
@@ -1052,26 +1057,19 @@ async function upsertBoardCardOnHash(
   // (`scripts/probe-boardcard-read-after-write-lag.ts`) — the 514ms figure
   // answered a different question, whether the FIRST read back is fresh.
   const retireSupersededRows = async () => {
+    // Janitor later: never mix Purge/Delete into the create/update request.
+    // Duplicate membership is visible until sweepBoardCardJanitor runs.
     if (previous) {
       const prevBoard = previous.board || "default";
       const prevSk = boardCardSk(previous.column, previous.position, previous.slug);
       if (prevBoard !== nextBoard || prevSk !== nextSk) {
-        // Targeted delete of the known previous sk only. A whole-partition
-        // orphan scan here (purgeOtherBoardCardRows) re-lists every BoardCards
-        // row on the board on every move/tag — multi-second under HashGroup
-        // thrash (papercut-fkanban-move-pays-whole-partition-orphan-scan).
-        // Multi-orphan drift is repaired by `groom board-cards-heal`, not the
-        // hot write path.
-        await deleteBoardCardSk(node, schemaHash, prevBoard, prevSk);
+        enqueueBoardCardJanitor([{ schemaHash, board: prevBoard, sk: prevSk }]);
       }
       return;
     }
-    if (!opts.skipOrphanPurge) {
-      // No previous sk: callers that omit it (legacy/add/metadata) can leave
-      // orphan column#pos rows. Scan once and drop every sk except nextSk.
-      // Brand-new creates pass skipOrphanPurge (createCardRecord).
-      await purgeOtherBoardCardRows(node, cfg, nextBoard, slug, nextSk);
-    }
+    // No previous-sk and no partition scan on the write path. Orphans stay
+    // until heal / the sweeper, which already listed the partition.
+    void opts.skipOrphanPurge;
   };
 
   const write = async (fields: Record<string, unknown>) => {
@@ -1712,27 +1710,18 @@ export async function removeBoardCardsBatch(
   }
 
   for (const schemaHash of boardCardsWriteHashes(cfg)) {
-    const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
     for (const [board, group] of byBoard) {
       const doomed = new Set<string>();
-      const slugs = new Set<string>();
       for (const card of group) {
-        if (card.slug) slugs.add(card.slug);
         const sk = boardCardSk(card.column, card.position, card.slug);
         if (sk) doomed.add(sk);
       }
-      // One spine read for the whole group, standing in for the per-card
-      // `purgeOtherBoardCardRows` this replaces. `row.sk` is the row's real
-      // range key, not a rebuild of it — see `purgeOtherBoardCardRows`.
-      if (slugs.size > 0) {
-        const part = await listBoardCardsPartitionSpine(node, oneHashCfg, board);
-        if (part) {
-          for (const row of part) {
-            if (slugs.has(row.slug) && row.sk) doomed.add(row.sk);
-          }
-        }
-      }
-      await deleteBoardCardSksBatched(node, schemaHash, board, [...doomed]);
+      // Reuse the rows the caller already listed. Do not re-scan the
+      // partition and do not purge inline — enqueue for the sweeper.
+      enqueueBoardCardJanitor(
+        [...doomed].map((sk) => ({ schemaHash, board, sk })),
+      );
     }
   }
+  await sweepBoardCardJanitor(node);
 }
