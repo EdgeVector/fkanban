@@ -46,7 +46,11 @@ function casError(actual: unknown): FkanbanError {
   });
 }
 
-function fakeNode(opts: { conflictSlug?: string } = {}): NodeClient & {
+function fakeNode(opts: {
+  conflictSlug?: string;
+  failColumnRead?: "todo" | "doing";
+  failCardUpdate?: string;
+} = {}): NodeClient & {
   queries: QueryLog[];
   mutations: MutationLog[];
 } {
@@ -114,6 +118,12 @@ function fakeNode(opts: { conflictSlug?: string } = {}): NodeClient & {
     async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
       const table = tableFor(schemaHash);
       const key = storeKey(keyHash, rangeKey);
+      if (schemaHash === "cardhash" && keyHash === opts.failCardUpdate) {
+        throw new FkanbanError({
+          code: "service_timeout",
+          message: "Injected Card update timeout.",
+        });
+      }
       if (!injectedConflict && schemaHash === "cardhash" && keyHash === opts.conflictSlug) {
         const previous = table.get(key);
         if (previous) previous.fields = { ...previous.fields, column: "doing" };
@@ -132,6 +142,13 @@ function fakeNode(opts: { conflictSlug?: string } = {}): NodeClient & {
     },
     async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
       queries.push({ schemaHash, fields, filter });
+      const prefix = (filter as { HashRangePrefix?: { prefix?: string } } | undefined)?.HashRangePrefix?.prefix;
+      if (schemaHash === "boardcardshash" && prefix === `${opts.failColumnRead}#`) {
+        throw new FkanbanError({
+          code: "service_timeout",
+          message: `Injected ${opts.failColumnRead} read timeout.`,
+        });
+      }
       const results = rowsFor(schemaHash, filter);
       return { ok: true, results, returned_count: results.length, total_count: results.length };
     },
@@ -250,6 +267,40 @@ describe("pickup claim v2 LastDB adapter", () => {
     await seedCard(node, card({ slug: "candidate" }));
     await expect(claimCard({ cfg, node, slug: "candidate", worker: "" })).rejects.toMatchObject({
       code: "missing_worker",
+    });
+  });
+
+  test("a keyed todo read failure is an error, not none", async () => {
+    const node = fakeNode({ failColumnRead: "todo" });
+    await seedCard(node, card({ slug: "candidate" }));
+
+    await expect(pickupClaimV2Result({ cfg, node, dryRun: true })).rejects.toMatchObject({
+      code: "service_timeout",
+      message: "Injected todo read timeout.",
+    });
+  });
+
+  test("a keyed doing read failure is an error, not a clear overlap result", async () => {
+    const node = fakeNode({ failColumnRead: "doing" });
+    await seedCard(node, card({ slug: "candidate" }));
+
+    await expect(pickupClaimV2Result({ cfg, node, dryRun: true })).rejects.toMatchObject({
+      code: "service_timeout",
+      message: "Injected doing read timeout.",
+    });
+  });
+
+  test("a failed Card CAS mutation does not stamp an assignee", async () => {
+    const node = fakeNode({ failCardUpdate: "candidate" });
+    await seedCard(node, card({ slug: "candidate" }));
+
+    await expect(pickupClaimV2Result({ cfg, node, worker: "worker-a" })).rejects.toMatchObject({
+      code: "service_timeout",
+      message: "Injected Card update timeout.",
+    });
+    expect(await findCard(node, cfg, "candidate")).toMatchObject({
+      column: "todo",
+      assignee: "",
     });
   });
 });
