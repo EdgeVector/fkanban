@@ -82,6 +82,85 @@ export class ClaimConflictError extends FkanbanError {
   }
 }
 
+export type AtomicClaimResult = {
+  result: "claimed";
+  card: Card;
+  from: "todo";
+  to: "doing";
+  worker: string;
+};
+
+/**
+ * Claim one admitted todo card without lifecycle policy or board repair.
+ *
+ * The Card point read supplies the complete record for the write. The CAS
+ * condition and the assignee stamp share the same Card mutation.
+ */
+export async function claimCard(opts: {
+  cfg: Config;
+  node: NodeClient;
+  slug: string;
+  worker: string;
+  expectedColumn?: "todo";
+}): Promise<AtomicClaimResult> {
+  const expectedColumn = opts.expectedColumn ?? "todo";
+  const worker = opts.worker.trim();
+  if (!worker) {
+    throw new FkanbanError({
+      code: "missing_worker",
+      message: "Pickup claim requires a worker identity.",
+    });
+  }
+
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
+  if (card.column !== expectedColumn) {
+    throw new ClaimConflictError({
+      slug: card.slug,
+      expected: expectedColumn,
+      current: card.column,
+    });
+  }
+
+  const updated: Card = {
+    ...card,
+    column: "doing",
+    position: appendPosition(),
+    assignee: worker,
+    updated_at: nowIso(),
+    done_at: "",
+  };
+
+  try {
+    await updateCardRecord(
+      { cfg: opts.cfg, node: opts.node },
+      updated,
+      { type: "value", field: "column", value: expectedColumn },
+      card,
+    );
+  } catch (err) {
+    if (err instanceof FkanbanError && err.code === "cas_conflict") {
+      const cause = err.cause;
+      const actual = typeof cause === "object" && cause !== null
+        ? (cause as { actual?: unknown }).actual
+        : undefined;
+      throw new ClaimConflictError({
+        slug: card.slug,
+        expected: expectedColumn,
+        current: typeof actual === "string" ? actual : "unknown",
+      });
+    }
+    throw err;
+  }
+
+  return {
+    result: "claimed",
+    card: updated,
+    from: "todo",
+    to: "doing",
+    worker,
+  };
+}
+
 function isExpectedPromotionSkip(err: unknown): boolean {
   return err instanceof FkanbanError &&
     (err.code === "default_todo_not_pickup_ready" ||
