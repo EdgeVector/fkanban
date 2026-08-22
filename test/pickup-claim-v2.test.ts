@@ -252,4 +252,40 @@ describe("pickup claim v2 LastDB adapter", () => {
       code: "missing_worker",
     });
   });
+
+  test("concurrent requests produce one winner for one card", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "candidate" }));
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        pickupClaimV2Result({ cfg, node, worker: `worker-${index}` })
+      ),
+    );
+
+    const claimed = results.filter((result) => result.result === "claimed");
+    expect(claimed).toHaveLength(1);
+    expect(results.filter((result) => result.result === "none")).toHaveLength(19);
+    const stored = await findCard(node, cfg, "candidate");
+    expect(stored).toMatchObject({
+      column: "doing",
+      assignee: claimed[0]?.result === "claimed" ? claimed[0].worker : "unreachable",
+    });
+  });
+
+  test("concurrent conflicts continue until each available card has one winner", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "first", position: "1", surfaces: ["src/a.ts"] }));
+    await seedCard(node, card({ slug: "second", position: "2", surfaces: ["src/b.ts"] }));
+
+    const results = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        pickupClaimV2Result({ cfg, node, worker: `worker-${index}` })
+      ),
+    );
+
+    const winners = results.flatMap((result) => result.result === "claimed" ? [result.card.slug] : []);
+    expect(winners.sort()).toEqual(["first", "second"]);
+    expect(new Set(winners).size).toBe(2);
+  });
 });
