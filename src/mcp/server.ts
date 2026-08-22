@@ -16,6 +16,12 @@ import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
 import { pickupStatusResult } from "../commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "../commands/pickup_claim.ts";
+import {
+  formatPickupClaimV2,
+  pickupClaimV2Error,
+  pickupClaimV2Payload,
+  pickupClaimV2Result,
+} from "../commands/pickup_claim_v2.ts";
 import { overlapResult, formatOverlap, overlapPayload } from "../commands/overlap.ts";
 import { rankCmd } from "../commands/rank.ts";
 import { searchResult } from "../commands/search.ts";
@@ -90,6 +96,7 @@ export const FKANBAN_WRITE_TOOLS = [
   "fkanban_move",
   "fkanban_rank",
   "fkanban_pickup_claim",
+  "fkanban_pickup_claim_v2",
   "fkanban_rm",
   "fkanban_dep_add",
   "fkanban_dep_rm",
@@ -625,6 +632,44 @@ export function createFkanbanMcpServer(
         return toolResult(formatPickupClaim(result), result);
       } catch (err) {
         return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fkanban_pickup_claim_v2",
+    {
+      title: "Claim by deterministic board order",
+      description:
+        "Deterministic pickup v2. Read keyed todo and doing ranges, require terminal dependencies, treat missing surfaces as the complete repository, and CAS-claim the first eligible board-position card. No lanes, cursors, repair, fair-share, capacity, Loom, State Machine, or LLM.",
+      annotations: { title: "Claim by deterministic board order", openWorldHint: false },
+      inputSchema: {
+        worker: z.string().optional().describe("Worker id. Required unless dry_run is true."),
+        dry_run: z.boolean().optional().describe("Select one card without a write."),
+      },
+      outputSchema: {
+        result: z.enum(["claimed", "none", "error"]),
+        card: cardSchema.optional(),
+        from: z.literal("todo").optional(),
+        to: z.literal("doing").optional(),
+        worker: z.string().optional(),
+        dry_run: z.boolean().optional(),
+        code: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const { cfg, node } = requireConfig();
+        const result = await pickupClaimV2Result({
+          cfg,
+          node,
+          worker: args.worker,
+          dryRun: args.dry_run,
+        });
+        return toolResult(formatPickupClaimV2(result), pickupClaimV2Payload(result));
+      } catch (err) {
+        const result = pickupClaimV2Error(err);
+        return toolResult(formatPickupClaimV2(result), pickupClaimV2Payload(result), { isError: true });
       }
     },
   );

@@ -36,6 +36,7 @@ import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { showCmd } from "../src/commands/show.ts";
 import { boardListCmd } from "../src/commands/board.ts";
 import { DEFAULT_SEARCH_LIMIT } from "../src/board.ts";
+import { formatPickupClaimV2, pickupClaimV2Result } from "../src/commands/pickup_claim_v2.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -330,6 +331,28 @@ describe("MCP write tools return structuredContent", () => {
     // A second add for the same slug reports the update transition.
     const upd = await client.callTool({ name: "fkanban_add", arguments: { slug: "card-a", column: "doing" } });
     expect(upd.structuredContent).toEqual({ slug: "card-a", action: "updated", board: "default", column: "doing" });
+  });
+
+  test("pickup claim-v2 dry-run has CLI and MCP payload parity", async () => {
+    await client.callTool({
+      name: "fkanban_add",
+      arguments: {
+        slug: "v2-candidate",
+        column: "todo",
+        body: validPickupBody(),
+        surfaces: ["src/v2.ts"],
+      },
+    });
+
+    const cliResult = await pickupClaimV2Result({ cfg, node, dryRun: true });
+    const mcpResult = await client.callTool({
+      name: "fkanban_pickup_claim_v2",
+      arguments: { dry_run: true },
+    });
+
+    expect(mcpResult.structuredContent).toEqual(JSON.parse(formatPickupClaimV2(cliResult, true)));
+    expect((mcpResult.content as Array<{ type: string; text: string }>)[0]?.text)
+      .toBe(formatPickupClaimV2(cliResult));
   });
 
   test("fkanban_overlap reports matching surface claims", async () => {

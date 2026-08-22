@@ -36,6 +36,11 @@ import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcilePayload, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
 import { pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
+import {
+  formatPickupClaimV2,
+  pickupClaimV2Error,
+  pickupClaimV2Result,
+} from "./commands/pickup_claim_v2.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { pickupExplainCmd } from "./commands/pickup_explain.ts";
 import { overlapCmd } from "./commands/overlap.ts";
@@ -116,7 +121,8 @@ Commands:
   overlap <slug>       report declared surface conflicts with doing cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
   pickup explain <slug> full readiness path for one card (write-guard+classify+lane+overlap)
-  pickup claim         claim the next ready card into doing (lanes + priority + overlap + CAS)
+  pickup claim         claim by version 1 lane and priority policy
+  pickup claim-v2      claim by board order + deps + surfaces + CAS
   pickup lanes         show logical pickup lanes, starvation, and next claim order
   groom structured-routing dry-run/apply backfill body Repo/Base into structured fields
   groom body-clobber-scan report bodies matching generated/script clobber signatures (--json)
@@ -484,6 +490,7 @@ Usage:
   fkanban pickup explain <slug> [--json]
   fkanban pickup lanes [--json] [--board <slug>]
   fkanban pickup claim [options]
+  fkanban pickup claim-v2 [--worker <id>] [--dry-run] [--json]
 
 status — Classifies every active (non-terminal) card as pickup-ready,
 blocked-on-dependency, human-gated, malformed-routing, unattached-outcome,
@@ -507,6 +514,12 @@ CAS-claim the first winner into doing (\`move --from todo\`). On
 claim_conflict (another worker won), try the next candidate. Prefer this
 over hand-rolling list + overlap + move in prompts.
 
+claim-v2 — Read keyed todo and doing ranges. Select the first card in board
+order whose dependencies are terminal and whose effective surfaces do not
+overlap doing work. Missing surfaces reserve the complete repository. Claim
+with one CAS write that also sets the worker. No lanes, cursors, repair,
+fair-share, repository policy, capacity policy, Loom, State Machine, or LLM.
+
 status / explain options:
   --json                machine-readable report
 
@@ -523,12 +536,18 @@ claim options:
   --dry-run             select the next card without moving it
   --json                machine-readable claim result
 
+claim-v2 options:
+  --worker <id>         worker identity; required unless --dry-run
+  --dry-run             select one card without a write
+  --json                result is claimed, none, or error
+
 Example:
   fkanban pickup status
   fkanban pickup explain my-card-slug --json
   fkanban pickup lanes
   fkanban pickup claim --json --worker last-stack-fkanban-pickup
-  fkanban pickup claim --dry-run --prefer-repo EdgeVector/fold`),
+  fkanban pickup claim --dry-run --prefer-repo EdgeVector/fold
+  fkanban pickup claim-v2 --dry-run --json`),
 
   rank: withFooter(`fkanban rank — hard todo ranker (position rewrite for pickup)
 
@@ -2087,19 +2106,20 @@ async function dispatch(
     case "pickup-status":
     case "pickup-claim": {
       // Subcommand resolution:
-      //   pickup status | pickup explain <slug> | pickup claim | pickup lanes
+      //   pickup status | pickup explain <slug> | pickup claim | pickup claim-v2 | pickup lanes
       //   bare `pickup` (= status, back-compat)
       //   pickup-status / pickup-claim aliases (single positional)
-      let sub: "status" | "claim" | "lanes" | "explain";
+      let sub: "status" | "claim" | "claim-v2" | "lanes" | "explain";
       if (cmd === "pickup-status") sub = "status";
       else if (cmd === "pickup-claim") sub = "claim";
       else if (positionals[1] === undefined || positionals[1] === "status") sub = "status";
       else if (positionals[1] === "claim") sub = "claim";
+      else if (positionals[1] === "claim-v2") sub = "claim-v2";
       else if (positionals[1] === "lanes") sub = "lanes";
       else if (positionals[1] === "explain") sub = "explain";
       else {
         console.error(
-          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup explain <slug> | pickup lanes | pickup claim`,
+          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup explain <slug> | pickup lanes | pickup claim | pickup claim-v2`,
         );
         return 2;
       }
@@ -2142,6 +2162,30 @@ async function dispatch(
           json: values.json as boolean | undefined,
         }));
         return 0;
+      }
+
+      if (sub === "claim-v2") {
+        const unsupported = ["board", "prefer-repo", "exclude-repo", "max-doing"]
+          .find((flag) => values[flag] !== undefined);
+        if (unsupported) {
+          console.error(`kanban: --${unsupported} does not apply to pickup claim-v2.`);
+          return 2;
+        }
+        try {
+          const result = await pickupClaimV2Result({
+            cfg: ctx.cfg,
+            node: ctx.node,
+            worker: values.worker as string | undefined,
+            dryRun: values["dry-run"] as boolean | undefined,
+          });
+          console.log(formatPickupClaimV2(result, values.json as boolean | undefined));
+          return 0;
+        } catch (err) {
+          const result = pickupClaimV2Error(err);
+          if (values.json) console.log(formatPickupClaimV2(result, true));
+          else console.error(`kanban: ${formatPickupClaimV2(result)}`);
+          return 1;
+        }
       }
 
       const maxDoingRaw = values["max-doing"] as string | undefined;

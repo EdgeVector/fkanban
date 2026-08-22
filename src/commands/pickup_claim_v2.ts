@@ -1,4 +1,4 @@
-import type { NodeClient } from "../client.ts";
+import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import { firstEligible, type DependencyStatuses } from "../pickup_v2.ts";
 import {
@@ -47,6 +47,34 @@ export type PickupClaimV2Result =
       result: "none";
       dry_run: boolean;
     };
+
+export type PickupClaimV2Error = {
+  result: "error";
+  code: string;
+};
+
+export function pickupClaimV2Error(err: unknown): PickupClaimV2Error {
+  return {
+    result: "error",
+    code: err instanceof FkanbanError ? err.code : "internal_error",
+  };
+}
+
+export function pickupClaimV2Payload(
+  result: PickupClaimV2Result | PickupClaimV2Error,
+): PickupClaimV2Result | PickupClaimV2Error {
+  return JSON.parse(JSON.stringify(result)) as PickupClaimV2Result | PickupClaimV2Error;
+}
+
+export function formatPickupClaimV2(
+  result: PickupClaimV2Result | PickupClaimV2Error,
+  json = false,
+): string {
+  if (json) return JSON.stringify(pickupClaimV2Payload(result), null, 2);
+  if (result.result === "error") return `pickup error: ${result.code}`;
+  if (result.result === "none") return "no claim";
+  return `${result.dry_run ? "would claim" : "claimed"}: ${result.card.slug}`;
+}
 
 function dependencyStatuses(todo: readonly Card[], statuses: readonly Card[]): DependencyStatuses {
   const bySlug = new Map(statuses.map((card) => [card.slug, card]));
