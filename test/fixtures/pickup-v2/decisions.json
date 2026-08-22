@@ -1,0 +1,56 @@
+[
+  {
+    "name": "board position wins",
+    "todo": [
+      { "slug": "later", "column": "todo", "position": "20", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": ["src/later.ts"] },
+      { "slug": "first", "column": "todo", "position": "10", "created_at": "2026-01-02T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": ["src/first.ts"] }
+    ],
+    "doing": [],
+    "dependencyStatuses": {},
+    "expected": "first"
+  },
+  {
+    "name": "open dependency blocks the first card",
+    "todo": [
+      { "slug": "blocked", "column": "todo", "position": "10", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": ["dep"], "surfaces": ["src/a.ts"] },
+      { "slug": "ready", "column": "todo", "position": "20", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": ["src/b.ts"] }
+    ],
+    "doing": [],
+    "dependencyStatuses": { "dep": false },
+    "expected": "ready"
+  },
+  {
+    "name": "surface conflict blocks the first card",
+    "todo": [
+      { "slug": "conflict", "column": "todo", "position": "10", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": ["src/pickup/**"] },
+      { "slug": "clear", "column": "todo", "position": "20", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": ["src/record.ts"] }
+    ],
+    "doing": [
+      { "slug": "worker", "column": "doing", "position": "1", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": ["src/pickup/claim.ts"] }
+    ],
+    "dependencyStatuses": {},
+    "expected": "clear"
+  },
+  {
+    "name": "missing candidate surfaces reserve the repository",
+    "todo": [
+      { "slug": "unknown", "column": "todo", "position": "10", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": [] }
+    ],
+    "doing": [
+      { "slug": "worker", "column": "doing", "position": "1", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": ["src/record.ts"] }
+    ],
+    "dependencyStatuses": {},
+    "expected": null
+  },
+  {
+    "name": "same surface in another repository is clear",
+    "todo": [
+      { "slug": "candidate", "column": "todo", "position": "10", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fkanban", "deps": [], "surfaces": [] }
+    ],
+    "doing": [
+      { "slug": "worker", "column": "doing", "position": "1", "created_at": "2026-01-01T00:00:00.000Z", "repo": "EdgeVector/fold", "deps": [], "surfaces": [] }
+    ],
+    "dependencyStatuses": {},
+    "expected": "candidate"
+  }
+]
