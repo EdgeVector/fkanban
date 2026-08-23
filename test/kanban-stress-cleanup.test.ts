@@ -75,6 +75,15 @@ esac
 exit 0
 `;
 
+// Every `runHarness` test spawns the real bash harness end-to-end, which walks
+// the board durability legs against the stub CLI. That is tens of subprocesses,
+// so its wall clock tracks machine load rather than anything the assertion is
+// about — measured 2026-08-23 at 9.7s on a host running two other agent test
+// suites, which blew bun's 5s default and failed a test that had not changed.
+// State the budget the work actually needs instead of inheriting one sized for
+// an in-process unit test.
+const HARNESS_TIMEOUT_MS = 30_000;
+
 function runHarness(
   killOn?: string,
   n = "0",
@@ -133,7 +142,7 @@ describe("kanban-stress scratch cleanup", () => {
     }
     // Nothing throwaway survives the run.
     expect(boards.filter((b) => b.startsWith("zz-kstress-"))).toEqual([]);
-  });
+  }, HARNESS_TIMEOUT_MS);
 
   // The regression itself: cleanup used to be a linear block at the end of the
   // script, so a run that died before reaching it leaked every board it had
@@ -147,14 +156,14 @@ describe("kanban-stress scratch cleanup", () => {
     }
     expect(boards.filter((b) => b.startsWith("zz-kstress-"))).toEqual([]);
     expect(boards).toContain("agent-dogfood-scratch");
-  });
+  }, HARNESS_TIMEOUT_MS);
 
   test.if(hasJq)("never reaps the persistent scratch board it runs against", () => {
     const { log, boards } = runHarness();
 
     expect(log.some((line) => line.startsWith("board rm agent-dogfood-scratch"))).toBe(false);
     expect(boards).toContain("agent-dogfood-scratch");
-  });
+  }, HARNESS_TIMEOUT_MS);
 
   test.if(hasJq)("does not call a rejected delete a persisted-delete finding", () => {
     const { stdout, exitCode } = runHarness(undefined, "3");
@@ -162,7 +171,7 @@ describe("kanban-stress scratch cleanup", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("ERROR: delete test rm failed for ");
     expect(stdout).not.toContain("FINDING: delete-not-persisted");
-  });
+  }, HARNESS_TIMEOUT_MS);
 });
 
 describe("kanban-stress cleanup is trap-driven", () => {

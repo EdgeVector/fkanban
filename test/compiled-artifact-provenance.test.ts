@@ -140,7 +140,12 @@ describe("the compiled artifact reports its own install", () => {
 
     expect(run(root, exe("bbb222"), ["which", "--check"]).exitCode).toBe(0);
     expect(run(root, exe("aaa111"), ["which", "--check"]).exitCode).toBe(1);
-  });
+    // Two spawns of the ~100MB compiled artifact, where its siblings do one.
+    // On bun's 5s default that made the only two-spawn test in the file the
+    // one that failed under load (measured 2026-08-23: 8.1s on a host running
+    // two other agent test suites) — a timing verdict wearing a provenance
+    // test's name. Same budget the other artifact-spawning test states.
+  }, 30_000);
 
   test("a compiled binary outside every host-track root is still `unmanaged`", () => {
     // The fix must not answer "managed" by construction. A binary copied

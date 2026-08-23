@@ -183,8 +183,19 @@ describe("--field projection", () => {
     // subprocess work. LASTSEEK_DISABLE is the plane's own documented switch
     // (checked in both queryLastSeek and the availability probe); using it
     // makes the test hermetic instead of dependent on host index contents.
+    //
+    // LASTSEEK_DISABLE alone did NOT make it hermetic. `querySearchPlane`
+    // falls through from LastSeek to the INCUMBENT plane, which `spawnSync`s
+    // the host's `search` binary with a 60s timeout — so the test still paid
+    // for a real semantic query over the host index, and blew its own 10s
+    // budget on a loaded machine (measured 2026-08-23: 12.5s, failing both
+    // with and without the change under test). Point that spawn at a binary
+    // that cannot exist: the incumbent returns null immediately, which is the
+    // "no search plane installed" answer this test wants anyway.
     const prevDisable = process.env.LASTSEEK_DISABLE;
+    const prevSearchBin = process.env.LASTDB_SEARCH_BIN;
     process.env.LASTSEEK_DISABLE = "1";
+    process.env.LASTDB_SEARCH_BIN = "fkanban-test-absent-search-binary";
     try {
     const probe = card({ slug: "probe", title: "Probe", body: "needle body", position: "10" });
     const calls: Array<{ schemaHash: string; filter?: unknown }> = [];
@@ -242,6 +253,8 @@ describe("--field projection", () => {
     } finally {
       if (prevDisable === undefined) delete process.env.LASTSEEK_DISABLE;
       else process.env.LASTSEEK_DISABLE = prevDisable;
+      if (prevSearchBin === undefined) delete process.env.LASTDB_SEARCH_BIN;
+      else process.env.LASTDB_SEARCH_BIN = prevSearchBin;
     }
   }, 10000);
 
