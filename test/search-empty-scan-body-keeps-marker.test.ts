@@ -35,6 +35,7 @@ import { fakeNode, type FakeNode } from "./fake-node.ts";
 import type { Config } from "../src/config.ts";
 import {
   boardToFields,
+  CARD_SEARCH_SURFACE_FIELDS,
   cardToFields,
   hydrateCardBodies,
   isBodyOmitted,
@@ -179,13 +180,28 @@ describe("an empty scan body must not claim the body was read", () => {
 
   // COST BOUND. The fix must not turn the default search into whole-board
   // hydration — the reason it is a marker and not a read (see the header).
-  test("search body drain is HashKey slug+body, not a wide card projection", async () => {
+  //
+  // The drain projection is `CARD_SEARCH_SURFACE_FIELDS`, not the `slug`+`body`
+  // pair it was when this test was written. It widened so `search` can decide a
+  // match for a card the BoardCards display index never enumerated, using the
+  // same fields `cardMatchesQuery` reads (see
+  // search-enumeration-gap-recovery.test.ts). That costs no extra round trip —
+  // the key list already point-gets every card hash — and it does not weaken
+  // what this test guards: the drain is still a fixed narrow projection, never
+  // the whole card.
+  test("search body drain is the match surface, not a wide card projection", async () => {
     const before = node.reads.length;
     await searchResult({ cfg, node, query: "card" });
     const keyed = node.reads
       .slice(before)
       .filter((r) => r.schemaHash === "cardhash" && typeof r.filter?.HashKey === "string");
     expect(keyed.length).toBeGreaterThan(0);
-    for (const read of keyed) expect([...read.fields].sort()).toEqual(["body", "slug"]);
+    const expected = [...CARD_SEARCH_SURFACE_FIELDS].sort();
+    for (const read of keyed) expect([...read.fields].sort()).toEqual(expected);
+    // The claim above, pinned: short match fields plus `body`, and none of the
+    // heavy or irrelevant ones a full card read would drag along.
+    for (const absent of ["position", "created_at", "pr_url", "north_star"]) {
+      expect(expected).not.toContain(absent);
+    }
   });
 });

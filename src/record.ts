@@ -2405,12 +2405,61 @@ export function queryTerms(query: string): string[] {
   return query.toLowerCase().trim().split(/\s+/).filter((t) => t.length > 0);
 }
 
+/**
+ * Exactly the fields {@link cardMatchesQuery} reads.
+ *
+ * Named because a second caller now needs to decide a match from a KEY-LIST
+ * projection rather than from a whole `Card` — `search`'s recovery pass for
+ * cards the BoardCards display index failed to enumerate. Deriving that
+ * decision from a hand-picked subset (`slug` + `body`, say) would under-select:
+ * a card whose only match is its title would be judged a non-match and never
+ * point-read, so it would stay exactly as invisible as before the fix, for the
+ * narrower reason. The list IS the predicate's inputs, so the two cannot drift.
+ *
+ * Widening a key-list projection to carry them costs no extra round trip:
+ * `listCardsFromKeyList` already issues one HashKey point-get per card hash, so
+ * the added fields ride reads that were happening anyway, and `body` already
+ * dominates the row size. It cannot drop rows either — `isKeyOnlyRow` discards
+ * a row only when it carries NOTHING but the hash field, and more projected
+ * fields can only leave a row with more atoms, never fewer.
+ */
+export const CARD_SEARCH_SURFACE_FIELDS = [
+  "slug",
+  "title",
+  "body",
+  "assignee",
+  "tags",
+  "deps",
+] as const;
+
+/** The match-relevant slice of a card. See {@link CARD_SEARCH_SURFACE_FIELDS}. */
+export type CardSearchSurface = Pick<
+  Card,
+  "slug" | "title" | "body" | "assignee" | "tags" | "deps"
+>;
+
+// One haystack builder for both entry points below, so a `Card` and a key-list
+// surface can never disagree about what "matches" means.
+function queryHaystack(s: CardSearchSurface): string {
+  return [s.slug, s.title, s.body, s.assignee, ...s.tags, ...s.deps].join("\n").toLowerCase();
+}
+
 export function cardMatchesQuery(card: Card, query: string): boolean {
+  return searchSurfaceMatchesQuery(card, query);
+}
+
+/**
+ * {@link cardMatchesQuery} over a key-list projection instead of a whole card.
+ *
+ * Same terms, same haystack, same AND semantics — including "no terms matches
+ * everything", which `searchResult` never reaches because it rejects an empty
+ * query as a usage error before any read. Callers that can reach it must decide
+ * for themselves; see the recovery pass in `commands/search.ts`.
+ */
+export function searchSurfaceMatchesQuery(surface: CardSearchSurface, query: string): boolean {
   const terms = queryTerms(query);
   if (terms.length === 0) return true;
-  const hay = [card.slug, card.title, card.body, card.assignee, ...card.tags, ...card.deps]
-    .join("\n")
-    .toLowerCase();
+  const hay = queryHaystack(surface);
   return terms.every((t) => hay.includes(t));
 }
 
@@ -3336,6 +3385,55 @@ export async function listCardBodies(
     if (seen === undefined || seen.length < card.body.length) bodies.set(card.slug, card.body);
   }
   return bodies;
+}
+
+/**
+ * slug → the match-relevant slice of every Card the node will return, in the
+ * SAME one key-list read {@link listCardBodies} makes.
+ *
+ * `search` needs this rather than bodies alone because the key list is the only
+ * read on that path that sees a card the BoardCards display index failed to
+ * enumerate — and deciding whether such a card matches is what says whether to
+ * spend a point read recovering it. With bodies alone that decision
+ * under-selects on every field a body does not happen to repeat (a title, a
+ * tag, an assignee), which would leave the narrower half of the same bug open.
+ *
+ * The extra fields are free in round trips. `listCardsFromKeyList` already
+ * issues one HashKey point-get per card hash, so this widens rows that were
+ * already being read, and `body` already dominates their size. The
+ * HASH-ELSE-LEAD caution that keeps {@link listCardBodies} narrow does not bite
+ * here either: Card's hash field is `slug`, which this projects, so non-gate
+ * fields cannot drop live rows.
+ *
+ * ONE difference from `listCardBodies` worth naming, because it is a behaviour
+ * change and not a widening: projecting `tags` lets `listCardsFromKeyList`'s
+ * `isHiddenCard` filter actually fire. A legacy tag-tombstoned card is dropped
+ * here and survives the two-field read, which cannot see the tag it would be
+ * judged on. That is the correct direction — a hidden card is not a search
+ * result — but it does mean the two maps can differ by those cards.
+ *
+ * Keep-longest on `body` mirrors `listCardBodies`: it only matters if a keyed
+ * read ever returns duplicates, which production HashKey does not.
+ */
+export async function listCardSearchSurfaces(
+  node: NodeClient,
+  cfg: Config,
+): Promise<Map<string, CardSearchSurface>> {
+  const cards = await listCardsFromKeyList(node, cfg, [...CARD_SEARCH_SURFACE_FIELDS]);
+  const bySlug = new Map<string, CardSearchSurface>();
+  for (const card of cards) {
+    const seen = bySlug.get(card.slug);
+    if (seen !== undefined && seen.body.length >= card.body.length) continue;
+    bySlug.set(card.slug, {
+      slug: card.slug,
+      title: card.title,
+      body: card.body,
+      assignee: card.assignee,
+      tags: card.tags,
+      deps: card.deps,
+    });
+  }
+  return bySlug;
 }
 
 /**

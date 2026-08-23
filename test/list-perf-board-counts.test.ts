@@ -25,7 +25,14 @@ import { boardListCmd, boardListResult } from "../src/commands/board.ts";
 import { DEP_SEED_POINT_READ_MAX, listCmd } from "../src/commands/list.ts";
 import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
-import { boardToFields, cardToFields, emptyStructuredFields, type Board, type Card } from "../src/record.ts";
+import {
+  boardToFields,
+  CARD_SEARCH_SURFACE_FIELDS,
+  cardToFields,
+  emptyStructuredFields,
+  type Board,
+  type Card,
+} from "../src/record.ts";
 import { BOARD_LIST_INDEX_KEY, CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
 import { boardCardFieldsFromCard } from "../src/board-cards.ts";
 import type { Config } from "../src/config.ts";
@@ -437,7 +444,15 @@ describe("search — default text path matches real bodies via key list", () => 
     expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
     expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"))).toBe(true);
     const bodyPoint = node.cardQueries.find((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"));
-    expect(bodyPoint!.fields).toEqual(["slug", "body"]);
+    // The match surface, not the whole card. This used to be the literal
+    // `["slug", "body"]`; the drain widened to every field `cardMatchesQuery`
+    // reads so `search` can also decide a match for a card the display index
+    // never enumerated (see search-enumeration-gap-recovery.test.ts). Assert the
+    // NAMED contract rather than a copy of it, and keep the guard that matters:
+    // still a handful of short fields plus `body`, still not `fieldsFor("card")`.
+    expect(bodyPoint!.fields).toEqual([...CARD_SEARCH_SURFACE_FIELDS]);
+    expect(bodyPoint!.fields).not.toContain("position");
+    expect(bodyPoint!.fields).not.toContain("pr_url");
   });
 
   test("--json uses indexed/native candidates by default while returning capped body previews", async () => {
