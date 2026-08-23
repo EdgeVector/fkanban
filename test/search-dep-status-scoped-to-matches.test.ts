@@ -101,13 +101,23 @@ function seedOffBoardCard(node: FakeNode, c: Card): void {
   node.seed({ schemaHash: "cardhash", keyHash: c.slug, fields: cardToFields(c) });
 }
 
-/** Dep-status point reads against Card (not the slug+body key-list drain). */
+/**
+ * Dep-status point reads against Card — NOT the key-list drain `search` runs to
+ * get bodies, which point-gets every card hash and would swamp every count here.
+ *
+ * Discriminated on `column`, which `CARD_STATUS_FIELDS` (the dep read) projects
+ * and `CARD_SEARCH_SURFACE_FIELDS` (the drain) does not. It used to discriminate
+ * on `deps`, which stopped separating them when the drain widened to the whole
+ * match surface — a change that made every drain read look like a dep read and
+ * turned all four cost assertions below red at once. Pick a field only one of
+ * the two projections carries, or this instrument measures the wrong thing.
+ */
 function cardPointReads(node: FakeNode): Array<Record<string, unknown>> {
   return node.reads
     .filter((r) =>
       r.schemaHash === "cardhash" &&
       r.filter !== undefined &&
-      r.fields.includes("deps"),
+      r.fields.includes("column"),
     )
     .map((r) => r.filter as unknown as Record<string, unknown>);
 }
@@ -120,8 +130,15 @@ describe("search resolves deps for its matches, not for the whole board", () => 
     seedBoard(node);
     // The match. Its dep points off the board, so a verdict about it needs one
     // real read.
-    seedCard(node, card({ slug: "needle-card", body: "needle", deps: ["needle-dep"] }));
-    seedOffBoardCard(node, card({ slug: "needle-dep", column: "todo", position: "2" }));
+    //
+    // The dep slug must NOT contain the query term. It used to be `needle-dep`,
+    // and `search` now recovers a query-matching card that the display index
+    // failed to enumerate — which this "off-board" seed is exactly the shape of
+    // (a Card record on `default`/`todo` with no BoardCards row). It was
+    // returning as a second, legitimate match and failing a test about dep-read
+    // COST. Recovery has its own test; keep this fixture about one thing.
+    seedCard(node, card({ slug: "needle-card", body: "needle", deps: ["blocking-dep"] }));
+    seedOffBoardCard(node, card({ slug: "blocking-dep", column: "todo", position: "2" }));
     // Three non-matching cards, each with its own off-board dep. Nothing the
     // command prints can depend on these.
     for (const n of [1, 2, 3]) {
@@ -142,14 +159,14 @@ describe("search resolves deps for its matches, not for the whole board", () => 
     const onBoard = new Set(
       boardRead.results.map((r) => String((r.fields as Record<string, unknown>).slug ?? "")),
     );
-    expect(onBoard.has("needle-dep")).toBe(false);
+    expect(onBoard.has("blocking-dep")).toBe(false);
     for (const n of [1, 2, 3]) expect(onBoard.has(`other-dep-${n}`)).toBe(false);
   });
 
   test("only the MATCH's dep is point-read — the other three are not", async () => {
     await searchResult({ node, cfg, query: "needle" } as never);
     const reads = JSON.stringify(cardPointReads(node));
-    expect(reads).toContain("needle-dep");
+    expect(reads).toContain("blocking-dep");
     for (const n of [1, 2, 3]) expect(reads).not.toContain(`other-dep-${n}`);
   });
 
