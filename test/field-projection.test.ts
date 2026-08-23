@@ -256,7 +256,11 @@ describe("--field projection", () => {
       if (prevSearchBin === undefined) delete process.env.LASTDB_SEARCH_BIN;
       else process.env.LASTDB_SEARCH_BIN = prevSearchBin;
     }
-  }, 10000);
+    // Removing the 60s-timeout `search` spawn took this from 12.5s to 4.2s
+    // standalone, but it still does real subprocess work and still measured
+    // 11.4s inside the full suite on a loaded host. Say what the work costs
+    // rather than leaving the budget at a number it beats only when idle.
+  }, 30_000);
 
   test("projection allowlist is seeded from the card schema fields", () => {
     for (const field of fieldsFor("card")) {

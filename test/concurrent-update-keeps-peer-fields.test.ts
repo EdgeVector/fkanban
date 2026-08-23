@@ -58,6 +58,13 @@ function seedCard(node: ReturnType<typeof fakeNode>, over: Partial<Card> = {}): 
   return card;
 }
 
+const BOARD_CARDS_HASH = "boardcardshash";
+
+const cfgWithBoardCards: Config = {
+  ...cfg,
+  schemaHashes: { ...cfg.schemaHashes, board_cards: BOARD_CARDS_HASH },
+};
+
 function newNode() {
   return fakeNode({ hashFields: { [CARD_HASH]: "slug" } });
 }
@@ -109,6 +116,40 @@ describe("concurrent updates to one card", () => {
     const cardWrites = node.writes.filter((w) => w.schemaHash === CARD_HASH && w.op === "update");
     expect(cardWrites).toHaveLength(1);
     expect(Object.keys(cardWrites[0]!.fields ?? {}).sort()).toEqual(["title", "updated_at"]);
+  });
+
+  test("the membership write carries current truth, not the caller's snapshot", async () => {
+    // Narrowing the Card write is only half of it. BoardCards is dual-written
+    // from shared field molecules, so a WIDE membership payload built from a
+    // stale snapshot reaches the Card record through those shared tips.
+    //
+    // Measured 2026-08-23 against a real node: a Card write of `{assignee}`
+    // sets `Card.assignee` to `agent-a`, and a later `upsertBoardCard` carrying
+    // the pre-edit snapshot puts it back to `""` — with no Card write between
+    // them. Here the assertion is on the payload, which is the thing this code
+    // controls: the row must state the peer's value, not the snapshot's.
+    const node = newNode();
+    seedCard(node);
+    const opts = { cfg: cfgWithBoardCards, node };
+
+    const snapshotB = (await findCard(node, cfgWithBoardCards, "c1"))!;
+    const snapshotA = (await findCard(node, cfgWithBoardCards, "c1"))!;
+    await writeCardPatch(opts, snapshotA, { assignee: "agent-a" });
+    node.writes.length = 0;
+
+    await updateCardRecord(
+      opts,
+      { ...snapshotB, title: "renamed by B", updated_at: nowIso() },
+      undefined,
+      snapshotB,
+    );
+
+    const membership = node.writes.filter((w) => w.schemaHash === BOARD_CARDS_HASH);
+    expect(membership.length).toBeGreaterThan(0);
+    for (const write of membership) {
+      expect(write.fields?.assignee).toBe("agent-a");
+      expect(write.fields?.title).toBe("renamed by B");
+    }
   });
 
   test("without a baseline the write still heals every field it carries", async () => {
