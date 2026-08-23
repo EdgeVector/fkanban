@@ -4850,6 +4850,11 @@ function sameCardValue(a: unknown, b: unknown): boolean {
  *
  * `slug` is not re-sent: it addresses the row (it travels as keyHash) and
  * cannot differ here — a slug change is a different record, not an update.
+ *
+ * Only for a caller that cannot state the baseline it edited (`previous`
+ * omitted). It answers "what is different NOW", which is a different question
+ * from "what did this command change" the moment anyone else writes the same
+ * card — see {@link intendedCardFields}.
  */
 function changedCardFields(
   stored: Record<string, unknown>,
@@ -4860,6 +4865,50 @@ function changedCardFields(
   for (const field of projected) {
     if (field === "slug") continue;
     if (!(field in next)) continue;
+    if (sameCardValue(stored[field], next[field])) continue;
+    out[field] = next[field];
+  }
+  return out;
+}
+
+/**
+ * The subset of `next` THIS command changed — measured against the baseline it
+ * read, not against what happens to be stored when the write goes out.
+ *
+ * Every card command is a read-modify-write: resolve the card, apply guards,
+ * write. `previous` is that first read, and `next` is it plus the command's
+ * edit. Everything else in `next` is a COPY of the baseline that the command
+ * never looked at.
+ *
+ * Diffing against `stored` (what {@link changedCardFields} does) cannot tell
+ * those apart. A peer write that lands in the gap shows up as a difference, so
+ * it gets "restored" to the copy this command has been carrying since before
+ * the peer wrote — the second writer silently reverts the first, on fields it
+ * never named. That is not last-writer-wins; it is last-writer-wins per
+ * RECORD, which on a board with concurrent pickup / watch / closeout / groom
+ * writers means an edit can disappear seconds after a successful write.
+ *
+ * Diffing against `previous` gives last-writer-wins per FIELD: two commands
+ * editing different fields of one card both land, and two commands editing the
+ * SAME field resolve to whichever wrote last. No re-read, no retry, no CAS —
+ * the write simply stops claiming authority over fields it never read.
+ *
+ * `stored` still gets a say, but only to DROP work: a field already at the
+ * intended value is not worth a byte on the wire.
+ */
+function intendedCardFields(
+  previous: Record<string, unknown>,
+  stored: Record<string, unknown>,
+  next: Record<string, unknown>,
+  projected: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of projected) {
+    if (field === "slug") continue;
+    if (!(field in next)) continue;
+    // Absent from the baseline is not "unchanged" — the command may be filling
+    // a field the row never carried, and that is an edit like any other.
+    if (field in previous && sameCardValue(previous[field], next[field])) continue;
     if (sameCardValue(stored[field], next[field])) continue;
     out[field] = next[field];
   }
@@ -4892,6 +4941,15 @@ function changedCardFields(
  * update with a 40x larger body (32KB vs 1.3KB) measured 3578ms against
  * 3269ms. So the win here is field COUNT, and it is available to every card
  * mutation — including a move, whose key (`slug`) does not change.
+ *
+ * ## Which diff, and why it is a correctness question
+ *
+ * `previousFields` is the baseline the caller read before it edited. With it,
+ * the write carries only what the command changed ({@link intendedCardFields});
+ * without it, only what differs from the stored row right now
+ * ({@link changedCardFields}), which reverts any peer write that landed in the
+ * gap. Narrowing started as a latency win; the baseline is what makes it a
+ * concurrency guarantee.
  */
 async function writeChangedCardFieldsOnly(
   opts: { cfg: Config; node: NodeClient },
@@ -4899,7 +4957,9 @@ async function writeChangedCardFieldsOnly(
   schemaHash: string,
   next: Record<string, unknown>,
   projected: readonly string[],
-): Promise<boolean> {
+  previousFields: Record<string, unknown> | null,
+  expected?: CasExpectation,
+): Promise<Record<string, unknown> | null> {
   let stored: { fields: Record<string, unknown>; projected: readonly string[] } | null;
   try {
     stored = await readWholeCardRow(opts.node, opts.cfg, card.slug, projected);
@@ -4907,15 +4967,38 @@ async function writeChangedCardFieldsOnly(
     // The probe is an optimization; its failure must never be the reason a
     // write fails. Fall through to the wide path, which either succeeds or
     // surfaces the same fault with its own well-worn fallback machinery.
-    return false;
+    return null;
   }
-  if (!stored) return false;
-  const changed = changedCardFields(stored.fields, next, stored.projected);
-  // Nothing changed: the node would no-op this in ~148ms, but a round trip we
-  // can prove is pointless is a round trip not worth taking.
-  if (Object.keys(changed).length === 0) return true;
-  await opts.node.updateRecord({ schemaHash, fields: changed, keyHash: card.slug });
-  return true;
+  if (!stored) return null;
+  const changed = previousFields
+    ? intendedCardFields(previousFields, stored.fields, next, stored.projected)
+    : changedCardFields(stored.fields, next, stored.projected);
+  if (expected) {
+    // The node evaluates a CAS precondition against the WRITE PAYLOAD, not
+    // against stored state. Measured on a real node 2026-08-23
+    // (`scripts/probe-card-cas-narrow-write.ts`): with `column` stored as
+    // `todo`, `expected column=todo` is ACCEPTED when the payload carries
+    // `column` and REJECTED when it does not. A narrow write that drops the
+    // CAS field therefore fails a precondition that holds.
+    //
+    // `absent` has no value to carry, so it keeps the wide write.
+    if (expected.type !== "value") return null;
+    if (!(expected.field in changed)) {
+      // Not a field this command changed. Carry it at its STORED value: the
+      // assertion becomes testable and the field still ends where it started.
+      if (!(expected.field in stored.fields)) return null;
+      changed[expected.field] = stored.fields[expected.field];
+    }
+  } else if (Object.keys(changed).length === 0) {
+    // Nothing changed: the node would no-op this in ~148ms, but a round trip we
+    // can prove is pointless is a round trip not worth taking.
+    return { ...stored.fields };
+  }
+  await opts.node.updateRecord({ schemaHash, fields: changed, keyHash: card.slug, expected });
+  // The record as it now stands: what was stored a moment ago, plus this
+  // write. The caller needs it for the membership write and would otherwise
+  // pay a second read to learn what this one already knows.
+  return { ...stored.fields, ...changed };
 }
 
 async function writeCardRecordWithOptionalFieldFallback(
@@ -4923,7 +5006,9 @@ async function writeCardRecordWithOptionalFieldFallback(
   card: Card,
   op: CardWriteOp,
   expected?: CasExpectation,
-): Promise<void> {
+  /** The card as the caller read it, before its edit. See {@link intendedCardFields}. */
+  previous?: Card,
+): Promise<Record<string, unknown> | null> {
   // Single choke point for every card write. `cardToFields` emits the WHOLE
   // record, so persisting a body-free projection silently blanks the stored
   // brief — the failure mode `rank`, `migrate area-tags`, `groom --apply` and
@@ -4936,25 +5021,30 @@ async function writeCardRecordWithOptionalFieldFallback(
   // shape directly — the full-shape attempt would fail the same way it did
   // when the memo was recorded (same hash ⇒ same field set).
   const legacyShape = opts.cfg.cardLegacyWriteHash === hash;
-  // Narrow path: send only what changed. Skipped for a create (the row does
-  // not exist, so there is nothing to diff and the probe could only ever
-  // return "absent") and whenever a CAS expectation is in play — the node
-  // checks CAS against stored state rather than the payload, but no caller
-  // passes `expected` today, so narrowing it would ship a behaviour nothing
-  // exercises. Give it back its wide write until something needs otherwise.
-  if (op === "updateRecord" && !expected) {
-    const done = await writeChangedCardFieldsOnly(
+  // Narrow path: send only what this command changed. Skipped for a create —
+  // the row does not exist, so there is nothing to diff and the probe could
+  // only ever return "absent".
+  //
+  // A CAS expectation rides along rather than disqualifying the write.
+  // `move --from` / `--expect-column` is the board's most contended write and
+  // has no business reverting a peer's title edit to win a column claim. The
+  // narrow path carries the CAS field explicitly, because the node reads the
+  // precondition off the payload — see the measurement there.
+  if (op === "updateRecord") {
+    const written = await writeChangedCardFieldsOnly(
       opts,
       card,
       hash,
       legacyShape ? cardToLegacyOptionalFields(card) : cardToFields(card),
       legacyShape ? CARD_LEGACY_FIELDS : CARD_FIELDS,
+      previous ? (legacyShape ? cardToLegacyOptionalFields(previous) : cardToFields(previous)) : null,
+      expected,
     );
-    if (done) return;
+    if (written) return written;
   }
   if (legacyShape) {
     await opts.node[op]({ schemaHash: hash, fields: cardToLegacyOptionalFields(card), keyHash: card.slug, expected });
-    return;
+    return null;
   }
   try {
     await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug, expected });
@@ -4972,6 +5062,7 @@ async function writeCardRecordWithOptionalFieldFallback(
     // stop paying a failed mutation (and a polluted error tally) per write.
     rememberCardLegacyWriteHash(opts.cfg, hash);
   }
+  return null;
 }
 
 export async function createCardRecord(
@@ -5015,12 +5106,43 @@ export async function updateCardRecord(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   expected?: CasExpectation,
-  /** Prior card state — required to delete old BoardCards sk on move. */
+  /**
+   * The card as this caller read it, before its edit.
+   *
+   * Required to delete the old BoardCards sk on a move, and — since the
+   * concurrent-update fix — it is also what tells the Card write which fields
+   * this command actually changed, so it cannot revert a peer's edit to a
+   * field it never named ({@link intendedCardFields}). Omitting it still
+   * writes, with the older whole-record semantics.
+   */
   previous?: Card,
 ): Promise<void> {
-  await writeCardRecordWithOptionalFieldFallback(opts, card, "updateRecord", expected);
-  await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  await writeCardMembership(opts, card, previous ?? null);
+  const written = await writeCardRecordWithOptionalFieldFallback(
+    opts,
+    card,
+    "updateRecord",
+    expected,
+    previous,
+  );
+  // The membership write is WIDE by contract — a BoardCards row must carry
+  // every field or it drops out of the projections `list`/`pickup`/`overlap`
+  // read. So narrowing the Card write above is only half the fix: the
+  // BoardCards row is dual-written from shared field molecules, and a wide
+  // payload built from the caller's stale snapshot lands on the Card record
+  // through those shared tips.
+  //
+  // Measured 2026-08-23 against a real node: Card write `{assignee}` sets
+  // `Card.assignee = "agent-a"`; a later `upsertBoardCard` carrying the
+  // pre-edit snapshot puts `Card.assignee` back to `""` — with no Card write
+  // in between. The secondary is a full-record write to the primary by proxy.
+  //
+  // `written` is the record as it now stands (stored ∪ this write), which the
+  // Card write already had in hand. Building membership from that keeps the
+  // row wide AND current, for zero extra round trips. A wide Card write
+  // returns null — it just stored `card` whole, so `card` IS current.
+  const effective = written ? rowToCard({ fields: written, key: { hash: card.slug, range: null } }) : card;
+  await patchCardListIndex(opts.node, opts.cfg, effective, "upsert");
+  await writeCardMembership(opts, effective, previous ?? null);
 }
 
 /**
