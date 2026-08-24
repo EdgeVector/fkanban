@@ -564,10 +564,6 @@ export function fieldsFor(type: RecordType): string[] {
   return RECORDS[type].schema.schema.fields.slice();
 }
 
-export function schemaFor(type: RecordType): AddSchemaRequest {
-  return RECORDS[type].schema;
-}
-
 export function isDefaultColumn(s: string): s is Column {
   return (DEFAULT_COLUMNS as readonly string[]).includes(s);
 }
