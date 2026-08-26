@@ -4525,16 +4525,56 @@ function sortMilestones(milestones: Milestone[]): Milestone[] {
 }
 
 /**
+ * Replace BoardMilestones membership copies with the fat Milestone HashKey row
+ * that `milestone show` reads.
+ *
+ * BoardMilestones is a dual-written / Mini-folded copy. Live drift (2026-08-26):
+ * the index still said `state=active` for milestones whose HashKey primary was
+ * `complete`, and it blanked `north_star` values `show` returned. Gap-report
+ * then queued `decompose` / `complete_proof` that the state CLI correctly
+ * refused. HashKey point-get is the access pattern `show` already uses; this
+ * is not a Milestone product scan.
+ *
+ * Dual leftover SK rows (state is in the range key) are collapsed to one slug
+ * before the point-get so a stale `active#…` row cannot outrank a newer copy.
+ */
+export async function hydrateMilestonesFromPrimary(
+  node: NodeClient,
+  cfg: Config,
+  milestones: Milestone[],
+): Promise<Milestone[]> {
+  if (milestones.length === 0) return [];
+  const unique = new Map<string, Milestone>();
+  for (const listed of milestones) {
+    if (!listed.slug) continue;
+    const prev = unique.get(listed.slug);
+    if (!prev || (listed.updated_at || "") > (prev.updated_at || "")) {
+      unique.set(listed.slug, listed);
+    }
+  }
+  const listed = [...unique.values()];
+  const hydrated = await mapWithConcurrency(
+    listed,
+    async (row) => (await findMilestone(node, cfg, row.slug)) ?? row,
+    POINT_READ_CONCURRENCY,
+  );
+  return sortMilestones(hydrated);
+}
+
+/**
  * Milestones on one board via BoardMilestones HashRange.
  *
  * When the index is bound and the partition query succeeds, an empty partition
  * is authoritative. The admin-only heal command owns legacy backfill; hot list,
  * portfolio, and gap-report paths must not product-scan Milestone just because
  * an indexed board currently has no rows.
+ *
+ * Index hits are HashKey-hydrated so `list` / `portfolio` / `gap-report` report
+ * the same `state` and `north_star` as `milestone show`.
  */
 export async function listMilestonesOnBoard(node: NodeClient, cfg: Config, board: string): Promise<Milestone[]> {
   const fromIndex = await listBoardMilestonesPartition(node, cfg, board);
-  if (fromIndex !== null) return sortMilestones(fromIndex);
+  if (fromIndex !== null) return hydrateMilestonesFromPrimary(node, cfg, fromIndex);
   return (await listMilestones(node, cfg)).filter((m) => m.board === board);
 }
 
@@ -4554,7 +4594,7 @@ export async function listMilestones(
 ): Promise<Milestone[]> {
   const boards = opts.boards ?? (await listBoards(node, cfg));
   const fromIndex = await listAllBoardMilestones(node, cfg, boards);
-  if (fromIndex !== null) return sortMilestones(fromIndex);
+  if (fromIndex !== null) return hydrateMilestonesFromPrimary(node, cfg, fromIndex);
 
   // `null` above means one of two very different things, and substituting the
   // product scan is only right for one of them — the same conflation that
