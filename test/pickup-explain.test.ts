@@ -70,7 +70,15 @@ describe("pickup explain render", () => {
         { name: "classify", ok: true, note: "pickup-ready" },
         { name: "surface-overlap", ok: true, note: "no conflicts with doing" },
         { name: "situation-fence", ok: true, note: "allowed" },
+        { name: "pr-liveness", ok: true, note: "none" },
       ],
+      pr_liveness: {
+        pr_url: "",
+        state: "none",
+        venue: "unknown",
+        action: "work",
+        note: "no pr_url; fresh WORK",
+      },
     };
     const text = renderPickupExplain(report);
     expect(text).toContain("eligible_for_claim: YES");

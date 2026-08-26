@@ -240,6 +240,13 @@ describe("gate rendering — UNK is neither OK nor FAIL", () => {
       situation: { allowed: true },
       eligible_for_claim: true,
       gates: [gate],
+      pr_liveness: {
+        pr_url: "",
+        state: "none",
+        venue: "unknown",
+        action: "work",
+        note: "no pr_url; fresh WORK",
+      },
     };
   }
 

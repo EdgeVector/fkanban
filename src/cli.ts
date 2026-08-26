@@ -43,6 +43,7 @@ import {
 } from "./commands/pickup_claim_v2.ts";
 import { pickupLanesCmd } from "./commands/pickup_lanes.ts";
 import { pickupExplainCmd } from "./commands/pickup_explain.ts";
+import { pickupWorkPolicyCmd } from "./commands/pickup_work_policy.ts";
 import { overlapCmd } from "./commands/overlap.ts";
 import {
   GROOM_SUBCOMMANDS,
@@ -120,7 +121,8 @@ Commands:
   list                 render columns, --wide table, or --group-by-milestone
   overlap <slug>       report declared surface conflicts with doing cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
-  pickup explain <slug> full readiness path for one card (write-guard+classify+lane+overlap)
+  pickup explain <slug> full readiness path for one card (write-guard+classify+lane+overlap+pr-liveness)
+  pickup work-policy <slug> PR-liveness work vs reconcile vs closeout for one card
   pickup claim         claim by version 1 lane and priority policy
   pickup claim-v2      claim by board order + deps + surfaces + CAS
   pickup lanes         show logical pickup lanes, starvation, and next claim order
@@ -488,6 +490,7 @@ Example:
 Usage:
   fkanban pickup status [--json]
   fkanban pickup explain <slug> [--json]
+  fkanban pickup work-policy <slug> [--json]
   fkanban pickup lanes [--json] [--board <slug>]
   fkanban pickup claim [options]
   fkanban pickup claim-v2 [--worker <id>] [--dry-run] [--json]
@@ -500,8 +503,12 @@ unattached-outcome is a well-formed card one --milestone from ready.
 
 explain — Full readiness path for ONE card: write-guard
 (assertDefaultTodoPickupReady), classify category, lane, surface-overlap vs
-doing, situation fence, and eligible_for_claim. Prefer this over re-deriving
-policy from prompts.
+doing, situation fence, PR-liveness of pr_url, and eligible_for_claim.
+Prefer this over re-deriving policy from prompts.
+
+work-policy — Classify one card's pr_url: open → reconcile, merged → closeout,
+closed-unmerged or none → work. Closed-unmerged is a terminal PR state, so
+pickup must not park the card on reconcile forever.
 
 lanes — Logical lanes on the default board todo queue: p0-now, program:*,
 unlaned, papercut. Shows ready/doing pressure, starved lanes (ready>0 and
@@ -544,6 +551,7 @@ claim-v2 options:
 Example:
   fkanban pickup status
   fkanban pickup explain my-card-slug --json
+  fkanban pickup work-policy my-card-slug --json
   fkanban pickup lanes
   fkanban pickup claim --json --worker last-stack-fkanban-pickup
   fkanban pickup claim --dry-run --prefer-repo EdgeVector/fold
@@ -2106,10 +2114,11 @@ async function dispatch(
     case "pickup-status":
     case "pickup-claim": {
       // Subcommand resolution:
-      //   pickup status | pickup explain <slug> | pickup claim | pickup claim-v2 | pickup lanes
+      //   pickup status | pickup explain <slug> | pickup work-policy <slug>
+      //   pickup claim | pickup claim-v2 | pickup lanes
       //   bare `pickup` (= status, back-compat)
       //   pickup-status / pickup-claim aliases (single positional)
-      let sub: "status" | "claim" | "claim-v2" | "lanes" | "explain";
+      let sub: "status" | "claim" | "claim-v2" | "lanes" | "explain" | "work-policy";
       if (cmd === "pickup-status") sub = "status";
       else if (cmd === "pickup-claim") sub = "claim";
       else if (positionals[1] === undefined || positionals[1] === "status") sub = "status";
@@ -2117,15 +2126,16 @@ async function dispatch(
       else if (positionals[1] === "claim-v2") sub = "claim-v2";
       else if (positionals[1] === "lanes") sub = "lanes";
       else if (positionals[1] === "explain") sub = "explain";
+      else if (positionals[1] === "work-policy") sub = "work-policy";
       else {
         console.error(
-          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup explain <slug> | pickup lanes | pickup claim | pickup claim-v2`,
+          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup explain <slug> | pickup work-policy <slug> | pickup lanes | pickup claim | pickup claim-v2`,
         );
         return 2;
       }
 
       const maxPos = cmd === "pickup"
-        ? (sub === "explain" ? 3 : (positionals[1] === undefined ? 1 : 2))
+        ? ((sub === "explain" || sub === "work-policy") ? 3 : (positionals[1] === undefined ? 1 : 2))
         : 1;
       const usage = cmd === "pickup" ? `pickup ${sub}` : cmd;
       const extra = rejectExtraPositionals(positionals, maxPos, usage);
@@ -2150,6 +2160,20 @@ async function dispatch(
           cfg: ctx.cfg,
           node: ctx.node,
           slug: explainSlug,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      if (sub === "work-policy") {
+        const policySlug = positionals[2];
+        if (!policySlug) {
+          console.error("kanban: pickup work-policy requires a card slug. Usage: pickup work-policy <slug> [--json]");
+          return 2;
+        }
+        console.log(await pickupWorkPolicyCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          slug: policySlug,
           json: values.json as boolean | undefined,
         }));
         return 0;
