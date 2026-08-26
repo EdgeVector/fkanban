@@ -32,7 +32,7 @@ export function peekBoardCardJanitor(): readonly BoardCardJanitorTarget[] {
   return queue.slice();
 }
 
-export function takeBoardCardJanitor(): BoardCardJanitorTarget[] {
+function takeBoardCardJanitor(): BoardCardJanitorTarget[] {
   return queue.splice(0, queue.length);
 }
 
