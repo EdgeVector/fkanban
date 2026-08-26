@@ -32,6 +32,11 @@ import {
   checkSituationFence,
   type SituationPreflight,
 } from "../situations.ts";
+import {
+  probeCardPrLiveness,
+  type PrLiveness,
+  type PrLivenessProbe,
+} from "../pr_liveness.ts";
 
 export type WriteGuardStep = {
   ok: boolean;
@@ -75,6 +80,11 @@ export type PickupExplainReport = {
    * the OK it replaced, in the other direction.
    */
   gates: { name: string; ok: boolean; note: string; status?: "unknown" }[];
+  /**
+   * Venue liveness of `pr_url`. Always present. `state=none` when the card
+   * has no locator. Closed-unmerged is WORK, not reconcile.
+   */
+  pr_liveness: PrLiveness;
 };
 
 function writeGuardFor(
@@ -141,13 +151,26 @@ function surfaceOverlapGate(
   return gate;
 }
 
+function prLivenessGate(
+  live: PrLiveness,
+): { name: string; ok: boolean; note: string; status?: "unknown" } {
+  const gate: { name: string; ok: boolean; note: string; status?: "unknown" } = {
+    name: "pr-liveness",
+    ok: live.action === "work",
+    note: `${live.state} venue=${live.venue} action=${live.action} — ${live.note}`,
+  };
+  if (live.state === "unknown") gate.status = "unknown";
+  return gate;
+}
+
 function gatesFrom(
   classification: PickupClassification,
   writeGuard: WriteGuardStep,
   overlap: OverlapResult,
   situationAllowed: boolean,
   situationReason: string,
-): { name: string; ok: boolean; note: string }[] {
+  prLiveness: PrLiveness,
+): { name: string; ok: boolean; note: string; status?: "unknown" }[] {
   return [
     {
       name: "write-guard (default/todo policy)",
@@ -171,6 +194,7 @@ function gatesFrom(
       ok: situationAllowed,
       note: situationAllowed ? "allowed" : situationReason || "blocked",
     },
+    prLivenessGate(prLiveness),
   ];
 }
 
@@ -179,6 +203,7 @@ export async function pickupExplainResult(opts: {
   node: NodeClient;
   slug: string;
   situationPreflight?: SituationPreflight;
+  prLivenessProbe?: PrLivenessProbe;
 }): Promise<PickupExplainReport> {
   const slug = opts.slug.trim();
   if (!slug) {
@@ -229,6 +254,11 @@ export async function pickupExplainResult(opts: {
       milestoneStateBySlug = new Map();
     }
   }
+  const prLiveness = await probeCardPrLiveness(card, {
+    node: opts.node,
+    probe: opts.prLivenessProbe,
+  });
+  const prLivenessBySlug = new Map([[card.slug, prLiveness]]);
   const classification = classifyPickupCard(
     card,
     cards,
@@ -237,6 +267,7 @@ export async function pickupExplainResult(opts: {
     {
       requireLiveMilestone: enforceLivePrMilestone,
       milestoneStateBySlug,
+      prLivenessBySlug,
     },
   );
   const writeGuard = writeGuardFor(card, { enforceLivePrMilestone, milestoneState });
@@ -261,6 +292,7 @@ export async function pickupExplainResult(opts: {
     overlap,
     fence.allowed,
     fence.reason ?? "",
+    prLiveness,
   );
 
   return {
@@ -297,6 +329,7 @@ export async function pickupExplainResult(opts: {
     },
     eligible_for_claim: eligible,
     gates,
+    pr_liveness: prLiveness,
   };
 }
 
@@ -314,6 +347,9 @@ export function renderPickupExplain(report: PickupExplainReport): string {
   );
   for (const d of report.details) lines.push(`    detail: ${d}`);
   lines.push(`  eligible_for_claim: ${report.eligible_for_claim ? "YES" : "NO"}`);
+  lines.push(
+    `  pr_liveness: ${report.pr_liveness.state} venue=${report.pr_liveness.venue} action=${report.pr_liveness.action} — ${report.pr_liveness.note}`,
+  );
   lines.push("  gates:");
   for (const g of report.gates) {
     const label = g.status === "unknown" ? "UNK " : g.ok ? "OK  " : "FAIL";
@@ -340,6 +376,7 @@ export async function pickupExplainCmd(opts: {
   slug: string;
   json?: boolean;
   situationPreflight?: SituationPreflight;
+  prLivenessProbe?: PrLivenessProbe;
 }): Promise<string> {
   const report = await pickupExplainResult(opts);
   return opts.json ? JSON.stringify(report, null, 2) : renderPickupExplain(report);

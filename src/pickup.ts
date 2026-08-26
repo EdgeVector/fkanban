@@ -32,6 +32,7 @@ import {
   type SituationPreflight,
 } from "./situations.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
+import { probeCardPrLiveness, type PrLiveness } from "./pr_liveness.ts";
 
 export const HUMAN_BOARD_SLUG = "human";
 // Human boards use the same fixed column set as every other board.
@@ -218,6 +219,13 @@ export type ClassifyPickupCardOpts = {
    * rejects `live_pr_milestone_abandoned`).
    */
   milestoneStateBySlug?: ReadonlyMap<string, string>;
+  /**
+   * Optional map of card slug → PR/CR liveness. When a todo card has `pr_url`,
+   * closed-unmerged is treated as no PR (fresh WORK). Open stays reconcile.
+   * Merged is closeout, not a new WORK unit. Absent map keeps today's
+   * fail-closed collision for any non-empty pr_url.
+   */
+  prLivenessBySlug?: ReadonlyMap<string, PrLiveness>;
 };
 
 export function classifyPickupCard(
@@ -378,15 +386,33 @@ export function classifyPickupCard(
   if (card.column === "doing") {
     return out("collision", "card is already in doing", "Do not pick up again; reconcile the existing branch/PR or move it back to todo.");
   }
-  // Only an open PR URL means in-flight work. A pre-declared `branch` name alone
-  // is optional metadata (agents often set Branch: kanban/<slug> at file time)
-  // and must NOT block pickup — that false collision stranded ready cards.
+  // Only an OPEN PR URL means in-flight work. Closed-unmerged is terminal for
+  // that artifact — reconcile can never complete, so treating it as a collision
+  // parks the card forever. A pre-declared `branch` name alone is optional
+  // metadata (agents often set Branch: kanban/<slug> at file time) and must NOT
+  // block pickup.
   if (card.pr_url) {
-    return out(
-      "collision",
-      "todo card already has PR metadata",
-      "Reconcile the existing PR (watch/merge or clear pr_url) before pickup.",
-    );
+    const live = opts?.prLivenessBySlug?.get(card.slug);
+    if (live) {
+      details.push(`pr_liveness: ${live.state} venue=${live.venue} action=${live.action}`);
+    }
+    if (live?.state === "closed-unmerged" || live?.state === "none") {
+      details.push("stale pr_url is closed-unmerged; treat as no PR (fresh WORK)");
+    } else if (live?.state === "merged") {
+      return out(
+        "collision",
+        "todo card PR is already merged",
+        "Close out the card; do not pick it up for new work.",
+      );
+    } else {
+      return out(
+        "collision",
+        "todo card already has PR metadata",
+        live?.state === "open"
+          ? "Reconcile the existing open PR (watch/merge) before pickup."
+          : "Reconcile the existing PR (watch/merge or clear pr_url) before pickup.",
+      );
+    }
   }
   if (card.column !== "todo") {
     return out("parked/non-work", `card is parked in ${card.column}`, "Move to default/todo only when an agent should pick it up.");
@@ -527,10 +553,29 @@ export async function buildPickupStatusReportWithSituations(
       milestoneStateBySlug = undefined;
     }
   }
+  const prLivenessBySlug = new Map<string, PrLiveness>();
+  if (depsContext) {
+    // Probe only todo cards that still carry a locator. Doing cards are already
+    // a collision for being in doing; backlog holds stay parked on block_status.
+    const needLiveness = cardsWithDeps.filter(
+      (card) => card.column === "todo" && card.pr_url.trim().length > 0,
+    );
+    if (needLiveness.length > 0) {
+      const probed = await mapWithConcurrency(needLiveness, (card) =>
+        probeCardPrLiveness(card, { node: depsContext.node }),
+      );
+      for (let i = 0; i < needLiveness.length; i++) {
+        const card = needLiveness[i];
+        const live = probed[i];
+        if (card && live) prLivenessBySlug.set(card.slug, live);
+      }
+    }
+  }
   const classifyOpts: ClassifyPickupCardOpts | undefined = depsContext
     ? {
         requireLiveMilestone: depsContext.cfg.enforceLivePrMilestone === true,
         milestoneStateBySlug,
+        prLivenessBySlug: prLivenessBySlug.size > 0 ? prLivenessBySlug : undefined,
       }
     : undefined;
   const local = buildPickupStatusReport(cardsWithDeps, undefined, classifyOpts);

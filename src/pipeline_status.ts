@@ -258,9 +258,18 @@ const CR_FIELDS = [
   "head_ref",
   "base_ref",
   "head_oid",
+  "merge_oid",
   "state",
   "require_status",
 ] as const;
+
+export type ChangeRequestRow = {
+  cr_id: string;
+  repo: string;
+  state: string;
+  head_oid: string;
+  merge_oid: string;
+};
 
 /** Context lastgit CI watch/status use when not overridden. */
 export function defaultCiContext(): string {
@@ -567,6 +576,38 @@ export async function resolveCardOid(
   }
 
   return { oid: "", via: "none" };
+}
+
+/**
+ * Point-read one LastgitChangeRequest row. Used by PR-liveness: a missing row
+ * is a dead locator (closed-unmerged), not an invitation to scan the partition.
+ */
+export async function fetchChangeRequestRow(
+  node: NodeClient,
+  repoSlug: string,
+  crId: string,
+): Promise<ChangeRequestRow | null> {
+  if (!repoSlug || !crId) return null;
+  const candidates = crId.startsWith("cr-") ? [crId, crId.slice(3)] : [crId, `cr-${crId}`];
+  for (const candidate of candidates) {
+    const rows = await querySchema(node, CR_SCHEMA, CR_FIELDS, {
+      repo: repoSlug,
+      range: candidate,
+    });
+    const match = rows.find((r) => {
+      const id = strField(r.fields, "cr_id");
+      return id === crId || id === `cr-${crId}` || `cr-${id}` === crId;
+    });
+    if (!match) continue;
+    return {
+      cr_id: strField(match.fields, "cr_id"),
+      repo: strField(match.fields, "repo"),
+      state: strField(match.fields, "state"),
+      head_oid: strField(match.fields, "head_oid"),
+      merge_oid: strField(match.fields, "merge_oid"),
+    };
+  }
+  return null;
 }
 
 export type FetchCiStatusOptions = {
