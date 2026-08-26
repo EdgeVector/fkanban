@@ -273,6 +273,21 @@ const ALLOWED_TRANSITIONS: Record<string, readonly string[]> = {
   abandoned: ["planned", "active"],
 };
 
+/** Lifecycle targets the state CLI will accept from `from` with this proof_status. */
+export function allowedMilestoneTransitions(from: string, proofStatus: string): string[] {
+  const allowed = [...(ALLOWED_TRANSITIONS[from] ?? [])];
+  // not_required skips the proving phase (no harness to exercise).
+  if (from === "active" && proofStatus === "not_required") {
+    allowed.push("complete");
+  }
+  return allowed;
+}
+
+export function canMilestoneTransition(from: string, to: string, proofStatus: string): boolean {
+  if (from === to) return true;
+  return allowedMilestoneTransitions(from, proofStatus).includes(to);
+}
+
 // The terminal-proof EVIDENCE predicates moved to `../milestone_proof.ts`, next
 // to the derived verdict that re-runs them on every read. They are re-exported
 // here because this module was their published home — `proofGate` and the
@@ -464,12 +479,8 @@ async function validateTransition(
 ): Promise<void> {
   const from = existing?.state ?? "planned";
   const to = milestone.state;
-  const allowed = [...(ALLOWED_TRANSITIONS[from] ?? [])];
-  // not_required skips the proving phase (no harness to exercise).
-  if (from === "active" && to === "complete" && milestone.proof_status === "not_required") {
-    allowed.push("complete");
-  }
-  if (from !== to && !allowed.includes(to)) {
+  const allowed = allowedMilestoneTransitions(from, milestone.proof_status);
+  if (from !== to && !canMilestoneTransition(from, to, milestone.proof_status)) {
     throw new FkanbanError({
       code: "invalid_milestone_transition",
       message: `Milestone "${milestone.slug}" cannot transition ${from} → ${to}.`,
@@ -1517,6 +1528,24 @@ export type MilestoneGapAction =
   | "await_proof"
   | "complete_proof";
 
+/**
+ * Gap-report actions the milestone-driver will attempt. `complete_proof` is
+ * the driver calling `milestone state complete --proof-status not_required`.
+ * Operational actions (promote / decompose / await_proof) are not transitions,
+ * but they are never legal on a terminal milestone.
+ */
+export function isMilestoneGapActionLegal(
+  state: string,
+  action: MilestoneGapAction,
+): boolean {
+  if (action === "skip") return true;
+  if (state === "complete" || state === "abandoned") return false;
+  if (action === "complete_proof") {
+    return canMilestoneTransition(state, "complete", "not_required");
+  }
+  return true;
+}
+
 export type MilestoneGapEntry = {
   slug: string;
   title: string;
@@ -1553,6 +1582,15 @@ export type MilestoneGapReport = {
 };
 
 const BODY_STOP_RE = /STOPPED by Tom|resume only by explicit direction|resume only after explicit/i;
+
+function legalizeGapEntry(milestone: Milestone, entry: MilestoneGapEntry): MilestoneGapEntry {
+  if (isMilestoneGapActionLegal(milestone.state, entry.action)) return entry;
+  return {
+    ...entry,
+    action: "skip",
+    reason: `${entry.reason} (skipped: ${entry.action} is not legal from state=${milestone.state})`,
+  };
+}
 
 /**
  * Pure classifier: given one milestone + its board cards + dep-resolved child
@@ -1617,36 +1655,30 @@ export function classifyMilestoneGap(
     proof_passing,
   };
 
+  let classified: MilestoneGapEntry;
   if (milestone.state === "complete") {
-    return { ...base, status: "complete", action: "skip", reason: "milestone is complete" };
-  }
-  if (milestone.state === "abandoned") {
-    return { ...base, status: "abandoned", action: "skip", reason: "milestone is abandoned" };
-  }
-  if (!milestone.north_star?.trim()) {
-    return { ...base, status: "no_north_star", action: "skip", reason: "no north_star set — out of gap-fill scope" };
-  }
-  if (milestone.state === "blocked") {
-    return { ...base, status: "blocked", action: "skip", reason: milestone.block_reason || "milestone state is blocked" };
-  }
-  if (pr_todo > 0 || pr_doing > 0) {
-    return {
+    classified = { ...base, status: "complete", action: "skip", reason: "milestone is complete" };
+  } else if (milestone.state === "abandoned") {
+    classified = { ...base, status: "abandoned", action: "skip", reason: "milestone is abandoned" };
+  } else if (!milestone.north_star?.trim()) {
+    classified = { ...base, status: "no_north_star", action: "skip", reason: "no north_star set — out of gap-fill scope" };
+  } else if (milestone.state === "blocked") {
+    classified = { ...base, status: "blocked", action: "skip", reason: milestone.block_reason || "milestone state is blocked" };
+  } else if (pr_todo > 0 || pr_doing > 0) {
+    classified = {
       ...base,
       status: "in_flight",
       action: "skip",
       reason: `live Kind:pr in todo=${pr_todo} doing=${pr_doing}`,
     };
-  }
-
-  // No live todo/doing PRs.
-  if (pr_live === 0 && pr_done > 0 && !proof_passing) {
+  } else if (pr_live === 0 && pr_done > 0 && !proof_passing) {
+    // No live todo/doing PRs.
     if (proof?.passingEvidence) {
-      return { ...base, status: "proof_ready", action: "complete_proof", reason: "implementation done; proof body has PASS evidence" };
-    }
-    // Prefer closing with not_required over hanging forever or minting hollow
-    // validation shells (last-stack-milestone-driver contract).
-    if (milestone.proof_status === "not_required" || !String(milestone.proof_card ?? "").trim()) {
-      return {
+      classified = { ...base, status: "proof_ready", action: "complete_proof", reason: "implementation done; proof body has PASS evidence" };
+    } else if (milestone.proof_status === "not_required" || !String(milestone.proof_card ?? "").trim()) {
+      // Prefer closing with not_required over hanging forever or minting hollow
+      // validation shells (last-stack-milestone-driver contract).
+      classified = {
         ...base,
         status: "proof_ready",
         action: "complete_proof",
@@ -1655,11 +1687,11 @@ export function classifyMilestoneGap(
             ? "implementation Kind:pr done; proof_status=not_required — complete without harness"
             : "implementation Kind:pr done; no proof card — complete with not_required (no theater shell)",
       };
+    } else {
+      classified = { ...base, status: "proof_pending", action: "await_proof", reason: "implementation Kind:pr done; terminal proof still pending" };
     }
-    return { ...base, status: "proof_pending", action: "await_proof", reason: "implementation Kind:pr done; terminal proof still pending" };
-  }
-  if (pr_live === 0 && pr_done === 0) {
-    return {
+  } else if (pr_live === 0 && pr_done === 0) {
+    classified = {
       ...base,
       status: "idle_empty",
       action: "decompose",
@@ -1667,30 +1699,29 @@ export function classifyMilestoneGap(
         ? "no Kind:pr children — needs next-gate decomposition into PR cards"
         : "no Kind:pr children and no proof card — needs proof link + next-gate PRs",
     };
-  }
-  if (pr_backlog > 0 && promoteable.length > 0) {
-    return {
+  } else if (pr_backlog > 0 && promoteable.length > 0) {
+    classified = {
       ...base,
       status: "idle_promoteable",
       action: "promote",
       reason: `${promoteable.length} promoteable Kind:pr in backlog (no todo/doing)`,
     };
-  }
-  if (pr_backlog > 0 && promoteable.length === 0) {
-    return {
+  } else if (pr_backlog > 0 && promoteable.length === 0) {
+    classified = {
       ...base,
       status: "idle_blocked",
       action: "skip",
       reason: "backlog Kind:pr exist but all are held, hollow, missing Repo, or dep-blocked",
     };
+  } else {
+    classified = {
+      ...base,
+      status: "idle_empty",
+      action: "decompose",
+      reason: "no feedable live Kind:pr frontier",
+    };
   }
-
-  return {
-    ...base,
-    status: "idle_empty",
-    action: "decompose",
-    reason: "no feedable live Kind:pr frontier",
-  };
+  return legalizeGapEntry(milestone, classified);
 }
 
 export function buildMilestoneGapReport(
