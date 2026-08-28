@@ -6,7 +6,7 @@ import { FkanbanError, type AppSearchHit, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   blockedSlugSet,
-  CARD_DISPLAY_FIELDS,
+  CARD_SEARCH_DISPLAY_FIELDS,
   ensureColumn,
   findCard,
   listCardSearchSurfaces,
@@ -129,45 +129,58 @@ function legacyNativeHitToAppSearchHit(hit: unknown): AppSearchHit | null {
   };
 }
 
-async function nativeIndexCandidateSlugs(opts: SearchOptions): Promise<{ slugs: string[]; saturated: boolean } | null> {
+async function nativeIndexCandidateSlugs(
+  opts: SearchOptions,
+  plane: "semantic" | "keyword" = "semantic",
+): Promise<{ slugs: string[]; saturated: boolean } | null> {
   const cardHash = opts.cfg.schemaHashes.card ?? "";
-  // Primary: the first-party semantic plane (shared with brain).
-  //
-  // Scope on the configured hash ALONE. The old call also passed
-  // `"fkanban/Card"` and `"Card"` as extra spellings to try, which was
-  // harmless against a plane that silently dropped terms it could not resolve
-  // — and is exactly wrong against one that does not. LastSeek fails a query
-  // whose scope term resolves to nothing, on purpose, so a speculative
-  // spelling is no longer a free guess: it would fail every card search.
-  //
-  // Nothing is lost. LastSeek resolves `bc941dbc…` through its Schema Service
-  // table and answers with every identity that key names, which is what the
-  // extra spellings were reaching for.
-  const plane = await querySearchPlane({
-    query: opts.query,
-    k: NATIVE_INDEX_RESULT_CAP,
-    schemas: cardHash ? [cardHash] : undefined,
-  });
-  if (plane !== null && plane.length > 0) {
-    const slugs: string[] = [];
-    const seen = new Set<string>();
-    for (const h of plane) {
-      const schemaOk =
-        !cardHash ||
-        h.schema_name === cardHash ||
-        h.schema_name === "fkanban/Card" ||
-        h.schema_name === "Card";
-      if (!schemaOk) continue;
-      const slug = h.key_hash;
-      if (!slug || seen.has(slug)) continue;
-      seen.add(slug);
-      slugs.push(slug);
-    }
-    if (slugs.length > 0) {
-      return {
-        slugs,
-        saturated: plane.length >= NATIVE_INDEX_RESULT_CAP,
-      };
+  // Semantic mode ranks through LastSeek. Keyword (substring) fallback must
+  // not: LastSeek is a regenerable mmap index, not the live write path, and
+  // a unique token like `kdogtok…` is absent from it for minutes after
+  // `add`. If LastSeek returns ANY other Card hit, the old code returned
+  // those slugs and never asked the socket `/api/app/search` — so a newly
+  // created card was unreachable in the exact degraded path the fallback
+  // exists to serve. Mini has no native index either; skipping the plane
+  // here just stops a stale semantic set from pretending to be recall.
+  if (plane === "semantic") {
+    // Primary: the first-party semantic plane (shared with brain).
+    //
+    // Scope on the configured hash ALONE. The old call also passed
+    // `"fkanban/Card"` and `"Card"` as extra spellings to try, which was
+    // harmless against a plane that silently dropped terms it could not resolve
+    // — and is exactly wrong against one that does not. LastSeek fails a query
+    // whose scope term resolves to nothing, on purpose, so a speculative
+    // spelling is no longer a free guess: it would fail every card search.
+    //
+    // Nothing is lost. LastSeek resolves `bc941dbc…` through its Schema Service
+    // table and answers with every identity that key names, which is what the
+    // extra spellings were reaching for.
+    const semanticHits = await querySearchPlane({
+      query: opts.query,
+      k: NATIVE_INDEX_RESULT_CAP,
+      schemas: cardHash ? [cardHash] : undefined,
+    });
+    if (semanticHits !== null && semanticHits.length > 0) {
+      const slugs: string[] = [];
+      const seen = new Set<string>();
+      for (const h of semanticHits) {
+        const schemaOk =
+          !cardHash ||
+          h.schema_name === cardHash ||
+          h.schema_name === "fkanban/Card" ||
+          h.schema_name === "Card";
+        if (!schemaOk) continue;
+        const slug = h.key_hash;
+        if (!slug || seen.has(slug)) continue;
+        seen.add(slug);
+        slugs.push(slug);
+      }
+      if (slugs.length > 0) {
+        return {
+          slugs,
+          saturated: semanticHits.length >= NATIVE_INDEX_RESULT_CAP,
+        };
+      }
     }
   }
 
@@ -310,7 +323,7 @@ async function indexedSearchCards(
   // card the display index never enumerated — including one whose only match is
   // its title.
   const [displayRead, surfaces] = await Promise.all([
-    listCardsByFilter(opts.node, opts.cfg, filter, CARD_DISPLAY_FIELDS, {
+    listCardsByFilter(opts.node, opts.cfg, filter, CARD_SEARCH_DISPLAY_FIELDS, {
       allowKeyListFallback: false,
     }),
     listCardSearchSurfaces(opts.node, opts.cfg).catch(() => null),
@@ -426,7 +439,7 @@ async function indexedSearchCards(
   let native: { slugs: string[]; saturated: boolean } | null = null;
   if (surfaces === null || scopedDisplay.length === 0) {
     try {
-      native = await nativeIndexCandidateSlugs(opts);
+      native = await nativeIndexCandidateSlugs(opts, "keyword");
     } catch {
       native = null;
     }
