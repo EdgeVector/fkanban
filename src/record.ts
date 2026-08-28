@@ -16,6 +16,7 @@ import {
   type BoardSummary,
 } from "./card-list-index.ts";
 import {
+  awaitBoardCardSearchVisible,
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
   boardCardsHash,
@@ -2706,7 +2707,7 @@ export function assertBodyLoaded(card: Card, operation: string): void {
  * read for a correctness bug.
  */
 type BoardListOpt = {
-  boards?: Board[];
+  boards?: Array<{ slug: string; columns?: readonly string[] }>;
   /**
    * Read only the non-terminal columns of each board.
    *
@@ -3220,7 +3221,7 @@ async function listCardsClientFiltered(
   cfg: Config,
   fields: string[],
   predicate: Record<string, string>,
-  opts: { allowKeyListFallback?: boolean } = {},
+  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
 ): Promise<Card[]> {
   return (await listCardsClientFilteredTraced(node, cfg, fields, predicate, opts)).cards;
 }
@@ -3231,7 +3232,7 @@ async function listCardsClientFilteredTraced(
   cfg: Config,
   fields: string[],
   predicate: Record<string, string>,
-  opts: { allowKeyListFallback?: boolean } = {},
+  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const required = Object.keys(predicate);
   const matches = (c: Card): boolean =>
@@ -3239,6 +3240,16 @@ async function listCardsClientFilteredTraced(
       const actual = (c as unknown as Record<string, unknown>)[field];
       return typeof actual === "string" && actual === predicate[field];
     });
+  // A `board` predicate is HashKey=that board, not "list every partition then
+  // throw the other boards away". Search with `--board` used to fan out over
+  // the whole board list; one shed sibling returned `null` from
+  // `listAllBoardCards` and the display read came back empty — then a newly
+  // created card on the named board was invisible even though `show` (a Card
+  // point-get) returned it. Scope the read to the named partition.
+  const listOpts: { allowKeyListFallback?: boolean } & BoardListOpt = {
+    ...opts,
+    ...(predicate.board && !opts.boards ? { boards: [{ slug: predicate.board }] } : {}),
+  };
   // Prefer column-only path via full list then filter (partition already thin).
   // The filtering is client-side, so `servedBy` describes the READ, not the
   // predicate — which is the honest thing to report: the cost this is a
@@ -3251,7 +3262,7 @@ async function listCardsClientFilteredTraced(
       required,
     ),
     undefined,
-    opts,
+    listOpts,
   );
   return { cards: read.cards.filter(matches), servedBy: read.servedBy };
 }
@@ -3760,7 +3771,7 @@ export async function listCardsByFilter(
   cfg: Config,
   filter: QueryFilter,
   fields: string[],
-  opts: { allowKeyListFallback?: boolean } = {},
+  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const entries = Object.entries(filter).filter(([, value]) => value.length > 0);
   if (entries.length === 0) {
@@ -3968,6 +3979,21 @@ export const CARD_DISPLAY_FIELDS = [
   "created_by",
   "milestone",
 ];
+
+/**
+ * Display projection for `search`. Same as {@link CARD_DISPLAY_FIELDS} minus
+ * `milestone`.
+ *
+ * BoardCards' catalog `hash_field` is `milestone`, and that atom lags ~1–2 s
+ * after a socket write while the rest of the row is visible. Projecting it
+ * drops the new row from the partition listing `search` enumerates, so
+ * `kanban show` (Card HashKey) succeeds and `kanban search` for a unique
+ * title token misses. Removing `milestone` from this projection can only
+ * ADD rows — see `BOARD_CARDS_SEARCH_FIELDS`.
+ */
+export const CARD_SEARCH_DISPLAY_FIELDS = CARD_DISPLAY_FIELDS.filter(
+  (field) => field !== "milestone",
+);
 
 // Like listCards but fetches only CARD_DISPLAY_FIELDS (body-free); absent fields
 // (notably `body`) come back as "" on the Card. Enough for the text board render,
@@ -5115,6 +5141,7 @@ export async function createCardRecord(
   // there can be no other row for the slug to purge. (There is no pre-write read
   // to skip any more — `upsertBoardCard` always writes wide.)
   await writeCardMembership(opts, card, null, { skipOrphanPurge: true });
+  await awaitBoardCardSearchVisible(opts.node, opts.cfg, card);
 }
 
 /**
@@ -5183,6 +5210,7 @@ export async function updateCardRecord(
   const effective = written ? rowToCard({ fields: written, key: { hash: card.slug, range: null } }) : card;
   await patchCardListIndex(opts.node, opts.cfg, effective, "upsert");
   await writeCardMembership(opts, effective, previous ?? null);
+  await awaitBoardCardSearchVisible(opts.node, opts.cfg, effective);
 }
 
 /**

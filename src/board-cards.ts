@@ -1045,9 +1045,11 @@ async function upsertBoardCardOnHash(
   //      actually being made.
   //
   // Callers inherit this: any path that writes a BoardCards row and then reads
-  // a partition back to decide something is reading pre-write state. `move` and
-  // `add` end at the write and `pickup claim` CAS-claims the Card rather than
-  // re-reading the board — keep it that way.
+  // a partition back to DECIDE THE WRITE is reading pre-write state. That is
+  // the pattern that is gone. `createCardRecord` / `updateCardRecord` DO wait
+  // after the write, via `awaitBoardCardSearchVisible`, until the search-shaped
+  // partition query can see the slug — that wait does not choose fields, and
+  // `pickup claim` still CAS-claims the Card rather than re-reading the board.
   //
   // This function was the exception while asserting it was not: until
   // 2026-08-05 the narrow path below read the partition back and decided what
@@ -1109,6 +1111,63 @@ export async function upsertBoardCard(
       previous,
       opts,
     );
+  }
+}
+
+const SEARCH_INDEX_VISIBLE_ATTEMPTS = 8;
+const SEARCH_INDEX_VISIBLE_BACKOFF_MS = [0, 0, 25, 50, 100, 200, 400, 800];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The BoardCards projection `search` uses to enumerate a board.
+ *
+ * `milestone` is deliberately absent. On this schema it is the catalog
+ * `hash_field` and gates from any position, and it is the one field that
+ * lags after a socket write (measured 935–1798 ms while the other 17 varied
+ * fields read fresh at ~5 ms — `readWholeBoardCardRow`). A search that
+ * projects it drops a newly created row until that atom lands, while
+ * `show` point-gets the Card record and returns it immediately. That is
+ * the 2026-08-27 dogfood finding `search-index-divergence`.
+ */
+export const BOARD_CARDS_SEARCH_FIELDS = BOARD_CARDS_DISPLAY_FIELDS.filter(
+  (field) => field !== "milestone",
+);
+
+/**
+ * Wait until the BoardCards partition query `search` will issue can see
+ * this card. The write ACK is not that query: Mini acks off resident and
+ * the durable index can still serve pre-write state.
+ *
+ * Bounded, per-row, and uses {@link BOARD_CARDS_SEARCH_FIELDS} — not a
+ * global `index_wait`. A miss after the budget still returns: the Card
+ * write already succeeded, and failing `add` would turn a search finding
+ * into a lost create.
+ */
+export async function awaitBoardCardSearchVisible(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+): Promise<void> {
+  if (!boardCardsHash(cfg)) return;
+  const board = card.board?.trim();
+  const slug = card.slug?.trim();
+  if (!board || !slug) return;
+  for (let attempt = 0; attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS; attempt++) {
+    try {
+      const rows = await listBoardCardsPartition(node, cfg, board, {
+        fields: BOARD_CARDS_SEARCH_FIELDS,
+      });
+      if (rows?.some((row) => row.slug === slug)) return;
+    } catch {
+      // Shed or busy: retry. The Card row is already stored.
+    }
+    const wait = SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt];
+    if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS - 1) {
+      await delay(wait);
+    }
   }
 }
 
