@@ -269,19 +269,35 @@ while [ "$i" -le "$BURST" ]; do
 done
 
 # 7. concurrent updates to one card
+# Require at least one writer ACK before calling a leftover original title a
+# torn-write. Under node backpressure every writer can fail while the create
+# title remains; that is liveness, not a garbled concurrent write
+# (dogfood kstress-1787946224-42581).
 if [ "$N" -ge 2 ]; then
-  u="$RUN-c2"; vals=""; i=1
+  u="$RUN-c2"; vals=""; i=1; acked=0
   while [ "$i" -le "$BURST" ]; do
     v="v$i-$RUN"; vals="$vals|$v|"
-    ( "$FK" add "$u" --title "$v" --board "$BOARD" --kind "$KSTRESS_KIND" --repo EdgeVector/fold >/dev/null 2>&1 ) &
+    ( "$FK" add "$u" --title "$v" --board "$BOARD" --kind "$KSTRESS_KIND" --repo EdgeVector/fold --json >"$tmp/u$i.out" 2>"$tmp/u$i.err"; echo $? >"$tmp/u$i.rc" ) &
     i=$((i+1))
   done
   wait
+  i=1
+  while [ "$i" -le "$BURST" ]; do
+    rc=$(cat "$tmp/u$i.rc" 2>/dev/null || echo 1)
+    if [ "$rc" = "0" ]; then
+      acked=$((acked + 1))
+    fi
+    i=$((i+1))
+  done
   r1=$(field "$u" '.title'); r2=$(field "$u" '.title'); r3=$(field "$u" '.title')
   if [ "$r1" != "$r2" ] || [ "$r2" != "$r3" ]; then
     finding "unstable-read-after-concurrent-update" "$u: reads diverged '$r1'/'$r2'/'$r3'"
   fi
-  case "$vals" in *"|$r1|"*) : ;; *) finding "torn-write" "$u: final title '$r1' is not any written value" ;; esac
+  if [ "$acked" -eq 0 ]; then
+    errlog "concurrent title updates on $u: 0/$BURST writers ACKed (liveness/backpressure, not torn-write); title='$r1'"
+  else
+    case "$vals" in *"|$r1|"*) : ;; *) finding "torn-write" "$u: final title '$r1' is not any written value (${acked}/${BURST} ACKed)" ;; esac
+  fi
 fi
 
 rm -rf "$tmp" 2>/dev/null || true

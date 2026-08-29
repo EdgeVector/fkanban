@@ -5210,7 +5210,28 @@ export async function updateCardRecord(
   const effective = written ? rowToCard({ fields: written, key: { hash: card.slug, range: null } }) : card;
   await patchCardListIndex(opts.node, opts.cfg, effective, "upsert");
   await writeCardMembership(opts, effective, previous ?? null);
-  await awaitBoardCardSearchVisible(opts.node, opts.cfg, effective);
+  // Search visibility is a contract for a NEW or MOVED BoardCards address —
+  // `createCardRecord` always waits, and an update waits only when the spine
+  // (board/column/position) changed so search must discover a new sk.
+  //
+  // A title-only (or any non-spine) update leaves the row where search already
+  // found it. Waiting here re-lists the partition up to eight times per writer.
+  // dogfood kstress-1787946224: BURST concurrent `add --title` processes each
+  // paid that wait, writers failed under the load, the original title remained,
+  // and the harness labeled the residue `torn-write`. Skip the wait when the
+  // address did not move.
+  if (!previous || boardCardsAddressChanged(previous, effective)) {
+    await awaitBoardCardSearchVisible(opts.node, opts.cfg, effective);
+  }
+}
+
+/** True when BoardCards would place `next` under a different address than `previous`. */
+function boardCardsAddressChanged(previous: Card, next: Card): boolean {
+  return (
+    previous.board !== next.board ||
+    previous.column !== next.column ||
+    String(previous.position) !== String(next.position)
+  );
 }
 
 /**
