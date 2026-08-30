@@ -59,7 +59,7 @@ import {
 import { boardToFields, cardToFields, findCard, nowIso, type Card } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
-import { searchResult } from "../src/commands/search.ts";
+import { SEARCH_SURFACES_UNAVAILABLE, searchResult } from "../src/commands/search.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -302,5 +302,189 @@ describe("the write path waits on every index search reads", () => {
     // 2026-08-27 fix again, and this assertion is what fails if someone tunes it
     // back down for speed.
     expect(SEARCH_INDEX_VISIBLE_BUDGET_MS).toBeGreaterThanOrEqual(3100);
+  });
+});
+
+// ── Fourth occurrence, 2026-08-30 19:37Z ────────────────────────────────────
+//
+// The fix above merged (`cr-mtfjti4v-a516`, main `6b973ff`) and the installed
+// build carried it (`host-track status`: `host_head=6b973ff`, `freshness=fresh`).
+// dogfood-kanban still reported `search-index-divergence` — run
+// `kstress-1788118773-31837`, repro slug `…-s1`, token `kdogtok1788118901` —
+// alongside 8 `board list empty/unreadable` errors.
+//
+// Those errors are the missing half. Every fix so far, this one included, has
+// asked WHICH INDEX the write path waits on, and each assumed the reads
+// themselves answer. Re-measured on the live primary 2026-08-30 with the
+// harness's own concurrent burst running, they do not:
+// `FKANBAN_DEBUG_QUERY_PLAN` reported `bodyScanUnavailable: true` — the Card
+// key-list read SHED. In that state the old code:
+//
+//   - counted each shed read in `awaitBoardCardSearchVisible` as a MISS, so the
+//     budget drained without the question ever being asked, under exactly the
+//     load that makes the wait necessary; and
+//   - skipped `search`'s recovery pass entirely (`surfaces === null`) and
+//     returned 0 matches with exit 0 — indistinguishable from "no such card"
+//     while `show <slug>` still returned the card in full.
+//
+// And a third assumption, from the fix directly above: it accepted `/api/list`
+// KEY membership as proof that search could answer. Search's recovery draws
+// from `listCardSearchSurfaces`, which point-gets each hash with the surface
+// projection and DROPS key-only rows. Key presence and searchable content are
+// two different facts, and the wait was checking the weaker one.
+//
+// The three tests below pin those three, and each fails against the code that
+// shipped in `6b973ff`.
+
+/** Refuse the first `n` BoardCards partition reads outright, then behave. */
+function withRefusedPartitionReads(node: FakeNode, n: number): () => number {
+  let refused = 0;
+  const origQuery = node.queryAll.bind(node);
+  node.queryAll = async (q) => {
+    if (isBoardCardsPartitionQuery(q) && refused < n) {
+      refused++;
+      throw new Error("service_timeout: node did not respond");
+    }
+    return origQuery(q);
+  };
+  return () => refused;
+}
+
+/**
+ * Hand back a KEY-ONLY row for the slug's search-surface point get — the state
+ * `isKeyOnlyRow` exists to name: the key resolves and the atoms have not landed.
+ * The key list still lists it, so only the SURFACE lags.
+ */
+function withKeyOnlySearchSurface(node: FakeNode, slug: string): void {
+  const origQuery = node.queryAll.bind(node);
+  node.queryAll = async (q) => {
+    const res = await origQuery(q);
+    const filter = q.filter as Record<string, unknown> | undefined;
+    if (q.schemaHash !== "cardhash" || filter?.HashKey !== slug) return res;
+    if (!q.fields?.includes("title")) return res;
+    const results = res.results.map((row) => ({ ...row, fields: { slug } }));
+    return { ...res, results };
+  };
+}
+
+describe("the wait survives the load that makes it necessary", () => {
+  let node: FakeNode;
+
+  beforeEach(() => {
+    node = fakeNode({ hashFields: { boardcardshash: "milestone" } });
+    seedBoard(node, SCRATCH);
+  });
+
+  test("a REFUSED read does not spend the budget a lagging read is for", async () => {
+    // Six shed reads, then a partition that lags a further full budget's worth.
+    // Charging the refusals leaves nothing for the lag — which is the shape the
+    // live node produced: the reads shed and lag at the same time, under the
+    // same load.
+    const card = writtenCard();
+    seedWrittenCard(node, card);
+    const refusedReads = withRefusedPartitionReads(node, 6);
+    const counters = withLaggingEnumerations(node, {
+      slug: SLUG,
+      // `withLaggingEnumerations` counts only reads that ANSWERED, so this is
+      // 12 lagging reads after the 6 refused ones. Together they outlast the
+      // 12-attempt budget if — and only if — a refusal is charged to it.
+      partitionVisibleAfter: 12,
+      keyListVisibleAfter: Number.MAX_SAFE_INTEGER,
+    });
+
+    const visible = await awaitBoardCardSearchVisible(node, cfg, card, { sleep: async () => {} });
+
+    expect(visible).toBe(true);
+    expect(refusedReads()).toBe(6);
+    expect(counters.partitionReads()).toBe(12);
+  });
+
+  test("the key-list source proves the SURFACE search reads, not just the key", async () => {
+    // The key is listed from the first read. Its search surface never is — the
+    // point get comes back carrying the hash field alone, so
+    // `listCardSearchSurfaces` drops it and `search`'s recovery pass has no
+    // candidate. A wait that stops at key membership reports success about a
+    // source that would discard the card.
+    const card = writtenCard();
+    seedWrittenCard(node, card);
+    withLaggingEnumerations(node, {
+      slug: SLUG,
+      partitionVisibleAfter: Number.MAX_SAFE_INTEGER,
+      keyListVisibleAfter: 1,
+    });
+    withKeyOnlySearchSurface(node, SLUG);
+
+    const visible = await awaitBoardCardSearchVisible(node, cfg, card, { sleep: async () => {} });
+
+    // False, and therefore WARNED — the honest answer. `true` here is the
+    // fourth occurrence: `add` returns silently and `search` still misses.
+    expect(visible).toBe(false);
+  });
+});
+
+describe("search declares a degraded read instead of answering empty", () => {
+  let node: FakeNode;
+
+  beforeEach(() => {
+    node = fakeNode({ hashFields: { boardcardshash: "milestone" } });
+    seedBoard(node, SCRATCH);
+  });
+
+  /** Throw from the key-list enumeration for the first `n` calls. */
+  function withRefusedKeyListReads(node: FakeNode, n: number): () => number {
+    let refused = 0;
+    const origList = node.listRecordKeys!.bind(node);
+    node.listRecordKeys = async (schemaHash, listOpts) => {
+      if (schemaHash === "cardhash" && refused < n) {
+        refused++;
+        throw new Error("too many concurrent reads");
+      }
+      return origList(schemaHash, listOpts);
+    };
+    return () => refused;
+  }
+
+  test("a key-list read that sheds once is retried, and the card is found", async () => {
+    // The recovery pass is the ONLY path to a card the display index has not
+    // enumerated. A shed read is backpressure, not "no cards" — so asking again
+    // is what turns the reported divergence back into a hit.
+    const card = writtenCard();
+    seedWrittenCard(node, card);
+    withLaggingEnumerations(node, {
+      slug: SLUG,
+      partitionVisibleAfter: Number.MAX_SAFE_INTEGER,
+      keyListVisibleAfter: 1,
+    });
+    const refusedReads = withRefusedKeyListReads(node, 1);
+
+    const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN, board: SCRATCH });
+
+    expect(refusedReads()).toBe(1);
+    expect(res.cards.map((c) => c.slug)).toEqual([SLUG]);
+  });
+
+  test("a key-list read that keeps shedding is reported, not returned as no-match", async () => {
+    const card = writtenCard();
+    seedWrittenCard(node, card);
+    withLaggingEnumerations(node, {
+      slug: SLUG,
+      partitionVisibleAfter: Number.MAX_SAFE_INTEGER,
+      keyListVisibleAfter: 1,
+    });
+    withRefusedKeyListReads(node, Number.MAX_SAFE_INTEGER);
+    const warnings: string[] = [];
+
+    const res = await searchResult({
+      cfg,
+      node,
+      query: DOGFOOD_TOKEN,
+      board: SCRATCH,
+      warn: (m) => warnings.push(m),
+    });
+
+    // Still no match — the read genuinely could not be made. The defect was
+    // never the empty list; it was returning it as if it were an answer.
+    expect(res.cards).toEqual([]);
+    expect(warnings.join("\n")).toContain(SEARCH_SURFACES_UNAVAILABLE);
   });
 });

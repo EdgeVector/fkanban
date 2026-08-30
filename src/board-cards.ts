@@ -23,7 +23,11 @@ import {
   POINT_READ_CONCURRENCY,
 } from "./concurrency.ts";
 import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
-import type { Card } from "./record.ts";
+import {
+  CARD_SEARCH_SURFACE_FIELDS,
+  isKeyOnlyRow,
+  type Card,
+} from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 import {
   enqueueBoardCardJanitor,
@@ -1141,6 +1145,24 @@ const SEARCH_INDEX_VISIBLE_ATTEMPTS = SEARCH_INDEX_VISIBLE_BACKOFF_MS.length;
  */
 const SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT = 3;
 
+/**
+ * How many rounds may be retried WITHOUT being charged to the attempt budget
+ * because every source they consulted refused to answer.
+ *
+ * The refusal is not hypothetical and it is not rare: with the harness's own
+ * concurrent burst on the board, `FKANBAN_DEBUG_QUERY_PLAN` reported
+ * `bodyScanUnavailable: true` on the live primary (2026-08-30) — the key-list
+ * read shed outright. Under that load the old loop counted each shed read as a
+ * miss, so the budget drained without the question ever being asked.
+ *
+ * Bounded rather than open-ended: a node that refuses every read must still let
+ * `add` return, warning, instead of hanging on it.
+ */
+const SEARCH_INDEX_REFUSED_ROUNDS = 6;
+
+/** Pause between refused rounds. Backpressure wants a gap, not a tight spin. */
+const SEARCH_INDEX_REFUSED_BACKOFF_MS = 250;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1161,16 +1183,29 @@ export const BOARD_CARDS_SEARCH_FIELDS = BOARD_CARDS_DISPLAY_FIELDS.filter(
 );
 
 /**
- * Is the slug in the Card key list — the enumeration `search`'s recovery pass
- * draws its candidates from?
+ * Can `search`'s recovery pass draw this slug as a candidate?
  *
- * `/api/list` only, no field hydration: this answers membership, and
- * `listCardsFromKeyList` point-gets each hash afterwards. A node whose client
- * predates `/api/list` reports `null` — unknown, not absent — so the caller
- * keeps waiting on the partition instead of treating a missing capability as a
- * hit.
+ * Not the same question as "is the key in the Card key list", and the
+ * difference is the third fix's mistake. `search` recovers a card the display
+ * index has not enumerated from {@link listCardSearchSurfaces}, which walks the
+ * key list and then point-gets each hash with the SURFACE projection — dropping
+ * any row that comes back carrying the hash field alone
+ * (`listCardsFromKeyList`'s `isKeyOnlyRow` filter). A key whose atoms have not
+ * landed yet is in the key list and NOT in that map, so a wait that stopped at
+ * `/api/list` membership reported "search can see it" about a source search
+ * would discard — the same shape as the two fixes before it, which each proved
+ * one index fresh and assumed the other matched what search reads.
+ *
+ * So this asks the key list for membership and then asks for the projection
+ * search actually consumes. Two reads, both bounded, and only from
+ * {@link SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT} — the point get is one hash, not
+ * the whole map.
+ *
+ * A node whose client predates `/api/list` reports `null` — unknown, not
+ * absent — so the caller keeps waiting on the partition instead of treating a
+ * missing capability as a hit.
  */
-async function cardKeyListHasSlug(
+async function cardSearchSurfaceHasSlug(
   node: NodeClient,
   cfg: Config,
   slug: string,
@@ -1179,16 +1214,27 @@ async function cardKeyListHasSlug(
   const schemaHash = schemaHashFor("card", cfg);
   let cursor: string | null = null;
   const seenCursors = new Set<string>();
+  let inKeyList = false;
   for (;;) {
     const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
-    if (page.keys.some((key) => key.hash === slug)) return true;
-    if (!page.has_more) return false;
+    if (page.keys.some((key) => key.hash === slug)) {
+      inKeyList = true;
+      break;
+    }
+    if (!page.has_more) break;
     if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
-      return false;
+      break;
     }
     seenCursors.add(page.next_cursor);
     cursor = page.next_cursor;
   }
+  if (!inKeyList) return false;
+
+  const fields = [...CARD_SEARCH_SURFACE_FIELDS];
+  const res = await node.queryAll({ schemaHash, fields, filter: { HashKey: slug } });
+  const row = res.results[0];
+  if (row === undefined) return false;
+  return !isKeyOnlyRow(row, fields);
 }
 
 /**
@@ -1234,24 +1280,41 @@ export async function awaitBoardCardSearchVisible(
   const board = card.board?.trim();
   const slug = card.slug?.trim();
   if (!board || !slug) return true;
-  for (let attempt = 0; attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS; attempt++) {
+  let attempt = 0;
+  let refusedRounds = 0;
+  while (attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
     const partition = listBoardCardsPartition(node, cfg, board, {
       fields: BOARD_CARDS_SEARCH_FIELDS,
     })
-      .then((rows) => rows?.some((row) => row.slug === slug) ?? false)
-      // Shed or busy: this attempt is unknown, not a miss. The Card row is
-      // already stored, so the next attempt asks again.
-      .catch(() => false);
+      .then((rows): boolean | null => rows?.some((row) => row.slug === slug) ?? false)
+      // Shed or busy: this read is UNKNOWN, not a miss. `null` is that third
+      // answer — reached only by a throw, never by an empty result — and the
+      // round below does not spend budget on it.
+      .catch((): boolean | null => null);
     // The second source joins only once the cheap one has missed a few times.
-    const keyList =
+    const surface =
       attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT
-        ? cardKeyListHasSlug(node, cfg, slug).catch(() => null)
+        ? cardSearchSurfaceHasSlug(node, cfg, slug).catch(() => null)
         : Promise.resolve(null);
-    const [inPartition, inKeyList] = await Promise.all([partition, keyList]);
-    if (inPartition || inKeyList === true) return true;
+    const [inPartition, inSurface] = await Promise.all([partition, surface]);
+    if (inPartition === true || inSurface === true) return true;
+
+    // A round in which every source it consulted was REFUSED asked nothing, so
+    // charging it to the budget shortens the wait by exactly the load that
+    // makes the wait necessary. The comment above has claimed "unknown, not a
+    // miss" since the third fix; returning `false` for a refusal is what made
+    // it untrue. Bounded, so a node refusing every read still terminates.
+    const consulted = attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT;
+    const answered = inPartition !== null || (consulted && inSurface !== null);
+    if (!answered && refusedRounds < SEARCH_INDEX_REFUSED_ROUNDS) {
+      refusedRounds++;
+      await sleep(SEARCH_INDEX_REFUSED_BACKOFF_MS);
+      continue;
+    }
 
     const wait = SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt];
-    if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS - 1) {
+    attempt++;
+    if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
       await sleep(wait);
     }
   }
