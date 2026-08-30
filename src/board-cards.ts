@@ -1212,29 +1212,32 @@ async function cardSearchSurfaceHasSlug(
 ): Promise<boolean | null> {
   if (!node.listRecordKeys) return null;
   const schemaHash = schemaHashFor("card", cfg);
+
+  // Cheap read first, and it gates the expensive one. The surface point get is
+  // ONE hash; the key-list walk is every hash on the node (measured 760 ms for
+  // 1967 of them against ~47 ms for the partition). Asking the cheap question
+  // first means the common failing case — atoms not landed yet — costs one
+  // keyed read per attempt instead of a full enumeration, so proving the
+  // stronger fact is cheaper than the weaker one it replaced.
+  const fields = [...CARD_SEARCH_SURFACE_FIELDS];
+  const res = await node.queryAll({ schemaHash, fields, filter: { HashKey: slug } });
+  const row = res.results[0];
+  if (row === undefined || isKeyOnlyRow(row, fields)) return false;
+
+  // Content alone is not enough: the recovery pass iterates the key list, so a
+  // surface the enumeration does not reach is still one search cannot draw.
   let cursor: string | null = null;
   const seenCursors = new Set<string>();
-  let inKeyList = false;
   for (;;) {
     const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
-    if (page.keys.some((key) => key.hash === slug)) {
-      inKeyList = true;
-      break;
-    }
-    if (!page.has_more) break;
+    if (page.keys.some((key) => key.hash === slug)) return true;
+    if (!page.has_more) return false;
     if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
-      break;
+      return false;
     }
     seenCursors.add(page.next_cursor);
     cursor = page.next_cursor;
   }
-  if (!inKeyList) return false;
-
-  const fields = [...CARD_SEARCH_SURFACE_FIELDS];
-  const res = await node.queryAll({ schemaHash, fields, filter: { HashKey: slug } });
-  const row = res.results[0];
-  if (row === undefined) return false;
-  return !isKeyOnlyRow(row, fields);
 }
 
 /**
