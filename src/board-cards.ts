@@ -14,7 +14,7 @@
 // 1299ms vs 7-field DEP_SEED 416ms). List paths must project only what the
 // caller needs — never default the full 24-field write shape.
 
-import type { Config } from "./config.ts";
+import { schemaHashFor, type Config } from "./config.ts";
 import { FkanbanError, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
 import {
@@ -1114,8 +1114,32 @@ export async function upsertBoardCard(
   }
 }
 
-const SEARCH_INDEX_VISIBLE_ATTEMPTS = 8;
-const SEARCH_INDEX_VISIBLE_BACKOFF_MS = [0, 0, 25, 50, 100, 200, 400, 800];
+/**
+ * The wait budget, sized from the lag it has to cover rather than from feel.
+ *
+ * Measured on the live primary 2026-08-30, `scripts/probe-search-read-lag.ts`,
+ * four creates through the real CLI: the BoardCards partition read had still
+ * not seen the new row when `add` returned (4 of 4), and first saw it ~1.6 s
+ * LATER — about 3.1 s after the write began. The previous budget summed to
+ * 1575 ms of sleep, so it always expired first, and the divergence it exists to
+ * prevent was reported by dogfood on 2026-08-21, 2026-08-27 and 2026-08-30.
+ *
+ * The sleeps below total 5925 ms. The loop still returns the moment either
+ * source can see the row, so a write whose index settles promptly pays what it
+ * paid before; only a genuinely slow one spends the tail.
+ */
+const SEARCH_INDEX_VISIBLE_BACKOFF_MS = [0, 25, 50, 100, 200, 300, 500, 750, 1000, 1000, 1000, 1000];
+const SEARCH_INDEX_VISIBLE_ATTEMPTS = SEARCH_INDEX_VISIBLE_BACKOFF_MS.length;
+
+/**
+ * First attempt that also consults the Card key list.
+ *
+ * The key list is the expensive read of the two (measured 760 ms for 1967
+ * hashes against ~47 ms for the partition), and it is the SECOND source, not
+ * the primary one — so a write whose BoardCards row lands quickly must never
+ * pay for it. From this attempt on, the two run concurrently.
+ */
+const SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT = 3;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1137,38 +1161,123 @@ export const BOARD_CARDS_SEARCH_FIELDS = BOARD_CARDS_DISPLAY_FIELDS.filter(
 );
 
 /**
- * Wait until the BoardCards partition query `search` will issue can see
- * this card. The write ACK is not that query: Mini acks off resident and
- * the durable index can still serve pre-write state.
+ * Is the slug in the Card key list — the enumeration `search`'s recovery pass
+ * draws its candidates from?
  *
- * Bounded, per-row, and uses {@link BOARD_CARDS_SEARCH_FIELDS} — not a
- * global `index_wait`. A miss after the budget still returns: the Card
- * write already succeeded, and failing `add` would turn a search finding
- * into a lost create.
+ * `/api/list` only, no field hydration: this answers membership, and
+ * `listCardsFromKeyList` point-gets each hash afterwards. A node whose client
+ * predates `/api/list` reports `null` — unknown, not absent — so the caller
+ * keeps waiting on the partition instead of treating a missing capability as a
+ * hit.
+ */
+async function cardKeyListHasSlug(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+): Promise<boolean | null> {
+  if (!node.listRecordKeys) return null;
+  const schemaHash = schemaHashFor("card", cfg);
+  let cursor: string | null = null;
+  const seenCursors = new Set<string>();
+  for (;;) {
+    const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
+    if (page.keys.some((key) => key.hash === slug)) return true;
+    if (!page.has_more) return false;
+    if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
+      return false;
+    }
+    seenCursors.add(page.next_cursor);
+    cursor = page.next_cursor;
+  }
+}
+
+/**
+ * Wait until `search` can find this card. The write ACK is not that query: Mini
+ * acks off resident and the durable index can still serve pre-write state.
+ *
+ * **Both** of search's sources are waited on, because either one is enough for
+ * it to answer. `indexedSearchCards` matches over the BoardCards partition AND
+ * runs a recovery pass over the Card key list, point-getting any key-list slug
+ * the partition did not enumerate — and a point get is fresh the moment the
+ * write acks. Waiting on the partition alone therefore waits past the point
+ * where search would already have succeeded, and — worse — reports success
+ * while search is still blind whenever the partition is the slower of the two.
+ * Measured 2026-08-30 (`scripts/probe-search-read-lag.ts`): at search's exact
+ * moment the partition missed 4 of 4 and the key list missed 3 of 4, while the
+ * point get hit 4 of 4.
+ *
+ * A miss after the budget still returns — the Card write already succeeded, and
+ * failing `add` would turn a search finding into a lost create — but it returns
+ * `false` and the caller WARNS. Silence is what let this defect recur three
+ * times: `add` printed `created card …`, `show` read it back, and nothing said
+ * that `search` could not see it yet, so two fixes read as holding while the
+ * divergence was live.
+ *
+ * @returns `true` when a source search uses can see the card, `false` when the
+ *   budget expired without one. Also `true` when there is nothing to wait for
+ *   (no BoardCards hash, or a card with no board/slug).
  */
 export async function awaitBoardCardSearchVisible(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
-): Promise<void> {
-  if (!boardCardsHash(cfg)) return;
+  /**
+   * `sleep` is a test seam, not a tuning knob. The budget below is measured in
+   * seconds, so a test that exercises the exhausted path through the real timer
+   * costs those seconds — and a guarantee too slow to assert is one nothing
+   * asserts, which is how the silent give-up survived two fixes.
+   */
+  opts?: { sleep?: (ms: number) => Promise<void> },
+): Promise<boolean> {
+  const sleep = opts?.sleep ?? delay;
+  if (!boardCardsHash(cfg)) return true;
   const board = card.board?.trim();
   const slug = card.slug?.trim();
-  if (!board || !slug) return;
+  if (!board || !slug) return true;
   for (let attempt = 0; attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS; attempt++) {
-    try {
-      const rows = await listBoardCardsPartition(node, cfg, board, {
-        fields: BOARD_CARDS_SEARCH_FIELDS,
-      });
-      if (rows?.some((row) => row.slug === slug)) return;
-    } catch {
-      // Shed or busy: retry. The Card row is already stored.
-    }
+    const partition = listBoardCardsPartition(node, cfg, board, {
+      fields: BOARD_CARDS_SEARCH_FIELDS,
+    })
+      .then((rows) => rows?.some((row) => row.slug === slug) ?? false)
+      // Shed or busy: this attempt is unknown, not a miss. The Card row is
+      // already stored, so the next attempt asks again.
+      .catch(() => false);
+    // The second source joins only once the cheap one has missed a few times.
+    const keyList =
+      attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT
+        ? cardKeyListHasSlug(node, cfg, slug).catch(() => null)
+        : Promise.resolve(null);
+    const [inPartition, inKeyList] = await Promise.all([partition, keyList]);
+    if (inPartition || inKeyList === true) return true;
+
     const wait = SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt];
     if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS - 1) {
-      await delay(wait);
+      await sleep(wait);
     }
   }
+  return false;
+}
+
+/** The wait budget in milliseconds — exported so a test can pin it to the measured lag. */
+export const SEARCH_INDEX_VISIBLE_BUDGET_MS = SEARCH_INDEX_VISIBLE_BACKOFF_MS.reduce(
+  (a, b) => a + b,
+  0,
+);
+
+/**
+ * What an operator is told when a card is written but `search` still cannot see
+ * it.
+ *
+ * Named and exported so the create and update paths cannot word it differently,
+ * and so a test can pin the sentence rather than a substring of it.
+ */
+export function searchVisibilityTimeoutWarning(slug: string): string {
+  return (
+    `warning: "${slug}" was written and \`show\` can read it, but no index ` +
+    "`search` uses could see it within " +
+    `${SEARCH_INDEX_VISIBLE_BUDGET_MS}ms. ` +
+    "`search` may miss this card until the index catches up."
+  );
 }
 
 /**
