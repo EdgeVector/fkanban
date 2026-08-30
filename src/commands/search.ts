@@ -10,6 +10,7 @@ import {
   ensureColumn,
   findCard,
   listCardSearchSurfaces,
+  type CardSearchSurface,
   listDependencyStatusesForCards,
   listCardsByFilter,
   listCardsWithBodies,
@@ -305,6 +306,52 @@ async function semanticSearchCards(
   };
 }
 
+/**
+ * Why a refused key-list read is retried instead of counted as "no cards".
+ *
+ * This read is the recovery pass's ONLY source: a card the display index has
+ * not enumerated yet is reachable through it and through nothing else. Under
+ * load the node sheds it — observed on the live primary 2026-08-30 with the
+ * dogfood harness's own concurrent burst running, `FKANBAN_DEBUG_QUERY_PLAN`
+ * reporting `bodyScanUnavailable: true`. A shed read is BACKPRESSURE, not an
+ * answer, and the old `.catch(() => null)` turned it into one: the recovery
+ * pass was skipped and `search` exited 0 with no match, which reads exactly
+ * like "no such card" while `show` still returns the card in full.
+ *
+ * That is the `search-index-divergence` shape the dogfood harness reports, and
+ * it is the half no previous fix touched — all three moved which index the
+ * write path WAITS on, and none asked what `search` does when its own read is
+ * refused.
+ *
+ * One retry, not a loop: the caller is an interactive search, and a node
+ * refusing twice is degraded in a way the answer must DECLARE rather than
+ * out-wait. The declaration is {@link SEARCH_SURFACES_UNAVAILABLE}.
+ */
+async function readSearchSurfaces(
+  opts: SearchOptions,
+): Promise<Map<string, CardSearchSurface> | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await listCardSearchSurfaces(opts.node, opts.cfg);
+    } catch {
+      // fall through to the retry, then to the declared-degraded answer
+    }
+  }
+  return null;
+}
+
+/**
+ * What `search` says when it answered from the board index alone.
+ *
+ * Named and exported so the sentence is pinned by a test rather than spelled
+ * differently at each call site, and so "no card matches" and "one of my two
+ * sources would not answer" can never again be the same output.
+ */
+export const SEARCH_SURFACES_UNAVAILABLE =
+  "the Card key list could not be read, so `search` answered from the board " +
+  "index alone — a card that index has not enumerated yet is missing from this " +
+  "result even though `show <slug>` can read it";
+
 async function indexedSearchCards(
   opts: SearchOptions,
 ): Promise<{ cards: Card[]; allCards: Card[]; fallbackReason?: string }> {
@@ -326,7 +373,7 @@ async function indexedSearchCards(
     listCardsByFilter(opts.node, opts.cfg, filter, CARD_SEARCH_DISPLAY_FIELDS, {
       allowKeyListFallback: false,
     }),
-    listCardSearchSurfaces(opts.node, opts.cfg).catch(() => null),
+    readSearchSurfaces(opts),
   ]);
 
   const inScope = (c: Card): boolean =>
@@ -507,7 +554,15 @@ async function indexedSearchCards(
     // Only the degraded path can be incomplete now: with the key-list read AND
     // a board enumeration, the display match plus the recovery pass reach every
     // board card, so a saturated native cap is no longer a partial answer.
-    fallbackReason: native?.saturated ? "native-index returned its cap" : undefined,
+    // Two different incomplete answers, reported as themselves. The degraded
+    // key-list read comes first: it is the one that can hide a card the caller
+    // just wrote.
+    fallbackReason:
+      surfaces === null
+        ? SEARCH_SURFACES_UNAVAILABLE
+        : native?.saturated
+          ? "native-index returned its cap"
+          : undefined,
   };
 }
 
@@ -587,13 +642,16 @@ export async function searchResult(
     }
   } else {
     const indexed = await indexedSearchCards(opts);
+    allCards = indexed.allCards;
+    matches = indexed.cards;
     if (indexed.fallbackReason !== undefined) {
       debugSearchPlan("indexed-candidates", { reason: indexed.fallbackReason, fullBodyScan: false });
-      allCards = indexed.allCards;
-      matches = indexed.cards;
-    } else {
-      allCards = indexed.allCards;
-      matches = indexed.cards;
+      // Surfaced rather than swallowed, on the DEFAULT path — the same rule the
+      // `--semantic` branch above already follows, and the branch this used to
+      // be was two identical bodies around a reason only the debug env var ever
+      // printed. `warnIfTruncated` below already defaults to `console.error`;
+      // an incomplete answer is at least as worth saying as a capped one.
+      (opts.warn ?? console.error)(`note: ${indexed.fallbackReason}`);
     }
   }
 
