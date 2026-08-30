@@ -17,6 +17,7 @@ import {
 } from "./card-list-index.ts";
 import {
   awaitBoardCardSearchVisible,
+  searchVisibilityTimeoutWarning,
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
   boardCardsHash,
@@ -5141,7 +5142,9 @@ export async function createCardRecord(
   // there can be no other row for the slug to purge. (There is no pre-write read
   // to skip any more — `upsertBoardCard` always writes wide.)
   await writeCardMembership(opts, card, null, { skipOrphanPurge: true });
-  await awaitBoardCardSearchVisible(opts.node, opts.cfg, card);
+  if (!(await awaitBoardCardSearchVisible(opts.node, opts.cfg, card))) {
+    console.error(searchVisibilityTimeoutWarning(card.slug));
+  }
 }
 
 /**
@@ -5221,7 +5224,9 @@ export async function updateCardRecord(
   // and the harness labeled the residue `torn-write`. Skip the wait when the
   // address did not move.
   if (!previous || boardCardsAddressChanged(previous, effective)) {
-    await awaitBoardCardSearchVisible(opts.node, opts.cfg, effective);
+    if (!(await awaitBoardCardSearchVisible(opts.node, opts.cfg, effective))) {
+      console.error(searchVisibilityTimeoutWarning(effective.slug));
+    }
   }
 }
 
