@@ -34,6 +34,16 @@ export type PingOptions = {
    * specific thing a caller can supply, so it short-circuits the disk read.
    */
   cfg?: Config;
+  /**
+   * Deadline for the single status request. Omitted, the probe inherits the
+   * shared data-plane default (`FKANBAN_HTTP_TIMEOUT_MS`, else 30s).
+   *
+   * Exposed so a caller with its own budget can bound the probe to it rather
+   * than discovering the inherited one the hard way. The fleet sets 90s for
+   * data-plane reads; a routine that gates on liveness and then loses 90 of its
+   * 126 seconds to the gate has been failed by the check, not by the node.
+   */
+  timeoutMs?: number;
   json?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
@@ -57,6 +67,7 @@ export async function runPingStructured(
   const report = await pingNode({
     nodeUrl: cfg.nodeUrl,
     socketPath: resolveSocketPath(cfg),
+    timeoutMs: opts.timeoutMs,
     verbose: opts.verbose,
   });
   return { ...report, version: pkg.version };
@@ -69,6 +80,16 @@ export async function pingCommand(opts: PingOptions = {}): Promise<number> {
     print(JSON.stringify(report));
   } else if (report.ok) {
     print(`✓ node ok in ${report.latency_ms}ms`);
+  } else if (report.timed_out) {
+    // Do NOT say "unreachable" here. The node answered nothing within the
+    // deadline, which on this endpoint is an ordinary outcome for a busy or
+    // freshly-restarted node — `/api/status` re-walks the entire store per
+    // request (see `PingReport.timed_out`). The fleet gates real work on this
+    // one line: CLAUDE.md points every agent at `kanban ping` as THE health
+    // check, and routines that read "unreachable" stop. Saying "busy" instead
+    // is not a softer word for the same thing, it is the accurate one, and it
+    // is the difference between a routine retrying and a routine aborting.
+    print(`✗ node did not answer in ${report.latency_ms}ms — busy, not unreachable — ${report.error}`);
   } else {
     print(`✗ node unreachable — ${report.error}`);
   }

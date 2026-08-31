@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { pingNode } from "../src/client.ts";
-import { runPingStructured } from "../src/commands/ping.ts";
+import { pingCommand, runPingStructured } from "../src/commands/ping.ts";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -26,6 +26,37 @@ function collapsedSocket(): string {
   const dir = mkdtempSync(join(tmpdir(), "fkanban-ping-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return join(dir, "folddb.sock");
+}
+
+// `resolveSocketPath` consults FOLDDB_SOCKET_PATH / LASTDB_HOME before it ever
+// looks at the config it was handed. A `pingCommand` test that only sets
+// `nodeSocketPath` would therefore probe the developer's REAL node whenever
+// either variable is set in the shell — the exact accident the `cfg` parameter
+// was added to stop. Pin the resolution for the duration of the test.
+function pinSocket(sock: string): void {
+  const prevSock = process.env.FOLDDB_SOCKET_PATH;
+  const prevLastdb = process.env.LASTDB_HOME;
+  const prevFold = process.env.FOLDDB_HOME;
+  process.env.FOLDDB_SOCKET_PATH = sock;
+  delete process.env.LASTDB_HOME;
+  delete process.env.FOLDDB_HOME;
+  cleanups.push(() => {
+    if (prevSock === undefined) delete process.env.FOLDDB_SOCKET_PATH;
+    else process.env.FOLDDB_SOCKET_PATH = prevSock;
+    if (prevLastdb !== undefined) process.env.LASTDB_HOME = prevLastdb;
+    if (prevFold !== undefined) process.env.FOLDDB_HOME = prevFold;
+  });
+}
+
+function fakeCfg(sock: string): never {
+  return {
+    configVersion: 1,
+    nodeUrl: "http://127.0.0.1:9001",
+    schemaServiceUrl: "https://schema.invalid",
+    userHash: "0".repeat(32),
+    schemaHashes: {},
+    nodeSocketPath: sock,
+  } as never;
 }
 
 /**
@@ -110,6 +141,41 @@ describe("pingNode", () => {
     expect(report.error!.length).toBeGreaterThan(0);
   });
 
+  // A node that accepts the connection and then never answers is the shape the
+  // fleet actually hits: `/api/status` recomputes a recursive walk of the whole
+  // store per request, so a healthy-but-loaded primary blows past the caller's
+  // deadline while its ordinary reads stay in single-digit ms. The probe must
+  // report that as a deadline, never as a missing node.
+  test("a node that never answers is a timeout, not unreachability", async () => {
+    const sock = collapsedSocket();
+    const uds = Bun.serve({
+      unix: sock,
+      async fetch() {
+        await new Promise(() => {}); // accepts, then never replies
+        return new Response("unreachable");
+      },
+    });
+    track(uds);
+
+    const report = await pingNode({
+      nodeUrl: "http://127.0.0.1:9001",
+      socketPath: sock,
+      timeoutMs: 150,
+    });
+    expect(report.ok).toBe(false);
+    expect(report.timed_out).toBe(true);
+    expect(report.error).toContain("did not respond within 150ms");
+  });
+
+  // The negative half, and the one that matters most: a genuinely absent node
+  // must NOT acquire the busy flag, or the distinction buys nothing.
+  test("a down node is not flagged as timed out", async () => {
+    const sock = collapsedSocket(); // never served
+    const report = await pingNode({ nodeUrl: "http://127.0.0.1:9001", socketPath: sock });
+    expect(report.ok).toBe(false);
+    expect(report.timed_out).toBeUndefined();
+  });
+
   test("node answering non-2xx is ok:false with the mapped error", async () => {
     const sock = collapsedSocket();
     const uds = Bun.serve({
@@ -123,6 +189,48 @@ describe("pingNode", () => {
     const report = await pingNode({ nodeUrl: "http://127.0.0.1:9001", socketPath: sock });
     expect(report.ok).toBe(false);
     expect(report.error).toBe("node_locked");
+  });
+});
+
+// The fleet gates on the PRINTED line, not on the report object: routines run
+// `kanban ping` in a shell and branch on what it says. These assert the words.
+describe("pingCommand output", () => {
+  test("a timeout does not print 'unreachable'", async () => {
+    const sock = collapsedSocket();
+    const uds = Bun.serve({
+      unix: sock,
+      async fetch() {
+        await new Promise(() => {});
+        return new Response("unreachable");
+      },
+    });
+    track(uds);
+
+    pinSocket(sock);
+    const lines: string[] = [];
+    const rc = await pingCommand({
+      cfg: fakeCfg(sock),
+      print: (l) => lines.push(l),
+      timeoutMs: 150,
+    });
+
+    expect(rc).toBe(1); // a probe that did not complete is still not a pass
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("busy, not unreachable");
+    expect(lines[0]).not.toContain("node unreachable");
+  });
+
+  test("a down node still prints 'unreachable'", async () => {
+    const sock = collapsedSocket(); // never served
+    pinSocket(sock);
+    const lines: string[] = [];
+    const rc = await pingCommand({
+      cfg: fakeCfg(sock),
+      print: (l) => lines.push(l),
+    });
+
+    expect(rc).toBe(1);
+    expect(lines[0]).toContain("node unreachable");
   });
 });
 

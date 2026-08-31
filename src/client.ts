@@ -1721,6 +1721,35 @@ export type PingReport = {
   latency_ms: number;
   socket_path?: string;
   error?: string;
+  /**
+   * True when the probe hit its own deadline instead of an answer.
+   *
+   * A deadline is NOT unreachability, and conflating the two is what this field
+   * exists to stop. `/api/status` is the most expensive request the node
+   * serves: it recomputes `status_data_dir`, a synchronous recursive walk of
+   * the whole store, per request with no cache. Measured on the live primary
+   * 2026-08-31 (`lastdb ops`, one hour of process life), across the four
+   * clients that call it:
+   *
+   * | client                | calls | avg   | max     |
+   * |---|---|---|---|
+   * | `lastdb`              | 109   | 10.7s | 1m21s   |
+   * | `peer:curl`           | 138   | 6.1s  | 1m31s   |
+   * | `lastdb-memory-guard` | 56    | 8.4s  | 1m23s   |
+   * | `lastgit`             | 36    | 6.4s  | 1m20s   |
+   *
+   * 339 status calls, 45 minutes of node service time — against `lastgit query`
+   * at 4ms over 173,614 calls. The cost scales with the store (it was 332ms in
+   * the 2026-08-05 measurement, when the store was 7.32 GiB; it is 24.45 GiB
+   * now), so a HEALTHY node routinely takes longer than a caller's deadline.
+   *
+   * Without this flag the fleet read every such deadline as "node unreachable"
+   * and aborted whole passes: `last-stack-fkanban-watch` 2026-08-31T07:04Z
+   * burned 90s of a 126s run on one ping and skipped its entire board sweep,
+   * 27 minutes after a node restart, while ordinary reads on that same node
+   * were answering in single-digit milliseconds.
+   */
+  timed_out?: boolean;
 };
 
 // One unauthenticated GET /api/status — a liveness probe, not a data-plane
@@ -1831,11 +1860,17 @@ export async function pingNode(opts: {
     }
     return { ok: true, latency_ms: latency(), socket_path: socketPath };
   } catch (err) {
+    // A deadline and a dead node are different answers and must not print the
+    // same. `ok` stays false either way — a probe that did not complete has not
+    // observed storage, and callers that need a positive liveness answer still
+    // do not have one — but `timed_out` tells them WHICH failure they have, so
+    // a slow node can be retried or waited on instead of being reported down.
     return {
       ok: false,
       latency_ms: latency(),
       socket_path: socketPath,
       error: err instanceof Error ? err.message : String(err),
+      ...(isServiceTimeout(err) ? { timed_out: true } : {}),
     };
   }
 }
