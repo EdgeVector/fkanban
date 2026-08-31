@@ -347,7 +347,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
         info(`${entry.key} not pinned`, "index unused — reads fall back to the unindexed path");
       }
 
-      // WRITE-PROBE the four index pins. Deliberately OUTSIDE the if/else chain
+      // WRITE-PROBE the five index pins. Deliberately OUTSIDE the if/else chain
       // above: the first cut of this sat inside one of its arms, which put it on
       // the `not_loaded` branch — a branch that by definition never runs for a
       // pin that IS loaded — so doctor printed three write-probes and no index

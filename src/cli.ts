@@ -30,6 +30,7 @@ import { ClaimConflictError, moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
 import { rankCmd } from "./commands/rank.ts";
 import { searchCmd } from "./commands/search.ts";
+import { flowCmd } from "./commands/flow.ts";
 import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
@@ -143,6 +144,7 @@ Commands:
   rank                 hard todo ranker: p0 → program/MS frontier → unlaned → papercut (--board --column --mode hard|priority)
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json --full-body)
                        --semantic ranks by MEANING via the LastSeek plane instead of substring
+  flow <milestone>     show keyed feature-card stage waits for one milestone (--json)
   gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            delete a card (hard erase, no undo; refuses if live
@@ -606,6 +608,21 @@ Example:
   fkanban search auth --limit 5
   fkanban search auth --all
   fkanban search auth --full-body`),
+
+  flow: withFooter(`fkanban flow — show feature-delivery stage waits for one milestone
+
+Usage:
+  fkanban flow <milestone> [--json]
+
+Reads one keyed FeatureFlowEvents milestone partition. It does not scan the
+board or Card records. The report shows each card's current generation, stage,
+stage age, and the oldest current wait.
+
+Flags:
+  --json               machine-readable report
+
+Example:
+  fkanban flow feature-delivery-effective-flow-v1 --json`),
 
   gates: withFooter(`fkanban gates — list open human gates from fbrain's open-decisions ledger
 
@@ -1172,6 +1189,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone", "json-array"]),
   rank: new Set(["board", "column", "mode"]),
   search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body", "json-array", "semantic"]),
+  flow: new Set(),
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
@@ -2498,6 +2516,20 @@ async function dispatch(
         semantic: Boolean(values.semantic),
       });
       console.log(out);
+      return 0;
+    }
+
+    case "flow": {
+      const milestone = requirePositional(positionals[1], "flow <milestone>");
+      const extra = rejectExtraPositionals(positionals, 2, "flow <milestone>");
+      if (extra !== undefined) return extra;
+      const ctx = loadCtx({ verbose });
+      console.log(await flowCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        milestone,
+        json: values.json as boolean | undefined,
+      }));
       return 0;
     }
 

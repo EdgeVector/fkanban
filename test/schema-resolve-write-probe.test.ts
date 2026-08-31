@@ -22,7 +22,7 @@ import { handleApiListFromPrefixedStore } from "./http-list.ts";
 import { CARD_OPTIONAL_SCHEMA_FIELDS, UNIQUE_SCHEMAS, fieldsFor, resolveLoadedSchema } from "../src/schemas.ts";
 
 // The catalog entry the probe now takes (it reads the DECLARED definition, so it
-// is callable for the four index schemas too — see `probeSchemaWritable`).
+// is callable for the five index schemas too — see `probeSchemaWritable`).
 const CARD_ENTRY = UNIQUE_SCHEMAS.find((e) => e.key === "card")!;
 
 // The current full Card hash (writable) and a stale 10-field duplicate.

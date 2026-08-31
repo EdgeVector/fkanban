@@ -1,4 +1,4 @@
-// Does `doctor` ACTUALLY run the write probe for the four index schemas?
+// Does `doctor` ACTUALLY run the write probe for the five index schemas?
 //
 // `probeSchemaWritable` being callable for them (index-schema-write-probe.test.ts)
 // is only half the fix. The first cut of the doctor wiring compiled, typechecked
@@ -25,7 +25,7 @@ import { EXTRA_SCHEMAS, allPinnedSchemas } from "../src/schemas.ts";
 import { handleApiList } from "./http-list.ts";
 
 // One loaded-schema row per pinned key, each at its DECLARED identity, so
-// `checkPinnedSchemaIdentity` returns `ok` for all seven and the probe gate
+// `checkPinnedSchemaIdentity` returns `ok` for all eight and the probe gate
 // (`identity.kind === "ok"`) is open. A fixture that got any identity wrong
 // would skip the probe for the right reason and pass this file for the wrong one.
 const HASH_FOR: Record<string, string> = Object.fromEntries(
@@ -142,7 +142,7 @@ async function doctorReport(name: string): Promise<{ report: string; store: Map<
   }
 }
 
-describe("doctor wires the write probe to the four index schemas", () => {
+describe("doctor wires the write probe to the five index schemas", () => {
   test("every EXTRA_SCHEMA gets a write-probe line", async () => {
     const { report } = await doctorReport("all-ok.json");
     for (const entry of EXTRA_SCHEMAS) {

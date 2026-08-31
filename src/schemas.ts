@@ -539,6 +539,51 @@ export const milestoneCardsSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// Keyed feature-delivery history: partition = milestone, range = card event.
+// One milestone read answers its complete flow report. One exact range key
+// makes each transition idempotent. No board or Card enumeration is needed.
+export const FEATURE_FLOW_EVENTS_FIELDS = [
+  "milestone",
+  "event_key",
+  "card_slug",
+  "north_star",
+  "generation",
+  "event",
+  "stage",
+  "event_at",
+  "created_at",
+  "updated_at",
+] as const;
+
+export const featureFlowEventsSchema: AddSchemaRequest = {
+  schema: {
+    name: "FeatureFlowEvents",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "FkanbanFeatureFlowEventsByMilestone",
+    purpose_statement:
+      "Keyed feature-card transition history by milestone and card, used to report current stage latency without a board scan",
+    schema_type: "HashRange",
+    key: { hash_field: "milestone", range_field: "event_key" },
+    fields: [...FEATURE_FLOW_EVENTS_FIELDS],
+    field_types: defaultStringFieldTypes(FEATURE_FLOW_EVENTS_FIELDS, []),
+    field_descriptions: {
+      milestone: "milestone partition that owns the feature card",
+      event_key: "stable card#generation#event range key, or card#current",
+      card_slug: "feature card slug",
+      north_star: "Brain North Star slug that owns the feature outcome",
+      generation: "zero-based reopen generation as a decimal string",
+      event: "create|claim|review|done|reopen|current",
+      stage: "current feature-delivery stage after this event",
+      event_at: "RFC 3339 transition timestamp",
+      created_at: "RFC 3339 first ledger-row timestamp",
+      updated_at: "RFC 3339 last ledger-row update timestamp",
+    },
+    field_classifications: {},
+    field_data_classifications: generalDataClassifications(FEATURE_FLOW_EVENTS_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
 // One entry per schema `kanban init` must register. Binds a config-key
 // (where init writes the canonical hash) to the AddSchemaRequest.
 export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }> = [
@@ -553,6 +598,7 @@ export const EXTRA_SCHEMAS: Array<{ key: string; schema: AddSchemaRequest }> = [
   { key: "board_cards", schema: boardCardsSchema },
   { key: "board_milestones", schema: boardMilestonesSchema },
   { key: "milestone_cards", schema: milestoneCardsSchema },
+  { key: "feature_flow_events", schema: featureFlowEventsSchema },
 ];
 
 
@@ -685,7 +731,7 @@ function keyLayoutMatches(
 //
 // This asks the cheapest, most load-bearing half of that question, and asks it
 // off the DECLARED DEFINITION rather than a record-type lookup, so it applies
-// uniformly to all seven keys: **is the schema this config hash points at the
+// uniformly to all eight keys: **is the schema this config hash points at the
 // one we declared?** Not "does it accept our fields" (that is the write probe,
 // which for a HashRange index would deposit a throwaway row in a live
 // partition), just "is it the same record type".

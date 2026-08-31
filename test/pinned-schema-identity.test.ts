@@ -3,7 +3,7 @@
  * that the address belongs to the type fkanban thinks it does.
  *
  * `resolveLoadedSchema` and `probeSchemaWritable` both read `RECORDS[type]`, so
- * neither can be CALLED for the four `EXTRA_SCHEMAS` — `card_list_index`,
+ * neither can be CALLED for the five `EXTRA_SCHEMAS` — `card_list_index`,
  * `board_cards`, `board_milestones`, `milestone_cards`. Those four are the
  * membership/projection indexes, i.e. the exact surface that has needed repair.
  * They had no identity check at all, while doctor printed key-layout and parity
@@ -182,7 +182,7 @@ describe("checkPinnedSchemaIdentity", () => {
 });
 
 describe("allPinnedSchemas", () => {
-  test("covers all seven config keys — the three record types AND the four indexes", () => {
+  test("covers all eight config keys — the three record types and the five indexes", () => {
     const keys = allPinnedSchemas().map((e) => e.key);
     expect(keys.length).toBe(UNIQUE_SCHEMAS.length + EXTRA_SCHEMAS.length);
     for (const k of ["card", "board", "milestone", "card_list_index", "board_cards", "board_milestones", "milestone_cards"]) {
@@ -306,7 +306,7 @@ describe("the identity check is wired into init and doctor", () => {
 
   test("doctor checks every pinned key, not the three it can resolve", () => {
     // The failure being repaired: doctor's schema loop iterates UNIQUE_SCHEMAS,
-    // so the four index pins got no identity check while three key-layout and
+    // so the five index pins got no identity check while three key-layout and
     // parity lines printed green above them.
     expect(doctor).toContain("for (const entry of allPinnedSchemas())");
     expect(doctor).toContain("checkPinnedSchemaIdentity(entry, configHash, loaded)");

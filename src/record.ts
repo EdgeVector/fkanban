@@ -5372,7 +5372,7 @@ async function readCardMembershipKeys(
 //
 // `leaked` is set when the create succeeded but the cleanup delete did not. It
 // does NOT flip the verdict — the write path is proven either way — but it is
-// carried rather than swallowed, because for the four index schemas a leaked
+// carried rather than swallowed, because for the five index schemas a leaked
 // probe row is unreachable: every BoardCards / MilestoneCards / BoardMilestones
 // / CardListIndex read is keyed or partition-scoped (see `probeSchemaWritable`),
 // so nothing, including heal, will ever revisit the probe partition to reap it.
@@ -5397,11 +5397,11 @@ export type WriteProbeResult =
 //
 // It used to read `schemaFor(type)` / `fieldsFor(type)` / `keyFieldFor(type)`,
 // all of which index `RECORDS[type]` — which holds only card/board/milestone. So
-// it could not be CALLED for the four `EXTRA_SCHEMAS`; passing one threw
+// it could not be CALLED for the five `EXTRA_SCHEMAS`; passing one threw
 // `TypeError: undefined is not an object`. Nobody scoped those four out, the
 // check was un-writable for them (see
 // `checkPinnedSchemaIdentity`, which was made callable the same way). Reading
-// the DECLARED definition off the entry makes one probe serve all seven pinned
+// the DECLARED definition off the entry makes one probe serve all eight pinned
 // keys, and there is no second definition of "which fields does this schema
 // take" that can drift from the first.
 //
@@ -5411,7 +5411,7 @@ export type WriteProbeResult =
 // deposited in a partition real reads serve — `board_cards` `hash=default` is
 // the partition behind every `kanban list`. It cannot, because the probe writes
 // its OWN partition: the hash field is set to `WRITE_PROBE_SLUG`, not to a real
-// board or milestone slug. Every read of all four indexes is keyed
+// board or milestone slug. Every read of all five indexes is keyed
 // (`HashKey: <board|milestone|key>`) or range-scoped within one such partition,
 // and heal enumerates the LIVE board list — so no product read, and no repair
 // pass, addresses the probe partition at all.
