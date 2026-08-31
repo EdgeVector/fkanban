@@ -1989,6 +1989,12 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
     const ns = parseBodyHeader(card.body, "North Star");
     if (ns) out.north_star = ns;
   }
+  // milestone is optional on adopted Card schemas. The legacy write path
+  // mirrors it into the body, so reads must restore the structured value.
+  if (!card.milestone) {
+    const milestone = parseBodyHeader(card.body, "Milestone");
+    if (milestone) out.milestone = milestone;
+  }
   if (card.surfaces.length === 0) {
     const surfaces = parseBodyListHeader(card.body, "Surfaces");
     if (surfaces.length > 0) out.surfaces = surfaces;
@@ -2050,6 +2056,7 @@ export type StructuredFieldRepairOptions = {
   base?: boolean;
   kind?: boolean;
   northStar?: boolean;
+  milestone?: boolean;
   branch?: boolean;
   surfaces?: boolean;
   db?: boolean;
@@ -2082,6 +2089,10 @@ export function repairStructuredFieldsFromBody(
   if (!explicit.northStar) {
     const northStar = parseBodyHeader(card.body, "North Star");
     if (northStar) card.north_star = northStar;
+  }
+  if (!explicit.milestone) {
+    const milestone = parseBodyHeader(card.body, "Milestone");
+    if (milestone) card.milestone = milestone;
   }
   if (!explicit.branch) {
     const branch = parseBodyHeader(card.body, "Branch");
@@ -2586,7 +2597,7 @@ export function rowToCard(row: QueryRow): Card {
     block_status: stringField(f, "block_status"),
     block_reason: stringField(f, "block_reason"),
     north_star: stringField(f, "north_star"),
-    milestone: stringField(f, "milestone"),
+    milestone: stringField(f, "milestone") || parseBodyHeader(body, "Milestone"),
     pr_url: stringField(f, "pr_url"),
     branch: stringField(f, "branch"),
   };
@@ -4830,9 +4841,13 @@ function cardToLegacyOptionalFields(c: Card): Record<string, unknown> {
   const fields = cardToFields({
     ...c,
     body: writeBodyHeader(
-      writeBodyHeader(writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []), "Db", c.db ?? ""),
-      "Created By",
-      c.created_by ?? UNKNOWN_CREATED_BY,
+      writeBodyHeader(
+        writeBodyHeader(writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []), "Db", c.db ?? ""),
+        "Created By",
+        c.created_by ?? UNKNOWN_CREATED_BY,
+      ),
+      "Milestone",
+      c.milestone ?? "",
     ),
   });
   for (const field of CARD_OPTIONAL_SCHEMA_FIELDS) delete fields[field];
