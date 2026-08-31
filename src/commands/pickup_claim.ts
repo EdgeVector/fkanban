@@ -20,7 +20,6 @@ import {
   nowIso,
   normalizeKind,
   priorityOf,
-  updateCardRecord,
   type Card,
 } from "../record.ts";
 import {
@@ -46,10 +45,6 @@ import {
   type LaneId,
 } from "../pickup_lanes.ts";
 import { type SituationPreflight } from "../situations.ts";
-import {
-  awaitCardClaimVisible,
-  claimVisibilityTimeoutWarning,
-} from "../doing-claim.ts";
 import { ClaimConflictError, moveCmd } from "./move.ts";
 import { claimedRepo, hydrateOverlapPeers, overlapAgainstCards } from "./overlap.ts";
 
@@ -554,9 +549,8 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     }
 
     try {
-      // Pass worker into move so claim stamp is atomic with the column write
-      // (papercut-kanban-move-claim-must-stamp-assignee). Fallback re-stamp
-      // below remains for older moveCmd paths / empty worker.
+      // Pass worker into move so the claim stamp is atomic with the column
+      // write (papercut-kanban-move-claim-must-stamp-assignee).
       const moved = await moveCmd({
         cfg: opts.cfg,
         node: opts.node,
@@ -567,52 +561,17 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         worker: opts.worker,
       });
 
-      // Read-after-write, not a plain re-read. The CAS above settled the claim,
-      // but `show` is this same keyed point read and it can still answer with
-      // the pre-claim record — so returning here without waiting is what makes
-      // `claimed=true, to=doing` and an immediate `show` saying `todo`
-      // simultaneously true ([[papercut-fkanban-show-lags-pickup-claim-projection]]).
-      const worker = (opts.worker ?? "").trim();
-      const visibility = await awaitCardClaimVisible(
-        opts.node,
-        opts.cfg,
-        candidate.slug,
-        { column: "doing", assignee: worker },
-      );
-      // A STALE read must never become the base of a write. The re-stamp below
-      // used to run on whatever came back, and `updateCardRecord` rebuilds the
-      // wide BoardCards row from that same object — which, per its own note, is
-      // "a full-record write to the primary by proxy". So re-stamping an
-      // assignee onto a snapshot that still said `column: todo` did not just
-      // report the lag, it WROTE it back over the claim. That is the durable
-      // revert-to-todo the papercut's witnesses kept hitting mid-build, and it
-      // is why this only ever writes from a read that already reflects the claim.
-      let claimedCard: Card;
-      if (visibility.reflects && visibility.card) {
-        claimedCard = visibility.card;
-      } else {
-        console.error(claimVisibilityTimeoutWarning(candidate.slug, "doing"));
-        // Report the claim the CAS settled, not the read that has not caught up.
-        claimedCard = {
-          ...(visibility.card ?? candidate),
-          column: "doing",
-          ...(worker ? { assignee: worker } : {}),
-        };
-      }
-      if (worker && visibility.reflects && claimedCard.assignee !== worker) {
-        const stamped: Card = {
-          ...claimedCard,
-          assignee: worker,
-          updated_at: nowIso(),
-        };
-        await updateCardRecord(
-          { cfg: opts.cfg, node: opts.node },
-          stamped,
-          undefined,
-          claimedCard,
-        );
-        claimedCard = stamped;
-      }
+      // Do not re-read and re-write here. The keyed Card read can still serve
+      // the pre-claim row after move returns. A former fallback assignee stamp
+      // used that stale todo row as a full-record write base and reverted the
+      // durable claim. `moved` is the write result; the response needs its
+      // placement and owner, while `show` joins the same claim projection.
+      const claimedCard: Card = {
+        ...candidate,
+        column: moved.to,
+        assignee: moved.assignee ?? candidate.assignee,
+        updated_at: nowIso(),
+      };
 
       const lane = laneOf(claimedCard);
       await persistLaneClaimState({
