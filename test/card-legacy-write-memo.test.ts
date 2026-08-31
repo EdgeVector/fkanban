@@ -43,6 +43,7 @@ function testCard(): Card {
     block_status: "",
     block_reason: "",
     north_star: "",
+    milestone: "feature-delivery-effective-flow-v1",
     pr_url: "",
     branch: "",
   };
@@ -88,6 +89,7 @@ describe("card legacy-write memo", () => {
     expect("surfaces" in calls[1]!.fields).toBe(false);
     // The dropped fields survive as body headers, not silent loss.
     expect(String(calls[1]!.fields.body)).toContain("Surfaces: src/record.ts");
+    expect(String(calls[1]!.fields.body)).toContain("Milestone: feature-delivery-effective-flow-v1");
     expect(cfg.cardLegacyWriteHash).toBe("cardhash");
   });
 

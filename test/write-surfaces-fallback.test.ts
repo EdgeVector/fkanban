@@ -1,5 +1,5 @@
 // Regression coverage for adopted Card schemas that predate optional
-// body-mirrored fields (`surfaces`, `db`). Current nodes reject those writes
+// body-mirrored fields (`surfaces`, `db`, `milestone`). Current nodes reject those writes
 // with structured `unknown_fields`; fkanban retries once with the legacy
 // body-header shape and memoizes that schema hash. Generic HTTP 500s are not
 // optional-field evidence and must bubble without a legacy retry.
@@ -48,6 +48,7 @@ function testCard(): Card {
     block_status: "none",
     block_reason: "",
     north_star: "",
+    milestone: "feature-delivery-effective-flow-v1",
     pr_url: "",
     branch: "",
   };
@@ -91,6 +92,7 @@ for (const [name, writeFn] of [
       expect("db" in accepted).toBe(false);
       expect(String(accepted.body)).toContain("Surfaces: src/record.ts");
       expect(String(accepted.body)).toContain("Db: lastdb://personal");
+      expect(String(accepted.body)).toContain("Milestone: feature-delivery-effective-flow-v1");
     });
 
     test("generic node_http_500 is NOT retried as an optional-field miss", async () => {

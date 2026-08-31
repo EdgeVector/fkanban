@@ -122,6 +122,22 @@ describe("cardToFields ⇄ rowToCard round-trip", () => {
     expect(normalizeKind(legacy.kind)).toBe("pr");
     expect(normalizeBlockStatus(legacy.block_status)).toBe("none");
   });
+
+  test("a legacy card restores milestone from its body header", () => {
+    const legacy = rowToCard({
+      fields: {
+        slug: "old-milestone-card",
+        title: "old milestone card",
+        body: "Milestone: delivery-v1\n\nbody",
+        board: "default",
+        column: "todo",
+        position: "1",
+        tags: [],
+      },
+      key: { hash: "old-milestone-card", range: null },
+    });
+    expect(legacy.milestone).toBe("delivery-v1");
+  });
 });
 
 describe("creator provenance resolution", () => {
@@ -853,6 +869,11 @@ describe("deriveStructuredFields (backfill)", () => {
     expect(deriveStructuredFields(c).north_star).toBe("at-rest-encryption-g1");
   });
 
+  test("pulls milestone from the body line", () => {
+    const c = card({ milestone: "", body: "Milestone: delivery-v1\n\nbody" });
+    expect(deriveStructuredFields(c).milestone).toBe("delivery-v1");
+  });
+
   test("pulls surfaces from the body line", () => {
     const c = card({ surfaces: [], body: "Surfaces: src/cli.ts, src/mcp/**\n\nbody" });
     expect(deriveStructuredFields(c).surfaces).toEqual(["src/cli.ts", "src/mcp/**"]);
@@ -891,6 +912,7 @@ describe("deriveStructuredFields (backfill)", () => {
       base: "",
       kind: "registry",
       north_star: "old-ns",
+      milestone: "old-milestone",
       branch: "old-branch",
       surfaces: ["src/old.ts"],
       tags: ["p3"],
@@ -900,6 +922,7 @@ describe("deriveStructuredFields (backfill)", () => {
         "Kind: pr",
         "Priority: P1",
         "North Star: north-star-lastdb-no-scan-access",
+        "Milestone: delivery-v1",
         "Branch: kanban/body-route",
         "Surfaces: src/commands/add.ts, src/record.ts",
         "",
@@ -913,6 +936,7 @@ describe("deriveStructuredFields (backfill)", () => {
     expect(c.base).toBe("main");
     expect(c.kind).toBe("pr");
     expect(c.north_star).toBe("north-star-lastdb-no-scan-access");
+    expect(c.milestone).toBe("delivery-v1");
     expect(c.branch).toBe("kanban/body-route");
     expect(c.surfaces).toEqual(["src/commands/add.ts", "src/record.ts"]);
   });
@@ -922,14 +946,16 @@ describe("deriveStructuredFields (backfill)", () => {
       repo: "EdgeVector/explicit",
       base: "explicit-base",
       kind: "tracker",
-      body: "Repo: EdgeVector/fkanban\nBase: main\nKind: pr\n\nBody headers.",
+      milestone: "explicit-milestone",
+      body: "Repo: EdgeVector/fkanban\nBase: main\nKind: pr\nMilestone: body-milestone\n\nBody headers.",
     });
 
-    repairStructuredFieldsFromBody(c, { repo: true, base: true, kind: true });
+    repairStructuredFieldsFromBody(c, { repo: true, base: true, kind: true, milestone: true });
 
     expect(c.repo).toBe("EdgeVector/explicit");
     expect(c.base).toBe("explicit-base");
     expect(c.kind).toBe("tracker");
+    expect(c.milestone).toBe("explicit-milestone");
   });
 
   test("derive + repair stamp pr_url from body PR/CR headers", () => {
