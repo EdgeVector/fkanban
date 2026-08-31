@@ -33,11 +33,7 @@ import {
 } from "../record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
-import {
-  awaitCardClaimVisible,
-  claimVisibilityTimeoutWarning,
-  planDoingClaim,
-} from "../doing-claim.ts";
+import { planDoingClaim } from "../doing-claim.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -155,17 +151,6 @@ export async function claimCard(opts: {
     }
     throw err;
   }
-
-  // Same read-after-write guarantee `pickup claim` makes: `show` is a keyed
-  // Card point read, and it can serve the pre-claim record after this write
-  // acks ([[papercut-fkanban-show-lags-pickup-claim-projection]]). `updated` is
-  // authoritative either way — it is what the CAS wrote — so a lagging read
-  // only ever costs a warning here, never the claim.
-  const visibility = await awaitCardClaimVisible(opts.node, opts.cfg, card.slug, {
-    column: "doing",
-    assignee: worker,
-  });
-  if (!visibility.reflects) console.error(claimVisibilityTimeoutWarning(card.slug, "doing"));
 
   return {
     result: "claimed",
