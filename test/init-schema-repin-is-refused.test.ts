@@ -56,7 +56,7 @@ describe("schemaPinMoves", () => {
   });
 
   test("moves are reported for INDEX schemas, not just record types", () => {
-    // The four EXTRA_SCHEMAS are exactly the ones doctor's identity check and
+    // The five EXTRA_SCHEMAS are exactly the ones doctor's identity check and
     // init's write probe cannot run on (`resolveLoadedSchema`/`probeSchemaWritable`
     // are keyed on RecordType). If this guard shared that blind spot it would
     // miss the only pin known to be at risk on the live primary.

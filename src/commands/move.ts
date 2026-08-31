@@ -7,6 +7,7 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
+import { recordFeatureFlowMutation } from "../flow-ledger.ts";
 import {
   appendPosition,
   assertDefaultTodoPickupReady,
@@ -151,6 +152,13 @@ export async function claimCard(opts: {
     }
     throw err;
   }
+
+  await recordFeatureFlowMutation({
+    cfg: opts.cfg,
+    node: opts.node,
+    previous: card,
+    next: updated,
+  });
 
   return {
     result: "claimed",
@@ -364,6 +372,13 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     card: updated,
     boardColumns: columns,
     reason: "done-transition",
+  });
+  await recordFeatureFlowMutation({
+    cfg: opts.cfg,
+    node: opts.node,
+    previous: card,
+    next: updated,
+    terminalColumn: terminalColumn(columns),
   });
   const promotedDependents =
     opts.column === terminalColumn(columns)

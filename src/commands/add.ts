@@ -8,6 +8,7 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
+import { recordFeatureFlowMutation } from "../flow-ledger.ts";
 import {
   appendPosition,
   assertBodyReplaceSafe,
@@ -43,6 +44,7 @@ import {
   nowIso,
   resolveCreatedBy,
   stampCardForWrite,
+  terminalColumn,
   updateCardRecord,
   UNKNOWN_CREATED_BY,
   validateSlug,
@@ -504,6 +506,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       boardColumns: columns,
       reason: "done-transition",
     });
+    await recordFeatureFlowMutation({
+      cfg: opts.cfg,
+      node: opts.node,
+      previous: existing,
+      next: updated,
+      terminalColumn: terminalColumn(columns),
+    });
     return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column };
   }
 
@@ -592,6 +601,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     card,
     boardColumns: columns,
     reason: "done-transition",
+  });
+  await recordFeatureFlowMutation({
+    cfg: opts.cfg,
+    node: opts.node,
+    previous: null,
+    next: card,
+    terminalColumn: terminalColumn(columns),
   });
   return { slug: opts.slug, action: "created", board: boardSlug, column: targetColumn };
 }

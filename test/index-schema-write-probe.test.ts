@@ -114,7 +114,7 @@ describe("probeSchemaWritable over every pinned schema", () => {
       // Every declared field is exercised — an all-empty write could be
       // silently accepted by a node that drops unknown empties, which is the
       // #94 failure the probe exists to catch. Card is the one record type with
-      // fields a legacy catalog may genuinely not carry; the four index schemas
+      // fields a legacy catalog may genuinely not carry; the five index schemas
       // have none, so this asserts full coverage for exactly them.
       const optional =
         entry.key === "card" ? new Set<string>(CARD_OPTIONAL_SCHEMA_FIELDS) : new Set<string>();
