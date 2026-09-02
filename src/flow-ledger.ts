@@ -124,10 +124,6 @@ export function featureFlowEventKey(
   return `${cardSlug}#g${Math.max(0, generation).toString().padStart(8, "0")}#${event}`;
 }
 
-export function featureFlowCardPrefix(cardSlug: string): string {
-  return `${cardSlug}#g`;
-}
-
 async function readExact(
   node: NodeClient,
   schemaHash: string,
