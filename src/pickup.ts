@@ -2,6 +2,8 @@ import { type NodeClient } from "./client.ts";
 import { type Config } from "./config.ts";
 import {
   assertBodyLoaded,
+  assertLivePrMilestone,
+  captureFkanbanError,
   depStatus,
   hasPrWorkBrief,
   hydrateCardBodies,
@@ -328,45 +330,40 @@ export function classifyPickupCard(
     card.column === "todo"
   ) {
     const msSlug = (card.milestone ?? "").trim();
-    if (!msSlug) {
-      // NOT `malformed-routing`. Everything routing needs is present and correct —
-      // repo, base, and kind all resolved above, or this line is unreachable. The
-      // card is well-formed and merely unattached to an outcome, which is one
-      // `--milestone` away and is a POLICY gate, not a defect in the card.
-      //
-      // Collapsing the two hid both. `malformed-routing` is where a genuinely
-      // broken card shows up — no `Repo:` header, nothing can route it — and on
-      // 2026-08-03 that bucket read 12 on the live board while every one of the 12
-      // was well-formed. A real routing bug would have been invisible in that
-      // count, and the reported remedy ("set a bare Repo: header") was wrong for
-      // all 12. Splitting the bucket is what makes each number actionable.
-      return out(
-        "unattached-outcome",
-        "missing milestone linkage",
-        "Attach an outcome with `fkanban add <slug> --milestone <slug>`; the claim write-guard (assertLivePrMilestone) rejects milestone-less Kind:pr claims.",
-      );
-    }
-    // When the portfolio map is supplied, abandoned / missing milestones must
-    // not classify as ready — claim rejects them with live_pr_milestone_abandoned
-    // (or fails the milestone resolve) and workers previously burned a full LLM
-    // run re-discovering an empty ready queue.
+    // NOT `malformed-routing`. Everything routing needs is present and correct —
+    // repo, base, and kind all resolved above, or this line is unreachable. The
+    // card is well-formed and merely unattached to an outcome, which is one
+    // `kanban set --milestone` away and is a POLICY gate, not a defect in the
+    // card.
+    //
+    // Ask the same write-guard move/explain run so status, explain, and move
+    // print one message. Collapsing this bucket into malformed-routing hid
+    // both: on 2026-08-03 that bucket read 12 on the live board while every
+    // one of the 12 was well-formed.
     const msMap = opts.milestoneStateBySlug;
-    if (msMap) {
+    let milestoneState = "";
+    if (msSlug && msMap) {
       if (!msMap.has(msSlug)) {
         return out(
           "unattached-outcome",
           `milestone not found: ${msSlug}`,
-          "Create the milestone or re-link with `fkanban add <slug> --milestone <active-slug>`.",
+          `Create the milestone or re-link with \`kanban set ${card.slug} --milestone <active-slug>\`.`,
         );
       }
-      const state = (msMap.get(msSlug) ?? "").trim();
-      if (state === "abandoned") {
-        return out(
-          "unattached-outcome",
-          `abandoned milestone: ${msSlug}`,
-          "Pick an active/planned milestone (`fkanban add <slug> --milestone <active-slug>`); claim write-guard rejects abandoned outcomes.",
-        );
-      }
+      milestoneState = (msMap.get(msSlug) ?? "").trim();
+    }
+    const writeGuardErr = captureFkanbanError(() =>
+      assertLivePrMilestone(card, false, {
+        milestoneState,
+        enforce: true,
+      }),
+    );
+    if (writeGuardErr) {
+      return out(
+        "unattached-outcome",
+        writeGuardErr.message,
+        writeGuardErr.hint ?? "",
+      );
     }
   }
   // Soft collision-gate hygiene: empty structured surfaces mean overlap is

@@ -12,9 +12,8 @@ import { recordFeatureFlowMutation } from "../flow-ledger.ts";
 import {
   appendPosition,
   assertBodyReplaceSafe,
-  assertDefaultTodoPickupReady,
+  assertDefaultTodoWriteGuard,
   assertDepUnblocked,
-  assertLivePrMilestone,
   assertNoExplicitTodoLaneMetadata,
   assertPrWorkBrief,
   assertUnlessAlreadyViolating,
@@ -443,23 +442,6 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
           column: existing.column,
         }),
     );
-    assertUnlessAlreadyViolating(
-      placementUnchanged,
-      () =>
-        assertLivePrMilestone(updated, opts.force, {
-          milestoneState: resolvedMilestoneState,
-          enforce: opts.cfg.enforceLivePrMilestone === true,
-        }),
-      () =>
-        assertLivePrMilestone(existing, opts.force, {
-          // Only reuse the resolved state when the write keeps the SAME
-          // milestone. Swapping one abandoned milestone for another is a new
-          // violation, not a pre-existing one.
-          milestoneState:
-            (existing.milestone ?? "") === (updated.milestone ?? "") ? resolvedMilestoneState : "",
-          enforce: opts.cfg.enforceLivePrMilestone === true,
-        }),
-    );
     // An explicit --branch/--pr-url that the lane is about to clear is refused
     // rather than dropped. Unconditional: unlike the guards above, this is not
     // a placement violation the card can already be in — it is a write THIS
@@ -475,10 +457,25 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       cleared: sanitizeDefaultTodoLaneMetadata(updated),
       previousPrUrl: existing.pr_url,
     });
+    // Same write-guard moveCmd / pickup explain run. Keep the two halves in one
+    // function so a Kind:pr card cannot enter default/todo while explain says
+    // it cannot. Reuse the resolved state only when the write keeps the SAME
+    // milestone — swapping one abandoned milestone for another is a new
+    // violation, not a pre-existing one.
+    const sameMilestone = (existing.milestone ?? "") === (updated.milestone ?? "");
+    const enforceLivePrMilestone = opts.cfg.enforceLivePrMilestone === true;
     assertUnlessAlreadyViolating(
       placementUnchanged,
-      () => assertDefaultTodoPickupReady(updated, opts.force, rawBody),
-      () => assertDefaultTodoPickupReady({ ...existing }, opts.force, existing.body),
+      () =>
+        assertDefaultTodoWriteGuard(updated, opts.force, rawBody, {
+          milestoneState: resolvedMilestoneState,
+          enforceLivePrMilestone,
+        }),
+      () =>
+        assertDefaultTodoWriteGuard({ ...existing }, opts.force, existing.body, {
+          milestoneState: sameMilestone ? resolvedMilestoneState : "",
+          enforceLivePrMilestone,
+        }),
     );
     // Unforced by design: this warns, it never refuses, so there is nothing for
     // --force to waive. See warnUnreachableDefaultBacklogCard.
@@ -556,10 +553,6 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     board: card.board,
     column: card.column,
   });
-  assertLivePrMilestone(card, opts.force, {
-    milestoneState: resolvedMilestoneState,
-    enforce: opts.cfg.enforceLivePrMilestone === true,
-  });
   assertNoExplicitTodoLaneMetadata(card, { branch: opts.branch, prUrl: opts.prUrl });
   // Create path. Explicit flags are already refused above, so a clear here means
   // `stampCardForWrite` backfilled `branch`/`pr_url` out of a `Branch:`/`PR:`
@@ -571,7 +564,10 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     cleared: sanitizeDefaultTodoLaneMetadata(card),
     previousPrUrl: prUrlBeforeSanitize,
   });
-  assertDefaultTodoPickupReady(card, opts.force, rawBody);
+  assertDefaultTodoWriteGuard(card, opts.force, rawBody, {
+    milestoneState: resolvedMilestoneState,
+    enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
+  });
   // The filing path this whole guard exists for: a brand-new Kind:pr card that
   // lands in the default column and would never be claimable from it.
   warnUnreachableDefaultBacklogCard(card, rawBody, {

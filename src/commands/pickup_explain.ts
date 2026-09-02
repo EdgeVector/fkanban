@@ -1,12 +1,11 @@
 // `fkanban pickup explain <slug>` — single readiness decision path for one card.
-// Composes write-guard (assertDefaultTodoPickupReady) + classifyPickupCard +
+// Composes write-guard (assertDefaultTodoWriteGuard) + classifyPickupCard +
 // laneOf + overlap-against-doing so agents/Tom don't re-derive policy from prompts.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
-  assertDefaultTodoPickupReady,
-  assertLivePrMilestone,
+  assertDefaultTodoWriteGuard,
   depStatus,
   findMilestone,
   listBoards,
@@ -93,15 +92,13 @@ function writeGuardFor(
 ): WriteGuardStep {
   try {
     const probe: Card = { ...card, board: "default", column: "todo" };
-    // Mirror moveCmd's gate order so explain's verdict is the CLAIM's verdict:
-    // the live-milestone gate fires before the todo-readiness policy. Explain
-    // saying YES on a card the claim write then rejects is exactly the
-    // contradiction that let one unclaimable head noop pickup for hours.
-    assertLivePrMilestone(probe, false, {
+    // Same function moveCmd / addCmd run. Explain saying YES on a card the
+    // claim write then rejects is exactly the contradiction that let one
+    // unclaimable head noop pickup for hours.
+    assertDefaultTodoWriteGuard(probe, false, undefined, {
       milestoneState: opts?.milestoneState ?? "",
-      enforce: opts?.enforceLivePrMilestone === true,
+      enforceLivePrMilestone: opts?.enforceLivePrMilestone === true,
     });
-    assertDefaultTodoPickupReady(probe);
     return { ok: true };
   } catch (err) {
     if (err instanceof FkanbanError) {
@@ -176,7 +173,7 @@ function gatesFrom(
       name: "write-guard (default/todo policy)",
       ok: writeGuard.ok,
       note: writeGuard.ok
-        ? "would pass assertDefaultTodoPickupReady"
+        ? "would pass assertDefaultTodoWriteGuard"
         : (writeGuard.message ?? "failed"),
     },
     {
