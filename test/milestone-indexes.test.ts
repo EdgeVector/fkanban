@@ -82,6 +82,16 @@ function fakeNode(opts: { foldMembership?: boolean } = {}): FakeNode {
           return { fields, key: { hash: hk, range } };
         });
     }
+    const prefix = (filter as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
+      ?.HashRangePrefix;
+    if (prefix?.hash && prefix.prefix !== undefined) {
+      return entries
+        .filter(([k]) => k.startsWith(`${prefix.hash}\0${prefix.prefix}`))
+        .map(([k, fields]) => {
+          const range = k.includes("\0") ? k.slice(k.indexOf("\0") + 1) : null;
+          return { fields, key: { hash: prefix.hash, range } };
+        });
+    }
     // unfiltered
     return entries.map(([k, fields]) => {
       const i = k.indexOf("\0");

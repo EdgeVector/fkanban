@@ -881,12 +881,19 @@ Flags:
 
 Usage:
   fkanban doctor [--json]
+  fkanban doctor --board default --stale-rows [--json]
 
 Verifies config, node reachability, and resolved schemas. Exits non-zero on
 any failed check.
 
+\`--stale-rows\` walks each column secondary on one board, drops BoardCards
+rows whose Card tip is another column, and deletes those known SKs. It does
+not scan.
+
 Flags:
-  --json               machine-readable { ok, checks } report`),
+  --json               machine-readable { ok, checks } report
+  --board <slug>       board for --stale-rows (default: default)
+  --stale-rows         list and heal stale BoardCards column rows`),
 
   which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
@@ -1165,8 +1172,9 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "json-arr
 // Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
 // names as COMMAND_HELP. Derived from each command's `--help` text and the
 // flags its dispatch branch actually reads. Commands absent here (e.g. `mark`, `show`,
-// `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
+// `rm`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
+  doctor: new Set(["board", "stale-rows"]),
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name", "accept-schema-repin"]),
   add: new Set([
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
@@ -1399,6 +1407,7 @@ async function main(argv: string[]): Promise<number> {
         "allow-unclaimed": { type: "boolean" },
         check: { type: "boolean" },
         "group-by-milestone": { type: "boolean" },
+        "stale-rows": { type: "boolean" },
       },
     });
   } catch (err) {
@@ -1681,15 +1690,20 @@ async function dispatch(
     case "doctor": {
       const extra = rejectExtraPositionals(positionals, 1, "doctor");
       if (extra !== undefined) return extra;
+      const doctorOpts = {
+        verbose,
+        board: values.board as string | undefined,
+        staleRows: values["stale-rows"] === true,
+      };
       if (values.json) {
         // Machine-readable: collect the structured report (no human ✓/✗ lines
         // leak to stdout) and emit the SAME { ok, version, checks } shape the
         // `fkanban_doctor` MCP tool returns as structuredContent.
-        const { ok, version, checks } = await runDoctorStructured({ verbose });
+        const { ok, version, checks } = await runDoctorStructured(doctorOpts);
         console.log(JSON.stringify({ ok, version, checks }));
         return ok ? 0 : 1;
       }
-      const ok = await doctor({ verbose });
+      const ok = await doctor(doctorOpts);
       return ok ? 0 : 1;
     }
 
@@ -2104,6 +2118,7 @@ async function dispatch(
         fullBody: fullBodyList,
         groupByMilestone: values["group-by-milestone"] as boolean | undefined,
         jsonArray: Boolean(values["json-array"]),
+        healStaleRows: true,
       });
       console.log(out);
       return 0;

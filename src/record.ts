@@ -20,13 +20,17 @@ import {
   searchVisibilityTimeoutWarning,
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
+  boardCardSk,
   boardCardsHash,
   boardCardsProjectionForCardFields,
+  enqueueBoardCardJanitor,
   listAllBoardCards,
   listBoardCardsPartition,
+  listBoardCardsPartitionSpine,
   preferFresherBoardCard,
   removeBoardCard,
   removeBoardCardsBatch,
+  sweepBoardCardJanitor,
   upsertBoardCard,
   upsertBoardCardsBatch,
   type BoardCardWriteOptions,
@@ -3656,7 +3660,7 @@ export async function listCardsByColumn(
    * Card-side projection, and only `reconcileBoardCardSummaries({verify:true})`
    * reads it.
    */
-  opts?: { projection?: readonly string[] },
+  opts?: { projection?: readonly string[]; healStaleRows?: boolean },
 ): Promise<Card[]> {
   if (!board) {
     throw new FkanbanError({
@@ -3676,10 +3680,84 @@ export async function listCardsByColumn(
       hint: "Run kanban init / ensure config.schemaHashes.board_cards is set. No secondary list path.",
     });
   }
-  const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+  const exclusive = await dropStaleColumnMembership(
+    node,
+    cfg,
+    board,
+    column,
+    part,
+    opts?.healStaleRows === true,
+  );
+  const reconciled = await reconcileBoardCardSummaries(node, cfg, exclusive, fields);
   return reconciled
     .filter((c) => !isHiddenCard(c))
     .map((c) => Object.assign(c, deriveStructuredFields(c)));
+}
+
+/**
+ * Drop BoardCards rows in `column` whose Card tip lives in another column.
+ *
+ * Other-column occupancy comes from one HashKey spine read (slug + SK), not a
+ * per-row Card get. Card tip is read only for slugs that already appear in two
+ * columns, so the happy path stays O(1) BoardCards queries.
+ *
+ * Unique membership in the listed column is kept even when the tip differs —
+ * deleting that row would hide the card. Overlap losers enqueue for the janitor
+ * when `heal` is set.
+ */
+async function dropStaleColumnMembership(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  column: string,
+  part: Card[],
+  heal: boolean,
+): Promise<Card[]> {
+  if (part.length === 0) return part;
+  const spine = await listBoardCardsPartitionSpine(node, cfg, board);
+  if (!spine) return part;
+  const otherSlugs = new Set<string>();
+  for (const row of spine) {
+    if (row.slug && row.column && row.column !== column) otherSlugs.add(row.slug);
+  }
+  const kept: Card[] = [];
+  const overlap: Card[] = [];
+  for (const card of part) {
+    if (otherSlugs.has(card.slug)) overlap.push(card);
+    else kept.push(card);
+  }
+  if (overlap.length === 0) return part;
+
+  const overlapSlugs = [...new Set(overlap.map((c) => c.slug))];
+  const tips = await mapWithConcurrency(overlapSlugs, (slug) =>
+    findCardWithFields(node, cfg, slug, ["slug", "column"]),
+  );
+  const tipColumn = new Map<string, string>();
+  for (const tip of tips) {
+    if (tip?.slug && tip.column) tipColumn.set(tip.slug, tip.column);
+  }
+
+  const dropped: Card[] = [];
+  for (const card of overlap) {
+    const tip = tipColumn.get(card.slug);
+    if (tip === undefined || tip === column) kept.push(card);
+    else dropped.push(card);
+  }
+
+  if (heal && dropped.length > 0) {
+    const schemaHash = boardCardsHash(cfg);
+    if (schemaHash) {
+      enqueueBoardCardJanitor(
+        dropped.map((card) => ({
+          schemaHash,
+          board: card.board || board,
+          sk: boardCardSk(card.column, card.position, card.slug),
+        })),
+      );
+      await sweepBoardCardJanitor(node);
+    }
+  }
+  return kept;
 }
 
 /**
@@ -5228,6 +5306,9 @@ async function writeCardMembership(
 ): Promise<void> {
   await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
   await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
+  // Janitor is process-local. Sweep in this same request so the previous SK
+  // delete is not lost when the CLI exits.
+  await sweepBoardCardJanitor(opts.node);
 }
 
 export async function updateCardRecord(

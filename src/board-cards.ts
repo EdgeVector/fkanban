@@ -751,6 +751,35 @@ export async function deleteBoardCardRowsBySk(
 }
 
 /**
+ * Point-delete BoardCards rows for `slug` on every column except `keepColumn`.
+ *
+ * Each other column is a HashRangePrefix under the board hash (not a partition
+ * scan). The listed SKs are known keys; the janitor then deletes them.
+ */
+export async function purgeOtherColumnRowsForSlug(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  slug: string,
+  keepColumn: string,
+  columns: readonly string[],
+): Promise<number> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash || !slug || !board) return 0;
+  const keep = keepColumn.trim();
+  for (const column of columns) {
+    if (!column || column === keep) continue;
+    const part = await listBoardCardsPartitionSpine(node, cfg, board, { column });
+    if (!part) continue;
+    const doomed = part
+      .filter((row) => row.slug === slug && row.column !== keep)
+      .map((row) => row.sk);
+    enqueueBoardCardJanitor(doomed.map((sk) => ({ schemaHash, board, sk })));
+  }
+  return await sweepBoardCardJanitor(node);
+}
+
+/**
  * Read exactly one BoardCards row, keyed by its full sk, at the WIDE
  * projection — and treat "not returned" as "not safe to write narrowly".
  *
