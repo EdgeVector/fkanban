@@ -6,6 +6,8 @@ import { assertLivePrMilestone, boardToFields, nowIso } from "../src/record.ts";
 import { FkanbanError } from "../src/client.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { moveCmd } from "../src/commands/move.ts";
+import { setCmd } from "../src/commands/set.ts";
+import { pickupExplainResult } from "../src/commands/pickup_explain.ts";
 import { milestoneAddCmd } from "../src/commands/milestone.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 
@@ -155,5 +157,61 @@ describe("assertLivePrMilestone", () => {
       column: "todo",
     })).rejects.toMatchObject({ code: "live_pr_milestone_required" });
     await moveCmd({ cfg, node, slug: "force-pr", column: "todo", force: true });
+  });
+
+  test("move into default/todo uses the claim write-guard; set --milestone then explain is eligible", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg,
+      node,
+      slug: "ms-live",
+      title: "Live",
+      state: "active",
+      northStar: "ns-a",
+    });
+    const brief =
+      "Repo: EdgeVector/fkanban\nBase: main\nKind: pr\n\n## GOAL\nShip the gate.\n\n## END STATE\nMove and explain agree.\n";
+    await addCmd({
+      cfg,
+      node,
+      slug: "gate-pr",
+      title: "Gate PR",
+      kind: "pr",
+      column: "backlog",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      northStar: "ns-a",
+      body: brief,
+    });
+
+    let moveErr: unknown;
+    try {
+      await moveCmd({ cfg, node, slug: "gate-pr", column: "todo" });
+    } catch (err) {
+      moveErr = err;
+    }
+    expect(moveErr).toMatchObject({
+      code: "live_pr_milestone_required",
+      message: 'Kind:pr card "gate-pr" cannot enter todo without a milestone.',
+    });
+    expect((moveErr as { hint?: string }).hint).toContain("kanban set gate-pr --milestone");
+    expect((moveErr as { hint?: string }).hint).toContain("--north-star");
+
+    const before = await pickupExplainResult({ cfg, node, slug: "gate-pr" });
+    expect(before.write_guard.ok).toBe(false);
+    expect(before.write_guard.code).toBe("live_pr_milestone_required");
+    expect(before.write_guard.message).toBe((moveErr as { message: string }).message);
+    expect(before.write_guard.hint).toBe((moveErr as { hint: string }).hint);
+    expect(before.eligible_for_claim).toBe(false);
+
+    await setCmd({ cfg, node, slug: "gate-pr", milestone: "ms-live" });
+    await moveCmd({ cfg, node, slug: "gate-pr", column: "todo" });
+
+    const after = await pickupExplainResult({ cfg, node, slug: "gate-pr" });
+    expect(after.write_guard.ok).toBe(true);
+    expect(after.column).toBe("todo");
+    expect(after.eligible_for_claim).toBe(true);
+    expect(after.category).toBe("pickup-ready");
   });
 });

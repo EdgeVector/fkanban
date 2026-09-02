@@ -106,7 +106,9 @@ describe("classify live-milestone requirement", () => {
     const c = classifyPickupCard(card, [card], dep, undefined, { requireLiveMilestone: true });
     expect(c.ready).toBe(false);
     expect(c.category).toBe("unattached-outcome");
-    expect(c.reason).toBe("missing milestone linkage");
+    expect(c.reason).toBe(`Kind:pr card "${card.slug}" cannot enter todo without a milestone.`);
+    expect(c.suggestion).toContain(`kanban set ${card.slug} --milestone`);
+    expect(c.suggestion).toContain("--north-star");
   });
 
   // The bucket split is the point, so assert the SEPARATION, not just the new

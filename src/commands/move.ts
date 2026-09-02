@@ -10,9 +10,8 @@ import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import { recordFeatureFlowMutation } from "../flow-ledger.ts";
 import {
   appendPosition,
-  assertDefaultTodoPickupReady,
+  assertDefaultTodoWriteGuard,
   assertDepUnblocked,
-  assertLivePrMilestone,
   sanitizeDefaultTodoLaneMetadata,
   warnClearedTodoLaneMetadata,
   applyDbLocatorForWrite,
@@ -228,11 +227,10 @@ async function promoteUnblockedBacklogDependents(opts: {
         const ms = await findMilestone(opts.node, opts.cfg, msSlug);
         if (ms) milestoneState = ms.state;
       }
-      assertLivePrMilestone(updated, false, {
+      assertDefaultTodoWriteGuard(updated, false, rawBody, {
         milestoneState,
-        enforce: opts.cfg.enforceLivePrMilestone === true,
+        enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
       });
-      assertDefaultTodoPickupReady(updated, false, rawBody);
       await assertDepUnblocked(opts.node, opts.cfg, updated, false);
     } catch (err) {
       if (isExpectedPromotionSkip(err)) continue;
@@ -313,11 +311,10 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     const ms = await findMilestone(opts.node, opts.cfg, msSlug);
     if (ms) milestoneState = ms.state;
   }
-  assertLivePrMilestone(updated, opts.force, {
+  assertDefaultTodoWriteGuard(updated, opts.force, rawBody, {
     milestoneState,
-    enforce: opts.cfg.enforceLivePrMilestone === true,
+    enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
   });
-  assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
   // Opt-in LastgitCiStatus gate: only cards with Requires-Status / Requires-Deploy

@@ -1539,9 +1539,7 @@ function livePrMilestoneGate(
     throw new FkanbanError({
       code: "live_pr_milestone_required",
       message: `Kind:pr card "${card.slug}" cannot enter ${card.column} without a milestone.`,
-      hint:
-        "Pass --milestone <slug> to attach a real outcome, or --force for an intentional Unassigned/Operational exception." +
-        FORCE_IS_UNSCOPED,
+      hint: livePrMilestoneRequiredHint(card.slug),
     });
   }
   const state = (opts?.milestoneState ?? "").trim();
@@ -1549,11 +1547,28 @@ function livePrMilestoneGate(
     throw new FkanbanError({
       code: "live_pr_milestone_abandoned",
       message: `Kind:pr card "${card.slug}" cannot use abandoned milestone "${milestone}".`,
-      hint:
-        "Pick an active/planned milestone, reopen the outcome, or pass --force for an intentional exception." +
-        FORCE_IS_UNSCOPED,
+      hint: livePrMilestoneAbandonedHint(),
     });
   }
+}
+
+/** Remedy for a missing live-PR milestone. `kanban move` has no --milestone flag. */
+export function livePrMilestoneRequiredHint(slug: string): string {
+  return (
+    `Use \`kanban set ${slug} --milestone <ms>\` or \`kanban set ${slug} --north-star <ns>\` ` +
+    "to attach a real outcome, then retry. `kanban move` does not take --milestone. " +
+    "Pass --force only for an intentional Unassigned/Operational exception." +
+    FORCE_IS_UNSCOPED
+  );
+}
+
+/** Remedy for an abandoned live-PR milestone. Same verb as the missing-milestone case. */
+export function livePrMilestoneAbandonedHint(): string {
+  return (
+    "Pick an active/planned milestone with `kanban set <slug> --milestone <ms>` " +
+    "(or `--north-star`), reopen the outcome, or pass --force for an intentional exception." +
+    FORCE_IS_UNSCOPED
+  );
 }
 
 /** Default reconciliation driver for new milestones (hierarchical pipeline). */
@@ -1775,6 +1790,33 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
       forcedGuardWaiverWarning(card.slug, "default/todo pickup-readiness", waived.message),
     );
   }
+}
+
+/**
+ * The pickup claim write-guard: live-PR milestone then default/todo readiness.
+ *
+ * `move`, `add`/`set`, and `pickup explain` must call this one function so a
+ * Kind:pr card cannot sit in default/todo while `pickup explain` says it
+ * cannot enter todo. `--force` still waives both halves (each prints its own
+ * warning). `doing` still hits the milestone half; the todo-readiness half
+ * no-ops outside default/todo.
+ */
+export type DefaultTodoWriteGuardOpts = {
+  milestoneState?: string;
+  enforceLivePrMilestone?: boolean;
+};
+
+export function assertDefaultTodoWriteGuard(
+  card: Card,
+  force?: boolean,
+  rawBody?: string,
+  opts?: DefaultTodoWriteGuardOpts,
+): void {
+  assertLivePrMilestone(card, force, {
+    milestoneState: opts?.milestoneState,
+    enforce: opts?.enforceLivePrMilestone === true,
+  });
+  assertDefaultTodoPickupReady(card, force, rawBody);
 }
 
 /**
@@ -2266,10 +2308,11 @@ export function forcedGuardWaiverWarning(slug: string, gate: string, verdict: st
  * disables the live-PR milestone gate, the default/todo pickup-readiness gate,
  * the lifecycle CI gate and this one. The gates do not share a subject, so
  * clearing one is not evidence about the others — but the error messages
- * recommend the flag per-gate. `assertLivePrMilestone`'s hint ends "or --force
- * for an intentional Unassigned/Operational exception", and an operator who
- * follows that sentence to get past a MILESTONE requirement also, silently,
- * moves a card into `doing` with unfinished dependencies.
+ * recommend the flag per-gate. `assertLivePrMilestone`'s hint still offers
+ * `--force` for an intentional Unassigned/Operational exception (after
+ * `kanban set --milestone` / `--north-star`), and an operator who follows that
+ * sentence to get past a MILESTONE requirement also, silently, moves a card
+ * into `doing` with unfinished dependencies.
  *
  * Measured on the live board 2026-08-03: `move <slug> doing --force`, offered
  * by the milestone error, printed only `moved … todo → doing` while `show`
