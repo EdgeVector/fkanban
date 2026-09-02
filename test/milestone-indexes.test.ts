@@ -85,11 +85,13 @@ function fakeNode(opts: { foldMembership?: boolean } = {}): FakeNode {
     const prefix = (filter as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
       ?.HashRangePrefix;
     if (prefix?.hash && prefix.prefix !== undefined) {
+      const hash = prefix.hash;
+      const rangePrefix = prefix.prefix;
       return entries
-        .filter(([k]) => k.startsWith(`${prefix.hash}\0${prefix.prefix}`))
+        .filter(([k]) => k.startsWith(`${hash}\0${rangePrefix}`))
         .map(([k, fields]) => {
           const range = k.includes("\0") ? k.slice(k.indexOf("\0") + 1) : null;
-          return { fields, key: { hash: prefix.hash, range } };
+          return { fields, key: { hash, range } };
         });
     }
     // unfiltered
