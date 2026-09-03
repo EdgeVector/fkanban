@@ -20,9 +20,12 @@ import { readFileSync } from "node:fs";
 import {
   schemaPinMoves,
   assertNoSilentSchemaRepin,
+  assertResolvedMembershipLayouts,
   type SchemaPinMove,
 } from "../src/commands/init.ts";
 import type { Config } from "../src/config.ts";
+import type { LoadedSchema, NodeClient } from "../src/client.ts";
+import { FkanbanError } from "../src/client.ts";
 
 function cfg(hashes: Record<string, string>): Config {
   return {
@@ -154,5 +157,61 @@ describe("the repin guard is wired into the init path", () => {
     expect(cli).toContain(`"accept-schema-repin": { type: "boolean" }`);
     expect(cli).toContain(`acceptSchemaRepin: values["accept-schema-repin"] === true`);
     expect(cli).toContain(`"accept-schema-repin"]`);
+  });
+
+  test("membership layout guard runs BEFORE config is written", () => {
+    const layoutAt = init.indexOf("assertResolvedMembershipLayouts(");
+    const writeAt = init.indexOf("writeConfig(config, configPath)");
+    expect(layoutAt).toBeGreaterThan(-1);
+    expect(writeAt).toBeGreaterThan(-1);
+    expect(layoutAt).toBeLessThan(writeAt);
+  });
+});
+
+describe("assertResolvedMembershipLayouts", () => {
+  function nodeWith(loaded: LoadedSchema[]): NodeClient {
+    return { listSchemas: async () => loaded } as unknown as NodeClient;
+  }
+
+  test("refuses a milestone-keyed board_cards hash", async () => {
+    const loaded: LoadedSchema[] = [
+      {
+        name: "39a0424f",
+        descriptive_name: "BoardCards_hashrange_v1",
+        owner_app_id: "fkanban",
+        fields: [],
+        key: { hash_field: "milestone", range_field: "sk" },
+      },
+    ];
+    let err: unknown;
+    try {
+      await assertResolvedMembershipLayouts(
+        nodeWith(loaded),
+        { board_cards: "39a0424f" },
+        () => {},
+      );
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("membership_pin_wrong_hash_field");
+    expect((err as FkanbanError).message).toContain("hash_field=milestone");
+  });
+
+  test("accepts a board-keyed board_cards hash", async () => {
+    const loaded: LoadedSchema[] = [
+      {
+        name: "1ef2e7a3",
+        descriptive_name: "BoardCards_hashrange_v1",
+        owner_app_id: "fkanban",
+        fields: [],
+        key: { hash_field: "board", range_field: "sk" },
+      },
+    ];
+    await assertResolvedMembershipLayouts(
+      nodeWith(loaded),
+      { board_cards: "1ef2e7a3" },
+      () => {},
+    );
   });
 });

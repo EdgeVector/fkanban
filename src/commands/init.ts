@@ -32,6 +32,7 @@ import {
   checkPinnedSchemaIdentity,
   formatSchemaIdentityMismatch,
 } from "../schemas.ts";
+import { membershipPinLayoutFailures } from "../membership_schema_guard.ts";
 import {
   CONFIG_VERSION,
   defaultConfigPath,
@@ -285,6 +286,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // checked. It says so on its own line rather than passing quietly — this seat
   // has now found four checks that reported coverage they did not have.
   await assertResolvedSchemaIdentities(node, schemaHashes, print);
+  await assertResolvedMembershipLayouts(node, schemaHashes, print);
 
   // A resolved hash that differs from the incumbent is an ADDRESS CHANGE, not a
   // config refresh, and the write probe above cannot stand in for this check: it
@@ -535,6 +537,39 @@ export async function assertResolvedSchemaIdentities(
       "does not error at write time — the index simply reads as empty. Repair the node's catalog " +
       "registration for the named schema(s), then re-run `kanban init`. Your existing config was " +
       "left untouched.",
+  });
+}
+
+/**
+ * Refuse a membership pin whose catalog hash_field is not the HashKey the app
+ * sends. Named-layout HashKey (fold #1893) uses that field as the partition;
+ * a `board_cards` pin with hash_field=milestone returns 0 rows for HashKey(board).
+ * Checks the resolved declaration hashes, before rekey staging, so a board-keyed
+ * target can still be staged while an incumbent wrong pin remains the read pin.
+ */
+export async function assertResolvedMembershipLayouts(
+  node: NodeClient,
+  schemaHashes: Record<string, string>,
+  print: (line: string) => void,
+): Promise<void> {
+  let loaded: LoadedSchema[];
+  try {
+    loaded = await node.listSchemas();
+  } catch {
+    print(`        ** membership layouts NOT verified — node schema list unavailable **`);
+    return;
+  }
+  const failures = membershipPinLayoutFailures(schemaHashes, loaded);
+  if (failures.length === 0) return;
+  throw new FkanbanError({
+    code: "membership_pin_wrong_hash_field",
+    message:
+      `Refusing to adopt ${failures.length === 1 ? "a membership pin" : "membership pins"} ` +
+      `whose catalog hash_field is not the declared HashKey:\n  ${failures.join("\n  ")}`,
+    hint:
+      "Point board_cards at an identity with hash_field=board (and milestone_cards at " +
+      "hash_field=milestone). Do not rewrite the other schema's hash_field. Existing config " +
+      "was left untouched.",
   });
 }
 

@@ -763,22 +763,11 @@ function formatKeyLayout(hash: string, range: string | null | undefined): string
   return range == null ? `Hash(${hash})` : `HashRange(${hash}, ${range})`;
 }
 
-// Hash fields this config key's index legitimately ALSO answers on, because a
-// multi-key catalog expand bound both lookups to one schema. Read off the same
-// table `checkMembershipKeyLayout` uses rather than restated here — the live
-// `board_cards` pin reports `hash_field=milestone` and serves every board row,
-// and a second, independent opinion about which layouts are legal is how one
-// check ends up calling the designed state a fault while its neighbour passes.
-//
-// TOLERATED IS NOT FREE, and the price is measured. Where the declared
-// hash_field and the key the app supplies disagree, the DECLARED field reads
-// back stale for ~1.4s after an acked write while every other field on the row
-// is fresh in ~5ms. On `board_cards` that field is `milestone`. The control
-// that isolates it is `scripts/probe-per-field-freshness-matched-key-schema.ts`:
-// on `milestone_cards`, where declared and supplied agree, nothing lags at all.
-// So this allowance is still correct — refusing the expand would be a false red
-// — but anything reading `milestone` off a freshly written BoardCards row must
-// treat it as possibly pre-write. See readWholeBoardCardRow in board-cards.ts.
+// Sibling hash fields the layout guard still admits (none after 2026-09-03).
+// Named-layout HashKey uses catalog hash_field as the partition, so a
+// board_cards pin with hash_field=milestone is a wrong identity, not a
+// tolerated expand. Read off MEMBERSHIP_KEY_EXPECTATIONS so identity and
+// layout cannot disagree.
 function siblingHashFields(configKey: string): readonly string[] {
   return MEMBERSHIP_KEY_EXPECTATIONS.find((e) => e.configKey === configKey)?.alsoAccepts ?? [];
 }
@@ -808,15 +797,10 @@ export function checkPinnedSchemaIdentity(
       actual: match.descriptive_name,
     });
   }
-  // Key layout, with the multi-key expand honoured on the hash axis only.
-  //
-  // `range_field` is compared STRICTLY and that is the load-bearing half: it is
-  // what separates a Hash entity from a HashRange index over that same entity,
-  // which is the confusion this check exists to catch. `hash_field` cannot carry
-  // the same weight — after an expand the catalog reports whichever key was
-  // declared last for BOTH lookups, so equality there fails on the designed
-  // state (measured on the primary: `board_cards` pinned to a schema reporting
-  // `HashRange(milestone, sk)`, and `HashKey=default` returns every board row).
+  // Key layout. `range_field` separates a Hash entity from a HashRange index.
+  // `hash_field` must match the declared HashKey after named-layout HashKey
+  // (fold #1893): a board_cards pin with catalog hash_field=milestone returns
+  // 0 rows for HashKey(board).
   //
   // `loadedKey == null` means the node did not report a layout — unknown, not
   // mismatched — matching `keyLayoutMatches` so an older node does not turn
