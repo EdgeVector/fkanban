@@ -35,7 +35,6 @@ import { fakeNode, type FakeNode } from "./fake-node.ts";
 import type { Config } from "../src/config.ts";
 import {
   boardToFields,
-  CARD_SEARCH_SURFACE_FIELDS,
   cardToFields,
   hydrateCardBodies,
   isBodyOmitted,
@@ -145,12 +144,11 @@ describe("an empty scan body must not claim the body was read", () => {
     expect(isBodyOmitted(match!)).toBe(true);
   });
 
-  test("a card the scan DID supply is marked read — the marker is not blanket", async () => {
+  test("default search keeps BODY_OMITTED even when Card has a body", async () => {
     const res = await searchResult({ cfg, node, query: briefed.slug });
     const match = res.cards.find((c) => c.slug === briefed.slug);
     expect(match).toBeDefined();
-    expect(isBodyOmitted(match!)).toBe(false);
-    expect(match!.body).toBe(BRIEF);
+    expect(isBodyOmitted(match!)).toBe(true);
   });
 
   // THE POINT OF THE FIX. `fkanban_search` runs exactly this over its capped
@@ -166,42 +164,24 @@ describe("an empty scan body must not claim the body was read", () => {
     expect(keyed).toContain(empty.slug);
   });
 
-  test("hydration still skips cards whose body the scan supplied", async () => {
+  test("page hydration HashKeys Card because default search did not", async () => {
     const res = await searchResult({ cfg, node, query: briefed.slug });
     const before = node.reads.length;
     await hydrateCardBodies(node, cfg, res.cards);
     const keyed = node.reads
       .slice(before)
       .filter((r) => r.schemaHash === "cardhash" && typeof r.filter?.HashKey === "string");
-    // Paying a point read to re-learn a body the scan already handed over is
-    // the cost this whole path exists to avoid.
-    expect(keyed).toHaveLength(0);
+    expect(keyed.length).toBeGreaterThan(0);
   });
 
-  // COST BOUND. The fix must not turn the default search into whole-board
-  // hydration — the reason it is a marker and not a read (see the header).
-  //
-  // The drain projection is `CARD_SEARCH_SURFACE_FIELDS`, not the `slug`+`body`
-  // pair it was when this test was written. It widened so `search` can decide a
-  // match for a card the BoardCards display index never enumerated, using the
-  // same fields `cardMatchesQuery` reads (see
-  // search-enumeration-gap-recovery.test.ts). That costs no extra round trip —
-  // the key list already point-gets every card hash — and it does not weaken
-  // what this test guards: the drain is still a fixed narrow projection, never
-  // the whole card.
-  test("search body drain is the match surface, not a wide card projection", async () => {
+  // COST BOUND. Default search matches BoardCards display fields only. It
+  // must not HashKey Card hashes to fill bodies or recover missing rows.
+  test("default search issues zero Card HashKeys", async () => {
     const before = node.reads.length;
     await searchResult({ cfg, node, query: "card" });
     const keyed = node.reads
       .slice(before)
       .filter((r) => r.schemaHash === "cardhash" && typeof r.filter?.HashKey === "string");
-    expect(keyed.length).toBeGreaterThan(0);
-    const expected = [...CARD_SEARCH_SURFACE_FIELDS].sort();
-    for (const read of keyed) expect([...read.fields].sort()).toEqual(expected);
-    // The claim above, pinned: short match fields plus `body`, and none of the
-    // heavy or irrelevant ones a full card read would drag along.
-    for (const absent of ["position", "created_at", "pr_url", "north_star"]) {
-      expect(expected).not.toContain(absent);
-    }
+    expect(keyed).toHaveLength(0);
   });
 });

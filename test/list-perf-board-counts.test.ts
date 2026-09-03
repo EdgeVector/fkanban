@@ -27,7 +27,6 @@ import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import {
   boardToFields,
-  CARD_SEARCH_SURFACE_FIELDS,
   cardToFields,
   emptyStructuredFields,
   type Board,
@@ -324,8 +323,8 @@ describe("board list — per-board live-card counts", () => {
 
 // The default search path matches against REAL bodies via key list + HashKey
 // point-gets (slug+body). Never an unfiltered Card query.
-describe("search — default text path matches real bodies via key list", () => {
-  test("default search uses key list + point-get, never an unfiltered Card query", async () => {
+describe("search — default text path matches BoardCards without Card HashKeys", () => {
+  test("default search uses BoardCards, never a Card HashKey or unfiltered Card query", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
@@ -343,29 +342,26 @@ describe("search — default text path matches real bodies via key list", () => 
 
     expect(cards.map((c) => c.slug)).toEqual(["feature-ready"]);
     expect(node.cardQueries.filter((q) => q.filter === undefined)).toEqual([]);
-    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
-    expect(node.cardQueries.every((q) => typeof q.filter?.HashKey === "string")).toBe(true);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(false);
+    expect(node.cardQueries.filter((q) => typeof q.filter?.HashKey === "string")).toEqual([]);
   });
 
-  test("a body-only match is found — the recall the candidate path silently lost", async () => {
+  test("a body-only match is not a default hit", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [
         card({ slug: "body-only", title: "Unrelated title", body: "the needle is only in this body" }),
         card({ slug: "other", title: "Other", body: "nothing here" }),
       ],
-      // No nativeSearchSlugs: the semantic index does NOT surface this card.
-      // Pre-fix, that made it unfindable — body text could only match for cards
-      // some other index happened to return.
       nativeSearchSlugs: [],
     });
 
     const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "needle" });
 
-    expect(cards.map((c) => c.slug)).toEqual(["body-only"]);
+    expect(cards.map((c) => c.slug)).not.toContain("body-only");
   });
 
-  test("a match found on display fields still carries its real body", async () => {
+  test("a display-field match does not carry a Card body", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: [card({ slug: "tagged", title: "Tagged", tags: ["feature-ship"], body: "the real body text" })],
@@ -374,30 +370,25 @@ describe("search — default text path matches real bodies via key list", () => 
 
     const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "feature-ship" });
 
-    // Pre-fix this matched on the body-free display read and was returned
-    // as-is, so it reached the caller with body: "" — 127 of 153 live matches
-    // did — while the `fkanban_search` MCP contract promises a full body.
     expect(cards.map((c) => c.slug)).toEqual(["tagged"]);
-    expect(cards[0]!.body).toBe("the real body text");
+    expect(cards[0]!.body).toBe("");
   });
 
-  test("one body scan replaces the per-candidate point reads, even when the index has hits", async () => {
+  test("default search does not HashKey Card even when native index has hits", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: Array.from({ length: 10 }, (_, i) =>
         card({ slug: `hit-${i}`, title: `Hit ${i}`, body: "needle", position: String(i + 1) }),
       ),
-      // The semantic index offers candidates; the scan has already answered, so
-      // spending a wide point read per candidate is pure cost.
       nativeSearchSlugs: Array.from({ length: 10 }, (_, i) => `hit-${i}`),
     });
 
-    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "needle" });
+    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "Hit" });
 
     expect(cards).toHaveLength(10);
     expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
-    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
-    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined && q.fields.includes("body")).length).toBeGreaterThan(0);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(false);
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
   });
 
   test("a duplicate empty Card row does not erase the body it matches on", async () => {
@@ -410,7 +401,12 @@ describe("search — default text path matches real bodies via key list", () => 
       extraCardScanRows: [{ slug: "dupe", body: "" }],
     });
 
-    const { cards } = await searchResult({ cfg: cfgWithIndexes, node, query: "needle" });
+    const { cards } = await searchResult({
+      cfg: cfgWithIndexes,
+      node,
+      query: "needle",
+      complete: true,
+    });
 
     expect(cards.map((c) => c.slug)).toEqual(["dupe"]);
     expect(cards[0]!.body).toBe("the needle lives in this body");
@@ -437,25 +433,14 @@ describe("search — default text path matches real bodies via key list", () => 
     // Indexed config: the shape every real deployment runs (run (k) confirmed
     // BoardCards is the index the write path maintains). The no-index config is
     // the DEGRADED path and has its own test.
-    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle" });
+    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "Body hit" });
     expect(out).toContain("body-hit");
-    // Bodies arrive via key list + HashKey point-gets, never an unfiltered scan.
     expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
-    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
-    expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"))).toBe(true);
-    const bodyPoint = node.cardQueries.find((q) => q.filter?.HashKey === "body-hit" && q.fields.includes("body"));
-    // The match surface, not the whole card. This used to be the literal
-    // `["slug", "body"]`; the drain widened to every field `cardMatchesQuery`
-    // reads so `search` can also decide a match for a card the display index
-    // never enumerated (see search-enumeration-gap-recovery.test.ts). Assert the
-    // NAMED contract rather than a copy of it, and keep the guard that matters:
-    // still a handful of short fields plus `body`, still not `fieldsFor("card")`.
-    expect(bodyPoint!.fields).toEqual([...CARD_SEARCH_SURFACE_FIELDS]);
-    expect(bodyPoint!.fields).not.toContain("position");
-    expect(bodyPoint!.fields).not.toContain("pr_url");
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(false);
+    expect(node.cardQueries.some((q) => q.filter?.HashKey === "body-hit")).toBe(false);
   });
 
-  test("--json uses indexed/native candidates by default while returning capped body previews", async () => {
+  test("--json caps BoardCards rows and does not HashKey Card for body previews", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: Array.from({ length: 25 }, (_, i) =>
@@ -469,14 +454,14 @@ describe("search — default text path matches real bodies via key list", () => 
       nativeSearchSlugs: Array.from({ length: 25 }, (_, i) => `body-hit-${i}`),
     });
 
-    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle", json: true });
+    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "Body hit", json: true });
     const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(20);
-    expect(parsed[0]!.body.length).toBeLessThanOrEqual(200);
-    expect(parsed[0]!.bodyTruncated).toBe(true);
-    // Body previews are a RENDER cap; bodies come from key list + HashKey reads.
+    expect(parsed[0]!.body).toBe("");
+    expect(parsed[0]!.bodyTruncated).toBe(false);
     expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
-    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(false);
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
   });
 
   test("--json stays on indexed card reads when the node rejects unallowed Card scans", async () => {
@@ -527,7 +512,7 @@ describe("search — default text path matches real bodies via key list", () => 
     expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
   });
 
-  test("search --all removes the broad JSON row cap but keeps body previews", async () => {
+  test("search --all removes the JSON row cap and still does not HashKey Card", async () => {
     const node = fakeNode({
       boards: [board({ slug: "default", title: "Default board" })],
       cards: Array.from({ length: 25 }, (_, i) =>
@@ -542,14 +527,14 @@ describe("search — default text path matches real bodies via key list", () => 
       rejectUnallowedCardScan: true,
     });
 
-    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "needle", json: true, all: true });
+    const out = await searchCmd({ cfg: cfgWithIndexes, node, query: "Body hit", json: true, all: true });
     const parsed = cardsFromJson(out) as Array<Card & { bodyTruncated: boolean }>;
     expect(parsed).toHaveLength(25);
-    expect(parsed[0]!.bodyTruncated).toBe(true);
+    expect(parsed[0]!.body).toBe("");
+    expect(parsed[0]!.bodyTruncated).toBe(false);
     expect(node.cardQueries.filter((q) => q.filter === undefined)).toHaveLength(0);
-    // `--all` lifts the ROW cap; bodies still come from key list + HashKey reads.
-    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(true);
-    expect(node.cardQueries.every((q) => typeof q.filter?.HashKey === "string")).toBe(true);
+    expect(node.listKeysCalls.some((c) => c.schemaHash === "cardhash")).toBe(false);
+    expect(node.cardQueries.filter((q) => q.filter?.HashKey !== undefined)).toHaveLength(0);
   });
 
   test("search --full-body restores the complete-body JSON surface", async () => {

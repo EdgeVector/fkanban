@@ -14,7 +14,7 @@
 // 1299ms vs 7-field DEP_SEED 416ms). List paths must project only what the
 // caller needs — never default the full 24-field write shape.
 
-import { schemaHashFor, type Config } from "./config.ts";
+import { type Config } from "./config.ts";
 import { FkanbanError, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
 import {
@@ -23,11 +23,7 @@ import {
   POINT_READ_CONCURRENCY,
 } from "./concurrency.ts";
 import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
-import {
-  CARD_SEARCH_SURFACE_FIELDS,
-  isKeyOnlyRow,
-  type Card,
-} from "./record.ts";
+import { type Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 import {
   enqueueBoardCardJanitor,
@@ -1128,22 +1124,12 @@ export async function upsertBoardCard(
  * 1575 ms of sleep, so it always expired first, and the divergence it exists to
  * prevent was reported by dogfood on 2026-08-21, 2026-08-27 and 2026-08-30.
  *
- * The sleeps below total 5925 ms. The loop still returns the moment either
- * source can see the row, so a write whose index settles promptly pays what it
- * paid before; only a genuinely slow one spends the tail.
+ * The sleeps below total 5925 ms. The loop returns the moment the BoardCards
+ * partition can see the row, so a write whose index settles promptly pays what
+ * it paid before; only a genuinely slow one spends the tail.
  */
 const SEARCH_INDEX_VISIBLE_BACKOFF_MS = [0, 25, 50, 100, 200, 300, 500, 750, 1000, 1000, 1000, 1000];
 const SEARCH_INDEX_VISIBLE_ATTEMPTS = SEARCH_INDEX_VISIBLE_BACKOFF_MS.length;
-
-/**
- * First attempt that also consults the Card key list.
- *
- * The key list is the expensive read of the two (measured 760 ms for 1967
- * hashes against ~47 ms for the partition), and it is the SECOND source, not
- * the primary one — so a write whose BoardCards row lands quickly must never
- * pay for it. From this attempt on, the two run concurrently.
- */
-const SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT = 3;
 
 /**
  * How many rounds may be retried WITHOUT being charged to the attempt budget
@@ -1183,77 +1169,11 @@ export const BOARD_CARDS_SEARCH_FIELDS = BOARD_CARDS_DISPLAY_FIELDS.filter(
 );
 
 /**
- * Can `search`'s recovery pass draw this slug as a candidate?
- *
- * Not the same question as "is the key in the Card key list", and the
- * difference is the third fix's mistake. `search` recovers a card the display
- * index has not enumerated from {@link listCardSearchSurfaces}, which walks the
- * key list and then point-gets each hash with the SURFACE projection — dropping
- * any row that comes back carrying the hash field alone
- * (`listCardsFromKeyList`'s `isKeyOnlyRow` filter). A key whose atoms have not
- * landed yet is in the key list and NOT in that map, so a wait that stopped at
- * `/api/list` membership reported "search can see it" about a source search
- * would discard — the same shape as the two fixes before it, which each proved
- * one index fresh and assumed the other matched what search reads.
- *
- * So this asks the key list for membership and then asks for the projection
- * search actually consumes. Two reads, both bounded, and only from
- * {@link SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT} — the point get is one hash, not
- * the whole map.
- *
- * A node whose client predates `/api/list` reports `null` — unknown, not
- * absent — so the caller keeps waiting on the partition instead of treating a
- * missing capability as a hit.
- */
-async function cardSearchSurfaceHasSlug(
-  node: NodeClient,
-  cfg: Config,
-  slug: string,
-): Promise<boolean | null> {
-  if (!node.listRecordKeys) return null;
-  const schemaHash = schemaHashFor("card", cfg);
-
-  // Cheap read first, and it gates the expensive one. The surface point get is
-  // ONE hash; the key-list walk is every hash on the node (measured 760 ms for
-  // 1967 of them against ~47 ms for the partition). Asking the cheap question
-  // first means the common failing case — atoms not landed yet — costs one
-  // keyed read per attempt instead of a full enumeration, so proving the
-  // stronger fact is cheaper than the weaker one it replaced.
-  const fields = [...CARD_SEARCH_SURFACE_FIELDS];
-  const res = await node.queryAll({ schemaHash, fields, filter: { HashKey: slug } });
-  const row = res.results[0];
-  if (row === undefined || isKeyOnlyRow(row, fields)) return false;
-
-  // Content alone is not enough: the recovery pass iterates the key list, so a
-  // surface the enumeration does not reach is still one search cannot draw.
-  let cursor: string | null = null;
-  const seenCursors = new Set<string>();
-  for (;;) {
-    const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
-    if (page.keys.some((key) => key.hash === slug)) return true;
-    if (!page.has_more) return false;
-    if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
-      return false;
-    }
-    seenCursors.add(page.next_cursor);
-    cursor = page.next_cursor;
-  }
-}
-
-/**
  * Wait until `search` can find this card. The write ACK is not that query: Mini
  * acks off resident and the durable index can still serve pre-write state.
  *
- * **Both** of search's sources are waited on, because either one is enough for
- * it to answer. `indexedSearchCards` matches over the BoardCards partition AND
- * runs a recovery pass over the Card key list, point-getting any key-list slug
- * the partition did not enumerate — and a point get is fresh the moment the
- * write acks. Waiting on the partition alone therefore waits past the point
- * where search would already have succeeded, and — worse — reports success
- * while search is still blind whenever the partition is the slower of the two.
- * Measured 2026-08-30 (`scripts/probe-search-read-lag.ts`): at search's exact
- * moment the partition missed 4 of 4 and the key list missed 3 of 4, while the
- * point get hit 4 of 4.
+ * Default search matches the BoardCards partition only. Waiting on the Card
+ * key list would report success while `kanban search` is still blind.
  *
  * A miss after the budget still returns — the Card write already succeeded, and
  * failing `add` would turn a search finding into a lost create — but it returns
@@ -1286,29 +1206,19 @@ export async function awaitBoardCardSearchVisible(
   let attempt = 0;
   let refusedRounds = 0;
   while (attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
-    const partition = listBoardCardsPartition(node, cfg, board, {
+    const inPartition = await listBoardCardsPartition(node, cfg, board, {
       fields: BOARD_CARDS_SEARCH_FIELDS,
     })
       .then((rows): boolean | null => rows?.some((row) => row.slug === slug) ?? false)
-      // Shed or busy: this read is UNKNOWN, not a miss. `null` is that third
-      // answer — reached only by a throw, never by an empty result — and the
-      // round below does not spend budget on it.
       .catch((): boolean | null => null);
-    // The second source joins only once the cheap one has missed a few times.
-    const surface =
-      attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT
-        ? cardSearchSurfaceHasSlug(node, cfg, slug).catch(() => null)
-        : Promise.resolve(null);
-    const [inPartition, inSurface] = await Promise.all([partition, surface]);
-    if (inPartition === true || inSurface === true) return true;
+    if (inPartition === true) return true;
 
     // A round in which every source it consulted was REFUSED asked nothing, so
     // charging it to the budget shortens the wait by exactly the load that
     // makes the wait necessary. The comment above has claimed "unknown, not a
     // miss" since the third fix; returning `false` for a refusal is what made
     // it untrue. Bounded, so a node refusing every read still terminates.
-    const consulted = attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT;
-    const answered = inPartition !== null || (consulted && inSurface !== null);
+    const answered = inPartition !== null;
     if (!answered && refusedRounds < SEARCH_INDEX_REFUSED_ROUNDS) {
       refusedRounds++;
       await sleep(SEARCH_INDEX_REFUSED_BACKOFF_MS);
