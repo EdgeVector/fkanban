@@ -56,8 +56,8 @@ import { fakeNode, type FakeNode } from "./fake-node.ts";
 const BC = "board-cards-hash";
 
 /**
- * The LIVE catalog `hash_field` for BoardCards — `milestone`, not the `board`
- * its declared layout names (`src/membership_schema_guard.ts`, `alsoAccepts`).
+ * Fake-node HASH-ELSE-LEAD gate for this test: `milestone`, not the `board`
+ * its declared layout names. Projection drop is independent of the pin gate.
  *
  * Stated rather than derived, because deriving it from the declared schema would
  * model the wrong gate: after the 2026-07-23 multi-key expand the node gates
