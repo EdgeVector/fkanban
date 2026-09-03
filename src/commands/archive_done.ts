@@ -154,7 +154,7 @@ function ageHours(card: Card, now: number): number | null {
   return (now - t) / 3_600_000;
 }
 
-export function renderArchiveDone(report: ArchiveDoneReport): string {
+function renderArchiveDone(report: ArchiveDoneReport): string {
   // Count the actions, never `eligible - deferred`: `eligible` means "past the
   // cutoff", and a dependency hold removes a card from the sweep without being a
   // deferral. Deriving the headline arithmetically reported 502 would-archive on
