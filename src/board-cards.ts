@@ -1533,6 +1533,166 @@ export async function listBoardCardsPartitionSpine(
   return spineRowsFromQueryRows(res.results, board);
 }
 
+/**
+ * One board partition read TWO WAYS, so a node that serves a short page can be
+ * caught by the disagreement instead of being believed.
+ *
+ * ## The incident this exists for
+ *
+ * 2026-09-03T22:16-22:35Z, primary `lastdbd` 0.23.3-1536, footprint climbing
+ * toward the 16 GiB memory guard. `kanban list --column todo` returned **4**
+ * rows while the truth was **17**, and `kanban list --column doing` returned
+ * **2** against **8**. No error, no `truncated` flag — a short page that looks
+ * complete. At the same moment the wide list read (`GET /api/list limit=1000`)
+ * enumerated every card, and `kanban show` read each one. The rows came back on
+ * their own after the guard restarted the daemon, with no repair applied, so
+ * this is a READ-path degradation and not lost writes.
+ *
+ * In that window the hourly `board-cards-heal --apply` took the degraded view as
+ * ground truth and printed `delete-stale-and-upsert` for seven LIVE todo cards
+ * while leaving the two rows that really are ghosts in place — wrong in both
+ * directions. See
+ * `papercut-kanban-board-cards-heal-deletes-live-rows-from-a-degraded-column-read-20260903`.
+ *
+ * ## Why heal's existing safety reasoning does not cover it
+ *
+ * Every delete in heal is authorized per row by a Card point-read, and the file
+ * argues — correctly, for a MISSING row — that "a row it cannot see is a row it
+ * cannot delete", so an incomplete read can only under-reap. That invariant is
+ * about ABSENCE. It says nothing about a read that returns a DIFFERENT set: a
+ * card whose real membership row is invisible this pass, but whose stale sibling
+ * is not, classifies as `stale` and is deleted on evidence that is simply wrong.
+ * Under-reaping is safe; mis-reading is not, and the two are not the same
+ * failure.
+ *
+ * ## The check
+ *
+ * Every BoardCards sk is `column#position#slug`, so the whole-partition read
+ * (`HashKey`) and the union of the per-column reads (`HashRangePrefix`) address
+ * exactly the same rows. They are different node access paths — the SAME pair
+ * that disagreed in the incident — so requiring them to agree is a direct test
+ * of the thing that went wrong, not a proxy for it.
+ *
+ * Both directions count. A row only the whole read saw means a column page came
+ * back short; a row only a column read saw means the whole page did. Neither can
+ * happen on a node serving complete pages.
+ *
+ * Columns probed are the board's DECLARED columns unioned with every column
+ * actually observed in the whole read. Declared alone would miss a ghost row
+ * parked on a retired column; observed alone would miss a column whose rows the
+ * whole read dropped entirely — the exact shape of the incident.
+ *
+ * Cost is one narrow query per probed column plus one for the partition, at the
+ * one-field address projection (measured 166-292ms each on the 264-row live
+ * `default` partition). Heal already pays 24 whole-partition queries per board
+ * for {@link sweepBoardCardsPartition}, so this is a small addition to a
+ * reconciler price — and no product read path calls it.
+ *
+ * A refused read is NOT reported as divergence. A query that throws is a gap in
+ * coverage, which heal already models with `incomplete_leads`; calling it
+ * disagreement would block the apply on a signal that does not mean the node is
+ * serving inconsistent pages.
+ *
+ * ## What this does NOT catch, and why that is the right boundary
+ *
+ * A UNIFORM truncation — every read of the partition returning the same short
+ * set — is invisible here, because the two views agree. That is deliberate, not
+ * a gap left for later: uniform truncation cannot authorize a wrong delete.
+ * `delete-orphan` needs the CARD to be absent, which is a different plane and a
+ * different read; `delete-stale-and-upsert` needs a stale row to be VISIBLE, and
+ * a row nobody returned is not. What a uniform short page produces is
+ * `upsert-truth` for cards that already have a row — a redundant write that
+ * restores the value already there.
+ *
+ * INCONSISTENT truncation is the dangerous one, and it is the one the incident
+ * showed: one view holds a card's real row while the other does not, so the
+ * classification that separates "stale sibling" from "row I did not see" is
+ * being made from two different boards. That distinction is the entire basis on
+ * which heal deletes.
+ */
+export type BoardCardsReadDivergence = {
+  board: string;
+  /** Columns actually probed with a range read. */
+  columnsProbed: string[];
+  /** sks the whole-partition read returned and the column reads did not. */
+  wholeOnly: string[];
+  /** sks a column read returned and the whole-partition read did not. */
+  columnOnly: string[];
+  /** A read that threw, so this board's comparison is unproven (not divergence). */
+  failed: string | null;
+};
+
+export function boardCardsReadDiverged(d: BoardCardsReadDivergence): boolean {
+  return d.wholeOnly.length > 0 || d.columnOnly.length > 0;
+}
+
+export async function readBoardCardsPartitionDivergence(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  declaredColumns: readonly string[] = [],
+): Promise<BoardCardsReadDivergence | null> {
+  if (!boardCardsHash(cfg)) return null;
+  const empty: BoardCardsReadDivergence = {
+    board,
+    columnsProbed: [],
+    wholeOnly: [],
+    columnOnly: [],
+    failed: null,
+  };
+
+  let whole: BoardCardSpineRow[];
+  try {
+    whole = (await listBoardCardsPartitionSpine(node, cfg, board)) ?? [];
+  } catch (err) {
+    return { ...empty, failed: `whole-partition read: ${errText(err)}` };
+  }
+
+  const columns = new Set<string>();
+  for (const c of declaredColumns) if (c.length > 0) columns.add(c);
+  for (const r of whole) if (r.column.length > 0) columns.add(r.column);
+  const columnsProbed = [...columns];
+  if (columnsProbed.length === 0) return { ...empty, columnsProbed };
+
+  const perColumn = await mapWithConcurrency(
+    columnsProbed,
+    async (column) => {
+      try {
+        return {
+          rows: (await listBoardCardsPartitionSpine(node, cfg, board, { column })) ?? [],
+          failure: null as string | null,
+        };
+      } catch (err) {
+        return { rows: [] as BoardCardSpineRow[], failure: `column ${column}: ${errText(err)}` };
+      }
+    },
+    PARTITION_READ_CONCURRENCY,
+  );
+
+  const failures = perColumn.map((p) => p.failure).filter((f): f is string => f !== null);
+  if (failures.length > 0) {
+    return { ...empty, columnsProbed, failed: failures.join("; ") };
+  }
+
+  const columnSks = new Set<string>();
+  for (const p of perColumn) for (const r of p.rows) columnSks.add(r.sk);
+  // Only rows on a probed column are comparable: a row on a column nothing
+  // probed is absent from the union for a reason that is not disagreement.
+  const wholeSks = new Set(whole.filter((r) => columns.has(r.column)).map((r) => r.sk));
+
+  return {
+    board,
+    columnsProbed,
+    wholeOnly: [...wholeSks].filter((sk) => !columnSks.has(sk)),
+    columnOnly: [...columnSks].filter((sk) => !wholeSks.has(sk)),
+    failed: null,
+  };
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** Shared row-building for every spine-shaped read. `board` is the filter. */
 function spineRowsFromQueryRows(
   rows: readonly { fields?: unknown; key?: { hash: string | null; range: string | null } }[],
