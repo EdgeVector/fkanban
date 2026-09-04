@@ -2,7 +2,7 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { featureFlowReport, formatFeatureFlowReport, type FeatureFlowReport } from "../flow-ledger.ts";
 
-export async function flowResult(opts: {
+async function flowResult(opts: {
   cfg: Config;
   node: NodeClient;
   milestone: string;
