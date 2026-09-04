@@ -237,7 +237,21 @@ describe("the write path waits on every index search reads", () => {
 
     const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN, board: SCRATCH });
     expect(res.cards.map((c) => c.slug)).not.toContain(SLUG);
-  });
+    // DEADLINE, derived — not a round number picked to make CI stop failing.
+    //
+    // `partitionVisibleAfter: MAX_SAFE_INTEGER` means the partition NEVER
+    // becomes visible, which is the point: the wait has to burn the whole
+    // budget. This test reaches `awaitBoardCardSearchVisible` through
+    // `addCmd`, which does not take the `sleep` seam its sibling below uses,
+    // so those SEARCH_INDEX_VISIBLE_BUDGET_MS are real wall clock.
+    //
+    // The budget is 5925 ms and bun's default per-test deadline is 5000, so
+    // this test was ALWAYS over — it passed only while the runner was fast
+    // enough for the early attempts to finish first, and failed on a loaded CI
+    // host at 5006 ms (fkanban CI 2026-09-04T00:46Z). A deadline shorter than
+    // a budget the test deliberately exhausts is a broken deadline, not a
+    // slow test, so it is derived from the constant and moves with it.
+  }, SEARCH_INDEX_VISIBLE_BUDGET_MS * 3);
 
   test("the wait outlives a partition lag longer than the old 8-attempt budget", async () => {
     const card = writtenCard();
