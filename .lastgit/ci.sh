@@ -21,6 +21,9 @@ bun install --frozen-lockfile
 echo "== schema-sync architecture boundary =="
 bun run check:schema-sync-boundary
 
+echo "== test-timeout architecture boundary =="
+bun run check:test-timeout-boundary
+
 echo "== typecheck =="
 bun run typecheck
 

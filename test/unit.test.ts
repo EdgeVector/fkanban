@@ -66,6 +66,7 @@ import { doctor, shimInstallHint } from "../src/commands/doctor.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../src/mcp/register.ts";
 import { TOP_HELP, COMMAND_HELP, commandHelpHint, resolveHelp, suggestFlag } from "../src/cli.ts";
 import { levenshtein, suggestClosest } from "../src/suggest.ts";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 function card(partial: Partial<Card>): Card {
   return {
@@ -811,7 +812,7 @@ describe("mcp register helper (single source of truth)", () => {
       expect(cmd).toContain(entry!);
       expect(entry!.endsWith("/src/mcp/main.ts")).toBe(true);
     }
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   // The invariant above is conditional on which branch this machine happens to
   // be in, so on a shim-less runner it proves nothing about the shim form and
@@ -834,7 +835,7 @@ describe("mcp register helper (single source of truth)", () => {
       // `-- bun <path>` executes <path>.
       : cmd.slice(cmd.indexOf(" -- bun ") + " -- bun ".length);
     expect(entry).toBe(runs);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });
 
 describe("per-command help", () => {

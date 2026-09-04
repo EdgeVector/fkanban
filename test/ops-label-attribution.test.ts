@@ -40,6 +40,7 @@ import { GROOM_SUBCOMMANDS } from "../src/commands/groom.ts";
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 import { allPinnedSchemas } from "../src/schemas.ts";
 import { handleApiList } from "./http-list.ts";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const HASH_FOR: Record<string, string> = Object.fromEntries(
   allPinnedSchemas().map((e) => [e.key, `hash-${e.key}`]),
@@ -285,6 +286,6 @@ describe("every groom sweep attributes its own traffic", () => {
       const labels = new Set(node.seen.map((s) => s.label));
       expect(labels).toEqual(new Set([groomOpsLabel(sub)]));
       expect(labels.has(DEFAULT_OPS_LABEL)).toBe(false);
-    });
+    }, SPAWN_TEST_TIMEOUT_MS);
   }
 });

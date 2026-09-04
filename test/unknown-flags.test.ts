@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const NO_CONFIG = join(tmpdir(), `fkanban-unknown-flags-no-config-${process.pid}.json`);
@@ -37,20 +38,20 @@ describe("unknown-flag rejection", () => {
     expect(stderr).toContain("--titel");
     expect(stderr.toLowerCase()).toContain("unknown option");
     expect(stderr).toContain("kanban add --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("add: a typo'd --colum (column) errors with exit 2 — no silent default", async () => {
     const { code, stderr } = await runCli(["add", "zz2", "--title", "T2", "--colum", "review"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--colum");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("list: an unknown --bogusflag errors with exit 2 and a list-scoped hint", async () => {
     const { code, stderr } = await runCli(["list", "--bogusflag"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--bogusflag");
     expect(stderr).toContain("kanban list --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("list: --tag is now a recognized flag (NOT an unknown-flag exit 2)", async () => {
     // `--tag` is a first-class list filter, so it must not trip the
@@ -60,7 +61,7 @@ describe("unknown-flag rejection", () => {
     const { code, stderr } = await runCli(["list", "--tag", "test"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("list: --full_body and --full-body are recognized compatibility aliases", async () => {
     for (const flag of ["--full_body", "--full-body"]) {
@@ -68,7 +69,7 @@ describe("unknown-flag rejection", () => {
       expect(code).not.toBe(2);
       expect(stderr).not.toContain("Unknown option");
     }
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("search: --full_body and --full-body are recognized compatibility aliases", async () => {
     for (const flag of ["--full_body", "--full-body"]) {
@@ -76,25 +77,25 @@ describe("unknown-flag rejection", () => {
       expect(code).not.toBe(2);
       expect(stderr).not.toContain("Unknown option");
     }
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("known flags still parse: `add --help` prints help and exits 0", async () => {
     const { code, stdout } = await runCli(["add", "--help"]);
     expect(code).toBe(0);
     expect(stdout).toContain("kanban add");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("--version still works (exit 0)", async () => {
     const { code, stdout } = await runCli(["--version"]);
     expect(code).toBe(0);
     expect(stdout.trim().length).toBeGreaterThan(0);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("unknown *command* contract is unchanged (exit 2)", async () => {
     const { code, stderr } = await runCli(["frobnicate"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown command");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });
 
 // A flag that's globally known (some command declares it) but misapplied to a
@@ -108,27 +109,27 @@ describe("misapplied-flag rejection (globally-known, wrong command)", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--column'");
     expect(stderr).toContain("kanban show --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("show --board: accepted as a compatibility no-op (slugs are global)", async () => {
     const { code, stderr } = await runCli(["show", "any-slug", "--board", "default"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("move --board: rejected with exit 2 (slugs are global; move can't scope)", async () => {
     const { code, stderr } = await runCli(["move", "any-slug", "doing", "--board", "X"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--board'");
     expect(stderr).toContain("kanban move --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("rm --tags: rejected with exit 2", async () => {
     const { code, stderr } = await runCli(["rm", "any-slug", "--tags", "foo"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--tags'");
     expect(stderr).toContain("kanban rm --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("add --tags: accepted (NOT an exit-2 unknown-flag rejection)", async () => {
     // --tags is a first-class `add` flag, so it must never trip the
@@ -137,25 +138,25 @@ describe("misapplied-flag rejection (globally-known, wrong command)", () => {
     const { code, stderr } = await runCli(["add", "zz", "--title", "T", "--tags", "a,b"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("move --position N --force: both accepted (no false rejection)", async () => {
     const { code, stderr } = await runCli(["move", "zz", "doing", "--position", "0", "--force"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("search --board/--column: accepted on search", async () => {
     const { code, stderr } = await runCli(["search", "q", "--board", "default", "--column", "todo"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("universal --json works on a command with no other flags (show)", async () => {
     const { code, stderr } = await runCli(["show", "any-slug", "--json"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("rank --mode: accepted on rank (NOT an exit-2 unknown-flag rejection)", async () => {
     // --mode is documented in `kanban rank --help` (hard|priority) and read by
@@ -165,5 +166,5 @@ describe("misapplied-flag rejection (globally-known, wrong command)", () => {
     const { code, stderr } = await runCli(["rank", "--board", "default", "--column", "todo", "--mode", "hard"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Unknown option '--mode'");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });

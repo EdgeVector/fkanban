@@ -17,6 +17,7 @@
     "fkanban": "bun src/cli.ts",
     "install-cli": "bash bin/install.sh",
     "check:schema-sync-boundary": "bun scripts/check-schema-sync-boundary.ts",
+    "check:test-timeout-boundary": "bun scripts/check-test-timeout-boundary.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
