@@ -12,14 +12,17 @@ import {
   boardCardFieldsFromCard,
   boardCardSk,
   boardCardsHash,
+  boardCardsReadDiverged,
   classifyBoardCardDuplicateRows,
   enqueueBoardCardJanitor,
   listBoardCardsPartition,
   listBoardCardsPartitionSpine,
   parseBoardCardSk,
+  readBoardCardsPartitionDivergence,
   sweepBoardCardJanitor,
   sweepBoardCardsPartition,
   upsertBoardCard,
+  type BoardCardsReadDivergence,
 } from "../board-cards.ts";
 import { BOARD_CARDS_FIELDS } from "../schemas.ts";
 import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "../card-list-index.ts";
@@ -199,9 +202,25 @@ export type BoardCardsHealReport = {
    * `sweepBoardCardsPartition`.
    */
   incomplete_leads: string[];
+  /**
+   * Per board, the whole-partition read compared against the union of its
+   * per-column reads — see {@link readBoardCardsPartitionDivergence}. Reported
+   * on every run, dry or apply, because a consumer that decides whether to
+   * apply needs it from the DRY run.
+   *
+   * A non-empty `wholeOnly`/`columnOnly` means the node served two inconsistent
+   * views of one partition during this run, and refuses an `--apply`. A
+   * non-null `failed` is a read that threw: coverage, not disagreement, so it
+   * is reported and does not block.
+   */
+  read_divergence: BoardCardsReadDivergence[];
   dryRun: boolean;
-  /** True when the removal ceiling refused the whole apply; nothing was written. */
+  /**
+   * True when a safety refusal cancelled the whole apply; nothing was written.
+   * {@link BoardCardsHealReport.blocked_reason} says which one.
+   */
   blocked?: boolean;
+  blocked_reason?: "removal-ceiling" | "read-divergence";
   removal_ceiling?: number;
   removals_possible?: number;
   actions: BoardCardsHealAction[];
@@ -319,6 +338,7 @@ export async function boardCardsHealResult(
         board_cards_bound: false,
         discovery_failed: null,
         incomplete_leads: [],
+        read_divergence: [],
         dryRun: !opts.apply,
         blocked: false,
         actions: [],
@@ -413,6 +433,10 @@ export async function boardCardsHealResult(
   // `<board>:<field>` for every completeness lead the node refused. Each one
   // means this run's view of that partition is a lower bound.
   const incompleteLeads: string[] = [];
+  // Two reads of each target partition, taken by different node access paths,
+  // recorded so the apply below can refuse when they disagree. Collected here
+  // because heal is already in this loop holding the board's column list.
+  const readDivergence: BoardCardsReadDivergence[] = [];
   // Partitions we actually read end-to-end. Only for these can heal claim to
   // know every row for a slug and skip the per-write orphan rescan; a partition
   // that failed to list (or a board with no Board record) keeps the defensive
@@ -439,6 +463,17 @@ export async function boardCardsHealResult(
     });
     if (!part) continue;
     enumeratedBoards.add(b.slug);
+    // Before anything is classified: does this node agree with itself about
+    // which rows this partition holds? A degraded page is silent — no error, no
+    // `truncated` flag — so the only way to see it is to ask twice by different
+    // routes and compare.
+    const divergence = await readBoardCardsPartitionDivergence(
+      opts.node,
+      opts.cfg,
+      b.slug,
+      b.columns ?? [],
+    );
+    if (divergence) readDivergence.push(divergence);
     const seenSlugs = new Set<string>();
     for (const c of part) {
       if (slugFilter && !slugFilter.has(c.slug)) continue;
@@ -643,6 +678,58 @@ export async function boardCardsHealResult(
     [...new Set([...byKey.keys()].map((key) => key.split("\0")[1] as string))],
   );
 
+  // READ-DIVERGENCE REFUSAL — before the first write, and before the ceiling,
+  // because it invalidates a different thing. The ceiling asks "is this repair
+  // plan too large to be believed?"; this asks "did the reads the plan is built
+  // on describe one board?". A plan built on two disagreeing views is not too
+  // large, it is unfounded, and its upserts are as suspect as its deletes.
+  //
+  // Refusing rather than repairing-the-safe-subset is deliberate. There is no
+  // safe subset: the incident's degraded read produced BOTH a delete for a live
+  // card and a skipped reap for a real ghost, so "act on what both reads agree
+  // about" would still have written on a view known to be wrong. The board is
+  // not damaged by waiting — heal is hourly, the rows returned by themselves
+  // after the daemon restarted, and the run that comes back finds them.
+  const diverged = readDivergence.filter(boardCardsReadDiverged);
+  if (opts.apply && diverged.length > 0) {
+    const blockedReport: BoardCardsHealReport = {
+      scanned_index_rows: rawRows.length,
+      drifted: 0,
+      healed: 0,
+      would_heal: 0,
+      missing_card: 0,
+      board_cards_bound: true,
+      discovery_failed: discoveryFailed,
+      incomplete_leads: incompleteLeads,
+      read_divergence: readDivergence,
+      dryRun: false,
+      blocked: true,
+      blocked_reason: "read-divergence",
+      actions: [],
+    };
+    const detail = diverged.map(
+      (d) =>
+        `  ${d.board}: ${d.wholeOnly.length} row(s) only the whole-partition read saw, ` +
+        `${d.columnOnly.length} only a column read saw ` +
+        `(columns probed: ${d.columnsProbed.join(",") || "none"})`,
+    );
+    // Exit 0 with `blocked: true` — a safety refusal is not an error, matching
+    // the removal ceiling, board-cards-heal-scheduled and milestone-indexes-heal.
+    return {
+      text: [
+        `board-cards heal: scanned=${rawRows.length} BLOCKED — the node served ` +
+        `inconsistent views of ${diverged.length} partition(s)`,
+        ...detail,
+        `  Nothing was written. Two reads of one partition disagreeing means this`,
+        `  run cannot tell a stale row from an unseen one, and heal deletes on`,
+        `  exactly that distinction.`,
+        `  This is a node-side read degradation, not board damage: re-run when the`,
+        `  reads agree. Do not restart anything on this signal alone.`,
+      ].join("\n"),
+      report: blockedReport,
+    };
+  }
+
   // SAFETY CEILING — read the run's removal intent before the first write.
   //
   // Every delete below is authorized per row by two reads (the wide point-read
@@ -681,8 +768,10 @@ export async function boardCardsHealResult(
       board_cards_bound: true,
       discovery_failed: discoveryFailed,
       incomplete_leads: incompleteLeads,
+      read_divergence: readDivergence,
       dryRun: false,
       blocked: true,
+      blocked_reason: "removal-ceiling",
       removal_ceiling: removalCeiling,
       removals_possible: removalsPossible,
       actions: [],
@@ -968,6 +1057,7 @@ export async function boardCardsHealResult(
     board_cards_bound: true,
     discovery_failed: discoveryFailed,
     incomplete_leads: incompleteLeads,
+    read_divergence: readDivergence,
     dryRun: !opts.apply,
     blocked: false,
     // Reported on EVERY run, not just refusals. A safety limit that is only

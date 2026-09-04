@@ -31,6 +31,7 @@ function report(partial: Partial<BoardCardsHealReport> = {}): BoardCardsHealRepo
     board_cards_bound: true,
     discovery_failed: null,
     incomplete_leads: [],
+    read_divergence: [],
     dryRun: true,
     actions: [],
     ...partial,
