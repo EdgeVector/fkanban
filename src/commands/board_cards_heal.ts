@@ -29,6 +29,8 @@ import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "
 import {
   cardExists,
   findCardSummaryForReconcile,
+  findMilestone,
+  isMilestoneState,
   listBoards,
   scanCardSummariesForReconcile,
   type Card,
@@ -127,14 +129,86 @@ export function resolveRemovalCeiling(
 export function countPossibleOrphanRemovals(
   byKey: Map<string, { column: string; position: string }[]>,
   truthBySlug: Map<string, Card | null>,
+  milestoneMembershipSlugs: ReadonlySet<string> = new Set(),
 ): number {
   let possible = 0;
   for (const [key, rows] of byKey) {
     if (rows.length === 0) continue;
     const slug = key.split("\0")[1] as string;
+    // Rows this run has already decided it will not delete must not inflate the
+    // ceiling. The ceiling is a statement of REMOVAL INTENT, and counting rows
+    // the classifier skips makes a run look closer to the brake than it is —
+    // on the live `default` board that is 29 of 198, enough to change whether a
+    // legitimate reap is refused.
+    if (milestoneMembershipSlugs.has(slug)) continue;
     if (!truthBySlug.get(slug)) possible += rows.length;
   }
   return possible;
+}
+
+/**
+ * Slugs whose BoardCards-partition rows are MILESTONE membership, not card
+ * membership — so heal must not read them as card orphans.
+ *
+ * ## Why any row in this partition can be a milestone's
+ *
+ * `BoardMilestones` and `BoardCards` are both `HashRange` keyed
+ * `{hash_field: "board", range_field: "sk"}`. They are supposed to be separate
+ * identities, and today they are (`board_milestones` pins its own hash). They
+ * were not always: the 2026-07-23 declare-resolver expand bug collapsed
+ * `BoardMilestones_hashrange_v1_portfolio_20260723` onto
+ * `BoardCards_hashrange_v1`, and every milestone written in that window landed
+ * in the identity `board_cards` still pins today (`1ef2e7a3…`). Those rows are
+ * addressable, enumerable, and indistinguishable from card rows by key shape —
+ * both grammars are `<segment>#<position(8)>#<slug>`.
+ *
+ * So heal enumerates them, point-reads Card by slug, finds nothing, and
+ * classifies `delete-orphan`. Measured on the live `default` board
+ * 2026-09-04: 198 rows classified orphan, of which **29 are live milestones**
+ * (`kanban milestone show` renders them; `kanban show` does not). `--apply`
+ * would have deleted the index rows of 29 milestones and reported it as
+ * routine orphan reaping.
+ *
+ * ## The discriminator, and why it takes both halves
+ *
+ * A row is milestone membership only when BOTH hold:
+ *
+ *  - EVERY row for the slug has a first sk segment that is a milestone STATE
+ *    ({@link isMilestoneState}). A board may legitimately declare a column
+ *    named `active`, so the segment alone is not enough — but a slug with rows
+ *    under a real board column is a card question, whichever else it has.
+ *  - a Milestone record point-reads for the slug. The state name alone would
+ *    let a dead row named `complete#…#anything` escape the reap forever, which
+ *    trades one silent wrong delete for one silent wrong keep.
+ *
+ * Both halves are needed because they fail in opposite directions, and the
+ * cheap half gates the read: only slugs that already failed the Card read AND
+ * are entirely state-keyed cost a Milestone point-read. On the live board that
+ * is 29 reads, not 198.
+ *
+ * Skipping is deliberately not repairing. Moving these rows to the
+ * `board_milestones` identity is `groom milestone-indexes-heal`'s job — it owns
+ * that index and its own ceiling. Heal's obligation here is only to stop
+ * deleting rows it cannot prove are card orphans.
+ */
+async function resolveMilestoneMembershipSlugs(
+  opts: BoardCardsHealOptions,
+  byKey: Map<string, { column: string; position: string }[]>,
+  truthBySlug: Map<string, Card | null>,
+): Promise<Set<string>> {
+  const candidates: string[] = [];
+  for (const [key, rows] of byKey) {
+    if (rows.length === 0) continue;
+    const slug = key.split("\0")[1] as string;
+    if (truthBySlug.get(slug)) continue;
+    if (!rows.every((row) => isMilestoneState(row.column))) continue;
+    candidates.push(slug);
+  }
+  const uniq = [...new Set(candidates)];
+  const found = await mapWithConcurrency(uniq, (slug) =>
+    findMilestone(opts.node, opts.cfg, slug),
+  );
+  return new Set(uniq.filter((_slug, i) => Boolean(found[i])));
 }
 
 export type BoardCardsHealAction = {
@@ -146,6 +220,7 @@ export type BoardCardsHealAction = {
   truth_position: string | null;
   action:
     | "delete-orphan"
+    | "skip-milestone-membership"
     | "upsert-truth"
     | "delete-stale-and-upsert"
     | "refresh-thin-fields"
@@ -179,6 +254,17 @@ export type BoardCardsHealReport = {
    */
   would_heal: number;
   missing_card: number;
+  /**
+   * BoardCards-partition rows this run refused to classify as card orphans
+   * because they are milestone membership stranded in the BoardCards identity
+   * — see {@link resolveMilestoneMembershipSlugs}.
+   *
+   * Reported on every run, dry or apply. A non-zero value is not board damage
+   * and needs no action from heal; it is the size of the `board_milestones`
+   * migration still outstanding, and the number of rows an unfixed heal would
+   * have deleted.
+   */
+  milestone_rows_skipped: number;
   /**
    * False when `board_cards` is not bound in config. Every partition read then
    * returns null and every write no-ops in `upsertBoardCard`, so the other
@@ -335,6 +421,7 @@ export async function boardCardsHealResult(
         healed: 0,
         would_heal: 0,
         missing_card: 0,
+        milestone_rows_skipped: 0,
         board_cards_bound: false,
         discovery_failed: null,
         incomplete_leads: [],
@@ -668,6 +755,7 @@ export async function boardCardsHealResult(
   // the shape that let the dry run disagree with the apply run it previews.
   let would_heal = 0;
   let missing_card = 0;
+  let milestone_rows_skipped = 0;
   let drifted = 0;
 
   // One point-read per distinct slug, not per (board, slug) key: the Card is
@@ -676,6 +764,14 @@ export async function boardCardsHealResult(
   const truthBySlug = await resolveTruthBySlug(
     opts,
     [...new Set([...byKey.keys()].map((key) => key.split("\0")[1] as string))],
+  );
+
+  // Resolved BEFORE the removal ceiling, because it changes what the ceiling is
+  // counting: these rows are not removal intent.
+  const milestoneMembershipSlugs = await resolveMilestoneMembershipSlugs(
+    opts,
+    byKey,
+    truthBySlug,
   );
 
   // READ-DIVERGENCE REFUSAL — before the first write, and before the ceiling,
@@ -698,6 +794,7 @@ export async function boardCardsHealResult(
       healed: 0,
       would_heal: 0,
       missing_card: 0,
+      milestone_rows_skipped: 0,
       board_cards_bound: true,
       discovery_failed: discoveryFailed,
       incomplete_leads: incompleteLeads,
@@ -753,7 +850,11 @@ export async function boardCardsHealResult(
   // Bounding the safe direction is the point — and the slack is small in
   // practice: 0 sparse-veto rows of 218 on the live board, 2026-08-03.
   const removalCeiling = resolveRemovalCeiling(opts.maxRemovals, rawRows.length);
-  const removalsPossible = countPossibleOrphanRemovals(byKey, truthBySlug);
+  const removalsPossible = countPossibleOrphanRemovals(
+    byKey,
+    truthBySlug,
+    milestoneMembershipSlugs,
+  );
   if (opts.apply && removalsPossible > removalCeiling) {
     const blockedReport: BoardCardsHealReport = {
       scanned_index_rows: rawRows.length,
@@ -765,6 +866,7 @@ export async function boardCardsHealResult(
       // name that does not promise the rows are really orphans.
       would_heal: 0,
       missing_card: 0,
+      milestone_rows_skipped: 0,
       board_cards_bound: true,
       discovery_failed: discoveryFailed,
       incomplete_leads: incompleteLeads,
@@ -795,6 +897,30 @@ export async function boardCardsHealResult(
     const point = truthBySlug.get(slug) ?? null;
     if (!point) {
       if (rows.length === 0) continue;
+
+      // NOT A CARD AT ALL. A milestone's membership row shares this partition's
+      // key shape (see {@link resolveMilestoneMembershipSlugs}), so "no Card
+      // record" is the expected reading of a healthy row, not evidence of an
+      // orphan. Reported and left alone — heal does not own the
+      // `board_milestones` index and must not delete on its behalf.
+      if (milestoneMembershipSlugs.has(slug)) {
+        for (const row of rows) {
+          actions.push({
+            slug,
+            board,
+            list_column: row.column,
+            list_position: row.position,
+            truth_column: null,
+            truth_position: null,
+            action: "skip-milestone-membership",
+            reason:
+              "row is milestone membership in the BoardCards identity " +
+              `(state "${row.column}", Milestone record present); not a card orphan`,
+          });
+          milestone_rows_skipped += 1;
+        }
+        continue;
+      }
 
       // CONFIRM the absence before reaping. This branch deletes board
       // membership, so it takes a second, independent read before acting.
@@ -1054,6 +1180,7 @@ export async function boardCardsHealResult(
     healed,
     would_heal,
     missing_card,
+    milestone_rows_skipped,
     board_cards_bound: true,
     discovery_failed: discoveryFailed,
     incomplete_leads: incompleteLeads,
@@ -1076,6 +1203,7 @@ export async function boardCardsHealResult(
       applied: report.healed,
       planned: report.would_heal,
     })} missing_card=${report.missing_card}` +
+    `${report.milestone_rows_skipped ? ` milestone_rows_skipped=${report.milestone_rows_skipped}` : ""}` +
     `${report.dryRun ? " — DRY RUN, no writes" : ""}`;
   const lines = report.actions
     .filter((a) => a.action !== "noop-match")
@@ -1104,7 +1232,18 @@ export async function boardCardsHealResult(
       `    candidate. Re-run when the node is not shedding reads before treating this as converged.`,
     ]
     : [];
-  const text = [head, ...discoveryWarn, ...warn, ...lines].join("\n");
+  // Its own line, not folded into the head: a reader who sees these rows
+  // vanish from `missing_card` between two versions of this command needs to
+  // find out here that they were not deleted either.
+  const milestoneNote = report.milestone_rows_skipped
+    ? [
+      `  MILESTONE ROWS — ${report.milestone_rows_skipped} row(s) in the BoardCards partition are`,
+      `    milestone membership (state-keyed sk, Milestone record present), not card orphans.`,
+      `    They are NOT deleted and NOT counted as removals. Repairing them belongs to`,
+      `    \`kanban groom milestone-indexes-heal\`, which owns the board_milestones index.`,
+    ]
+    : [];
+  const text = [head, ...discoveryWarn, ...warn, ...milestoneNote, ...lines].join("\n");
   return { text, report };
 }
 
