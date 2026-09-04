@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -39,7 +40,7 @@ describe("missing / dash-leading flag value (clean message, not parseArgs intern
     // kanban voice: names the flag and points at help.
     expect(stderr).toContain("--title");
     expect(stderr).toContain("kanban add --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("list: --limit -5 (dash-leading value, space form) → clean one-liner, exit 2", async () => {
     const { code, stderr } = await runCli(["list", "--limit", "-5"]);
@@ -48,12 +49,12 @@ describe("missing / dash-leading flag value (clean message, not parseArgs intern
     expect(stderr).not.toContain("..");
     expect(stderr.trim().split("\n").length).toBe(1);
     expect(stderr).toContain("kanban list --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("list: --limit=-5 (=-form) keeps the #34 validation message, unchanged", async () => {
     const { code, stderr } = await runCli(["list", "--limit=-5"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain('got "-5"');
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });
