@@ -369,7 +369,7 @@ export function capFlat<T extends Card>(cards: T[], limit: number): T[] {
 
 export const BODY_PREVIEW_CHARS = 200;
 
-export function previewBody(body: string): { body: string; bodyTruncated: boolean } {
+function previewBody(body: string): { body: string; bodyTruncated: boolean } {
   const flattened = body.replace(/\s+/g, " ").trim();
   if (flattened.length <= BODY_PREVIEW_CHARS) {
     return { body: flattened, bodyTruncated: false };
