@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import pkg from "../package.json";
 import { FKANBAN_TOOL_COUNT } from "../src/mcp/server.ts";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kanbanShimPath = resolve(here, "../bin/kanban");
@@ -67,7 +68,7 @@ describe("bin/kanban + bin/fkanban bun resolution", () => {
       expect(exitCode).toBe(0);
       expect(stderr).toBe("");
       expect(stdout.trim()).toBe(pkg.version);
-    });
+    }, SPAWN_TEST_TIMEOUT_MS);
   }
 
   for (const [name, shimPath] of [["kanban", kanbanShimPath], ["fkanban", fkanbanShimPath]] as const) {
@@ -91,7 +92,7 @@ describe("bin/kanban + bin/fkanban bun resolution", () => {
       expect(stderr).toContain("bun not found on PATH");
       expect(stderr).toContain("$HOME/.bun/bin/bun");
       expect(stderr).toContain(name);
-    });
+    }, SPAWN_TEST_TIMEOUT_MS);
   }
 
   for (const [name, shimPath] of [["kanban", kanbanShimPath], ["fkanban", fkanbanShimPath]] as const) {

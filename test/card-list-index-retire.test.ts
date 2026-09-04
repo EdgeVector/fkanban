@@ -26,7 +26,11 @@ import {
   type Board,
   type Card,
 } from "../src/record.ts";
-import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
+import {
+  boardCardFieldsFromCard,
+  boardCardSk,
+  SEARCH_INDEX_VISIBLE_BUDGET_MS,
+} from "../src/board-cards.ts";
 import { cardListIndexRetireResult } from "../src/commands/card_list_index_retire.ts";
 
 const CARD = "cardhash";
@@ -208,7 +212,15 @@ describe("CardListIndex all_cards is retired where BoardCards exists", () => {
     expect(rollupWrites(node)).toHaveLength(0);
     // ...and the row it DOES write is the bounded one, per card.
     expect(node.writes.some((w) => w.schemaHash === BOARD_CARDS)).toBe(true);
-  });
+    // DEADLINE, derived — not a round number picked to make CI stop failing.
+    //
+    // `createCardRecord` always calls `awaitBoardCardSearchVisible` after
+    // writing, and `fakeNode`'s BoardCards partition snapshot is fixed at
+    // construction time, so it never reflects "fresh" — the wait burns the
+    // whole real-time SEARCH_INDEX_VISIBLE_BUDGET_MS (5925ms) with no seam to
+    // skip it, the same shape as the already-fixed
+    // test/search-visibility-budget.test.ts case.
+  }, SEARCH_INDEX_VISIBLE_BUDGET_MS * 3);
 
   test("a legacy node without BoardCards still maintains the rollup", async () => {
     const node = fakeNode([card({ slug: "existing" })]);

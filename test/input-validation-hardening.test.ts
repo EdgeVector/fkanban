@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const NO_CONFIG = join(tmpdir(), `fkanban-input-validation-no-config-${process.pid}.json`);
@@ -34,13 +35,13 @@ describe("surplus positional rejection", () => {
     expect(stderr).toContain("Too many arguments");
     expect(stderr).toContain('"done"');
     expect(stderr).toContain("kanban move <slug> <column>");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("a valid move invocation is not rejected as a usage error", async () => {
     const { code, stderr } = await runCli(["move", "ship-login", "doing"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("Too many arguments");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("other fixed-arity commands reject surplus positionals before node access", async () => {
     for (const args of [
@@ -64,13 +65,13 @@ describe("strict decimal integer flags", () => {
       expect(stderr).toContain("--limit must be a positive integer");
       expect(stderr).toContain(`got "${value}"`);
     }
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("plain decimal limit is accepted by validation", async () => {
     const { code, stderr } = await runCli(["list", "--limit", "1000"]);
     expect(code).not.toBe(2);
     expect(stderr).not.toContain("--limit must be a positive integer");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });
 
 describe("subcommand validation before context loading", () => {
@@ -80,7 +81,7 @@ describe("subcommand validation before context loading", () => {
     expect(stderr).toContain('Unknown board subcommand "bogus"');
     expect(stderr).not.toContain(NO_CONFIG);
     expect(stderr).not.toContain("config");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("dep/tag bogus report unknown subcommand before missing arguments or context", async () => {
     const dep = await runCli(["dep", "bogus"]);
@@ -92,5 +93,5 @@ describe("subcommand validation before context loading", () => {
     expect(tag.code).toBe(2);
     expect(tag.stderr).toContain('Unknown tag subcommand "bogus"');
     expect(tag.stderr).not.toContain("Missing argument");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });

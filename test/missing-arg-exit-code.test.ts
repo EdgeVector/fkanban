@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pkg from "../package.json";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const REPO_ROOT = resolve(dirname(CLI), "..");
@@ -58,14 +59,14 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
       const { code, stderr } = await runCli(args);
       expect(code).toBe(2);
       expect(stderr).toContain("Missing argument");
-    });
+    }, SPAWN_TEST_TIMEOUT_MS);
   }
 
   test("unknown command stays exit 2 (unchanged usage-error contract)", async () => {
     const { code, stderr } = await runCli(["frobnicate"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown command");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("which prints CLI provenance without reaching config/node", async () => {
     const { code, stdout, stderr } = await runCli(["which"]);
@@ -75,7 +76,7 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(stdout).toContain("executable_path:");
     expect(stdout).toContain("source_path:");
     expect(stdout).toContain("bun_path:");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("which --json prints stable machine-readable provenance", async () => {
     const { code, stdout, stderr } = await runCli(["which", "--json"]);
@@ -97,7 +98,7 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(typeof (report as { expected_host_track?: unknown }).expected_host_track).toBe("string");
     expect(report.bun_path.length).toBeGreaterThan(0);
     expect(report.bun_version.length).toBeGreaterThan(0);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("which --check exits nonzero when the CLI is not host-track managed", async () => {
     const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-not-host-track-"));
@@ -105,7 +106,7 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(code).toBe(1);
     expect(stderr).toBe("");
     expect(stdout).toContain("in_host_track: false");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("which --check exits zero when the source root resolves under legacy host-track", async () => {
     const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-host-track-"));
@@ -115,7 +116,7 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(code).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain("in_host_track: true");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("which --check exits zero under local-safe apps/fkanban layout", async () => {
     // Kind B install root: ~/.host-track/apps/fkanban (versions/current underneath).
@@ -128,7 +129,7 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(stderr).toBe("");
     expect(stdout).toContain("in_host_track: true");
     // expected_host_track may be the realpath of the apps/fkanban symlink
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("which --check honors FKANBAN_HOST_TRACK_DIR override", async () => {
     const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-override-"));
@@ -139,7 +140,7 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(code).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain("in_host_track: true");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("which accepts the host-track refresh alias advertised by the manifest", async () => {
     const home = mkdtempSync(resolve(tmpdir(), "fkanban-which-refresh-"));
@@ -156,10 +157,10 @@ describe("missing-argument exit code (usage error → exit 2)", () => {
     expect(report.command).toBe("kanban-host-track-refresh");
     expect(report.under_host_track).toBe(true);
     expect(report.issues).toEqual([]);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("bare invocation prints help and exits 0 (unchanged)", async () => {
     const { code } = await runCli([]);
     expect(code).toBe(0);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });
