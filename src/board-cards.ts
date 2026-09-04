@@ -1186,6 +1186,49 @@ export const BOARD_CARDS_SEARCH_FIELDS = BOARD_CARDS_DISPLAY_FIELDS.filter(
  *   budget expired without one. Also `true` when there is nothing to wait for
  *   (no BoardCards hash, or a card with no board/slug).
  */
+/**
+ * Shared polling loop behind {@link awaitBoardCardSearchVisible} and
+ * {@link awaitBoardCardRowVisible} — same budget, same refusal handling,
+ * different question asked of each page.
+ */
+async function pollBoardCardsVisible(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  matches: (row: Card) => boolean,
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean> {
+  let attempt = 0;
+  let refusedRounds = 0;
+  while (attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
+    const found = await listBoardCardsPartition(node, cfg, board, {
+      fields: BOARD_CARDS_SEARCH_FIELDS,
+    })
+      .then((rows): boolean | null => rows?.some(matches) ?? false)
+      .catch((): boolean | null => null);
+    if (found === true) return true;
+
+    // A round in which every source it consulted was REFUSED asked nothing, so
+    // charging it to the budget shortens the wait by exactly the load that
+    // makes the wait necessary. The comment above has claimed "unknown, not a
+    // miss" since the third fix; returning `false` for a refusal is what made
+    // it untrue. Bounded, so a node refusing every read still terminates.
+    const answered = found !== null;
+    if (!answered && refusedRounds < SEARCH_INDEX_REFUSED_ROUNDS) {
+      refusedRounds++;
+      await sleep(SEARCH_INDEX_REFUSED_BACKOFF_MS);
+      continue;
+    }
+
+    const wait = SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt];
+    attempt++;
+    if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
+      await sleep(wait);
+    }
+  }
+  return false;
+}
+
 export async function awaitBoardCardSearchVisible(
   node: NodeClient,
   cfg: Config,
@@ -1203,35 +1246,40 @@ export async function awaitBoardCardSearchVisible(
   const board = card.board?.trim();
   const slug = card.slug?.trim();
   if (!board || !slug) return true;
-  let attempt = 0;
-  let refusedRounds = 0;
-  while (attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
-    const inPartition = await listBoardCardsPartition(node, cfg, board, {
-      fields: BOARD_CARDS_SEARCH_FIELDS,
-    })
-      .then((rows): boolean | null => rows?.some((row) => row.slug === slug) ?? false)
-      .catch((): boolean | null => null);
-    if (inPartition === true) return true;
+  return pollBoardCardsVisible(node, cfg, board, (row) => row.slug === slug, sleep);
+}
 
-    // A round in which every source it consulted was REFUSED asked nothing, so
-    // charging it to the budget shortens the wait by exactly the load that
-    // makes the wait necessary. The comment above has claimed "unknown, not a
-    // miss" since the third fix; returning `false` for a refusal is what made
-    // it untrue. Bounded, so a node refusing every read still terminates.
-    const answered = inPartition !== null;
-    if (!answered && refusedRounds < SEARCH_INDEX_REFUSED_ROUNDS) {
-      refusedRounds++;
-      await sleep(SEARCH_INDEX_REFUSED_BACKOFF_MS);
-      continue;
-    }
-
-    const wait = SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt];
-    attempt++;
-    if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
-      await sleep(wait);
-    }
-  }
-  return false;
+/**
+ * Like {@link awaitBoardCardSearchVisible}, but for callers that are about to
+ * delete a DIFFERENT row for the same slug and so cannot accept "some row for
+ * this slug is visible" as proof the replacement landed — the row it is about
+ * to delete already satisfies that question.
+ *
+ * `board-cards-heal`'s `delete-stale-and-upsert` is exactly this shape: the
+ * stale row and the truth row share a slug and coexist until the delete runs,
+ * so a slug-only visibility check is trivially true throughout and verifies
+ * nothing. This checks for the specific (column, position) the upsert wrote.
+ */
+export async function awaitBoardCardRowVisible(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+  opts?: { sleep?: (ms: number) => Promise<void> },
+): Promise<boolean> {
+  const sleep = opts?.sleep ?? delay;
+  if (!boardCardsHash(cfg)) return true;
+  const board = card.board?.trim();
+  const slug = card.slug?.trim();
+  if (!board || !slug) return true;
+  const column = card.column;
+  const position = String(card.position);
+  return pollBoardCardsVisible(
+    node,
+    cfg,
+    board,
+    (row) => row.slug === slug && row.column === column && String(row.position) === position,
+    sleep,
+  );
 }
 
 /** The wait budget in milliseconds — exported so a test can pin it to the measured lag. */
