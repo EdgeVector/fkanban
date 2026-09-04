@@ -9,6 +9,7 @@ import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import {
+  awaitBoardCardRowVisible,
   boardCardFieldsFromCard,
   boardCardSk,
   boardCardsHash,
@@ -79,6 +80,12 @@ export type BoardCardsHealOptions = {
    * milestone-indexes-heal); omitted uses {@link resolveRemovalCeiling}.
    */
   maxRemovals?: number | null;
+  /**
+   * Test seam for the post-upsert visibility wait — see
+   * {@link awaitBoardCardSearchVisible}'s own `sleep` option. Not a tuning
+   * knob for production callers; omit it there.
+   */
+  visibilitySleep?: (ms: number) => Promise<void>;
 };
 
 /**
@@ -309,6 +316,24 @@ export type BoardCardsHealReport = {
   blocked_reason?: "removal-ceiling" | "read-divergence";
   removal_ceiling?: number;
   removals_possible?: number;
+  /**
+   * `delete-stale-and-upsert` rows this run upserted but could NOT confirm
+   * visible (via {@link awaitBoardCardSearchVisible}) before the matching
+   * delete would have run. The stale sibling row is left in place rather than
+   * removed — see {@link BoardCardsHealReport.delete_sweep_skipped} for why
+   * that is safe: this run never deletes membership it has not just verified
+   * the replacement for.
+   */
+  unverified_upserts?: number;
+  /**
+   * True when the delete sweep at the end of this run was skipped because a
+   * re-check of partition/column agreement — run immediately before the
+   * sweep, not only at plan time — found the node's views had diverged since
+   * the plan was made. Every upsert this run issued still stands; only the
+   * deletes it had queued did not run, so no delete this run is ever
+   * authorized by a plan later shown to be wrong.
+   */
+  delete_sweep_skipped?: boolean;
   actions: BoardCardsHealAction[];
 };
 
@@ -757,6 +782,11 @@ export async function boardCardsHealResult(
   let missing_card = 0;
   let milestone_rows_skipped = 0;
   let drifted = 0;
+  let unverified_upserts = 0;
+  // Set whenever this run enqueues a janitor delete. Gates the pre-sweep
+  // divergence recheck below so a run that healed only by upsert (no deletes
+  // queued) does not pay for two extra partition reads it has no use for.
+  let deletesEnqueued = false;
 
   // One point-read per distinct slug, not per (board, slug) key: the Card is
   // keyed by slug alone, so the same card claimed by two boards resolved the
@@ -982,6 +1012,7 @@ export async function boardCardsHealResult(
               board,
               sk: boardCardSk(row.column, row.position, slug),
             }]);
+            deletesEnqueued = true;
           }
           healed += 1;
         }
@@ -1102,32 +1133,55 @@ export async function boardCardsHealResult(
 
     would_heal += 1;
     if (opts.apply) {
-      // Delete by the REAL range keys captured by the completeness sweep, not
-      // by rebuilding keys from the row's copied payload fields. Protein
-      // folding can refresh an old row's copied `position` while the physical
-      // key stays at its prior column/position. Rebuilding then targets a key
-      // that never existed, reports a successful repair, and leaves the stale
-      // membership behind forever.
-      const exactSks = spineSksBySlug.get(`${boardFromKey}\0${slug}`) ?? [];
-      const schemaHash = boardCardsHash(opts.cfg);
-      if (schemaHash && exactSks.length > 0) {
-        enqueueBoardCardJanitor(
-          exactSks.map((sk) => ({ schemaHash, board: boardFromKey, sk })),
-        );
-      } else if (schemaHash) {
-        // A refused sweep lead can leave a row visible only to the wide read.
-        // Enqueue the rows this pass already listed — no partition rescan.
-        enqueueBoardCardJanitor(
-          rows.map((row) => ({
-            schemaHash,
-            board: row.board || boardFromKey,
-            sk: boardCardSk(row.column, row.position, slug),
-          })),
-        );
-      }
+      // UPSERT — then VERIFY — then enqueue the delete. The stale row and the
+      // truth row are different sks by construction (that is what "stale"
+      // means here), so this never targets the row just written. What it
+      // guards against is a write that acks but is not yet — or never —
+      // visible through the same reads heal itself trusts: authorizing a
+      // delete on an unverified upsert is exactly how a heal can reduce a
+      // card's membership to zero while reporting success. See
+      // papercut-kanban-board-cards-heal-apply-deletes-all-membership-and-the-upsert-never-lands-20260904.
       await upsertBoardCard(opts.node, opts.cfg, truth, null, {
         skipOrphanPurge: enumeratedBoards.has(truthBoard),
       });
+      const upsertVisible = await awaitBoardCardRowVisible(
+        opts.node,
+        opts.cfg,
+        truth,
+        opts.visibilitySleep ? { sleep: opts.visibilitySleep } : undefined,
+      );
+      if (upsertVisible) {
+        // Delete by the REAL range keys captured by the completeness sweep, not
+        // by rebuilding keys from the row's copied payload fields. Protein
+        // folding can refresh an old row's copied `position` while the physical
+        // key stays at its prior column/position. Rebuilding then targets a key
+        // that never existed, reports a successful repair, and leaves the stale
+        // membership behind forever.
+        const exactSks = spineSksBySlug.get(`${boardFromKey}\0${slug}`) ?? [];
+        const schemaHash = boardCardsHash(opts.cfg);
+        if (schemaHash && exactSks.length > 0) {
+          enqueueBoardCardJanitor(
+            exactSks.map((sk) => ({ schemaHash, board: boardFromKey, sk })),
+          );
+          deletesEnqueued = true;
+        } else if (schemaHash) {
+          // A refused sweep lead can leave a row visible only to the wide read.
+          // Enqueue the rows this pass already listed — no partition rescan.
+          enqueueBoardCardJanitor(
+            rows.map((row) => ({
+              schemaHash,
+              board: row.board || boardFromKey,
+              sk: boardCardSk(row.column, row.position, slug),
+            })),
+          );
+          deletesEnqueued = true;
+        }
+      } else {
+        // Leave the stale row(s) in place. The card still has membership
+        // through them; the next heal run re-reads truth fresh and repairs
+        // this slug again, this time (or eventually) with a verifiable upsert.
+        unverified_upserts += 1;
+      }
       healed += 1;
     }
   }
@@ -1165,13 +1219,35 @@ export async function boardCardsHealResult(
         enqueueBoardCardJanitor(
           dup.sparseSks.map((sk) => ({ schemaHash, board, sk })),
         );
+        deletesEnqueued = true;
       }
       healed += 1;
     }
   }
 
-  if (opts.apply) {
-    await sweepBoardCardJanitor(opts.node);
+  let deleteSweepSkipped = false;
+  if (opts.apply && deletesEnqueued) {
+    // Re-check partition/column agreement immediately before the delete sweep
+    // runs, not only at plan time above. The plan-time guard is evaluated once
+    // before this run's first write; if the node's read view degrades to a
+    // whole-partition-vs-column disagreement while this run's own writes are
+    // still landing, the deletes queued below are authorized by a plan this
+    // run can no longer stand behind. Every upsert already issued stands —
+    // upserts only ever add or refresh membership — so skipping the sweep here
+    // costs nothing but a delayed reap of rows the next heal run will still
+    // see and classify fresh.
+    const recheck = await Promise.all(
+      targetBoards.map((b) => readBoardCardsPartitionDivergence(opts.node, opts.cfg, b.slug, b.columns ?? [])),
+    );
+    const stillDiverged = recheck.filter(
+      (d): d is BoardCardsReadDivergence => d !== null && boardCardsReadDiverged(d),
+    );
+    if (stillDiverged.length > 0) {
+      deleteSweepSkipped = true;
+      readDivergence.push(...stillDiverged);
+    } else {
+      await sweepBoardCardJanitor(opts.node);
+    }
   }
 
   const report: BoardCardsHealReport = {
@@ -1193,6 +1269,8 @@ export async function boardCardsHealResult(
     // identical to a quiet one. These two numbers make the headroom readable.
     removal_ceiling: removalCeiling,
     removals_possible: removalsPossible,
+    unverified_upserts,
+    delete_sweep_skipped: deleteSweepSkipped,
     actions: opts.json ? actions : actions.filter((a) => a.action !== "noop-match"),
   };
 
@@ -1243,7 +1321,33 @@ export async function boardCardsHealResult(
       `    \`kanban groom milestone-indexes-heal\`, which owns the board_milestones index.`,
     ]
     : [];
-  const text = [head, ...discoveryWarn, ...warn, ...milestoneNote, ...lines].join("\n");
+  // Reported whenever it happened, dry or apply is moot here — this only ever
+  // fires under `--apply`. Left in place, not lost: the stale sibling row(s)
+  // this would have removed are still on the board, so the card kept its
+  // membership through them.
+  const unverifiedWarn = report.unverified_upserts
+    ? [
+      `  ⚠ UNVERIFIED UPSERT — ${report.unverified_upserts} repair(s) wrote truth but could`,
+      `    not confirm it visible before the matching delete would have run. The stale row(s)`,
+      `    were left in place rather than removed. Re-run heal; a live card never lost membership.`,
+    ]
+    : [];
+  const sweepSkippedWarn = report.delete_sweep_skipped
+    ? [
+      `  ⚠ DELETE SWEEP SKIPPED — a re-check just before the delete sweep found the node's`,
+      `    partition/column views had diverged since this run's plan was made. Every upsert`,
+      `    above still landed; no delete ran. Re-run heal once the reads agree again.`,
+    ]
+    : [];
+  const text = [
+    head,
+    ...discoveryWarn,
+    ...warn,
+    ...milestoneNote,
+    ...unverifiedWarn,
+    ...sweepSkippedWarn,
+    ...lines,
+  ].join("\n");
   return { text, report };
 }
 
