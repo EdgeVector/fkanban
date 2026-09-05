@@ -27,8 +27,29 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
+      # Host-mode runners cannot use actions/checkout: the local runner's URL
+      # patch rewrites the forge remote to host.docker.internal, which only
+      # resolves inside Docker jobs, and fetching the action itself from
+      # code.forgejo.org took 8 minutes and failed on the first run. Clone from
+      # the forge ROOT_URL by hand, the way fold's Mac-lane jobs do.
+      - name: Checkout repository (host runner)
+        env:
+          FORGE_TOKEN: ${{ secrets.FORGEJO_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          server_url="${GITHUB_SERVER_URL%/}"
+          server_url="${server_url//host.docker.internal/localhost}"
+          repo_url="${server_url}/${GITHUB_REPOSITORY}.git"
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$repo_url"
+          if ! git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags origin "$GITHUB_SHA"; then
+            git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          fi
+          git checkout -q --detach "$GITHUB_SHA"
+          git reset -q --hard
+          git clean -ffdxq
+          echo "checked out $(git rev-parse --short HEAD) from $repo_url"
 
       - name: Host toolchains on PATH
         run: |
@@ -50,8 +71,29 @@ jobs:
       LASTGIT_FORGE_URL: http://localhost:3300
 
     steps:
-      - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
+      # Host-mode runners cannot use actions/checkout: the local runner's URL
+      # patch rewrites the forge remote to host.docker.internal, which only
+      # resolves inside Docker jobs, and fetching the action itself from
+      # code.forgejo.org took 8 minutes and failed on the first run. Clone from
+      # the forge ROOT_URL by hand, the way fold's Mac-lane jobs do.
+      - name: Checkout repository (host runner)
+        env:
+          FORGE_TOKEN: ${{ secrets.FORGEJO_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          server_url="${GITHUB_SERVER_URL%/}"
+          server_url="${server_url//host.docker.internal/localhost}"
+          repo_url="${server_url}/${GITHUB_REPOSITORY}.git"
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$repo_url"
+          if ! git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags origin "$GITHUB_SHA"; then
+            git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          fi
+          git checkout -q --detach "$GITHUB_SHA"
+          git reset -q --hard
+          git clean -ffdxq
+          echo "checked out $(git rev-parse --short HEAD) from $repo_url"
 
       - name: Host toolchains on PATH
         run: |
