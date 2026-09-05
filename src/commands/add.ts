@@ -57,6 +57,10 @@ import { assertSituationPreflightAllowed, type SituationPreflight } from "../sit
 export type AddOptions = {
   cfg: Config;
   node: NodeClient;
+  // Short-timeout twin of `node` for the post-create search-visibility wait's
+  // probe reads — see `createCardRecord` (record.ts). Omit in tests to keep
+  // every probe on `node`, unchanged from before this option existed.
+  probeNode?: NodeClient;
   slug: string;
   title?: string;
   board?: string;

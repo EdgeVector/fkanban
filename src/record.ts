@@ -5269,7 +5269,17 @@ async function writeCardRecordWithOptionalFieldFallback(
 }
 
 export async function createCardRecord(
-  opts: { cfg: Config; node: NodeClient },
+  opts: {
+    cfg: Config;
+    node: NodeClient;
+    // Short-timeout client for the post-write search-visibility wait's own
+    // probe reads. Set by `loadCtx`/`loadAppCtx` for real CLI invocations;
+    // omitted (falls back to `node`) by tests that construct `opts` directly.
+    // See `SEARCH_INDEX_PROBE_TIMEOUT_MS` in board-cards.ts for why this
+    // matters: without it, a refused probe read inherits the write's own
+    // (often much larger) HTTP deadline instead of failing fast.
+    probeNode?: NodeClient;
+  },
   card: Card,
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
@@ -5278,7 +5288,7 @@ export async function createCardRecord(
   // there can be no other row for the slug to purge. (There is no pre-write read
   // to skip any more — `upsertBoardCard` always writes wide.)
   await writeCardMembership(opts, card, null, { skipOrphanPurge: true });
-  if (!(await awaitBoardCardSearchVisible(opts.node, opts.cfg, card))) {
+  if (!(await awaitBoardCardSearchVisible(opts.node, opts.cfg, card, { probeNode: opts.probeNode }))) {
     console.error(searchVisibilityTimeoutWarning(card.slug));
   }
 }

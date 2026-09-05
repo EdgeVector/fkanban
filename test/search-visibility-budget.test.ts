@@ -431,6 +431,97 @@ describe("the wait survives the load that makes it necessary", () => {
   });
 });
 
+// ── Fifth occurrence, 2026-09-05 ────────────────────────────────────────────
+//
+// dogfood-kanban reported the same shape again (`kstress-1788601315-4412`,
+// token `kdogtok1788601560`), after the fourth fix above merged and was live.
+// The wait's own contract says a refusing node "must still let `add` return,
+// warning, instead of hanging on it" — but every probe read here rode the
+// SAME client the write used, whose HTTP deadline is `FKANBAN_HTTP_TIMEOUT_MS`
+// (30s default). Every scheduled routine in this fleet sets that env var to
+// 90000, and a timed-out `queryAll` is retried once inside the SDK transport
+// before its `.catch()` ever fires — so one "refused" round could cost up to
+// 180s in this fleet's own environment, not the ~250ms the refused-round
+// budget assumes. `SEARCH_INDEX_REFUSED_ROUNDS` (6) of those is 18 minutes,
+// not the few seconds the contract promises.
+//
+// The fix: the wait's probe reads get their OWN short, fixed timeout
+// (`SEARCH_INDEX_PROBE_TIMEOUT_MS`), independent of `FKANBAN_HTTP_TIMEOUT_MS`,
+// via a `probeNode` distinct from the write's `node`. These tests pin that the
+// wait actually reads from `probeNode` when one is given, and that
+// `createCardRecord` forwards it.
+describe("the wait's own probe reads use a client independent of the write's", () => {
+  test("awaitBoardCardSearchVisible reads from probeNode, not node, when given one", async () => {
+    const writeNode = fakeNode({ hashFields: { boardcardshash: "milestone" } });
+    seedBoard(writeNode, SCRATCH);
+    // Deliberately UNSEEDED on writeNode — proves the wait never asks it.
+    const probeNode = fakeNode({ hashFields: { boardcardshash: "milestone" } });
+    seedBoard(probeNode, SCRATCH);
+    const card = writtenCard();
+    seedWrittenCard(probeNode, card);
+
+    let writeNodeReads = 0;
+    const origQuery = writeNode.queryAll.bind(writeNode);
+    writeNode.queryAll = async (q) => {
+      writeNodeReads++;
+      return origQuery(q);
+    };
+    const origList = writeNode.listRecordKeys!.bind(writeNode);
+    writeNode.listRecordKeys = async (schemaHash, opts) => {
+      writeNodeReads++;
+      return origList(schemaHash, opts);
+    };
+
+    const visible = await awaitBoardCardSearchVisible(writeNode, cfg, card, {
+      sleep: async () => {},
+      probeNode,
+    });
+
+    expect(visible).toBe(true);
+    expect(writeNodeReads).toBe(0);
+  });
+
+  test("createCardRecord forwards opts.probeNode to the visibility wait", async () => {
+    const node = fakeNode({ hashFields: { boardcardshash: "milestone" } });
+    seedBoard(node, SCRATCH);
+    // A thin counting proxy over the SAME node, so the create's actual writes
+    // and the wait's probe reads share one truth — the only question this
+    // test asks is WHICH client the wait's reads went through.
+    let probeReads = 0;
+    const probeNode: FakeNode = {
+      ...node,
+      queryAll: async (q) => {
+        probeReads++;
+        return node.queryAll(q);
+      },
+      listRecordKeys: async (schemaHash, listOpts) => {
+        probeReads++;
+        return node.listRecordKeys!(schemaHash, listOpts);
+      },
+    };
+
+    const created = await addCmd({
+      cfg,
+      node,
+      probeNode,
+      slug: SLUG,
+      title: `find me ${DOGFOOD_TOKEN}`,
+      board: SCRATCH,
+      column: "todo",
+      kind: "tracker",
+      tags: ["kstress"],
+      repo: "EdgeVector/fkanban",
+      body: validBody,
+    });
+
+    expect(created.action).toBe("created");
+    // At least the cheap BoardCards partition probe must have gone through
+    // probeNode — if `createCardRecord` dropped `opts.probeNode` on the floor
+    // this would be 0 and the wait would have used `node` instead.
+    expect(probeReads).toBeGreaterThan(0);
+  });
+});
+
 describe("search declares a degraded read instead of answering empty", () => {
   let node: FakeNode;
 

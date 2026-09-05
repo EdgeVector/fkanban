@@ -14,8 +14,8 @@
 // 1299ms vs 7-field DEP_SEED 416ms). List paths must project only what the
 // caller needs — never default the full 24-field write shape.
 
-import { type Config } from "./config.ts";
-import { FkanbanError, type NodeClient, type QueryFilter } from "./client.ts";
+import { resolveSocketPath, type Config } from "./config.ts";
+import { FkanbanError, newNodeClient, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
 import {
   mapWithConcurrency,
@@ -1309,6 +1309,53 @@ export const BOARD_CARDS_SEARCH_FIELDS = BOARD_CARDS_DISPLAY_FIELDS.filter(
  *   (no BoardCards hash, or a card with no board/slug).
  */
 /**
+ * Timeout for {@link awaitBoardCardSearchVisible}'s own probe reads —
+ * deliberately independent of `FKANBAN_HTTP_TIMEOUT_MS`.
+ *
+ * The wait's whole contract is bounded refusal: "a node that refuses every
+ * read must still let `add` return, warning, instead of hanging on it" (see
+ * `SEARCH_INDEX_REFUSED_ROUNDS`). That bound assumes a refused/slow read
+ * fails within roughly `SEARCH_INDEX_REFUSED_BACKOFF_MS`. It does not: every
+ * probe read here used to ride the SAME client the write used, whose HTTP
+ * deadline is `FKANBAN_HTTP_TIMEOUT_MS` (client.ts default 30s) — and every
+ * scheduled routine in this fleet sets that env var to 90000. A `queryAll`
+ * read that times out is even retried once inside `sdkTransport.send`
+ * (`withTimeoutRetry`), so ONE refused round could cost up to 2x that
+ * deadline before its `.catch()` fires — 180s in this fleet's own
+ * environment — times up to `SEARCH_INDEX_REFUSED_ROUNDS` (6) rounds. `add`
+ * was documented to never hang on a refusing node; under this fleet's own
+ * env it could hang for many minutes instead, which is worse than the
+ * divergence it exists to report.
+ *
+ * A probe read only ever asks "can search see this slug yet?" — a
+ * `false`/timeout answer is exactly as actionable as a `true` one arriving
+ * late, so there is no correctness reason for it to share the write's
+ * generous, environment-tunable deadline.
+ */
+export const SEARCH_INDEX_PROBE_TIMEOUT_MS = 3_000;
+
+const searchVisibilityProbeClients = new WeakMap<Config, NodeClient>();
+
+/**
+ * A `NodeClient` dedicated to {@link awaitBoardCardSearchVisible}'s probe
+ * reads, with the fixed short timeout above. Cached per `Config` so a bulk
+ * caller (`migrate`, `groom`) pays the attestation handshake once, not once
+ * per card.
+ */
+export function searchVisibilityProbeClient(cfg: Config): NodeClient {
+  const cached = searchVisibilityProbeClients.get(cfg);
+  if (cached) return cached;
+  const client = newNodeClient({
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+    socketPath: resolveSocketPath(cfg),
+    timeoutMs: SEARCH_INDEX_PROBE_TIMEOUT_MS,
+  });
+  searchVisibilityProbeClients.set(cfg, client);
+  return client;
+}
+
+/**
  * Shared polling loop behind {@link awaitBoardCardSearchVisible} and
  * {@link awaitBoardCardRowVisible} — same budget, same refusal handling,
  * different question asked of each page.
@@ -1355,20 +1402,31 @@ export async function awaitBoardCardSearchVisible(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
-  /**
-   * `sleep` is a test seam, not a tuning knob. The budget below is measured in
-   * seconds, so a test that exercises the exhausted path through the real timer
-   * costs those seconds — and a guarantee too slow to assert is one nothing
-   * asserts, which is how the silent give-up survived two fixes.
-   */
-  opts?: { sleep?: (ms: number) => Promise<void> },
+  opts?: {
+    /**
+     * `sleep` is a test seam, not a tuning knob. The budget below is measured
+     * in seconds, so a test that exercises the exhausted path through the
+     * real timer costs those seconds — and a guarantee too slow to assert is
+     * one nothing asserts, which is how the silent give-up survived two
+     * fixes.
+     */
+    sleep?: (ms: number) => Promise<void>;
+    /**
+     * The client the probe reads use. Defaults to `node` (the write client)
+     * so every existing caller and test keeps today's behavior; production
+     * create/update paths pass {@link searchVisibilityProbeClient} instead so
+     * a refused read fails on ITS OWN short deadline rather than the write's.
+     */
+    probeNode?: NodeClient;
+  },
 ): Promise<boolean> {
   const sleep = opts?.sleep ?? delay;
+  const probeNode = opts?.probeNode ?? node;
   if (!boardCardsHash(cfg)) return true;
   const board = card.board?.trim();
   const slug = card.slug?.trim();
   if (!board || !slug) return true;
-  return pollBoardCardsVisible(node, cfg, board, (row) => row.slug === slug, sleep);
+  return pollBoardCardsVisible(probeNode, cfg, board, (row) => row.slug === slug, sleep);
 }
 
 /**

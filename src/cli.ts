@@ -1788,6 +1788,7 @@ async function dispatch(
         const res = await addCmd({
           cfg: ctx.cfg,
           node: ctx.node,
+          probeNode: ctx.probeNode,
           slug,
           title: values.title as string | undefined,
           board: values.board as string | undefined,
