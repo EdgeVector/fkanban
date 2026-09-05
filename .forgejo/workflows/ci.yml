@@ -113,8 +113,11 @@ jobs:
             echo "$d" >> "$GITHUB_PATH"
           done
 
+      # The checkout step cleans ignored files, so node_modules is gone here.
       - name: Build the artifact tree
-        run: bun run build
+        run: |
+          bun install --frozen-lockfile
+          bun run build
 
       - name: Publish into the artifact CAS and promote stable
         run: |
