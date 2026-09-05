@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { COMPILE_TEST_TIMEOUT_MS, SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const REPO_ROOT = fileURLToPath(import.meta.url).replace(/\/test\/[^/]+$/, "");
 
@@ -60,7 +61,7 @@ beforeAll(() => {
   if (build.exitCode !== 0) {
     throw new Error(`could not compile the artifact under test: ${build.stderr.toString()}`);
   }
-});
+}, COMPILE_TEST_TIMEOUT_MS);
 
 afterAll(() => {
   if (workdir) rmSync(workdir, { recursive: true, force: true });
@@ -113,7 +114,7 @@ describe("the compiled artifact reports its own install", () => {
     expect(report.build_status).toBe("current");
     expect(report.build).toBe("bbb222");
     expect(report.issues).toEqual([]);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("a superseded compiled build is detected — the check this module exists for", () => {
     // The live hazard: a long-lived `kanban mcp` keeps serving the version
@@ -128,7 +129,7 @@ describe("the compiled artifact reports its own install", () => {
     expect(report.build).toBe("aaa111");
     expect(report.current_build).toBe("bbb222");
     expect(report.issues).toHaveLength(1);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("`which --check` exits non-zero on a superseded artifact and zero on a current one", () => {
     // The scripted contract: a routine gating on this exit code got a clean 0
@@ -162,7 +163,7 @@ describe("the compiled artifact reports its own install", () => {
 
     expect(report.build_status).toBe("unmanaged");
     expect(report.in_host_track).toBe(false);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("`source_path` stays honest about the embedded module URL", () => {
     // `source_root` is now the resolved install tree, so the two fields say
@@ -178,7 +179,7 @@ describe("the compiled artifact reports its own install", () => {
     expect(String(report.source_path)).toContain("$bunfs");
     expect(String(report.source_root)).toContain("versions/bbb222");
     expect(String(report.bun_path)).toContain("versions/bbb222");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });
 
 /**
@@ -227,7 +228,7 @@ describe("the compiled artifact prints a registration command that works", () =>
     // clearing PATH, so the shim lookup genuinely runs and genuinely misses.
     noShimPath = mkdtempSync(join(tmpdir(), "fkanban-noshim-"));
     installs.push(noShimPath);
-  });
+  }, COMPILE_TEST_TIMEOUT_MS);
 
   function probeWith(path: string, env: Record<string, string> = {}, exe = probe): Record<string, unknown> {
     const proc = Bun.spawnSync([exe], { env: { PATH: path, ...env } });
@@ -263,7 +264,7 @@ describe("the compiled artifact prints a registration command that works", () =>
     // `existsSync` and `statSync` alike, so the probe uses `realpathSync.native`.
     expect(report.entrypoint_on_disk).toBe(true);
     expect(String(report.command)).not.toContain("$bunfs");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("the CLI invocation is runnable too — it was `bun run src/cli.ts`", () => {
     // init's Next-steps `list`/`add` lines. Under the artifact there is no
@@ -272,7 +273,7 @@ describe("the compiled artifact prints a registration command that works", () =>
     const report = probeWith(`${noShimPath}:/usr/bin:/bin`);
     expect(report.invocation).toBe(probe);
     expect(String(report.invocation)).not.toContain("$bunfs");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("a shim on PATH still wins, and the entrypoint is that shim", () => {
     // The fix must not answer "compiled" by construction. When a shim exists it
@@ -290,7 +291,7 @@ describe("the compiled artifact prints a registration command that works", () =>
     expect(report.command).toBe("claude mcp add fkanban -- kanban mcp");
     expect(report.entrypoint).toBe(shim);
     expect(report.entrypoint_on_disk).toBe(true);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("run from source, the bun+path form is unchanged", () => {
     // The shape that always worked. Pinned because the fix's whole risk is
@@ -306,7 +307,7 @@ describe("the compiled artifact prints a registration command that works", () =>
     expect(report.command).toBe(`claude mcp add fkanban -- bun ${REPO_ROOT}/src/mcp/main.ts`);
     expect(report.entrypoint).toBe(`${REPO_ROOT}/src/mcp/main.ts`);
     expect(report.invocation).toBe("bun run src/cli.ts");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("under host-track it registers `current`, not the version dir it resolved to", () => {
     // `process.execPath` is fully resolved, so a binary invoked through
@@ -324,7 +325,7 @@ describe("the compiled artifact prints a registration command that works", () =>
     // The resolved path is what it RAN from; it must not be what it registers.
     expect(String(report.exec_path)).toContain("versions/bbb222");
     expect(String(report.entrypoint)).not.toContain("versions/");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("a superseded build registers itself, not the `current` it is behind", () => {
     // The other direction of the same honesty. `current` here is a DIFFERENT
@@ -335,7 +336,7 @@ describe("the compiled artifact prints a registration command that works", () =>
 
     expect(report.entrypoint).toBe(`${root}/versions/aaa111/dist/kanban`);
     expect(String(report.entrypoint)).not.toContain("/current/");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("`<executable> mcp` actually serves MCP — the claim the compiled branch rests on", async () => {
     // Asserted against the SHIPPED binary, not the probe. Everything above

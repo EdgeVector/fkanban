@@ -20,13 +20,17 @@ import {
   searchVisibilityTimeoutWarning,
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
+  boardCardSk,
   boardCardsHash,
   boardCardsProjectionForCardFields,
+  enqueueBoardCardJanitor,
   listAllBoardCards,
   listBoardCardsPartition,
+  listBoardCardsPartitionSpine,
   preferFresherBoardCard,
   removeBoardCard,
   removeBoardCardsBatch,
+  sweepBoardCardJanitor,
   upsertBoardCard,
   upsertBoardCardsBatch,
   type BoardCardWriteOptions,
@@ -1539,9 +1543,7 @@ function livePrMilestoneGate(
     throw new FkanbanError({
       code: "live_pr_milestone_required",
       message: `Kind:pr card "${card.slug}" cannot enter ${card.column} without a milestone.`,
-      hint:
-        "Pass --milestone <slug> to attach a real outcome, or --force for an intentional Unassigned/Operational exception." +
-        FORCE_IS_UNSCOPED,
+      hint: livePrMilestoneRequiredHint(card.slug),
     });
   }
   const state = (opts?.milestoneState ?? "").trim();
@@ -1549,11 +1551,28 @@ function livePrMilestoneGate(
     throw new FkanbanError({
       code: "live_pr_milestone_abandoned",
       message: `Kind:pr card "${card.slug}" cannot use abandoned milestone "${milestone}".`,
-      hint:
-        "Pick an active/planned milestone, reopen the outcome, or pass --force for an intentional exception." +
-        FORCE_IS_UNSCOPED,
+      hint: livePrMilestoneAbandonedHint(),
     });
   }
+}
+
+/** Remedy for a missing live-PR milestone. `kanban move` has no --milestone flag. */
+export function livePrMilestoneRequiredHint(slug: string): string {
+  return (
+    `Use \`kanban set ${slug} --milestone <ms>\` or \`kanban set ${slug} --north-star <ns>\` ` +
+    "to attach a real outcome, then retry. `kanban move` does not take --milestone. " +
+    "Pass --force only for an intentional Unassigned/Operational exception." +
+    FORCE_IS_UNSCOPED
+  );
+}
+
+/** Remedy for an abandoned live-PR milestone. Same verb as the missing-milestone case. */
+export function livePrMilestoneAbandonedHint(): string {
+  return (
+    "Pick an active/planned milestone with `kanban set <slug> --milestone <ms>` " +
+    "(or `--north-star`), reopen the outcome, or pass --force for an intentional exception." +
+    FORCE_IS_UNSCOPED
+  );
 }
 
 /** Default reconciliation driver for new milestones (hierarchical pipeline). */
@@ -1775,6 +1794,33 @@ export function assertDefaultTodoPickupReady(card: Card, force?: boolean, rawBod
       forcedGuardWaiverWarning(card.slug, "default/todo pickup-readiness", waived.message),
     );
   }
+}
+
+/**
+ * The pickup claim write-guard: live-PR milestone then default/todo readiness.
+ *
+ * `move`, `add`/`set`, and `pickup explain` must call this one function so a
+ * Kind:pr card cannot sit in default/todo while `pickup explain` says it
+ * cannot enter todo. `--force` still waives both halves (each prints its own
+ * warning). `doing` still hits the milestone half; the todo-readiness half
+ * no-ops outside default/todo.
+ */
+export type DefaultTodoWriteGuardOpts = {
+  milestoneState?: string;
+  enforceLivePrMilestone?: boolean;
+};
+
+export function assertDefaultTodoWriteGuard(
+  card: Card,
+  force?: boolean,
+  rawBody?: string,
+  opts?: DefaultTodoWriteGuardOpts,
+): void {
+  assertLivePrMilestone(card, force, {
+    milestoneState: opts?.milestoneState,
+    enforce: opts?.enforceLivePrMilestone === true,
+  });
+  assertDefaultTodoPickupReady(card, force, rawBody);
 }
 
 /**
@@ -2266,10 +2312,11 @@ export function forcedGuardWaiverWarning(slug: string, gate: string, verdict: st
  * disables the live-PR milestone gate, the default/todo pickup-readiness gate,
  * the lifecycle CI gate and this one. The gates do not share a subject, so
  * clearing one is not evidence about the others — but the error messages
- * recommend the flag per-gate. `assertLivePrMilestone`'s hint ends "or --force
- * for an intentional Unassigned/Operational exception", and an operator who
- * follows that sentence to get past a MILESTONE requirement also, silently,
- * moves a card into `doing` with unfinished dependencies.
+ * recommend the flag per-gate. `assertLivePrMilestone`'s hint still offers
+ * `--force` for an intentional Unassigned/Operational exception (after
+ * `kanban set --milestone` / `--north-star`), and an operator who follows that
+ * sentence to get past a MILESTONE requirement also, silently, moves a card
+ * into `doing` with unfinished dependencies.
  *
  * Measured on the live board 2026-08-03: `move <slug> doing --force`, offered
  * by the milestone error, printed only `moved … todo → doing` while `show`
@@ -3613,7 +3660,7 @@ export async function listCardsByColumn(
    * Card-side projection, and only `reconcileBoardCardSummaries({verify:true})`
    * reads it.
    */
-  opts?: { projection?: readonly string[] },
+  opts?: { projection?: readonly string[]; healStaleRows?: boolean },
 ): Promise<Card[]> {
   if (!board) {
     throw new FkanbanError({
@@ -3633,10 +3680,84 @@ export async function listCardsByColumn(
       hint: "Run kanban init / ensure config.schemaHashes.board_cards is set. No secondary list path.",
     });
   }
-  const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+  const exclusive = await dropStaleColumnMembership(
+    node,
+    cfg,
+    board,
+    column,
+    part,
+    opts?.healStaleRows === true,
+  );
+  const reconciled = await reconcileBoardCardSummaries(node, cfg, exclusive, fields);
   return reconciled
     .filter((c) => !isHiddenCard(c))
     .map((c) => Object.assign(c, deriveStructuredFields(c)));
+}
+
+/**
+ * Drop BoardCards rows in `column` whose Card tip lives in another column.
+ *
+ * Other-column occupancy comes from one HashKey spine read (slug + SK), not a
+ * per-row Card get. Card tip is read only for slugs that already appear in two
+ * columns, so the happy path stays O(1) BoardCards queries.
+ *
+ * Unique membership in the listed column is kept even when the tip differs —
+ * deleting that row would hide the card. Overlap losers enqueue for the janitor
+ * when `heal` is set.
+ */
+async function dropStaleColumnMembership(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  column: string,
+  part: Card[],
+  heal: boolean,
+): Promise<Card[]> {
+  if (part.length === 0) return part;
+  const spine = await listBoardCardsPartitionSpine(node, cfg, board);
+  if (!spine) return part;
+  const otherSlugs = new Set<string>();
+  for (const row of spine) {
+    if (row.slug && row.column && row.column !== column) otherSlugs.add(row.slug);
+  }
+  const kept: Card[] = [];
+  const overlap: Card[] = [];
+  for (const card of part) {
+    if (otherSlugs.has(card.slug)) overlap.push(card);
+    else kept.push(card);
+  }
+  if (overlap.length === 0) return part;
+
+  const overlapSlugs = [...new Set(overlap.map((c) => c.slug))];
+  const tips = await mapWithConcurrency(overlapSlugs, (slug) =>
+    findCardWithFields(node, cfg, slug, ["slug", "column"]),
+  );
+  const tipColumn = new Map<string, string>();
+  for (const tip of tips) {
+    if (tip?.slug && tip.column) tipColumn.set(tip.slug, tip.column);
+  }
+
+  const dropped: Card[] = [];
+  for (const card of overlap) {
+    const tip = tipColumn.get(card.slug);
+    if (tip === undefined || tip === column) kept.push(card);
+    else dropped.push(card);
+  }
+
+  if (heal && dropped.length > 0) {
+    const schemaHash = boardCardsHash(cfg);
+    if (schemaHash) {
+      enqueueBoardCardJanitor(
+        dropped.map((card) => ({
+          schemaHash,
+          board: card.board || board,
+          sk: boardCardSk(card.column, card.position, card.slug),
+        })),
+      );
+      await sweepBoardCardJanitor(node);
+    }
+  }
+  return kept;
 }
 
 /**
@@ -5195,6 +5316,9 @@ async function writeCardMembership(
 ): Promise<void> {
   await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
   await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
+  // Janitor is process-local. Sweep in this same request so the previous SK
+  // delete is not lost when the CLI exits.
+  await sweepBoardCardJanitor(opts.node);
 }
 
 export async function updateCardRecord(

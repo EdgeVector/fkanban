@@ -2,9 +2,11 @@
  * Membership-index key layout guards.
  *
  * BoardCards must partition by `board`; MilestoneCards by `milestone`.
- * Catalog expand that rewrites BoardCards.hash_field → milestone empties
- * board lists (incident 2026-07-23). Doctor uses these pure checks so scrapers
- * can refuse to start on a poisoned pin.
+ * After named-layout HashKey (fold #1893), catalog `hash_field` is the
+ * HashKey partition. A `board_cards` pin whose catalog field is `milestone`
+ * returns 0 rows for HashKey(board) (incident 2026-09-03). Doctor and init
+ * refuse that pin. Both indexes stay; each pin names its own identity
+ * (`preference-schema-expand-same-product-different-keys`).
  */
 
 export type MembershipKeyLayout = {
@@ -18,42 +20,9 @@ export type MembershipKeyExpectation = {
   label: string;
   expected: MembershipKeyLayout;
   /**
-   * Sibling hash fields this index legitimately ALSO answers on, because a
-   * multi-key catalog expand bound both lookups to one schema.
-   *
-   * The catalog reports a single `hash_field` for such a schema — whichever key
-   * was declared last — so a bare equality check calls the designed state a
-   * poisoning. `board_cards` and `milestone_cards` share a schema after the
-   * 2026-07-23 expand: on the live node BoardCards' catalog `hash_field` reads
-   * `milestone`, and yet `HashKey=default` returns every board row (896 of them,
-   * measured 2026-07-30). Per the standing multi-key-expand rule, keeping BOTH
-   * indexes is correct and must not be "fixed" by rewriting the key.
-   *
-   * This acceptance is correct and must not be "fixed" by rewriting the key.
-   * What it is NOT is consequence-free, which this block claimed until
-   * 2026-08-04: *"Key layout is metadata; whether the partition actually
-   * answers is behaviour."*
-   *
-   * The catalog `hash_field` IS behaviour — it is the projection gate. LastDB
-   * returns a row iff it has an atom for the HASH field when the projection
-   * contains it, and for the LEADING field otherwise
-   * ([[lastdb-projection-rule-is-hash-else-lead-not-lead]]). So BoardCards
-   * reading `milestone` in the catalog means every BoardCards read that
-   * PROJECTS `milestone` is gated on `milestone`, from any position in the
-   * list — and a row carrying no `milestone` atom is silently absent from it.
-   *
-   * Measured on this index with constructed rows of known atom sets
-   * (`scripts/probe-boardcards-hash-gate-constructed.ts`): a row written with
-   * `slug`/`title`/`column`/`position` and no `milestone` is returned by
-   * `["slug"]` and dropped by the shipped list projection, while a row missing
-   * `board` is returned by both. `board` gates only when it LEADS; `milestone`
-   * gates from anywhere. The partition still answers on `HashKey=<board>` —
-   * that part of the old comment holds — but which ROWS it answers with is
-   * decided by a field the declared layout never mentions.
-   *
-   * So the acceptance now carries a note rather than passing silently: the
-   * state is designed, its consequence is not obvious, and completeness reads
-   * ({@link BOARD_CARDS_ADDRESS_FIELDS}) must keep `milestone` out.
+   * Unused by shipped expectations after 2026-09-03. Kept on the type so
+   * `checkMembershipKeyLayout` can still take an explicit list in tests.
+   * A sibling `hash_field` is a different identity, not an accepted pin.
    */
   alsoAccepts?: string[];
 };
@@ -63,13 +32,11 @@ export const MEMBERSHIP_KEY_EXPECTATIONS: MembershipKeyExpectation[] = [
     configKey: "board_cards",
     label: "BoardCards",
     expected: { schema_type: "HashRange", hash_field: "board", range_field: "sk" },
-    alsoAccepts: ["milestone"],
   },
   {
     configKey: "milestone_cards",
     label: "MilestoneCards",
     expected: { schema_type: "HashRange", hash_field: "milestone", range_field: "sk" },
-    alsoAccepts: ["board"],
   },
   {
     configKey: "board_milestones",
@@ -366,7 +333,7 @@ export function checkMembershipKeyLayout(
       ok: false,
       reason: `hash_field=${hf || "(empty)"} (want ${expected.hash_field}${
         alsoAccepts.length > 0 ? ` or ${alsoAccepts.join("/")}` : ""
-      }) — catalog expand may have rewritten this membership index`,
+      }) — named-layout HashKey uses catalog hash_field as the partition`,
     };
   }
   // Admitted through `alsoAccepts`: designed, and load-bearing. Carried out to
@@ -391,4 +358,30 @@ export function checkMembershipKeyLayout(
     };
   }
   return { ok: true };
+}
+
+/** Failures for resolved membership pins whose catalog layout is not the declared HashKey. */
+export function membershipPinLayoutFailures(
+  schemaHashes: Record<string, string>,
+  loaded: readonly { name: string; key: { hash_field: string; range_field: string | null } | null }[],
+): string[] {
+  const byName = new Map(loaded.map((s) => [s.name, s]));
+  const failures: string[] = [];
+  for (const exp of MEMBERSHIP_KEY_EXPECTATIONS) {
+    const hash = schemaHashes[exp.configKey];
+    if (!hash) continue;
+    const schema = byName.get(hash);
+    if (!schema?.key) continue;
+    const result = checkMembershipKeyLayout(
+      {
+        schema_type: "HashRange",
+        hash_field: schema.key.hash_field,
+        range_field: schema.key.range_field,
+      },
+      exp.expected,
+      exp.alsoAccepts ?? [],
+    );
+    if (!result.ok) failures.push(`${exp.configKey}: ${result.reason}`);
+  }
+  return failures;
 }

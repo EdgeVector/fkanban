@@ -158,13 +158,23 @@ describe("board-cards-heal: reaping orphans must not re-read the partition per r
     // Belt-and-braces absolute bound: whatever the census costs, five reaped
     // rows must not add five scans on top of it.
     //
-    // The census is a wide read plus one read per BoardCards field. The
-    // per-field half is the completeness sweep — a projection filters on its
-    // LEADING field, so no single read can enumerate a partition and the union
-    // over leads is what replaced the spine here (see
-    // `listBoardCardsPartitionComplete`). Derived from the field list, so the
-    // bound tracks the schema instead of drifting into a magic number, and the
-    // thing being asserted stays "nothing scales with ORPHANS".
-    expect(partitionReads(node)).toBeLessThanOrEqual(1 + BOARD_CARDS_FIELDS.length);
+    // The census is a wide read plus one read per BoardCards field, plus the
+    // read-divergence probe's whole-partition read. The per-field half is the
+    // completeness sweep — a projection filters on its LEADING field, so no
+    // single read can enumerate a partition and the union over leads is what
+    // replaced the spine here (see `listBoardCardsPartitionComplete`). The
+    // first extra `1` is the plan-time `readBoardCardsPartitionDivergence`,
+    // which reads the whole partition once and then once per COLUMN by range
+    // prefix; only the first is a `HashKey` read, so only the first is counted
+    // by `partitionReads` above. The second extra `1` is the pre-delete-sweep
+    // recheck of the same divergence (see
+    // papercut-kanban-board-cards-heal-apply-deletes-all-membership-and-the-upsert-never-lands-20260904):
+    // a plan-time-only check missed damage that appeared while this run's own
+    // writes were landing, so the sweep re-asks the same question immediately
+    // before it deletes anything, at the cost of one more whole-partition read
+    // whenever this run enqueued any delete. Derived from the field list, so
+    // the bound tracks the schema instead of drifting into a magic number, and
+    // the thing being asserted stays "nothing scales with ORPHANS".
+    expect(partitionReads(node)).toBeLessThanOrEqual(1 + BOARD_CARDS_FIELDS.length + 1 + 1);
   });
 });

@@ -18,10 +18,9 @@ import {
   boardCardFieldsFromCard,
   boardCardSk,
   listAllBoardCards,
-  sweepBoardCardJanitor,
   upsertBoardCard,
 } from "../src/board-cards.ts";
-import { resetBoardCardJanitorForTests } from "../src/board-card-janitor.ts";
+import { peekBoardCardJanitor, resetBoardCardJanitorForTests } from "../src/board-card-janitor.ts";
 import type { Config } from "../src/config.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
 import { fakeNode, type FakeNode } from "./fake-node.ts";
@@ -109,7 +108,11 @@ describe("BoardCards move durability", () => {
     expect(rows![0]!.column).toBe("todo"); // still at the source, not vanished
   });
 
-  test("the destination write is issued and the source is not deleted on that request", async () => {
+  test("the source delete is a later request than the destination write, never the same one", async () => {
+    // The janitor's rule is "not in the create/update REQUEST" — not "not in
+    // this command". Both halves matter and only the pair pins them: the
+    // delete must EXIST (it is dropped otherwise, which is the 2026-09-05
+    // leak) and it must come strictly after the destination write.
     resetBoardCardJanitorForTests();
     const node = fakeNode();
     const prev = card({ column: "todo", position: "1" });
@@ -126,7 +129,7 @@ describe("BoardCards move durability", () => {
       (w) => w.op === "delete" && w.rangeKey === boardCardSk(prev.column, prev.position, prev.slug),
     );
     expect(wroteDest).toBeGreaterThanOrEqual(0);
-    expect(deletedSource).toBe(-1);
+    expect(deletedSource).toBeGreaterThan(wroteDest);
   });
 
   test("the source delete is not issued until the destination write has RESOLVED", async () => {
@@ -183,13 +186,11 @@ describe("BoardCards move durability", () => {
     releaseWrite();
     await inFlight;
 
-    // ...and it still happens once the write is durable, so this pins the
-    // ordering rather than merely forbidding the delete.
-    const deletedAfter = node.writes.some(
-      (w) => w.schemaHash === BC && w.op === "delete" && w.rangeKey === srcSk,
-    );
-    expect(deletedAfter).toBe(false);
-    await sweepBoardCardJanitor(node);
+    // ...and it HAS happened by the time `upsertBoardCard` resolves, with no
+    // help from the caller. This assertion used to require the test to call
+    // `sweepBoardCardJanitor` itself first, which is precisely why the missing
+    // production sweep survived: no production mutation path called it, so
+    // every move leaked its source row while this file read green.
     expect(
       node.writes.some(
         (w) => w.schemaHash === BC && w.op === "delete" && w.rangeKey === srcSk,
@@ -197,7 +198,13 @@ describe("BoardCards move durability", () => {
     ).toBe(true);
   });
 
-  test("a completed move still leaves exactly one row, at the destination", async () => {
+  test("a completed move leaves exactly one row, with no caller sweeping the janitor", async () => {
+    // `kanban move` reaches `upsertBoardCard` and nothing else: no
+    // `removeBoardCardsBatch`, no `groom board-cards-heal`, and the CLI has no
+    // exit hook. So this test may not sweep either — it used to, and that one
+    // line is what let the production leak read as covered. The empty-queue
+    // assertion is the load-bearing half: it fails if the sweep moves back out
+    // of `upsertBoardCard` into a caller.
     resetBoardCardJanitorForTests();
     const node = fakeNode();
     const prev = card({ column: "todo", position: "1" });
@@ -205,8 +212,8 @@ describe("BoardCards move durability", () => {
     seedRow(node, prev);
 
     await upsertBoardCard(node, cfg, next, prev);
-    await sweepBoardCardJanitor(node);
 
+    expect(peekBoardCardJanitor()).toHaveLength(0);
     const rows = await listAllBoardCards(node, cfg, [{ slug: "default" }]);
     expect(rows).toHaveLength(1);
     expect(rows![0]!.column).toBe("doing");
@@ -223,13 +230,20 @@ describe("BoardCards move durability", () => {
     const next = card({ column: "doing", position: "2", updated_at: "2026-01-03T00:00:00.000Z" });
     seedRow(node, prev);
     const realDelete = node.deleteRecord.bind(node);
+    const realDeletes = node.deleteRecords?.bind(node);
     node.deleteRecord = (async () => {
       throw new Error("deadline_exceeded");
     }) as FakeNode["deleteRecord"];
+    // The janitor tries the BATCH verb first and only falls back per row, so
+    // both have to fail for this to be a failed cleanup rather than a slow one.
+    node.deleteRecords = (async () => {
+      throw new Error("deadline_exceeded");
+    }) as NonNullable<FakeNode["deleteRecords"]>;
 
     // deleteBoardCardSk is best-effort, so the move itself still reports success.
     await upsertBoardCard(node, cfg, next, prev);
     node.deleteRecord = realDelete;
+    node.deleteRecords = realDeletes;
 
     expect(node.rowsOf(BC)).toHaveLength(2); // both rows really are present
     const rows = await listAllBoardCards(node, cfg, [{ slug: "default" }]);

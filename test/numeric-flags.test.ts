@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -34,20 +35,20 @@ describe("numeric-flag validation", () => {
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain('got "abc"');
     expect(stderr).toContain("kanban list --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("list: --limit 12abc (partial-numeric) is rejected, not coerced to 12", async () => {
     const { code, stderr } = await runCli(["list", "--limit", "12abc"]);
     expect(code).toBe(2);
     expect(stderr).toContain('got "12abc"');
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("list: --limit 0 errors with exit 2 and points at --all", async () => {
     const { code, stderr } = await runCli(["list", "--limit", "0"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain("Use --all to show everything");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("move: --position abc errors with exit 2 and a move-scoped hint", async () => {
     const { code, stderr } = await runCli(["move", "zz", "todo", "--position", "abc"]);
@@ -55,11 +56,11 @@ describe("numeric-flag validation", () => {
     expect(stderr).toContain("--position must be an integer >= 0");
     expect(stderr).toContain('got "abc"');
     expect(stderr).toContain("kanban move --help");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("move: a negative --position is rejected (positions are non-negative)", async () => {
     const { code, stderr } = await runCli(["move", "zz", "todo", "--position=-1"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--position must be an integer >= 0");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });

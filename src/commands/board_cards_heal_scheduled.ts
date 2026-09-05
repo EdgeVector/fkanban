@@ -5,6 +5,19 @@ import {
   type BoardCardsHealOptions,
   type BoardCardsHealReport,
 } from "./board_cards_heal.ts";
+import { boardCardsReadDiverged } from "../board-cards.ts";
+
+/**
+ * Partitions whose two reads disagreed in this run, or an empty array.
+ *
+ * Read off the DRY run, so the hourly routine never issues the apply at all
+ * when the node is serving inconsistent pages. `boardCardsHealResult` refuses
+ * the same condition again on its own — the two are not redundant: this wrapper
+ * is one caller, and the refusal has to sit at the write.
+ */
+export function healReadDivergence(report: BoardCardsHealReport): string[] {
+  return (report.read_divergence ?? []).filter(boardCardsReadDiverged).map((d) => d.board);
+}
 
 export const DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT = 250;
 
@@ -19,7 +32,13 @@ export type BoardCardsHealScheduledReport = {
    * looked at it. `incomplete` is the same `drifted === 0` with the coverage
    * missing — see {@link healWasIncomplete}.
    */
-  reason: "clean" | "incomplete" | "dry-run-only" | "healed" | "ceiling-exceeded";
+  reason:
+    | "clean"
+    | "incomplete"
+    | "dry-run-only"
+    | "healed"
+    | "ceiling-exceeded"
+    | "read-divergence";
   /**
    * Why this run's coverage was partial, or null. Carried up from the heal
    * report because this wrapper reduces it to one number and one word, and
@@ -81,10 +100,23 @@ function renderReport(report: BoardCardsHealScheduledReport): string {
   // On its OWN line and marked, not appended to the summary: this text is
   // grepped out of a routine log, and a caveat living at the end of the line
   // that starts `drifted=0` gets read as part of the good news.
-  return report.incomplete_reason
-    ? `${line}\n  ⚠ INCOMPLETE COVERAGE — ${report.incomplete_reason}.\n` +
-      `    drifted=${report.drifted} is a LOWER BOUND; this run did not see the whole board.`
-    : line;
+  if (!report.incomplete_reason) return line;
+  // Two different caveats, and they must not share a sentence. Incomplete
+  // coverage makes `drifted` a LOWER BOUND — the run saw part of the board and
+  // everything it saw was true. Divergence makes `drifted` no bound at all:
+  // the run saw two boards and cannot say which one exists, so a count that is
+  // too HIGH is equally possible.
+  if (report.reason === "read-divergence") {
+    return (
+      `${line}\n  ⚠ READ DIVERGENCE — ${report.incomplete_reason}.\n` +
+      `    drifted=${report.drifted} is not a bound in either direction; nothing was written.\n` +
+      `    This is a node read degradation. Re-run when the reads agree; restart nothing.`
+    );
+  }
+  return (
+    `${line}\n  ⚠ INCOMPLETE COVERAGE — ${report.incomplete_reason}.\n` +
+    `    drifted=${report.drifted} is a LOWER BOUND; this run did not see the whole board.`
+  );
 }
 
 export async function boardCardsHealScheduledResult(
@@ -105,7 +137,25 @@ export async function boardCardsHealScheduledResult(
   const incomplete = healWasIncomplete(dry.report);
 
   let report: BoardCardsHealScheduledReport;
-  if (drifted === 0) {
+  const divergentBoards = healReadDivergence(dry.report);
+  if (divergentBoards.length > 0) {
+    // BEFORE the `drifted === 0` branch, because a divergent read makes
+    // `drifted` untrustworthy in BOTH directions — `0` from a run that could
+    // not see the board reads exactly like a clean one, which is the mistake
+    // `healWasIncomplete` exists to stop this wrapper making about coverage.
+    report = {
+      board,
+      max_drift: maxDrift,
+      drifted,
+      applied: false,
+      blocked: true,
+      reason: "read-divergence",
+      incomplete_reason:
+        `node served inconsistent views of partition(s) ${divergentBoards.join(",")} — ` +
+        `the whole-partition read and the per-column reads disagree`,
+      dry_run: dry.report,
+    };
+  } else if (drifted === 0) {
     report = {
       board,
       max_drift: maxDrift,

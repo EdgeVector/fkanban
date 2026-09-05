@@ -28,7 +28,12 @@ import { resetBoardCardJanitorForTests } from "../src/board-card-janitor.ts";
 import { CARD_LIST_INDEX_KEY } from "../src/card-list-index.ts";
 import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
 import { emptyStructuredFields, type Card } from "../src/record.ts";
-import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT, boardCardsSchema } from "../src/schemas.ts";
+import {
+  BOARD_CARDS_FIELDS,
+  BOARD_CARDS_LAYOUT,
+  boardCardsSchema,
+  DEFAULT_COLUMNS,
+} from "../src/schemas.ts";
 
 const cfgWithBoardCards: Config = {
   configVersion: 1,
@@ -614,19 +619,26 @@ describe("board-cards heal read cost", () => {
     const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
     expect(applied.report.healed).toBe(5);
 
-    // A fixed per-partition census — one wide read plus one read per BoardCards
-    // field — and nothing per repaired card. The old code added one
-    // whole-partition rescan per upsert, so this grew with the number of cards
-    // repaired; that is what the bound exists to catch, and it still does.
+    // A fixed per-partition census and nothing per repaired card. The old code
+    // added one whole-partition rescan per upsert, so this grew with the number
+    // of cards repaired; that is what the bound exists to catch, and it still
+    // does. Three fixed parts, each derived rather than written as a constant:
     //
-    // The per-field reads are the completeness sweep: a projection filters on
-    // its LEADING field, so a single read cannot enumerate a partition and heal
-    // — the only path allowed to DELETE rows — must not be reading through one.
-    // See `listBoardCardsPartitionComplete`.
+    //  1. one wide read;
+    //  2. one read per BoardCards field — the completeness sweep. A projection
+    //     filters on its LEADING field, so a single read cannot enumerate a
+    //     partition and heal, the only path allowed to DELETE rows, must not be
+    //     reading through one. See `listBoardCardsPartitionComplete`.
+    //  3. the read-divergence probe: one whole-partition read plus one range
+    //     read per column, compared to catch a node serving a short page
+    //     (`readBoardCardsPartitionDivergence`). Per BOARD and per COLUMN, both
+    //     bounded by the schema — never per row and never per repair.
     const partitionReads = queries.filter(
       (q) => q.schemaHash === cfgWithBoardCards.schemaHashes.board_cards,
     );
-    expect(partitionReads.length).toBeLessThanOrEqual(1 + BOARD_CARDS_FIELDS.length);
+    expect(partitionReads.length).toBeLessThanOrEqual(
+      1 + BOARD_CARDS_FIELDS.length + 1 + DEFAULT_COLUMNS.length,
+    );
 
     // ...and the repair still actually happened.
     const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);

@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const SCRIPT = fileURLToPath(new URL("../bin/fkanban-worktree", import.meta.url));
 
@@ -73,7 +74,7 @@ beforeEach(async () => {
   writeFileSync(join(repo, "README.md"), "hi\n");
   await git(repo, ["add", "."]);
   await git(repo, ["commit", "-q", "-m", "init"]);
-});
+}, SPAWN_TEST_TIMEOUT_MS);
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
@@ -124,7 +125,7 @@ test("warms a fresh worktree by CoW-cloning the parent's target/ (APFS); falls b
   expect(readFileSync(join(parentTarget, "debug", "sentinel"), "utf8")).toBe(
     "compiled\n",
   );
-});
+}, SPAWN_TEST_TIMEOUT_MS);
 
 test("succeeds and creates the worktree even when the parent has no target/", async () => {
   const wt = join(root, "wt-cold");
@@ -133,7 +134,7 @@ test("succeeds and creates the worktree even when the parent has no target/", as
   expect(existsSync(join(wt, "README.md"))).toBe(true);
   // No parent target/ → worktree simply starts cold; no target/ created.
   expect(existsSync(join(wt, "target"))).toBe(false);
-});
+}, SPAWN_TEST_TIMEOUT_MS);
 
 test("refuses to clobber an existing worktree dir", async () => {
   const wt = join(root, "wt-exists");
@@ -141,7 +142,7 @@ test("refuses to clobber an existing worktree dir", async () => {
   const { code, out } = await run([repo, wt, "fkanban/x", "main"]);
   expect(code).not.toBe(0);
   expect(out).toContain("refusing to clobber");
-});
+}, SPAWN_TEST_TIMEOUT_MS);
 
 test("errors when the repo-root is not a git checkout", async () => {
   const notrepo = join(root, "notrepo");
@@ -149,4 +150,4 @@ test("errors when the repo-root is not a git checkout", async () => {
   const { code, out } = await run([notrepo, join(root, "wt2"), "fkanban/y", "main"]);
   expect(code).not.toBe(0);
   expect(out).toContain("not a git checkout");
-});
+}, SPAWN_TEST_TIMEOUT_MS);

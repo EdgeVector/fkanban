@@ -1197,7 +1197,9 @@ describe("pickup claim live-milestone gate", () => {
     expect(result.reason).toBe("no-eligible");
     expect(result.scanned_ready).toBe(0);
     expect(result.todo_blockers).toBe(1);
-    expect(result.todo_blocker_exemplars?.[0]?.reason).toBe("missing milestone linkage");
+    expect(result.todo_blocker_exemplars?.[0]?.reason).toBe(
+      'Kind:pr card "nomiles" cannot enter todo without a milestone.',
+    );
   });
 
   test("milestone-less claims still work when enforcement is off", async () => {

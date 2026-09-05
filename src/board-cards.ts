@@ -14,7 +14,7 @@
 // 1299ms vs 7-field DEP_SEED 416ms). List paths must project only what the
 // caller needs — never default the full 24-field write shape.
 
-import { resolveSocketPath, schemaHashFor, type Config } from "./config.ts";
+import { resolveSocketPath, type Config } from "./config.ts";
 import { FkanbanError, newNodeClient, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
 import {
@@ -23,11 +23,7 @@ import {
   POINT_READ_CONCURRENCY,
 } from "./concurrency.ts";
 import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
-import {
-  CARD_SEARCH_SURFACE_FIELDS,
-  isKeyOnlyRow,
-  type Card,
-} from "./record.ts";
+import { type Card } from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 import {
   enqueueBoardCardJanitor,
@@ -751,6 +747,35 @@ export async function deleteBoardCardRowsBySk(
 }
 
 /**
+ * Point-delete BoardCards rows for `slug` on every column except `keepColumn`.
+ *
+ * Each other column is a HashRangePrefix under the board hash (not a partition
+ * scan). The listed SKs are known keys; the janitor then deletes them.
+ */
+export async function purgeOtherColumnRowsForSlug(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  slug: string,
+  keepColumn: string,
+  columns: readonly string[],
+): Promise<number> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash || !slug || !board) return 0;
+  const keep = keepColumn.trim();
+  for (const column of columns) {
+    if (!column || column === keep) continue;
+    const part = await listBoardCardsPartitionSpine(node, cfg, board, { column });
+    if (!part) continue;
+    const doomed = part
+      .filter((row) => row.slug === slug && row.column !== keep)
+      .map((row) => row.sk);
+    enqueueBoardCardJanitor(doomed.map((sk) => ({ schemaHash, board, sk })));
+  }
+  return await sweepBoardCardJanitor(node);
+}
+
+/**
  * Read exactly one BoardCards row, keyed by its full sk, at the WIDE
  * projection — and treat "not returned" as "not safe to write narrowly".
  *
@@ -1116,6 +1141,99 @@ export async function upsertBoardCard(
       opts,
     );
   }
+  // Drain what those writes queued, HERE — the queue is process-local and
+  // nothing outside this module drains it on a mutation path.
+  //
+  // `retireSupersededRows` (above) enqueues the source sk of every move, and
+  // until 2026-09-05 the only production callers of `sweepBoardCardJanitor`
+  // were `removeBoardCardsBatch` and `groom board-cards-heal`. `kanban move`
+  // reaches neither: it goes `moveCmd` -> `updateCardRecord` ->
+  // `writeCardMembership` -> here, the CLI process exits, and the queued
+  // delete goes with it. So EVERY move left its source row in the partition
+  // permanently. Measured on the live `default` board 2026-09-05T02:05Z:
+  // 9 of the 13 rows `kanban list --column doing` returned had a different
+  // point-truth column — a 69% phantom lane.
+  //
+  // The gap was invisible because the tests sweep by hand:
+  // `board-cards-move-durability.test.ts` called `sweepBoardCardJanitor(node)`
+  // itself and then asserted one surviving row. Coverage of the function, none
+  // of its callers.
+  //
+  // The janitor's contract is "not in the create/update REQUEST", not "not in
+  // this command" — see its module docstring. Sweeping after the destination
+  // write has resolved satisfies it exactly, and keeps the ordering the long
+  // comment in `upsertBoardCardOnHash` argues for: write the destination,
+  // then retire the source, never the reverse and never overlapped.
+  await sweepBoardCardJanitor(node);
+}
+
+/**
+ * Retire every OTHER BoardCards row this card holds on its board, keeping the
+ * row at the card's current address.
+ *
+ * This is the repair `move` runs, and it is deliberately not on the shared
+ * write path: it costs one partition spine read (measured 336 rows in 195ms,
+ * `scripts/probe-boardcard-purge-reach.ts`), which is the right price for a
+ * command an operator reaches for and the wrong one for every `set`/`mark`.
+ *
+ * **Self-gated, and it WAITS for the gate.** It deletes nothing unless the
+ * same spine read that finds the stale rows also sees `keepSk`. A BoardCards
+ * write is durable but unreadable for ~0.5-2.4s after its own ack, so a purge
+ * that trusted the caller's intended address could delete every row the card
+ * has while its destination was still invisible — the "card on no board" state
+ * the write path is built to avoid.
+ *
+ * The gate alone is not enough, and shipping it alone made this function a
+ * no-op in production. Measured on the live `default` partition
+ * 2026-09-05T03:00Z with the parked canary of the CR that introduced it: a
+ * `move` on a card holding three rows retired the one it superseded (the
+ * janitor drain working) and purged NEITHER of the two stale ones, because the
+ * destination it had just written was not in the index yet. Run against the
+ * same slug seconds later, standalone, the identical call read
+ * `keepSk visible in spine: true` and removed 2 of 3. Every `move` writes its
+ * destination immediately before calling this, so "not yet visible" is the
+ * NORMAL case, not the rare one — a gate checked once is a gate that almost
+ * always refuses.
+ *
+ * So it polls for the destination on the same budget the write path already
+ * uses for search visibility, and gives up rather than deleting blind.
+ *
+ * @returns how many delete attempts ran (0 when the destination never became
+ *   visible within the budget, or when the card holds no other row).
+ */
+export async function purgeStaleBoardCardRows(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+  sleep: (ms: number) => Promise<void> = delay,
+): Promise<number> {
+  const slug = card.slug;
+  if (!slug) return 0;
+  const board = card.board || "default";
+  const keepSk = boardCardSk(card.column, card.position, slug);
+  if (!keepSk) return 0;
+
+  let removed = 0;
+  for (const schemaHash of boardCardsWriteHashes(cfg)) {
+    const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
+    let doomed: string[] | null = null;
+    for (let attempt = 0; attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS; attempt++) {
+      if (attempt > 0) await sleep(SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt] ?? 0);
+      const part = await listBoardCardsPartitionSpine(node, oneHashCfg, board);
+      if (!part) break;
+      // The gate: only a page that CONTAINS the row we are keeping may decide
+      // which rows to drop. A page without it is unreadable evidence, not
+      // evidence of absence.
+      if (!part.some((row) => row.sk === keepSk)) continue;
+      doomed = part
+        .filter((row) => row.slug === slug && row.sk !== keepSk)
+        .map((row) => row.sk);
+      break;
+    }
+    if (doomed === null) continue;
+    removed += await deleteBoardCardSksBatched(node, schemaHash, board, doomed);
+  }
+  return removed;
 }
 
 /**
@@ -1128,22 +1246,12 @@ export async function upsertBoardCard(
  * 1575 ms of sleep, so it always expired first, and the divergence it exists to
  * prevent was reported by dogfood on 2026-08-21, 2026-08-27 and 2026-08-30.
  *
- * The sleeps below total 5925 ms. The loop still returns the moment either
- * source can see the row, so a write whose index settles promptly pays what it
- * paid before; only a genuinely slow one spends the tail.
+ * The sleeps below total 5925 ms. The loop returns the moment the BoardCards
+ * partition can see the row, so a write whose index settles promptly pays what
+ * it paid before; only a genuinely slow one spends the tail.
  */
 const SEARCH_INDEX_VISIBLE_BACKOFF_MS = [0, 25, 50, 100, 200, 300, 500, 750, 1000, 1000, 1000, 1000];
 const SEARCH_INDEX_VISIBLE_ATTEMPTS = SEARCH_INDEX_VISIBLE_BACKOFF_MS.length;
-
-/**
- * First attempt that also consults the Card key list.
- *
- * The key list is the expensive read of the two (measured 760 ms for 1967
- * hashes against ~47 ms for the partition), and it is the SECOND source, not
- * the primary one — so a write whose BoardCards row lands quickly must never
- * pay for it. From this attempt on, the two run concurrently.
- */
-const SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT = 3;
 
 /**
  * How many rounds may be retried WITHOUT being charged to the attempt budget
@@ -1183,77 +1291,11 @@ export const BOARD_CARDS_SEARCH_FIELDS = BOARD_CARDS_DISPLAY_FIELDS.filter(
 );
 
 /**
- * Can `search`'s recovery pass draw this slug as a candidate?
- *
- * Not the same question as "is the key in the Card key list", and the
- * difference is the third fix's mistake. `search` recovers a card the display
- * index has not enumerated from {@link listCardSearchSurfaces}, which walks the
- * key list and then point-gets each hash with the SURFACE projection — dropping
- * any row that comes back carrying the hash field alone
- * (`listCardsFromKeyList`'s `isKeyOnlyRow` filter). A key whose atoms have not
- * landed yet is in the key list and NOT in that map, so a wait that stopped at
- * `/api/list` membership reported "search can see it" about a source search
- * would discard — the same shape as the two fixes before it, which each proved
- * one index fresh and assumed the other matched what search reads.
- *
- * So this asks the key list for membership and then asks for the projection
- * search actually consumes. Two reads, both bounded, and only from
- * {@link SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT} — the point get is one hash, not
- * the whole map.
- *
- * A node whose client predates `/api/list` reports `null` — unknown, not
- * absent — so the caller keeps waiting on the partition instead of treating a
- * missing capability as a hit.
- */
-async function cardSearchSurfaceHasSlug(
-  node: NodeClient,
-  cfg: Config,
-  slug: string,
-): Promise<boolean | null> {
-  if (!node.listRecordKeys) return null;
-  const schemaHash = schemaHashFor("card", cfg);
-
-  // Cheap read first, and it gates the expensive one. The surface point get is
-  // ONE hash; the key-list walk is every hash on the node (measured 760 ms for
-  // 1967 of them against ~47 ms for the partition). Asking the cheap question
-  // first means the common failing case — atoms not landed yet — costs one
-  // keyed read per attempt instead of a full enumeration, so proving the
-  // stronger fact is cheaper than the weaker one it replaced.
-  const fields = [...CARD_SEARCH_SURFACE_FIELDS];
-  const res = await node.queryAll({ schemaHash, fields, filter: { HashKey: slug } });
-  const row = res.results[0];
-  if (row === undefined || isKeyOnlyRow(row, fields)) return false;
-
-  // Content alone is not enough: the recovery pass iterates the key list, so a
-  // surface the enumeration does not reach is still one search cannot draw.
-  let cursor: string | null = null;
-  const seenCursors = new Set<string>();
-  for (;;) {
-    const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
-    if (page.keys.some((key) => key.hash === slug)) return true;
-    if (!page.has_more) return false;
-    if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
-      return false;
-    }
-    seenCursors.add(page.next_cursor);
-    cursor = page.next_cursor;
-  }
-}
-
-/**
  * Wait until `search` can find this card. The write ACK is not that query: Mini
  * acks off resident and the durable index can still serve pre-write state.
  *
- * **Both** of search's sources are waited on, because either one is enough for
- * it to answer. `indexedSearchCards` matches over the BoardCards partition AND
- * runs a recovery pass over the Card key list, point-getting any key-list slug
- * the partition did not enumerate — and a point get is fresh the moment the
- * write acks. Waiting on the partition alone therefore waits past the point
- * where search would already have succeeded, and — worse — reports success
- * while search is still blind whenever the partition is the slower of the two.
- * Measured 2026-08-30 (`scripts/probe-search-read-lag.ts`): at search's exact
- * moment the partition missed 4 of 4 and the key list missed 3 of 4, while the
- * point get hit 4 of 4.
+ * Default search matches the BoardCards partition only. Waiting on the Card
+ * key list would report success while `kanban search` is still blind.
  *
  * A miss after the budget still returns — the Card write already succeeded, and
  * failing `add` would turn a search finding into a lost create — but it returns
@@ -1313,6 +1355,49 @@ export function searchVisibilityProbeClient(cfg: Config): NodeClient {
   return client;
 }
 
+/**
+ * Shared polling loop behind {@link awaitBoardCardSearchVisible} and
+ * {@link awaitBoardCardRowVisible} — same budget, same refusal handling,
+ * different question asked of each page.
+ */
+async function pollBoardCardsVisible(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  matches: (row: Card) => boolean,
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean> {
+  let attempt = 0;
+  let refusedRounds = 0;
+  while (attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
+    const found = await listBoardCardsPartition(node, cfg, board, {
+      fields: BOARD_CARDS_SEARCH_FIELDS,
+    })
+      .then((rows): boolean | null => rows?.some(matches) ?? false)
+      .catch((): boolean | null => null);
+    if (found === true) return true;
+
+    // A round in which every source it consulted was REFUSED asked nothing, so
+    // charging it to the budget shortens the wait by exactly the load that
+    // makes the wait necessary. The comment above has claimed "unknown, not a
+    // miss" since the third fix; returning `false` for a refusal is what made
+    // it untrue. Bounded, so a node refusing every read still terminates.
+    const answered = found !== null;
+    if (!answered && refusedRounds < SEARCH_INDEX_REFUSED_ROUNDS) {
+      refusedRounds++;
+      await sleep(SEARCH_INDEX_REFUSED_BACKOFF_MS);
+      continue;
+    }
+
+    const wait = SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt];
+    attempt++;
+    if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
+      await sleep(wait);
+    }
+  }
+  return false;
+}
+
 export async function awaitBoardCardSearchVisible(
   node: NodeClient,
   cfg: Config,
@@ -1341,45 +1426,40 @@ export async function awaitBoardCardSearchVisible(
   const board = card.board?.trim();
   const slug = card.slug?.trim();
   if (!board || !slug) return true;
-  let attempt = 0;
-  let refusedRounds = 0;
-  while (attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
-    const partition = listBoardCardsPartition(probeNode, cfg, board, {
-      fields: BOARD_CARDS_SEARCH_FIELDS,
-    })
-      .then((rows): boolean | null => rows?.some((row) => row.slug === slug) ?? false)
-      // Shed or busy: this read is UNKNOWN, not a miss. `null` is that third
-      // answer — reached only by a throw, never by an empty result — and the
-      // round below does not spend budget on it.
-      .catch((): boolean | null => null);
-    // The second source joins only once the cheap one has missed a few times.
-    const surface =
-      attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT
-        ? cardSearchSurfaceHasSlug(probeNode, cfg, slug).catch(() => null)
-        : Promise.resolve(null);
-    const [inPartition, inSurface] = await Promise.all([partition, surface]);
-    if (inPartition === true || inSurface === true) return true;
+  return pollBoardCardsVisible(probeNode, cfg, board, (row) => row.slug === slug, sleep);
+}
 
-    // A round in which every source it consulted was REFUSED asked nothing, so
-    // charging it to the budget shortens the wait by exactly the load that
-    // makes the wait necessary. The comment above has claimed "unknown, not a
-    // miss" since the third fix; returning `false` for a refusal is what made
-    // it untrue. Bounded, so a node refusing every read still terminates.
-    const consulted = attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT;
-    const answered = inPartition !== null || (consulted && inSurface !== null);
-    if (!answered && refusedRounds < SEARCH_INDEX_REFUSED_ROUNDS) {
-      refusedRounds++;
-      await sleep(SEARCH_INDEX_REFUSED_BACKOFF_MS);
-      continue;
-    }
-
-    const wait = SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt];
-    attempt++;
-    if (wait !== undefined && wait > 0 && attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
-      await sleep(wait);
-    }
-  }
-  return false;
+/**
+ * Like {@link awaitBoardCardSearchVisible}, but for callers that are about to
+ * delete a DIFFERENT row for the same slug and so cannot accept "some row for
+ * this slug is visible" as proof the replacement landed — the row it is about
+ * to delete already satisfies that question.
+ *
+ * `board-cards-heal`'s `delete-stale-and-upsert` is exactly this shape: the
+ * stale row and the truth row share a slug and coexist until the delete runs,
+ * so a slug-only visibility check is trivially true throughout and verifies
+ * nothing. This checks for the specific (column, position) the upsert wrote.
+ */
+export async function awaitBoardCardRowVisible(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+  opts?: { sleep?: (ms: number) => Promise<void> },
+): Promise<boolean> {
+  const sleep = opts?.sleep ?? delay;
+  if (!boardCardsHash(cfg)) return true;
+  const board = card.board?.trim();
+  const slug = card.slug?.trim();
+  if (!board || !slug) return true;
+  const column = card.column;
+  const position = String(card.position);
+  return pollBoardCardsVisible(
+    node,
+    cfg,
+    board,
+    (row) => row.slug === slug && row.column === column && String(row.position) === position,
+    sleep,
+  );
 }
 
 /** The wait budget in milliseconds — exported so a test can pin it to the measured lag. */
@@ -1679,6 +1759,166 @@ export async function listBoardCardsPartitionSpine(
     filter,
   });
   return spineRowsFromQueryRows(res.results, board);
+}
+
+/**
+ * One board partition read TWO WAYS, so a node that serves a short page can be
+ * caught by the disagreement instead of being believed.
+ *
+ * ## The incident this exists for
+ *
+ * 2026-09-03T22:16-22:35Z, primary `lastdbd` 0.23.3-1536, footprint climbing
+ * toward the 16 GiB memory guard. `kanban list --column todo` returned **4**
+ * rows while the truth was **17**, and `kanban list --column doing` returned
+ * **2** against **8**. No error, no `truncated` flag — a short page that looks
+ * complete. At the same moment the wide list read (`GET /api/list limit=1000`)
+ * enumerated every card, and `kanban show` read each one. The rows came back on
+ * their own after the guard restarted the daemon, with no repair applied, so
+ * this is a READ-path degradation and not lost writes.
+ *
+ * In that window the hourly `board-cards-heal --apply` took the degraded view as
+ * ground truth and printed `delete-stale-and-upsert` for seven LIVE todo cards
+ * while leaving the two rows that really are ghosts in place — wrong in both
+ * directions. See
+ * `papercut-kanban-board-cards-heal-deletes-live-rows-from-a-degraded-column-read-20260903`.
+ *
+ * ## Why heal's existing safety reasoning does not cover it
+ *
+ * Every delete in heal is authorized per row by a Card point-read, and the file
+ * argues — correctly, for a MISSING row — that "a row it cannot see is a row it
+ * cannot delete", so an incomplete read can only under-reap. That invariant is
+ * about ABSENCE. It says nothing about a read that returns a DIFFERENT set: a
+ * card whose real membership row is invisible this pass, but whose stale sibling
+ * is not, classifies as `stale` and is deleted on evidence that is simply wrong.
+ * Under-reaping is safe; mis-reading is not, and the two are not the same
+ * failure.
+ *
+ * ## The check
+ *
+ * Every BoardCards sk is `column#position#slug`, so the whole-partition read
+ * (`HashKey`) and the union of the per-column reads (`HashRangePrefix`) address
+ * exactly the same rows. They are different node access paths — the SAME pair
+ * that disagreed in the incident — so requiring them to agree is a direct test
+ * of the thing that went wrong, not a proxy for it.
+ *
+ * Both directions count. A row only the whole read saw means a column page came
+ * back short; a row only a column read saw means the whole page did. Neither can
+ * happen on a node serving complete pages.
+ *
+ * Columns probed are the board's DECLARED columns unioned with every column
+ * actually observed in the whole read. Declared alone would miss a ghost row
+ * parked on a retired column; observed alone would miss a column whose rows the
+ * whole read dropped entirely — the exact shape of the incident.
+ *
+ * Cost is one narrow query per probed column plus one for the partition, at the
+ * one-field address projection (measured 166-292ms each on the 264-row live
+ * `default` partition). Heal already pays 24 whole-partition queries per board
+ * for {@link sweepBoardCardsPartition}, so this is a small addition to a
+ * reconciler price — and no product read path calls it.
+ *
+ * A refused read is NOT reported as divergence. A query that throws is a gap in
+ * coverage, which heal already models with `incomplete_leads`; calling it
+ * disagreement would block the apply on a signal that does not mean the node is
+ * serving inconsistent pages.
+ *
+ * ## What this does NOT catch, and why that is the right boundary
+ *
+ * A UNIFORM truncation — every read of the partition returning the same short
+ * set — is invisible here, because the two views agree. That is deliberate, not
+ * a gap left for later: uniform truncation cannot authorize a wrong delete.
+ * `delete-orphan` needs the CARD to be absent, which is a different plane and a
+ * different read; `delete-stale-and-upsert` needs a stale row to be VISIBLE, and
+ * a row nobody returned is not. What a uniform short page produces is
+ * `upsert-truth` for cards that already have a row — a redundant write that
+ * restores the value already there.
+ *
+ * INCONSISTENT truncation is the dangerous one, and it is the one the incident
+ * showed: one view holds a card's real row while the other does not, so the
+ * classification that separates "stale sibling" from "row I did not see" is
+ * being made from two different boards. That distinction is the entire basis on
+ * which heal deletes.
+ */
+export type BoardCardsReadDivergence = {
+  board: string;
+  /** Columns actually probed with a range read. */
+  columnsProbed: string[];
+  /** sks the whole-partition read returned and the column reads did not. */
+  wholeOnly: string[];
+  /** sks a column read returned and the whole-partition read did not. */
+  columnOnly: string[];
+  /** A read that threw, so this board's comparison is unproven (not divergence). */
+  failed: string | null;
+};
+
+export function boardCardsReadDiverged(d: BoardCardsReadDivergence): boolean {
+  return d.wholeOnly.length > 0 || d.columnOnly.length > 0;
+}
+
+export async function readBoardCardsPartitionDivergence(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  declaredColumns: readonly string[] = [],
+): Promise<BoardCardsReadDivergence | null> {
+  if (!boardCardsHash(cfg)) return null;
+  const empty: BoardCardsReadDivergence = {
+    board,
+    columnsProbed: [],
+    wholeOnly: [],
+    columnOnly: [],
+    failed: null,
+  };
+
+  let whole: BoardCardSpineRow[];
+  try {
+    whole = (await listBoardCardsPartitionSpine(node, cfg, board)) ?? [];
+  } catch (err) {
+    return { ...empty, failed: `whole-partition read: ${errText(err)}` };
+  }
+
+  const columns = new Set<string>();
+  for (const c of declaredColumns) if (c.length > 0) columns.add(c);
+  for (const r of whole) if (r.column.length > 0) columns.add(r.column);
+  const columnsProbed = [...columns];
+  if (columnsProbed.length === 0) return { ...empty, columnsProbed };
+
+  const perColumn = await mapWithConcurrency(
+    columnsProbed,
+    async (column) => {
+      try {
+        return {
+          rows: (await listBoardCardsPartitionSpine(node, cfg, board, { column })) ?? [],
+          failure: null as string | null,
+        };
+      } catch (err) {
+        return { rows: [] as BoardCardSpineRow[], failure: `column ${column}: ${errText(err)}` };
+      }
+    },
+    PARTITION_READ_CONCURRENCY,
+  );
+
+  const failures = perColumn.map((p) => p.failure).filter((f): f is string => f !== null);
+  if (failures.length > 0) {
+    return { ...empty, columnsProbed, failed: failures.join("; ") };
+  }
+
+  const columnSks = new Set<string>();
+  for (const p of perColumn) for (const r of p.rows) columnSks.add(r.sk);
+  // Only rows on a probed column are comparable: a row on a column nothing
+  // probed is absent from the union for a reason that is not disagreement.
+  const wholeSks = new Set(whole.filter((r) => columns.has(r.column)).map((r) => r.sk));
+
+  return {
+    board,
+    columnsProbed,
+    wholeOnly: [...wholeSks].filter((sk) => !columnSks.has(sk)),
+    columnOnly: [...columnSks].filter((sk) => !wholeSks.has(sk)),
+    failed: null,
+  };
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Shared row-building for every spine-shaped read. `board` is the filter. */

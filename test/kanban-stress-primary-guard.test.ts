@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const scriptPath = join(import.meta.dir, "..", "scripts", "kanban-stress.sh");
 
@@ -90,7 +91,7 @@ describe("kanban-stress refuses the shared primary node", () => {
     expect(stdout).toContain("errors=1");
     // It must bail BEFORE any leg runs, or it has already done the damage.
     expect(stdout).not.toContain("kanban-stress run=");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test.if(hasJq)("refuses via the ~/.folddb compat path that symlinks to the primary", () => {
     // Same node, legacy name. A string compare would let this through; the
@@ -101,7 +102,7 @@ describe("kanban-stress refuses the shared primary node", () => {
     expect(stdout).toContain("refusing to stress the shared primary");
     expect(exitCode).toBe(0);
     expect(stdout).not.toContain("kanban-stress run=");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test.if(hasJq)("KSTRESS_ALLOW_PRIMARY=1 forces a deliberate supervised run", () => {
     const h = makeHome();
@@ -113,7 +114,7 @@ describe("kanban-stress refuses the shared primary node", () => {
     expect(stdout).not.toContain("refusing to stress the shared primary");
     expect(stdout).toContain("kanban-stress run=");
     expect(exitCode).toBe(0);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test.if(hasJq)("an isolated socket runs without the guard firing", () => {
     const h = makeHome();
@@ -122,5 +123,5 @@ describe("kanban-stress refuses the shared primary node", () => {
     expect(stdout).not.toContain("refusing to stress the shared primary");
     expect(stdout).toContain("kanban-stress run=");
     expect(exitCode).toBe(0);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });

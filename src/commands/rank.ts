@@ -17,17 +17,20 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
+import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "../concurrency.ts";
 import {
   RANK_POSITION_STEP,
   ensureColumn,
+  findMilestone,
+  hydrateCardBodies,
   isBodyOmitted,
   isMetaCardKind,
-  listBoardCardsWithBodies,
-  listMilestonesOnBoard,
+  listCards,
   priorityOf,
   rankCards,
   requireBoard,
   writeCardPatch,
+  type Milestone,
   type PriorityTier,
 } from "../record.ts";
 import {
@@ -72,31 +75,62 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
   // `Priority:` body header (the tag is only the fallback), and each reordered
   // card is written back whole — the body-free list silently demoted every
   // header-only card to P2 and blanked the brief it rewrote.
-  const all = await listBoardCardsWithBodies(opts.node, opts.cfg);
-  const candidates = all.filter(
+  //
+  // Scope the read to the single column being ranked — the ranker never
+  // reorders any other column. Reading the whole board (or worse, the whole
+  // product's Card schema through the body-map short-cut) paid for hundreds
+  // of rows it could never touch: a 20-card `todo` column cost ~3,004 node
+  // queries before this fix, because the body hydrate fanned out over every
+  // card on the board regardless of scope. Point-reading bodies for just this
+  // column's candidates (`hydrateCardBodies`) costs one query per candidate.
+  // See kanban-rank-hard-3004-queries-168s-blocks-pickup-claim-20260904.
+  const scoped = await listCards(opts.node, opts.cfg, {
+    boards: [{ slug: boardSlug }],
+    column,
+  });
+  const candidates = scoped.filter(
     (c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind),
   );
+  const hydrated = await hydrateCardBodies(opts.node, opts.cfg, candidates);
   // A BoardCards orphan has no Card primary to hydrate. Keep rank fail-open:
   // the row remains visible to the explicit board-cards healer, while every
   // real card can still be ordered. Passing the orphan through would make the
   // first required position rewrite hit the body-loaded write guard and abort
   // the entire pickup factory.
-  const skipped = candidates
+  const skipped = hydrated
     .filter(isBodyOmitted)
     .map((card) => ({ slug: card.slug, reason: "card-primary-missing" }));
-  const inColumn = candidates.filter((card) => !isBodyOmitted(card));
+  const inColumn = hydrated.filter((card) => !isBodyOmitted(card));
 
   let ctx: HardTodoRankContext | undefined;
   if (mode === "hard") {
-    try {
-      const milestones = await listMilestonesOnBoard(opts.node, opts.cfg, boardSlug);
-      const frontier = new Set(
-        milestones.filter((m) => isFrontierMilestoneState(m.state)).map((m) => m.slug),
-      );
-      ctx = { frontierMilestones: frontier };
-    } catch {
-      // Milestone index optional — rank still applies hard lane tiers without frontier boost.
+    // Only the milestones this column's own cards actually reference need a
+    // frontier verdict — listing and hydrating every milestone on the board
+    // (218 queries measured on the primary) paid for milestones no candidate
+    // here points at. Point-read just the referenced slugs instead.
+    const milestoneSlugs = [
+      ...new Set(inColumn.map((c) => (c.milestone ?? "").trim()).filter((s) => s.length > 0)),
+    ];
+    if (milestoneSlugs.length === 0) {
       ctx = {};
+    } else {
+      try {
+        const milestones = await mapWithConcurrency(
+          milestoneSlugs,
+          (slug) => findMilestone(opts.node, opts.cfg, slug),
+          POINT_READ_CONCURRENCY,
+        );
+        const frontier = new Set(
+          milestones
+            .filter((m): m is Milestone => m !== null)
+            .filter((m) => isFrontierMilestoneState(m.state))
+            .map((m) => m.slug),
+        );
+        ctx = { frontierMilestones: frontier };
+      } catch {
+        // Milestone index optional — rank still applies hard lane tiers without frontier boost.
+        ctx = {};
+      }
     }
   }
 

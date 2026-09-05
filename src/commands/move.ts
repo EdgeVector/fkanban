@@ -10,9 +10,8 @@ import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import { recordFeatureFlowMutation } from "../flow-ledger.ts";
 import {
   appendPosition,
-  assertDefaultTodoPickupReady,
+  assertDefaultTodoWriteGuard,
   assertDepUnblocked,
-  assertLivePrMilestone,
   sanitizeDefaultTodoLaneMetadata,
   warnClearedTodoLaneMetadata,
   applyDbLocatorForWrite,
@@ -32,9 +31,11 @@ import {
   updateCardRecord,
   type Card,
 } from "../record.ts";
+import { purgeStaleBoardCardRows } from "../board-cards.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 import { planDoingClaim } from "../doing-claim.ts";
+import { purgeOtherColumnRowsForSlug } from "../board-cards.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -159,6 +160,15 @@ export async function claimCard(opts: {
     previous: card,
     next: updated,
   });
+  const claimBoard = await ensureBoardRecord(opts.node, opts.cfg, updated.board);
+  await purgeOtherColumnRowsForSlug(
+    opts.node,
+    opts.cfg,
+    updated.board,
+    updated.slug,
+    updated.column,
+    claimBoard.columns,
+  );
 
   return {
     result: "claimed",
@@ -228,11 +238,10 @@ async function promoteUnblockedBacklogDependents(opts: {
         const ms = await findMilestone(opts.node, opts.cfg, msSlug);
         if (ms) milestoneState = ms.state;
       }
-      assertLivePrMilestone(updated, false, {
+      assertDefaultTodoWriteGuard(updated, false, rawBody, {
         milestoneState,
-        enforce: opts.cfg.enforceLivePrMilestone === true,
+        enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
       });
-      assertDefaultTodoPickupReady(updated, false, rawBody);
       await assertDepUnblocked(opts.node, opts.cfg, updated, false);
     } catch (err) {
       if (isExpectedPromotionSkip(err)) continue;
@@ -313,11 +322,10 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     const ms = await findMilestone(opts.node, opts.cfg, msSlug);
     if (ms) milestoneState = ms.state;
   }
-  assertLivePrMilestone(updated, opts.force, {
+  assertDefaultTodoWriteGuard(updated, opts.force, rawBody, {
     milestoneState,
-    enforce: opts.cfg.enforceLivePrMilestone === true,
+    enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
   });
-  assertDefaultTodoPickupReady(updated, opts.force, rawBody);
   await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
   // Opt-in LastgitCiStatus gate: only cards with Requires-Status / Requires-Deploy
@@ -352,6 +360,33 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     }
     throw err;
   }
+  // A move states where this card belongs, so it is also the repair for a card
+  // that reads as belonging in two places at once.
+  //
+  // `updateCardRecord` retires only the row the CALLER knew about — the address
+  // built from the Card point read it was handed. A drifted card has a row the
+  // Card record cannot name (the 2026-09-05 `doing` lane held 9 such rows of
+  // 13), so the documented repair `kanban move <slug> <truth-column> --force`
+  // exited 0, printed `done -> done`, and left the phantom row first in the
+  // listing. Agents reported a repair they had not made:
+  // `papercut-kanban-move-to-truth-column-does-not-clear-the-stale-listing-row-20260905`.
+  //
+  // Only the partition knows every row a slug holds, so the repair has to ask
+  // it. Best-effort: the card is already written and already correct, and a
+  // failure here leaves exactly the duplicate that existed a moment ago.
+  try {
+    await purgeStaleBoardCardRows(opts.node, opts.cfg, updated);
+  } catch (err) {
+    // The move succeeded; a failed reap leaves exactly the duplicate that
+    // existed a moment ago, so it must not fail the command. It must not be
+    // SILENT either: an operator running this as the phantom-row repair needs
+    // to know the repair half did not run.
+    console.error(
+      `kanban: move wrote ${updated.slug} but could not retire its stale membership rows: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `Re-run the move, or use \`kanban groom board-cards-heal\`.`,
+    );
+  }
   // AFTER the write, never before. A completion checkpoint is a durable, one-way
   // append into Brain that nothing in this codebase retracts, so ordering it
   // ahead of the write means a refused write — a `service_timeout` on a busy
@@ -380,6 +415,16 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     next: updated,
     terminalColumn: terminalColumn(columns),
   });
+  // Previous-SK janitor only knows the tip SK. Leftover rows in other columns
+  // (the live todo+doing dual-list bug) need prefix deletes on those columns.
+  await purgeOtherColumnRowsForSlug(
+    opts.node,
+    opts.cfg,
+    updated.board,
+    updated.slug,
+    updated.column,
+    columns,
+  );
   const promotedDependents =
     opts.column === terminalColumn(columns)
       ? await promoteUnblockedBacklogDependents({ cfg: opts.cfg, node: opts.node, dependency: updated })

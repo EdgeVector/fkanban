@@ -120,21 +120,15 @@ describe("checkPinnedSchemaIdentity", () => {
     });
   });
 
-  test("the live multi-key expand is the DESIGNED state, not a crossed identity", () => {
-    // Measured on the primary 2026-08-04: `board_cards` is pinned to a schema
-    // the catalog reports as `HashRange(milestone, sk)` — because the 2026-07-23
-    // expand bound both lookups to one schema and the catalog reports whichever
-    // key was declared last. `HashKey=default` still returns every board row.
-    //
-    // A first cut of this check flagged it, which is the exact false red doctor
-    // was already taught out of once (`alsoAccepts`). Two independent opinions
-    // about which key layouts are legal is how one check calls the designed
-    // state a poisoning while its neighbour passes it.
+  test("a milestone-keyed BoardCards catalog entry is a key mismatch", () => {
     const expanded: LoadedSchemaCandidate = {
       ...loadedFrom("39a0boardcards", boardCardsSchema.schema),
       key: { hash_field: "milestone", range_field: "sk" },
     };
-    expect(checkPinnedSchemaIdentity(BC_ENTRY, "39a0boardcards", [expanded])).toEqual({ kind: "ok" });
+    const check = checkPinnedSchemaIdentity(BC_ENTRY, "39a0boardcards", [expanded]);
+    expect(check.kind).toBe("mismatch");
+    if (check.kind !== "mismatch") throw new Error("unreachable");
+    expect(check.mismatches.map((m) => m.what)).toContain("key");
   });
 
   test("a hash field belonging to NEITHER lookup is still a mismatch", () => {

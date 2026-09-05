@@ -665,23 +665,33 @@ describe("MCP read tools return structuredContent matching the CLI --json shape"
     expect((res.content as Array<{ type: string; text: string }>)[0]?.text.length).toBeGreaterThan(0);
   });
 
-  test("fkanban_search returns { cards } deep-equal to `search --json`", async () => {
-    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "search me" } });
-    const cliRaw = JSON.parse(await searchCmd({ cfg, node, query: "search me", json: true })) as {
+  test("fkanban_search matches the CLI --json set; MCP hydrates the capped page", async () => {
+    const res = await client.callTool({ name: "fkanban_search", arguments: { query: "UI work" } });
+    const cliRaw = JSON.parse(await searchCmd({ cfg, node, query: "UI work", json: true })) as {
       cards: Array<Record<string, unknown>>;
       total: number;
       truncated: boolean;
     };
-    const cliCards = cliRaw.cards;
-    // One match, under the default cap → full set + `truncated:false`. Body is
-    // previewed (short fixture body → unchanged, bodyTruncated:false).
-    const cliCardsPreviewed = cliCards.map((c: Record<string, unknown>) => ({ ...c, bodyTruncated: false }));
-    expect(res.structuredContent).toEqual({
-      cards: cliCardsPreviewed,
+    const cliCards = cliRaw.cards as Array<{ slug: string; body: string }>;
+    const mcp = res.structuredContent as {
+      cards: Array<{ slug: string; body: string; bodyTruncated: boolean }>;
+      total: number;
+      truncated: boolean;
+    };
+    expect(cliCards.map((c) => c.slug)).toEqual(["ui"]);
+    expect(mcp.cards.map((c) => c.slug)).toEqual(["ui"]);
+    expect({ total: mcp.total, truncated: mcp.truncated }).toEqual({
       total: cliRaw.total,
       truncated: cliRaw.truncated,
     });
-    expect((cliCards as Array<{ slug: string }>).map((c) => c.slug)).toEqual(["ui"]);
+    // CLI default JSON is BoardCards (empty body, 0 Card HashKeys). MCP hydrates
+    // the capped page so the agent gets a real preview without N HashKeys.
+    expect(cliCards[0]!.body).toBe("");
+    const apiTruth = await findCard(node, cfg, "ui");
+    expect(mcp.cards[0]).toMatchObject({
+      body: apiTruth!.body.replace(/\s+/g, " ").trim(),
+      bodyTruncated: false,
+    });
   });
 
   test("searchResult rejects a whitespace-only query (missing_arg) instead of dumping the board", async () => {
@@ -757,13 +767,14 @@ describe("MCP read tools cap the structured card array by default", () => {
     node = fakeNode();
     await seedDefaultBoard(node);
     client = await connectedClient(node);
-    // Seed N cards in `todo`, each whose body contains the term "needle" so a
-    // single search matches all of them.
+    // Seed N cards in `todo`. Default search matches BoardCards display fields
+    // (title), not Card body. Put the term in the title so the cap is a real
+    // match set, not an empty body-only miss.
     for (let i = 0; i < N; i++) {
       const idx = String(i).padStart(3, "0");
       await client.callTool({
         name: "fkanban_add",
-        arguments: { slug: `card-${idx}`, title: `Card ${idx}`, body: validPickupBody("needle in the body"), column: "todo" },
+        arguments: { slug: `card-${idx}`, title: `Needle ${idx}`, body: validPickupBody("needle in the body"), column: "todo" },
       });
     }
   });
@@ -956,8 +967,8 @@ describe("MCP read tools preview card bodies by default, full under full_body / 
   });
 
   test("fkanban_search previews the body by default and restores it under full_body:true", async () => {
-    const def = await client.callTool({ name: "fkanban_search", arguments: { query: "needle" } });
-    const full = await client.callTool({ name: "fkanban_search", arguments: { query: "needle", full_body: true } });
+    const def = await client.callTool({ name: "fkanban_search", arguments: { query: "Huge" } });
+    const full = await client.callTool({ name: "fkanban_search", arguments: { query: "Huge", full_body: true } });
     const huge = cardsOf(def).find((c) => c.slug === "huge")!;
     expect(huge.body.length).toBe(PREVIEW_LEN);
     expect(huge.bodyTruncated).toBe(true);
@@ -1033,7 +1044,7 @@ describe("MCP: writing a previewed body back cannot silently truncate a card", (
   }
 
   test("the search preview is a tiny fraction of the brief, and writing it back is REFUSED", async () => {
-    const found = await client.callTool({ name: "fkanban_search", arguments: { query: "reconcile" } });
+    const found = await client.callTool({ name: "fkanban_search", arguments: { query: "Brief" } });
     const preview = (found.structuredContent as { cards: Array<{ slug: string; body: string; bodyTruncated: boolean }> })
       .cards.find((c) => c.slug === "brief-card")!;
     expect(preview.bodyTruncated).toBe(true);

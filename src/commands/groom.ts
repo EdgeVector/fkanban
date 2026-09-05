@@ -117,7 +117,7 @@ export type SweepCounts = {
  * construction, and `groom-sweep-counts.test.ts` fails if any head line stops
  * coming from here.
  */
-export function renderSweepHead(label: string, counts: SweepCounts): string {
+function renderSweepHead(label: string, counts: SweepCounts): string {
   // "candidate cards" stays ungrammatical at 1 on purpose: the only behavioural
   // delta this change is allowed to carry is the count semantics and the key
   // name, so that reverting it produces an unambiguous test split.

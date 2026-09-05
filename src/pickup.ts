@@ -1,7 +1,10 @@
 import { type NodeClient } from "./client.ts";
 import { type Config } from "./config.ts";
+import { isDefaultColumn } from "./schemas.ts";
 import {
   assertBodyLoaded,
+  assertLivePrMilestone,
+  captureFkanbanError,
   depStatus,
   hasPrWorkBrief,
   hydrateCardBodies,
@@ -16,7 +19,6 @@ import {
   PICKUP_AREA_ACTIVE_COLUMNS,
   PICKUP_AREA_BLOCK_PREFIX,
   listDependencyStatusesForCards,
-  listMilestones,
   resolvePickupRepo,
   sanitizeRepoValue,
   sortCards,
@@ -48,6 +50,10 @@ export const PICKUP_CATEGORIES = [
   "collision",
   "stale-metadata",
   "situation-fenced",
+  // Not a card verdict: rows on no board column (Milestone rows reach the card
+  // list through BoardCards). Counted so dropping them from classification is
+  // visible, never classified — see `activeCards`.
+  "off-board/non-card",
 ] as const;
 export type PickupCategory = (typeof PICKUP_CATEGORIES)[number];
 
@@ -84,8 +90,37 @@ const GENERATED_REASON_PREFIXES = [
   "fkanban-pickup cannot pick up",
 ];
 
+/**
+ * The rows a pickup verdict can apply to: not terminal, AND actually on a board
+ * column.
+ *
+ * Boards cannot redefine columns (see `DEFAULT_COLUMNS` — `board create
+ * --columns` accepts that exact list or nothing), so a row whose `column` holds
+ * anything else is not on a board at all and no `fkanban move` can route it.
+ * This is the same rule the terminal-column filter already applies, carried to
+ * the other end: a row pickup cannot move gets no verdict, no body and no dep
+ * read.
+ *
+ * It is not hypothetical. Measured on the live board 2026-09-04,
+ * `listCards({ activeOnly: true })` returned 439 rows of which **29 carried a
+ * Milestone `state` in `column`** — `complete` 15, `planned` 7, `active` 6,
+ * `abandoned` 1. Those 29 were exactly the `malformed-routing` count, each
+ * reported as "repo unresolved: no repo field" about a record that has no
+ * `repo` BY DESIGN. So the bucket an operator reads to find broken routing was
+ * 29 false positives and 1 real card, and each phantom also bought a body
+ * hydrate and a dep fan-out on the way to that verdict.
+ */
 function activeCards(cards: Card[]): Card[] {
-  return cards.filter((c) => c.column !== TERMINAL_COLUMN);
+  return cards.filter((c) => c.column !== TERMINAL_COLUMN && isDefaultColumn(c.column));
+}
+
+/**
+ * Rows that survive the terminal filter but sit on no board column — what
+ * {@link activeCards} now drops. Counted, never classified: they are reported
+ * under their own key so the drop is visible rather than silent.
+ */
+function offBoardRows(cards: Card[]): Card[] {
+  return cards.filter((c) => c.column !== TERMINAL_COLUMN && !isDefaultColumn(c.column));
 }
 
 function generatedReason(reason: string): boolean {
@@ -328,45 +363,40 @@ export function classifyPickupCard(
     card.column === "todo"
   ) {
     const msSlug = (card.milestone ?? "").trim();
-    if (!msSlug) {
-      // NOT `malformed-routing`. Everything routing needs is present and correct —
-      // repo, base, and kind all resolved above, or this line is unreachable. The
-      // card is well-formed and merely unattached to an outcome, which is one
-      // `--milestone` away and is a POLICY gate, not a defect in the card.
-      //
-      // Collapsing the two hid both. `malformed-routing` is where a genuinely
-      // broken card shows up — no `Repo:` header, nothing can route it — and on
-      // 2026-08-03 that bucket read 12 on the live board while every one of the 12
-      // was well-formed. A real routing bug would have been invisible in that
-      // count, and the reported remedy ("set a bare Repo: header") was wrong for
-      // all 12. Splitting the bucket is what makes each number actionable.
-      return out(
-        "unattached-outcome",
-        "missing milestone linkage",
-        "Attach an outcome with `fkanban add <slug> --milestone <slug>`; the claim write-guard (assertLivePrMilestone) rejects milestone-less Kind:pr claims.",
-      );
-    }
-    // When the portfolio map is supplied, abandoned / missing milestones must
-    // not classify as ready — claim rejects them with live_pr_milestone_abandoned
-    // (or fails the milestone resolve) and workers previously burned a full LLM
-    // run re-discovering an empty ready queue.
+    // NOT `malformed-routing`. Everything routing needs is present and correct —
+    // repo, base, and kind all resolved above, or this line is unreachable. The
+    // card is well-formed and merely unattached to an outcome, which is one
+    // `kanban set --milestone` away and is a POLICY gate, not a defect in the
+    // card.
+    //
+    // Ask the same write-guard move/explain run so status, explain, and move
+    // print one message. Collapsing this bucket into malformed-routing hid
+    // both: on 2026-08-03 that bucket read 12 on the live board while every
+    // one of the 12 was well-formed.
     const msMap = opts.milestoneStateBySlug;
-    if (msMap) {
+    let milestoneState = "";
+    if (msSlug && msMap) {
       if (!msMap.has(msSlug)) {
         return out(
           "unattached-outcome",
           `milestone not found: ${msSlug}`,
-          "Create the milestone or re-link with `fkanban add <slug> --milestone <active-slug>`.",
+          `Create the milestone or re-link with \`kanban set ${card.slug} --milestone <active-slug>\`.`,
         );
       }
-      const state = (msMap.get(msSlug) ?? "").trim();
-      if (state === "abandoned") {
-        return out(
-          "unattached-outcome",
-          `abandoned milestone: ${msSlug}`,
-          "Pick an active/planned milestone (`fkanban add <slug> --milestone <active-slug>`); claim write-guard rejects abandoned outcomes.",
-        );
-      }
+      milestoneState = (msMap.get(msSlug) ?? "").trim();
+    }
+    const writeGuardErr = captureFkanbanError(() =>
+      assertLivePrMilestone(card, false, {
+        milestoneState,
+        enforce: true,
+      }),
+    );
+    if (writeGuardErr) {
+      return out(
+        "unattached-outcome",
+        writeGuardErr.message,
+        writeGuardErr.hint ?? "",
+      );
     }
   }
   // Soft collision-gate hygiene: empty structured surfaces mean overlap is
@@ -436,6 +466,9 @@ export function buildPickupStatusReport(
   );
   const counts = Object.fromEntries(PICKUP_CATEGORIES.map((category) => [category, 0])) as Record<PickupCategory, number>;
   for (const c of classifications) counts[c.category] += 1;
+  // Reported, not classified. `cards` therefore holds only rows with a real
+  // verdict, and `scanned` counts what was actually judged.
+  counts["off-board/non-card"] = offBoardRows(cards).length;
   return {
     scanned: classifications.length,
     ready: counts["pickup-ready"],
@@ -536,14 +569,39 @@ export async function buildPickupStatusReportWithSituations(
   }
   let milestoneStateBySlug: Map<string, string> | undefined;
   if (depsContext?.cfg.enforceLivePrMilestone === true) {
-    // One portfolio list per status/claim scan — cheap vs per-card point reads,
-    // and required so abandoned milestones classify as unattached-outcome.
+    // REFERENCED milestones only — seeded empty so
+    // `includePointReadableReferencedMilestones` point-reads exactly the slugs
+    // some card names, and nothing else.
+    //
+    // This used to seed the whole portfolio via `listMilestones`, on the
+    // reasoning that one list beats per-card point reads. That trade only pays
+    // when most milestones are referenced, and on this board almost none are.
+    // Measured on the live primary 2026-09-04: `listMilestones` returned **217
+    // rows in 14.0 s**, of which **27 were referenced by an active card and 190
+    // were not** — 88% of the read thrown away. The list is also the expensive
+    // shape: it is a HashRange partition per board plus a HashKey hydrate per
+    // milestone, and lifetime it makes `kanban query Milestone` the node's #3
+    // consumer of cold shard loads (11.3M loads, 171 per call).
+    //
+    // Behaviour is unchanged, which is what makes this a pure narrowing:
+    // classification only ever looks this map up by `card.milestone`
+    // (`classifyPickupCard` -> `milestoneStateBySlug.get(msSlug)`), so a
+    // milestone no card references could never be read out of it.
+    //
+    // Cost matters here because this read sits inside the gate every pickup
+    // worker runs BEFORE it can claim anything: at 21-25 s per call it was
+    // exceeding the 45 s cap in `last-stack-kanban-pickup-gate` under normal
+    // board load, and 16 of 70 pickup cycles claimed no card while the board
+    // held 16 ready.
     try {
+      // `activeCards`, not the whole set: the map is only ever read for a card
+      // that gets a verdict, so a milestone named by a terminal or off-board row
+      // is a point read whose result no path can observe.
       const milestones = await includePointReadableReferencedMilestones(
         depsContext.node,
         depsContext.cfg,
-        await listMilestones(depsContext.node, depsContext.cfg),
-        cardsWithDeps,
+        [],
+        activeCards(cardsWithDeps),
       );
       milestoneStateBySlug = new Map(
         milestones.map((m) => [m.slug, (m.state ?? "").trim()]),

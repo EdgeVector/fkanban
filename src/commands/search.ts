@@ -9,18 +9,14 @@ import {
   CARD_SEARCH_DISPLAY_FIELDS,
   ensureColumn,
   findCard,
-  listCardSearchSurfaces,
-  type CardSearchSurface,
   listDependencyStatusesForCards,
   listCardsByFilter,
   listCardsWithBodies,
   queryTerms,
   requireBoard,
   cardMatchesQuery,
-  searchSurfaceMatchesQuery,
   searchCards,
   sortCards,
-  withLoadedBody,
   type Card,
 } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
@@ -307,45 +303,8 @@ async function semanticSearchCards(
 }
 
 /**
- * Why a refused key-list read is retried instead of counted as "no cards".
- *
- * This read is the recovery pass's ONLY source: a card the display index has
- * not enumerated yet is reachable through it and through nothing else. Under
- * load the node sheds it — observed on the live primary 2026-08-30 with the
- * dogfood harness's own concurrent burst running, `FKANBAN_DEBUG_QUERY_PLAN`
- * reporting `bodyScanUnavailable: true`. A shed read is BACKPRESSURE, not an
- * answer, and the old `.catch(() => null)` turned it into one: the recovery
- * pass was skipped and `search` exited 0 with no match, which reads exactly
- * like "no such card" while `show` still returns the card in full.
- *
- * That is the `search-index-divergence` shape the dogfood harness reports, and
- * it is the half no previous fix touched — all three moved which index the
- * write path WAITS on, and none asked what `search` does when its own read is
- * refused.
- *
- * One retry, not a loop: the caller is an interactive search, and a node
- * refusing twice is degraded in a way the answer must DECLARE rather than
- * out-wait. The declaration is {@link SEARCH_SURFACES_UNAVAILABLE}.
- */
-async function readSearchSurfaces(
-  opts: SearchOptions,
-): Promise<Map<string, CardSearchSurface> | null> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      return await listCardSearchSurfaces(opts.node, opts.cfg);
-    } catch {
-      // fall through to the retry, then to the declared-degraded answer
-    }
-  }
-  return null;
-}
-
-/**
- * What `search` says when it answered from the board index alone.
- *
- * Named and exported so the sentence is pinned by a test rather than spelled
- * differently at each call site, and so "no card matches" and "one of my two
- * sources would not answer" can never again be the same output.
+ * Kept so tests that pin the old key-list-degraded sentence still compile.
+ * Default search no longer reads the Card key list.
  */
 export const SEARCH_SURFACES_UNAVAILABLE =
   "the Card key list could not be read, so `search` answered from the board " +
@@ -359,22 +318,16 @@ async function indexedSearchCards(
   if (opts.board) filter.board = opts.board;
   if (opts.column) filter.column = opts.column;
 
-  // Independent reads — the key-list read must not sit behind the display read
-  // on the critical path (the mistake run (j) made with the portfolio board
-  // read).
-  //
-  // `listCardSearchSurfaces`, not `listCardBodies`: the SAME one key-list read,
-  // projected to every field `cardMatchesQuery` reads instead of `body` alone.
-  // The extra fields cost no round trip (that read already point-gets each card
-  // hash) and they are what lets the recovery pass below decide a match for a
-  // card the display index never enumerated — including one whose only match is
-  // its title.
-  const [displayRead, surfaces] = await Promise.all([
-    listCardsByFilter(opts.node, opts.cfg, filter, CARD_SEARCH_DISPLAY_FIELDS, {
-      allowKeyListFallback: false,
-    }),
-    readSearchSurfaces(opts),
-  ]);
+  // Default search is the BoardCards display index. Do not HashKey every Card.
+  // Live primary 2026-09-02: that key-list drain was ~12 Card queries/s.
+  // Body-only hits and cards missing from BoardCards stay `--complete`.
+  const displayRead = await listCardsByFilter(
+    opts.node,
+    opts.cfg,
+    filter,
+    CARD_SEARCH_DISPLAY_FIELDS,
+    { allowKeyListFallback: false },
+  );
 
   const inScope = (c: Card): boolean =>
     (!opts.board || c.board === opts.board) && (!opts.column || c.column === opts.column);
@@ -382,109 +335,14 @@ async function indexedSearchCards(
 
   const bySlug = new Map<string, Card>();
   for (const card of scopedDisplay) {
-    // `withLoadedBody` is the marker-clearing half of the BODY_OMITTED
-    // contract: a card whose body we genuinely read is no longer "unread".
-    //
-    // AN EMPTY SCAN BODY IS NOT A READ. `listBoardCardsWithBodies` holds this
-    // same scan to that rule already; this is its other consumer, and clearing
-    // the marker on `""` was the laundering step the sweep fix named — it turns
-    // "the scan told me nothing" into "I read it, and it was empty".
-    //
-    // Here that DEFEATS a defence that is already in place. `fkanban_search`
-    // hydrates its capped page (`hydrateCardBodies` on ≤20 cards, mcp/server.ts)
-    // so every returned match carries a real body — and `hydrateCardBodies`
-    // correctly refuses to re-read a body someone claimed to have read. A card
-    // whose scan body was empty therefore skipped the very read that exists to
-    // fill it.
-    //
-    // Keeping the marker costs this path nothing: no read is issued here, and
-    // `cardMatchesQuery` sees `body: ""` either way. It only re-arms the bounded
-    // hydration downstream. Deliberately NOT hydrating the whole board here —
-    // measured on the live primary 2026-08-01, that is 12 point reads / 257ms on
-    // a 1139ms read phase for zero recall today
-    // (`scripts/probe-search-empty-body-denial.ts`), and the page-bounded read
-    // MCP already does is the proportionate place to pay it.
-    const body = surfaces?.get(card.slug)?.body;
-    const whole = body === undefined || body.length === 0 ? card : withLoadedBody(card, body);
-    if (cardMatchesQuery(whole, opts.query)) bySlug.set(whole.slug, whole);
+    // BoardCards has no body. Keep BODY_OMITTED so MCP hydrate still runs.
+    if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
   }
 
-  // Cards the Card KEY LIST covers and the display index did not ENUMERATE.
-  //
-  // The loop above reads two different things from two different places and
-  // only one of them decides membership: `surfaces` is the Card key list (the
-  // source of truth `show` point-gets), but the card set being matched is
-  // `scopedDisplay` — the BoardCards display index alone. A slug present in the
-  // key list and absent from that index is therefore unreachable by `search` at
-  // ANY query, while `show <slug>` returns it in full. The key-list read walks
-  // straight past it: `surfaces.get(card.slug)` is keyed BY the display read,
-  // so a surface with no display row is never looked up.
-  //
-  // That is the 2026-08-21 dogfood finding (`show` read
-  // `kstress-1787297879-3095-s1`, `search kdogtok1787297933` missed it), and it
-  // is not rare. Measured on the live primary 2026-08-23,
-  // `scripts/probe-search-enumeration-gap.ts`: display read 178 cards, key list
-  // 338 slugs, gap 176 — of which **8 were real placed board cards**
-  // (`default/todo`, `default/doing`, bodies 2415–31994 chars) that no query
-  // could reach. `kanban search "Arm bounded gc-atoms from the daemon sync
-  // cycle"` returned 0 against a `todo` card whose title is that exact string.
-  //
-  // The native fallback below cannot rescue this: it fires only when the read
-  // is WHOLLY degraded (`surfaces === null` or an empty display read). One
-  // missing row in an otherwise healthy read never trips it.
-  //
-  // The recovery is bounded by the QUERY, not by the gap: a gap slug is
-  // point-read only when the surface the key list already supplies ALREADY
-  // matches, judged by `searchSurfaceMatchesQuery` — the same terms, haystack
-  // and AND semantics as `cardMatchesQuery`, over the same fields, so the
-  // pre-filter cannot under-select and silently re-hide a card. Non-matching
-  // gap slugs cost nothing: 0 reads for a no-match query on the board above, 17
-  // for `lastdb`, 40 for `kanban`, against 176 keyed reads measured at 38ms
-  // concurrent on a 309ms read phase. No cap — a cap here would drop matches
-  // while still reading as "search found everything".
-  //
-  // An EMPTY query recovers nothing. It means "every card on the board", and
-  // board membership is exactly what a card with no BoardCards row does not
-  // have; answering it from the key list would widen the default board-scoped
-  // surface into `--complete`'s job. `searchResult` already rejects an empty
-  // query as a usage error before any read, so this guard is the local
-  // statement of that contract rather than the thing enforcing it.
-  //
-  // The point read is authoritative, and it decides membership as well as
-  // content: only a card that comes back PLACED (both `board` and `column` set)
-  // is one the display index owed us. An off-board Card record stays
-  // `--complete`'s to return. `cardMatchesQuery` then runs on the whole card,
-  // so one predicate stays in charge of the final answer.
-  if (surfaces !== null && queryTerms(opts.query).length > 0) {
-    const enumerated = new Set(displayRead.cards.map((c) => c.slug));
-    const candidates: string[] = [];
-    for (const [slug, surface] of surfaces) {
-      if (enumerated.has(slug)) continue;
-      if (searchSurfaceMatchesQuery(surface, opts.query)) candidates.push(slug);
-    }
-    const recovered = await mapWithConcurrency(candidates, (slug) =>
-      findCard(opts.node, opts.cfg, slug),
-    );
-    for (const card of recovered) {
-      if (!card || !card.board || !card.column) continue;
-      if (!inScope(card)) continue;
-      if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
-    }
-  }
-
-  // Fallback only, on either half of the degraded case:
-  //   - the key-list read was refused, so no card has a body to match against; or
-  //   - the display read could not ENUMERATE the board (no display indexes
-  //     provisioned), so there is no card list for the bodies to attach to —
-  //     slug+body alone cannot render a result.
-  // With both halves healthy, the display read plus the key-list recovery pass
-  // above have between them matched every card this could reach, so spending up
-  // to 50 more point reads to re-derive a subset is pure cost. (Before that
-  // recovery pass existed this comment claimed the same thing of the scan
-  // alone, and it was wrong in exactly the way the pass fixes: the key-list
-  // read supplies CONTENT, it never supplied MEMBERSHIP.)
+  // Native fallback only when BoardCards could not enumerate. Default search
+  // must not HashKey Card rows on a healthy display read.
   let native: { slugs: string[]; saturated: boolean } | null = null;
-  if (surfaces === null || scopedDisplay.length === 0) {
+  if (scopedDisplay.length === 0) {
     try {
       native = await nativeIndexCandidateSlugs(opts, "keyword");
     } catch {
@@ -543,26 +401,15 @@ async function indexedSearchCards(
   debugSearchPlan("indexed-candidates", {
     displayCards: scopedDisplay.length,
     displayServedBy: displayRead.servedBy,
-    bodiesRead: surfaces?.size ?? 0,
-    bodyScanUnavailable: surfaces === null,
+    bodiesRead: 0,
+    bodyScanUnavailable: false,
     nativeCandidates: native?.slugs.length ?? 0,
     fullBodyScan: false,
   });
   return {
     cards: matches,
     allCards: statusCards,
-    // Only the degraded path can be incomplete now: with the key-list read AND
-    // a board enumeration, the display match plus the recovery pass reach every
-    // board card, so a saturated native cap is no longer a partial answer.
-    // Two different incomplete answers, reported as themselves. The degraded
-    // key-list read comes first: it is the one that can hide a card the caller
-    // just wrote.
-    fallbackReason:
-      surfaces === null
-        ? SEARCH_SURFACES_UNAVAILABLE
-        : native?.saturated
-          ? "native-index returned its cap"
-          : undefined,
+    fallbackReason: native?.saturated ? "native-index returned its cap" : undefined,
   };
 }
 

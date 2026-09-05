@@ -35,7 +35,7 @@ import { showCmd } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcilePayload, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
-import { pickupStatusCmd } from "./commands/pickup_status.ts";
+import { pickupReadyCmd, pickupStatusCmd } from "./commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "./commands/pickup_claim.ts";
 import {
   formatPickupClaimV2,
@@ -122,6 +122,7 @@ Commands:
   list                 render columns, --wide table, or --group-by-milestone
   overlap <slug>       report declared surface conflicts with doing cards in the same repo
   pickup status        classify active cards by pickup eligibility (--json)
+  pickup ready         cheap ready gate: classifies only the default board's todo partition (--board, --json)
   pickup explain <slug> full readiness path for one card (write-guard+classify+lane+overlap+pr-liveness)
   pickup work-policy <slug> PR-liveness work vs reconcile vs closeout for one card
   pickup claim         claim by version 1 lane and priority policy
@@ -491,6 +492,7 @@ Example:
 
 Usage:
   fkanban pickup status [--json]
+  fkanban pickup ready [--board <slug>] [--json]
   fkanban pickup explain <slug> [--json]
   fkanban pickup work-policy <slug> [--json]
   fkanban pickup lanes [--json] [--board <slug>]
@@ -502,6 +504,13 @@ blocked-on-dependency, human-gated, malformed-routing, unattached-outcome,
 parked/non-work, collision, or stale-metadata. Read-only hygiene report.
 malformed-routing is a card nothing can route (no Repo:/Base:);
 unattached-outcome is a well-formed card one --milestone from ready.
+
+ready — The gate's cheap path: same classification as status, but reads only
+the BoardCards todo partition of one board (default: default) instead of
+every active card on every board. classifyPickupCard can never mark a card
+pickup-ready outside that one partition, so report.ready is identical to
+status's, at a fraction of the cost. The other category counts in the
+report are scoped to that partition only — use status for a full audit.
 
 explain — Full readiness path for ONE card: write-guard
 (assertDefaultTodoPickupReady), classify category, lane, surface-overlap vs
@@ -532,6 +541,10 @@ fair-share, repository policy, capacity policy, Loom, State Machine, or LLM.
 status / explain options:
   --json                machine-readable report
 
+ready options:
+  --board <slug>        board (default: default)
+  --json                machine-readable report
+
 lanes options:
   --board <slug>        board (default: default)
   --json                machine-readable lane pressure + state
@@ -552,6 +565,7 @@ claim-v2 options:
 
 Example:
   fkanban pickup status
+  fkanban pickup ready --json
   fkanban pickup explain my-card-slug --json
   fkanban pickup work-policy my-card-slug --json
   fkanban pickup lanes
@@ -881,12 +895,19 @@ Flags:
 
 Usage:
   fkanban doctor [--json]
+  fkanban doctor --board default --stale-rows [--json]
 
 Verifies config, node reachability, and resolved schemas. Exits non-zero on
 any failed check.
 
+\`--stale-rows\` walks each column secondary on one board, drops BoardCards
+rows whose Card tip is another column, and deletes those known SKs. It does
+not scan.
+
 Flags:
-  --json               machine-readable { ok, checks } report`),
+  --json               machine-readable { ok, checks } report
+  --board <slug>       board for --stale-rows (default: default)
+  --stale-rows         list and heal stale BoardCards column rows`),
 
   which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
@@ -1165,8 +1186,9 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "json-arr
 // Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
 // names as COMMAND_HELP. Derived from each command's `--help` text and the
 // flags its dispatch branch actually reads. Commands absent here (e.g. `mark`, `show`,
-// `rm`, `doctor`, `mcp`, `version`) accept only the universal flags.
+// `rm`, `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
+  doctor: new Set(["board", "stale-rows"]),
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name", "accept-schema-repin"]),
   add: new Set([
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
@@ -1399,6 +1421,7 @@ async function main(argv: string[]): Promise<number> {
         "allow-unclaimed": { type: "boolean" },
         check: { type: "boolean" },
         "group-by-milestone": { type: "boolean" },
+        "stale-rows": { type: "boolean" },
       },
     });
   } catch (err) {
@@ -1681,15 +1704,20 @@ async function dispatch(
     case "doctor": {
       const extra = rejectExtraPositionals(positionals, 1, "doctor");
       if (extra !== undefined) return extra;
+      const doctorOpts = {
+        verbose,
+        board: values.board as string | undefined,
+        staleRows: values["stale-rows"] === true,
+      };
       if (values.json) {
         // Machine-readable: collect the structured report (no human ✓/✗ lines
         // leak to stdout) and emit the SAME { ok, version, checks } shape the
         // `fkanban_doctor` MCP tool returns as structuredContent.
-        const { ok, version, checks } = await runDoctorStructured({ verbose });
+        const { ok, version, checks } = await runDoctorStructured(doctorOpts);
         console.log(JSON.stringify({ ok, version, checks }));
         return ok ? 0 : 1;
       }
-      const ok = await doctor({ verbose });
+      const ok = await doctor(doctorOpts);
       return ok ? 0 : 1;
     }
 
@@ -2105,6 +2133,7 @@ async function dispatch(
         fullBody: fullBodyList,
         groupByMilestone: values["group-by-milestone"] as boolean | undefined,
         jsonArray: Boolean(values["json-array"]),
+        healStaleRows: true,
       });
       console.log(out);
       return 0;
@@ -2133,14 +2162,15 @@ async function dispatch(
     case "pickup-status":
     case "pickup-claim": {
       // Subcommand resolution:
-      //   pickup status | pickup explain <slug> | pickup work-policy <slug>
+      //   pickup status | pickup ready | pickup explain <slug> | pickup work-policy <slug>
       //   pickup claim | pickup claim-v2 | pickup lanes
       //   bare `pickup` (= status, back-compat)
       //   pickup-status / pickup-claim aliases (single positional)
-      let sub: "status" | "claim" | "claim-v2" | "lanes" | "explain" | "work-policy";
+      let sub: "status" | "ready" | "claim" | "claim-v2" | "lanes" | "explain" | "work-policy";
       if (cmd === "pickup-status") sub = "status";
       else if (cmd === "pickup-claim") sub = "claim";
       else if (positionals[1] === undefined || positionals[1] === "status") sub = "status";
+      else if (positionals[1] === "ready") sub = "ready";
       else if (positionals[1] === "claim") sub = "claim";
       else if (positionals[1] === "claim-v2") sub = "claim-v2";
       else if (positionals[1] === "lanes") sub = "lanes";
@@ -2148,7 +2178,7 @@ async function dispatch(
       else if (positionals[1] === "work-policy") sub = "work-policy";
       else {
         console.error(
-          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup explain <slug> | pickup work-policy <slug> | pickup lanes | pickup claim | pickup claim-v2`,
+          `kanban: Unknown pickup subcommand "${positionals[1]}". Try: pickup status | pickup ready | pickup explain <slug> | pickup work-policy <slug> | pickup lanes | pickup claim | pickup claim-v2`,
         );
         return 2;
       }
@@ -2165,6 +2195,15 @@ async function dispatch(
         console.log(await pickupStatusCmd({
           cfg: ctx.cfg,
           node: ctx.node,
+          json: values.json as boolean | undefined,
+        }));
+        return 0;
+      }
+      if (sub === "ready") {
+        console.log(await pickupReadyCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          board: values.board as string | undefined,
           json: values.json as boolean | undefined,
         }));
         return 0;

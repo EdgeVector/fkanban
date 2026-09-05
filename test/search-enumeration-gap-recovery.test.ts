@@ -174,28 +174,28 @@ describe("search reaches every card show can read", () => {
     expect(slugs).not.toContain(diverged.slug);
   });
 
-  // THE CARD'S END STATE, VERBATIM: "A card that `kanban show` reads is also
-  // found by `kanban search` for a unique body token."
-  test("a unique BODY token finds the diverged card", async () => {
+  // Default search is BoardCards only. A Card record with no display row is
+  // `--complete` work, not the hot path (card fkanban-search-must-not-hashkey-every-card).
+  test("default search does not HashKey-recover a card missing from BoardCards", async () => {
     const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN });
+    expect(res.cards.map((c) => c.slug)).not.toContain(diverged.slug);
+  });
+
+  test("--complete still finds the diverged card by body token", async () => {
+    const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN, complete: true });
     expect(res.cards.map((c) => c.slug)).toEqual([diverged.slug]);
   });
 
-  test("the exact TITLE finds the diverged card", async () => {
-    const res = await searchResult({ cfg, node, query: diverged.title });
-    expect(res.cards.map((c) => c.slug)).toContain(diverged.slug);
-  });
-
-  test("the exact SLUG finds the diverged card", async () => {
-    const res = await searchResult({ cfg, node, query: diverged.slug });
+  test("--complete still finds the diverged card by title", async () => {
+    const res = await searchResult({ cfg, node, query: diverged.title, complete: true });
     expect(res.cards.map((c) => c.slug)).toContain(diverged.slug);
   });
 
   // The recovered card is a whole card, not a slug+body stub: the point read is
   // what supplies it, so its placement and title come back too. A caller that
   // renders the result must not get a hollow row.
-  test("the recovered card carries its real placement, title and body", async () => {
-    const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN });
+  test("--complete recovered card carries its real placement, title and body", async () => {
+    const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN, complete: true });
     const match = res.cards.find((c) => c.slug === diverged.slug);
     expect(match).toBeDefined();
     expect(match!.title).toBe(diverged.title);
@@ -238,10 +238,10 @@ describe("search reaches every card show can read", () => {
   // NON-VACUITY for the bound above: the same probe DOES see the read when the
   // query matches. Without this, a typo in the filter would pass the cost test
   // by observing nothing at all.
-  test("a matching query does issue exactly that recovery point read", async () => {
+  test("default matching query issues zero Card HashKeys for the gap slug", async () => {
     const before = node.reads.length;
     await searchResult({ cfg, node, query: DOGFOOD_TOKEN });
-    expect(wideCardReads(before, diverged.slug).length).toBeGreaterThan(0);
+    expect(wideCardReads(before, diverged.slug)).toHaveLength(0);
   });
 
   // An empty query means "every card on the board", and board membership is
@@ -288,17 +288,21 @@ describe("recovery returns board cards only", () => {
     seedCardRecordOnly(node, diverged);
   });
 
-  test("an off-board Card record is not recovered", async () => {
+  test("an off-board Card record is not a default hit", async () => {
     const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN });
     const slugs = res.cards.map((c) => c.slug);
     expect(slugs).not.toContain(offBoard.slug);
-    expect(slugs).toContain(diverged.slug);
+    expect(slugs).not.toContain(diverged.slug);
   });
 
-  // --board/--column scoping is applied to a recovered card exactly as it is to
-  // an indexed one: the point read supplies the placement the filter needs.
-  test("--board scoping applies to recovered cards", async () => {
-    const res = await searchResult({ cfg, node, query: DOGFOOD_TOKEN, board: "roadmap" });
+  test("--complete --board scoping finds the other-board card", async () => {
+    const res = await searchResult({
+      cfg,
+      node,
+      query: DOGFOOD_TOKEN,
+      board: "roadmap",
+      complete: true,
+    });
     expect(res.cards.map((c) => c.slug)).toEqual([onOtherBoard.slug]);
   });
 
