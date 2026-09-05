@@ -1,10 +1,13 @@
 #!/usr/bin/env bun
 /**
- * Test-timeout architecture gate: a test that starts a process must carry an
- * explicit timeout. Bun's 5000ms per-test default has no margin for process
- * start cost on a loaded host — two tests crossed it under real CI load
+ * Test-timeout architecture gate: a test OR a lifecycle hook that starts a
+ * process must carry an explicit timeout. Bun's 5000ms default has no margin
+ * for process start cost on a loaded host — two tests crossed it under real CI
+ * load
  * (fkanban-deflake-5s-timeouts-boardcards-lag-and-kstress-primary-refusal-20260903,
- * fkanban CI 2026-09-03T17:30Z, 5 live routines + a cargo build).
+ * fkanban CI 2026-09-03T17:30Z, 5 live routines + a cargo build), and a
+ * `beforeEach` crossed it on the main tip on 2026-09-05 while every `test()` in
+ * the file already carried one.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
@@ -41,7 +44,6 @@ const REGEX_PRECEDING = /[([{,;:!&|?=+\-*%^~<>]$|(?:^|\W)(?:return|typeof|instan
 function maskNonCode(content: string): string {
   const out = content.split("");
   const n = content.length;
-  let prevSig = "";
 
   function blank(from: number, to: number): void {
     for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = ".";
@@ -73,7 +75,6 @@ function maskNonCode(content: string): string {
         while (i < n && content[i] !== quote) { if (content[i] === "\\") i++; i++; }
         i = Math.min(i + 1, n);
         blank(s + 1, i - 1);
-        prevSig = quote;
         continue;
       }
       if (c === "`") {
@@ -88,7 +89,6 @@ function maskNonCode(content: string): string {
           blank(i, i + 1);
           i++;
         }
-        prevSig = "`";
         continue;
       }
       if (c === "/" && REGEX_PRECEDING.test(content.slice(Math.max(0, i - 12), i).trimEnd())) {
@@ -104,9 +104,8 @@ function maskNonCode(content: string): string {
         }
         if (i < n && content[i] === "/") {
           i++;
-          while (i < n && /[a-z]/.test(content[i])) i++; // flags
+          while (i < n && /[a-z]/.test(content[i] ?? "")) i++; // flags
           blank(s, i);
-          prevSig = "/";
           continue;
         }
         i = s; // fall through as ordinary char (division / stray slash)
@@ -116,7 +115,6 @@ function maskNonCode(content: string): string {
         if (depth === 0) return i; // caller consumes the closing brace
         depth--;
       }
-      if (!/\s/.test(c)) prevSig = c;
       i++;
     }
     return i;
@@ -203,63 +201,124 @@ function findSpawningHelperNames(content: string): Set<string> {
 
 const TEST_KEYWORD = /\b(?:test|it)((?:\.(?:if|skip|only|todo|each)\s*\([^)]*\))*)\s*\(/g;
 
+// bun's lifecycle hooks take `(fn, timeout?)` and inherit the SAME 5000ms
+// default as `test()`, so a hook that spawns a process is the identical defect
+// this gate exists to catch — and it was the one shape the gate could not see.
+//
+// Measured: `beforeEach` in `test/fkanban-worktree.test.ts` spawns three git
+// processes through the in-file `git()` helper and carried no timeout. On the
+// fkanban main tip (443d02d0, 2026-09-05) it timed out at 7031.87ms and failed
+// 1 of 2058 tests, which left the tip's `ci-required` row `failure`. A terminal
+// row cannot be replaced by a rerun, so that blocked host-track from installing
+// the merged p0 board-cards-heal fix underneath it. The gate passed on that
+// commit: every `test()` carried SPAWN_TEST_TIMEOUT_MS and the hook doing the
+// spawning was never scanned.
+const HOOK_KEYWORD = /\b(?:beforeEach|afterEach|beforeAll|afterAll)\s*\(/g;
+
+/** 1-based line number of `offset`, for naming a call site that has no name. */
+function lineAt(content: string, offset: number): number {
+  let line = 1;
+  for (let i = 0; i < offset && i < content.length; i++)
+    if (content[i] === "\n") line++;
+  return line;
+}
+
+/**
+ * Scan one call shape.
+ *
+ * `timeoutArgIndex` is where an explicit timeout sits in the argument list:
+ * `test(name, fn, timeout?)` puts it third, `beforeEach(fn, timeout?)` second.
+ * That single number is the whole difference between the two shapes — the
+ * spawn detection, the masking and the bracket matching are shared, so the two
+ * cannot drift apart in what they consider "starts a process".
+ */
+function scanCallShape(
+  file: SourceFile,
+  pattern: RegExp,
+  timeoutArgIndex: number,
+  spawningHelpers: Set<string>,
+  masked: string,
+): TimeoutViolation[] {
+  const original = file.content;
+  const violations: TimeoutViolation[] = [];
+  pattern.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(masked))) {
+    const openParen = m.index + m[0].length - 1;
+    const closeParen = matchBracket(masked, openParen);
+    if (closeParen === -1) continue;
+
+    // Recover argument boundaries from the masked text (safe to bracket-match),
+    // but read the actual test-name text back out of the original file.
+    const argText = masked.slice(openParen + 1, closeParen);
+    const args = splitArgs(argText);
+    if (args.length === 0) continue;
+    const argOffsets: Array<[number, number]> = [];
+    {
+      let cursor = openParen + 1;
+      for (const a of args) {
+        argOffsets.push([cursor, cursor + a.length]);
+        cursor += a.length + 1; // skip the comma
+      }
+    }
+
+    const firstArg = argOffsets[0];
+    if (!firstArg) continue;
+
+    let label: string;
+    let fullBody: string;
+    if (timeoutArgIndex >= 3) {
+      const nameLiteralOriginal = original
+        .slice(firstArg[0], firstArg[1])
+        .trim();
+      const nameMatch = /^["'`]((?:\\.|[^"'`])*)["'`]$/.exec(nameLiteralOriginal);
+      label = nameMatch?.[1] ?? nameLiteralOriginal.slice(0, 60);
+      fullBody = args.length > 1 ? args.slice(1).join(",") : "";
+    } else {
+      // A hook has no name; the keyword plus its line is what an operator needs
+      // to find it, and it is what the failure report gives them ("a
+      // beforeEach/afterEach hook timed out for this test").
+      label = `${m[0].slice(0, -1).trim()} (line ${lineAt(original, m.index)})`;
+      fullBody = args.join(",");
+    }
+
+    const spawnsDirectly = SPAWN_CALL.test(fullBody);
+    const spawnsViaHelper = [...spawningHelpers].some((h) =>
+      new RegExp(`\\b${h}\\s*\\(`).test(fullBody),
+    );
+    if (!spawnsDirectly && !spawnsViaHelper) continue;
+
+    // Signature is test(name, fn, timeout?) / hook(fn, timeout?). An explicit
+    // timeout is present when the argument list reaches `timeoutArgIndex` and
+    // the last argument is a bare number/identifier expression, not a function.
+    // `test(name, options, fn)` therefore does NOT count as a timeout.
+    const lastArg = (args[args.length - 1] ?? "").trim();
+    const lastArgIsFunction = /^(?:async\s*)?\(?.*=>|^(?:async\s*)?function\b/s.test(lastArg);
+    const hasExplicitTimeout =
+      args.length >= timeoutArgIndex && !lastArgIsFunction;
+
+    if (!hasExplicitTimeout) {
+      violations.push({
+        path: file.path,
+        test: label,
+        detail:
+          "starts a process without an explicit timeout; the bun 5000ms default has no margin under host load",
+        closeParen,
+      });
+    }
+  }
+  return violations;
+}
+
 function findTestTimeoutViolations(files: SourceFile[]): TimeoutViolation[] {
   const violations: TimeoutViolation[] = [];
   for (const file of files) {
-    const original = file.content;
-    const content = maskNonCode(original); // structural parsing only — literal text is blanked
-    const spawningHelpers = findSpawningHelperNames(content);
-    TEST_KEYWORD.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = TEST_KEYWORD.exec(content))) {
-      const openParen = m.index + m[0].length - 1;
-      const closeParen = matchBracket(content, openParen);
-      if (closeParen === -1) continue;
-
-      // Recover argument boundaries from the masked text (safe to bracket-match),
-      // but read the actual test-name text back out of the original file.
-      const argText = content.slice(openParen + 1, closeParen);
-      const args = splitArgs(argText);
-      if (args.length === 0) continue;
-      const argOffsets: Array<[number, number]> = [];
-      {
-        let cursor = openParen + 1;
-        for (const a of args) {
-          argOffsets.push([cursor, cursor + a.length]);
-          cursor += a.length + 1; // skip the comma
-        }
-      }
-
-      const nameLiteralOriginal = original.slice(argOffsets[0][0], argOffsets[0][1]).trim();
-      const nameMatch = /^["'`]((?:\\.|[^"'`])*)["'`]$/.exec(nameLiteralOriginal);
-      const testName = nameMatch ? nameMatch[1] : nameLiteralOriginal.slice(0, 60);
-
-      const fullBody = args.length > 1 ? args.slice(1).join(",") : "";
-
-      const spawnsDirectly = SPAWN_CALL.test(fullBody);
-      const spawnsViaHelper = [...spawningHelpers].some((h) =>
-        new RegExp(`\\b${h}\\s*\\(`).test(fullBody),
-      );
-      if (!spawnsDirectly && !spawnsViaHelper) continue;
-
-      // Signature is test(name, fn, timeout?) or test(name, options, fn).
-      // An explicit timeout is present when there is a 3rd arg that is a bare
-      // number/identifier expression (not itself a function).
-      const lastArg = args.length >= 1 ? args[args.length - 1].trim() : "";
-      const hasThirdArg = args.length >= 3;
-      const lastArgIsFunction = /^(?:async\s*)?\(?.*=>|^(?:async\s*)?function\b/s.test(lastArg);
-      const hasExplicitTimeout = hasThirdArg && !lastArgIsFunction;
-
-      if (!hasExplicitTimeout) {
-        violations.push({
-          path: file.path,
-          test: testName,
-          detail:
-            "starts a process without an explicit timeout; the bun 5000ms default has no margin under host load",
-          closeParen,
-        });
-      }
-    }
+    const masked = maskNonCode(file.content); // structural parsing only — literal text is blanked
+    const spawningHelpers = findSpawningHelperNames(masked);
+    violations.push(
+      ...scanCallShape(file, TEST_KEYWORD, 3, spawningHelpers, masked),
+      ...scanCallShape(file, HOOK_KEYWORD, 2, spawningHelpers, masked),
+    );
   }
   return violations;
 }
@@ -328,7 +387,8 @@ if (import.meta.main) {
         console.error(`- ${v.path}: "${v.test}" — ${v.detail}`);
       }
       console.error(`\n${violations.length} violation(s). Add an explicit timeout ms as the`);
-      console.error("last test() argument (see test/helpers/spawn-test-timeout.ts).");
+      console.error("last argument — test(name, fn, TIMEOUT) or hook(fn, TIMEOUT)");
+      console.error("(see test/helpers/spawn-test-timeout.ts).");
       process.exit(1);
     }
     console.log("test-timeout architecture boundary PASSED");
