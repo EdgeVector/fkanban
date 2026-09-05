@@ -50,7 +50,7 @@ export const DIAGNOSTICS_PATH_ENV = "FKANBAN_DIAGNOSTICS_PATH";
 /** Set to "0" to disable recording entirely. */
 export const DIAGNOSTICS_ENABLED_ENV = "FKANBAN_DIAGNOSTICS";
 
-export const REJECTIONS_FILE_NAME = "node-rejections.jsonl";
+const REJECTIONS_FILE_NAME = "node-rejections.jsonl";
 
 /**
  * Cap the file rather than rotate it. This is a diagnostic TAIL — the question
