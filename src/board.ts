@@ -71,6 +71,10 @@ function paint(on: boolean, code: string, s: string): string {
 // TTY (and disabled when piped/redirected). Centralized so every renderer's
 // `opts.color ?? …` fallback resolves identically.
 function defaultColor(): boolean {
+  // NO_COLOR (https://no-color.org) wins over the terminal check: a CI host
+  // executor hands steps a pseudo-terminal, so isTTY alone painted ANSI codes
+  // into output that tests and log scrapers compare as plain text.
+  if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "") return false;
   return Boolean(process.stdout.isTTY);
 }
 
