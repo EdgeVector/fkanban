@@ -63,7 +63,13 @@ jobs:
             echo "$d" >> "$GITHUB_PATH"
           done
 
+      # The runner forces color into every step. The LastGit watcher never did,
+      # and two list-output tests compare plain text ("TODO  (0)"), so forced
+      # color turned them red on the first run here. Pin the gate to plain text.
       - name: Merge gate (.lastgit/ci.sh)
+        env:
+          NO_COLOR: "1"
+          FORCE_COLOR: "0"
         run: bash .lastgit/ci.sh
 
   publish:
