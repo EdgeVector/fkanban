@@ -14,8 +14,8 @@
 // 1299ms vs 7-field DEP_SEED 416ms). List paths must project only what the
 // caller needs — never default the full 24-field write shape.
 
-import { schemaHashFor, type Config } from "./config.ts";
-import { FkanbanError, type NodeClient, type QueryFilter } from "./client.ts";
+import { resolveSocketPath, schemaHashFor, type Config } from "./config.ts";
+import { FkanbanError, newNodeClient, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
 import {
   mapWithConcurrency,
@@ -1266,19 +1266,77 @@ async function cardSearchSurfaceHasSlug(
  *   budget expired without one. Also `true` when there is nothing to wait for
  *   (no BoardCards hash, or a card with no board/slug).
  */
+/**
+ * Timeout for {@link awaitBoardCardSearchVisible}'s own probe reads —
+ * deliberately independent of `FKANBAN_HTTP_TIMEOUT_MS`.
+ *
+ * The wait's whole contract is bounded refusal: "a node that refuses every
+ * read must still let `add` return, warning, instead of hanging on it" (see
+ * `SEARCH_INDEX_REFUSED_ROUNDS`). That bound assumes a refused/slow read
+ * fails within roughly `SEARCH_INDEX_REFUSED_BACKOFF_MS`. It does not: every
+ * probe read here used to ride the SAME client the write used, whose HTTP
+ * deadline is `FKANBAN_HTTP_TIMEOUT_MS` (client.ts default 30s) — and every
+ * scheduled routine in this fleet sets that env var to 90000. A `queryAll`
+ * read that times out is even retried once inside `sdkTransport.send`
+ * (`withTimeoutRetry`), so ONE refused round could cost up to 2x that
+ * deadline before its `.catch()` fires — 180s in this fleet's own
+ * environment — times up to `SEARCH_INDEX_REFUSED_ROUNDS` (6) rounds. `add`
+ * was documented to never hang on a refusing node; under this fleet's own
+ * env it could hang for many minutes instead, which is worse than the
+ * divergence it exists to report.
+ *
+ * A probe read only ever asks "can search see this slug yet?" — a
+ * `false`/timeout answer is exactly as actionable as a `true` one arriving
+ * late, so there is no correctness reason for it to share the write's
+ * generous, environment-tunable deadline.
+ */
+export const SEARCH_INDEX_PROBE_TIMEOUT_MS = 3_000;
+
+const searchVisibilityProbeClients = new WeakMap<Config, NodeClient>();
+
+/**
+ * A `NodeClient` dedicated to {@link awaitBoardCardSearchVisible}'s probe
+ * reads, with the fixed short timeout above. Cached per `Config` so a bulk
+ * caller (`migrate`, `groom`) pays the attestation handshake once, not once
+ * per card.
+ */
+export function searchVisibilityProbeClient(cfg: Config): NodeClient {
+  const cached = searchVisibilityProbeClients.get(cfg);
+  if (cached) return cached;
+  const client = newNodeClient({
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+    socketPath: resolveSocketPath(cfg),
+    timeoutMs: SEARCH_INDEX_PROBE_TIMEOUT_MS,
+  });
+  searchVisibilityProbeClients.set(cfg, client);
+  return client;
+}
+
 export async function awaitBoardCardSearchVisible(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
-  /**
-   * `sleep` is a test seam, not a tuning knob. The budget below is measured in
-   * seconds, so a test that exercises the exhausted path through the real timer
-   * costs those seconds — and a guarantee too slow to assert is one nothing
-   * asserts, which is how the silent give-up survived two fixes.
-   */
-  opts?: { sleep?: (ms: number) => Promise<void> },
+  opts?: {
+    /**
+     * `sleep` is a test seam, not a tuning knob. The budget below is measured
+     * in seconds, so a test that exercises the exhausted path through the
+     * real timer costs those seconds — and a guarantee too slow to assert is
+     * one nothing asserts, which is how the silent give-up survived two
+     * fixes.
+     */
+    sleep?: (ms: number) => Promise<void>;
+    /**
+     * The client the probe reads use. Defaults to `node` (the write client)
+     * so every existing caller and test keeps today's behavior; production
+     * create/update paths pass {@link searchVisibilityProbeClient} instead so
+     * a refused read fails on ITS OWN short deadline rather than the write's.
+     */
+    probeNode?: NodeClient;
+  },
 ): Promise<boolean> {
   const sleep = opts?.sleep ?? delay;
+  const probeNode = opts?.probeNode ?? node;
   if (!boardCardsHash(cfg)) return true;
   const board = card.board?.trim();
   const slug = card.slug?.trim();
@@ -1286,7 +1344,7 @@ export async function awaitBoardCardSearchVisible(
   let attempt = 0;
   let refusedRounds = 0;
   while (attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS) {
-    const partition = listBoardCardsPartition(node, cfg, board, {
+    const partition = listBoardCardsPartition(probeNode, cfg, board, {
       fields: BOARD_CARDS_SEARCH_FIELDS,
     })
       .then((rows): boolean | null => rows?.some((row) => row.slug === slug) ?? false)
@@ -1297,7 +1355,7 @@ export async function awaitBoardCardSearchVisible(
     // The second source joins only once the cheap one has missed a few times.
     const surface =
       attempt >= SEARCH_INDEX_KEY_LIST_FROM_ATTEMPT
-        ? cardSearchSurfaceHasSlug(node, cfg, slug).catch(() => null)
+        ? cardSearchSurfaceHasSlug(probeNode, cfg, slug).catch(() => null)
         : Promise.resolve(null);
     const [inPartition, inSurface] = await Promise.all([partition, surface]);
     if (inPartition === true || inSurface === true) return true;
