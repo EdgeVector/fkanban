@@ -12,6 +12,12 @@
 # instead of a LastGit ci-required row. The repo is disabled on LastGit, so no
 # step here pushes code to lastdb:///fkanban; host-track then installs the
 # channel head on its next refresh.
+# Runner requirement (measured 2026-09-05): the macos-arm64 host runner's
+# LaunchAgent must run at ProcessType Standard. At ProcessType Background,
+# macOS clamps every job step to background QoS, and with lastdbd busy a
+# 0.3-second fetch from localhost:3300 took 9m38s and this gate died at its
+# 10-minute limit. See brain
+# papercut-forge-host-runner-processtype-background-throttles-every-job-step-under-node-load-20260905.
 name: Forge CI
 
 on:
