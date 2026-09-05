@@ -1147,21 +1147,36 @@ export async function upsertBoardCard(
  * `scripts/probe-boardcard-purge-reach.ts`), which is the right price for a
  * command an operator reaches for and the wrong one for every `set`/`mark`.
  *
- * **Self-gated.** It deletes nothing unless the SAME spine read that finds the
- * stale rows also sees `keepSk`. A BoardCards write is durable but unreadable
- * for ~0.5-2.4s after its own ack, so a purge that trusted the caller's
- * intended address could delete every row the card has while its destination
- * was still invisible — the "card on no board" state the write path is built
- * to avoid. Requiring the destination in the same page makes that impossible
- * rather than unlikely, and costs no extra round trip.
+ * **Self-gated, and it WAITS for the gate.** It deletes nothing unless the
+ * same spine read that finds the stale rows also sees `keepSk`. A BoardCards
+ * write is durable but unreadable for ~0.5-2.4s after its own ack, so a purge
+ * that trusted the caller's intended address could delete every row the card
+ * has while its destination was still invisible — the "card on no board" state
+ * the write path is built to avoid.
  *
- * @returns how many delete attempts ran (0 when the destination is not yet
- *   visible, or when the card holds no other row).
+ * The gate alone is not enough, and shipping it alone made this function a
+ * no-op in production. Measured on the live `default` partition
+ * 2026-09-05T03:00Z with the parked canary of the CR that introduced it: a
+ * `move` on a card holding three rows retired the one it superseded (the
+ * janitor drain working) and purged NEITHER of the two stale ones, because the
+ * destination it had just written was not in the index yet. Run against the
+ * same slug seconds later, standalone, the identical call read
+ * `keepSk visible in spine: true` and removed 2 of 3. Every `move` writes its
+ * destination immediately before calling this, so "not yet visible" is the
+ * NORMAL case, not the rare one — a gate checked once is a gate that almost
+ * always refuses.
+ *
+ * So it polls for the destination on the same budget the write path already
+ * uses for search visibility, and gives up rather than deleting blind.
+ *
+ * @returns how many delete attempts ran (0 when the destination never became
+ *   visible within the budget, or when the card holds no other row).
  */
 export async function purgeStaleBoardCardRows(
   node: NodeClient,
   cfg: Config,
   card: Card | CardSummary,
+  sleep: (ms: number) => Promise<void> = delay,
 ): Promise<number> {
   const slug = card.slug;
   if (!slug) return 0;
@@ -1172,12 +1187,21 @@ export async function purgeStaleBoardCardRows(
   let removed = 0;
   for (const schemaHash of boardCardsWriteHashes(cfg)) {
     const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
-    const part = await listBoardCardsPartitionSpine(node, oneHashCfg, board);
-    if (!part) continue;
-    if (!part.some((row) => row.sk === keepSk)) continue;
-    const doomed = part
-      .filter((row) => row.slug === slug && row.sk !== keepSk)
-      .map((row) => row.sk);
+    let doomed: string[] | null = null;
+    for (let attempt = 0; attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS; attempt++) {
+      if (attempt > 0) await sleep(SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt] ?? 0);
+      const part = await listBoardCardsPartitionSpine(node, oneHashCfg, board);
+      if (!part) break;
+      // The gate: only a page that CONTAINS the row we are keeping may decide
+      // which rows to drop. A page without it is unreadable evidence, not
+      // evidence of absence.
+      if (!part.some((row) => row.sk === keepSk)) continue;
+      doomed = part
+        .filter((row) => row.slug === slug && row.sk !== keepSk)
+        .map((row) => row.sk);
+      break;
+    }
+    if (doomed === null) continue;
     removed += await deleteBoardCardSksBatched(node, schemaHash, board, doomed);
   }
   return removed;

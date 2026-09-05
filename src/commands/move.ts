@@ -366,9 +366,16 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   // failure here leaves exactly the duplicate that existed a moment ago.
   try {
     await purgeStaleBoardCardRows(opts.node, opts.cfg, updated);
-  } catch {
-    // The move succeeded; a failed reap is the pre-existing state, not a
-    // reason to fail the command.
+  } catch (err) {
+    // The move succeeded; a failed reap leaves exactly the duplicate that
+    // existed a moment ago, so it must not fail the command. It must not be
+    // SILENT either: an operator running this as the phantom-row repair needs
+    // to know the repair half did not run.
+    console.error(
+      `kanban: move wrote ${updated.slug} but could not retire its stale membership rows: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `Re-run the move, or use \`kanban groom board-cards-heal\`.`,
+    );
   }
   // AFTER the write, never before. A completion checkpoint is a durable, one-way
   // append into Brain that nothing in this codebase retracts, so ordering it

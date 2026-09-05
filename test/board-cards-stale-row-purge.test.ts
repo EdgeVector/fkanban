@@ -70,6 +70,9 @@ function seedRow(node: FakeNode, c: Card): void {
   });
 }
 
+/** The retry seam: these tests exercise the budget, they do not wait it out. */
+const noSleep = (): Promise<void> => Promise.resolve();
+
 describe("purgeStaleBoardCardRows", () => {
   test("retires a phantom row in another column and keeps the card's own", async () => {
     const node = fakeNode();
@@ -79,7 +82,7 @@ describe("purgeStaleBoardCardRows", () => {
     seedRow(node, phantom);
     expect(node.rowsOf(BC)).toHaveLength(2);
 
-    const removed = await purgeStaleBoardCardRows(node, cfg, truth);
+    const removed = await purgeStaleBoardCardRows(node, cfg, truth, noSleep);
 
     expect(removed).toBe(1);
     const rows = node.rowsOf(BC);
@@ -96,7 +99,7 @@ describe("purgeStaleBoardCardRows", () => {
     seedRow(node, phantom);
     seedRow(node, neighbour);
 
-    await purgeStaleBoardCardRows(node, cfg, truth);
+    await purgeStaleBoardCardRows(node, cfg, truth, noSleep);
 
     const survivors = node.rowsOf(BC).map((r) => r.rangeKey).sort();
     expect(survivors).toEqual([
@@ -105,7 +108,7 @@ describe("purgeStaleBoardCardRows", () => {
     ].sort());
   });
 
-  test("deletes nothing when the row it would keep is not visible yet", async () => {
+  test("deletes nothing when the row it would keep never becomes visible", async () => {
     // A BoardCards write is durable but unreadable for up to ~2.4s after its
     // own ack. Without this gate the purge would delete every row the card has
     // while its destination was still invisible, which is the "card on no
@@ -114,10 +117,47 @@ describe("purgeStaleBoardCardRows", () => {
     const phantom = card({ column: "doing", position: "3" });
     seedRow(node, phantom);
 
-    const removed = await purgeStaleBoardCardRows(node, cfg, card({ column: "done", position: "9" }));
+    const removed = await purgeStaleBoardCardRows(
+      node,
+      cfg,
+      card({ column: "done", position: "9" }),
+      noSleep,
+    );
 
     expect(removed).toBe(0);
     expect(node.rowsOf(BC)).toHaveLength(1);
+  });
+
+  test("waits for the destination row instead of refusing on the first read", async () => {
+    // The gate alone shipped as a no-op. Every `move` writes its destination
+    // immediately before calling this, and the BoardCards index lags its own
+    // ack, so "not visible yet" is the NORMAL first read — measured on the
+    // live primary 2026-09-05T03:00Z, where a canary `move` purged neither of
+    // two stale rows and the identical call seconds later removed both.
+    const node = fakeNode();
+    const truth = card({ column: "done", position: "9" });
+    const phantom = card({ column: "doing", position: "3" });
+    seedRow(node, phantom);
+
+    // The destination lands only after the third partition read, the way a
+    // lagging index reveals it.
+    let reads = 0;
+    const realQueryAll = node.queryAll.bind(node);
+    node.queryAll = (async (args: Parameters<FakeNode["queryAll"]>[0]) => {
+      if (args.schemaHash === BC) {
+        reads++;
+        if (reads === 3) seedRow(node, truth);
+      }
+      return realQueryAll(args);
+    }) as FakeNode["queryAll"];
+
+    const removed = await purgeStaleBoardCardRows(node, cfg, truth, noSleep);
+
+    expect(reads).toBeGreaterThan(1);
+    expect(removed).toBe(1);
+    const rows = node.rowsOf(BC);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.rangeKey).toBe(boardCardSk("done", "9", "drifted"));
   });
 
   test("is a no-op when the card holds exactly one row", async () => {
@@ -125,7 +165,7 @@ describe("purgeStaleBoardCardRows", () => {
     const truth = card({ column: "done", position: "9" });
     seedRow(node, truth);
 
-    expect(await purgeStaleBoardCardRows(node, cfg, truth)).toBe(0);
+    expect(await purgeStaleBoardCardRows(node, cfg, truth, noSleep)).toBe(0);
     expect(node.rowsOf(BC)).toHaveLength(1);
   });
 });
