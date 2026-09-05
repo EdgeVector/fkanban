@@ -8,15 +8,17 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { FkanbanError } from "../src/client.ts";
-import { fakeNode } from "./fake-node.ts";
+import { fakeNode, type FakeNode } from "./fake-node.ts";
 import type { NodeClient } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import {
   DEFAULT_PRIORITY,
   boardToFields,
+  cardToFields,
   emptyStructuredFields,
   findCard,
   isPriorityTag,
+  milestoneToFields,
   normalizePriority,
   priorityOf,
   priorityRank,
@@ -25,7 +27,9 @@ import {
   writeCardPatch,
   withPriorityTag,
   type Card,
+  type Milestone,
 } from "../src/record.ts";
+import { boardCardFieldsFromCard, boardCardSk } from "../src/board-cards.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
 import { rankCmd } from "../src/commands/rank.ts";
@@ -144,7 +148,7 @@ const cfg: Config = {
   nodeUrl: "http://unused.invalid",
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
-  schemaHashes: { card: "cardhash", board: "boardhash" },
+  schemaHashes: { card: "cardhash", board: "boardhash", milestone: "milestonehash" },
 };
 
 
@@ -295,6 +299,121 @@ describe("rank command", () => {
 
   test("a non-existent board is rejected", async () => {
     await expect(rankCmd({ cfg, node, board: "ghost" })).rejects.toBeInstanceOf(FkanbanError);
+  });
+});
+
+// ── rank read cost stays scoped to the ranked column ─────────────────────────
+//
+// kanban-rank-hard-3004-queries-168s-blocks-pickup-claim-20260904: before this
+// fix, ranking a 20-card `todo` column cost ~3,004 node queries because body
+// hydration ran as a whole-product Card scan (unscoped by column) and the
+// milestone frontier lookup hydrated every milestone on the board, not just
+// the ones the ranked cards actually reference. Pin the read count to a small
+// constant that does NOT grow with unrelated board/milestone size. Seeded
+// directly at the BoardCards-partition level (not via `addCmd`) so the read
+// exercises the same indexed path the live primary serves — the whole point
+// being tested is that `rank` reads one HashRange prefix, not the partition.
+describe("rank query-cost scoping", () => {
+  const scopedCfg: Config = {
+    configVersion: 1,
+    nodeUrl: "http://unused.invalid",
+    schemaServiceUrl: "http://unused.invalid",
+    userHash: "test-user",
+    schemaHashes: {
+      card: "cardhash",
+      board: "boardhash",
+      milestone: "milestonehash",
+      board_cards: "boardcardshash",
+    },
+  };
+
+  function fixtureCard(partial: Partial<Card>): Card {
+    return {
+      slug: "c",
+      title: "C",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nx\n## END STATE\nx\n",
+      board: "default",
+      column: "todo",
+      position: "10",
+      assignee: "",
+      tags: [],
+      deps: [],
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      ...emptyStructuredFields(),
+      ...partial,
+    };
+  }
+
+  function seedCard(node: FakeNode, c: Card): void {
+    node.seed({ schemaHash: scopedCfg.schemaHashes.card!, keyHash: c.slug, fields: cardToFields(c) });
+    node.seed({
+      schemaHash: scopedCfg.schemaHashes.board_cards!,
+      keyHash: c.board,
+      rangeKey: boardCardSk(c.column, c.position, c.slug),
+      fields: boardCardFieldsFromCard(c),
+    });
+  }
+
+  function fixtureMilestone(partial: Partial<Milestone> & { slug: string }): Milestone {
+    return {
+      title: partial.slug,
+      body: "",
+      board: "default",
+      state: "planned",
+      position: "",
+      north_star: "ns-a",
+      driver: "",
+      deps: [],
+      proof_card: "",
+      proof_status: "pending",
+      block_reason: "",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      completed_at: "",
+      ...partial,
+    };
+  }
+
+  function seedMilestone(node: FakeNode, m: Milestone): void {
+    node.seed({ schemaHash: scopedCfg.schemaHashes.milestone!, keyHash: m.slug, fields: milestoneToFields(m) });
+  }
+
+  test("body hydrate and milestone lookups scale with the ranked column, not the whole board", async () => {
+    const node = fakeNode();
+    await node.createRecord({
+      schemaHash: scopedCfg.schemaHashes.board!,
+      keyHash: "default",
+      fields: boardToFields({
+        slug: "default",
+        title: "default",
+        body: "",
+        columns: [...DEFAULT_COLUMNS],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }),
+    });
+
+    // Cards parked outside `todo` — the ranker must never read their bodies.
+    for (let i = 0; i < 25; i++) {
+      seedCard(node, fixtureCard({ slug: `parked-${i}`, column: "backlog", position: String(i) }));
+    }
+    // Milestones on the board; only one is referenced by the one todo card.
+    seedMilestone(node, fixtureMilestone({ slug: "ms-active", state: "active" }));
+    for (let i = 0; i < 15; i++) {
+      seedMilestone(node, fixtureMilestone({ slug: `ms-unrelated-${i}`, state: "planned" }));
+    }
+    seedCard(node, fixtureCard({ slug: "live-pr", column: "todo", position: "1", milestone: "ms-active" }));
+
+    const before = node.reads.length;
+    const res = await rankCmd({ cfg: scopedCfg, node });
+    const readsDuringRank = node.reads.length - before;
+
+    expect(res.order.map((o) => o.slug)).toEqual(["live-pr"]);
+    // Before the fix this count scaled with the 25 parked cards and 16
+    // milestones; a single-card `todo` column must cost a small constant
+    // number of reads regardless of how large the rest of the board is.
+    expect(readsDuringRank).toBeLessThan(15);
   });
 });
 
