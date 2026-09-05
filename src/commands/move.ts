@@ -31,6 +31,7 @@ import {
   updateCardRecord,
   type Card,
 } from "../record.ts";
+import { purgeStaleBoardCardRows } from "../board-cards.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 import { planDoingClaim } from "../doing-claim.ts";
@@ -348,6 +349,26 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
       });
     }
     throw err;
+  }
+  // A move states where this card belongs, so it is also the repair for a card
+  // that reads as belonging in two places at once.
+  //
+  // `updateCardRecord` retires only the row the CALLER knew about — the address
+  // built from the Card point read it was handed. A drifted card has a row the
+  // Card record cannot name (the 2026-09-05 `doing` lane held 9 such rows of
+  // 13), so the documented repair `kanban move <slug> <truth-column> --force`
+  // exited 0, printed `done -> done`, and left the phantom row first in the
+  // listing. Agents reported a repair they had not made:
+  // `papercut-kanban-move-to-truth-column-does-not-clear-the-stale-listing-row-20260905`.
+  //
+  // Only the partition knows every row a slug holds, so the repair has to ask
+  // it. Best-effort: the card is already written and already correct, and a
+  // failure here leaves exactly the duplicate that existed a moment ago.
+  try {
+    await purgeStaleBoardCardRows(opts.node, opts.cfg, updated);
+  } catch {
+    // The move succeeded; a failed reap is the pre-existing state, not a
+    // reason to fail the command.
   }
   // AFTER the write, never before. A completion checkpoint is a durable, one-way
   // append into Brain that nothing in this codebase retracts, so ordering it
