@@ -173,13 +173,14 @@ function todoCards(n: number): Card[] {
 }
 
 describe("list read amplification — cost must not scale with card count", () => {
-  test("--column costs one BoardCards query and zero Card point-reads", async () => {
+  test("--column costs a constant BoardCards budget and zero Card point-reads without overlap", async () => {
     const node = fakeNode(todoCards(10));
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
 
     expect((cardsFromJson(out) as Card[]).map((c) => c.slug)).toContain("todo-0");
-    expect(boardCardQueries(node)).toHaveLength(1);
-    // The regression this file exists for: one Card point-read per rendered row.
+    // Prefix for the listed column plus one HashKey spine to find other-column
+    // occupancy. Card tip is read only for slugs in two columns.
+    expect(boardCardQueries(node)).toHaveLength(2);
     expect(cardQueries(node)).toHaveLength(0);
   });
 

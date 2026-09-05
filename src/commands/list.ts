@@ -166,6 +166,11 @@ export type ListOptions = {
   // convention). Injected by tests so the notice is asserted, not printed.
   // The default envelope path does not warn on stderr (truncation is structural).
   warn?: WarnSink;
+  /**
+   * After a column list, delete BoardCards rows whose Card tip is another
+   * column. Default off: MCP list is read-only. The CLI sets this.
+   */
+  healStaleRows?: boolean;
 };
 
 // Both the human text and the structured (`--json`) payload, built from a
@@ -239,7 +244,9 @@ export async function listResult(
   // discarded (a prefix read on a slug that matches nothing, rows=0). The happy
   // path — every list the fleet actually runs — saves a whole round trip.
   const boardCardsRead = opts.column
-    ? listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields, boardSlug)
+    ? listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields, boardSlug, {
+        healStaleRows: opts.healStaleRows === true,
+      })
     : listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);
   // `allSettled`, not `all`: with `all` whichever read rejects FIRST decides the
   // error, so a flaky rollup read could mask "no such board" on a typo'd

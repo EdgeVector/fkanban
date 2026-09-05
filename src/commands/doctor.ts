@@ -10,13 +10,14 @@ import {
   FkanbanError,
   isLoopbackNodeUrl,
   newNodeClient,
+  type NodeClient,
   type Verbose,
 } from "../client.ts";
-import { resolveSocketPath, tryReadConfig } from "../config.ts";
+import { resolveSocketPath, tryReadConfig, type Config } from "../config.ts";
 import { isOnDisk, resolveRunningBuild, shortBuild } from "../host_track.ts";
 import { readRecentRejections, rejectionsPath } from "../diagnostics.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
-import { listBoards, listCards, findCard, probeSchemaWritable, WRITE_PROBE_SLUG, type Board, type Card } from "../record.ts";
+import { listBoards, listCards, findCard, findBoard, probeSchemaWritable, WRITE_PROBE_SLUG, type Board, type Card } from "../record.ts";
 import {
   MEMBERSHIP_KEY_EXPECTATIONS,
   checkMembershipKeyLayout,
@@ -25,7 +26,11 @@ import {
   type ProjectionParityResult,
 } from "../membership_schema_guard.ts";
 import {
+  boardCardsHash,
+  enqueueBoardCardJanitor,
   listBoardCardsPartition,
+  listBoardCardsPartitionSpine,
+  sweepBoardCardJanitor,
   sweepBoardCardsPartition,
 } from "../board-cards.ts";
 import {
@@ -41,6 +46,7 @@ import {
 import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
 import {
   BOARD_CARDS_FIELDS,
+  DEFAULT_COLUMNS,
   OWNER_APP_ID,
   UNIQUE_SCHEMAS,
   allPinnedSchemas,
@@ -63,6 +69,10 @@ export type DoctorOptions = {
   // the MCP server passes one to build `structuredContent`. Does NOT alter the
   // printed output.
   onCheck?: (check: DoctorCheck) => void;
+  /** Board slug for `--stale-rows`. Default `default`. */
+  board?: string;
+  /** Walk column secondaries and delete rows whose Card tip is another column. */
+  staleRows?: boolean;
 };
 
 // The machine-readable doctor report — the single shape shared by the CLI
@@ -242,6 +252,17 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     const detail = formatDoctorError(err);
     check(false, "node reachable + provisioned", detail);
     return false;
+  }
+
+  if (opts.staleRows) {
+    await reportStaleBoardCardRows({
+      node,
+      cfg,
+      board: (opts.board ?? "default").trim() || "default",
+      check,
+      info,
+    });
+    return ok;
   }
 
   // Cross-check the config hashes against the node's loaded schema set, and
@@ -996,6 +1017,61 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   reportRecentRejections(print, onCheck);
 
   return ok;
+}
+
+async function reportStaleBoardCardRows(opts: {
+  node: NodeClient;
+  cfg: Config;
+  board: string;
+  check: (pass: boolean, label: string, detail?: string) => void;
+  info: (label: string, detail?: string) => void;
+}): Promise<void> {
+  const schemaHash = boardCardsHash(opts.cfg);
+  if (!schemaHash) {
+    opts.check(false, "stale BoardCards rows", "board_cards schema hash missing; run kanban init");
+    return;
+  }
+  const boardRec = await findBoard(opts.node, opts.cfg, opts.board);
+  const columns = boardRec?.columns?.length ? boardRec.columns : [...DEFAULT_COLUMNS];
+  const stale: Array<{ slug: string; listed: string; tip: string; sk: string }> = [];
+  for (const column of columns) {
+    const part = await listBoardCardsPartitionSpine(opts.node, opts.cfg, opts.board, { column });
+    if (!part) continue;
+    const bySlug = new Map<string, typeof part>();
+    for (const row of part) {
+      const group = bySlug.get(row.slug) ?? [];
+      group.push(row);
+      bySlug.set(row.slug, group);
+    }
+    const tips = await mapWithConcurrency([...bySlug.keys()], (slug) =>
+      findCard(opts.node, opts.cfg, slug),
+    );
+    for (const tip of tips) {
+      if (!tip) continue;
+      const rows = bySlug.get(tip.slug) ?? [];
+      for (const row of rows) {
+        if (tip.column && row.column && tip.column !== row.column) {
+          stale.push({ slug: tip.slug, listed: row.column, tip: tip.column, sk: row.sk });
+        }
+      }
+    }
+  }
+  if (stale.length === 0) {
+    opts.check(true, `stale BoardCards rows (${opts.board})`, "none");
+    return;
+  }
+  enqueueBoardCardJanitor(stale.map((row) => ({
+    schemaHash,
+    board: opts.board,
+    sk: row.sk,
+  })));
+  const healed = await sweepBoardCardJanitor(opts.node);
+  const sample = stale.slice(0, 5).map((s) => `${s.slug}:${s.listed}->${s.tip}`).join(", ");
+  opts.info(
+    `stale BoardCards rows (${opts.board})`,
+    `found=${stale.length} healed=${healed} ${sample}`,
+  );
+  opts.check(true, `stale BoardCards rows healed (${opts.board})`, `${healed} row(s)`);
 }
 
 /**

@@ -35,6 +35,7 @@ import { purgeStaleBoardCardRows } from "../board-cards.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 import { planDoingClaim } from "../doing-claim.ts";
+import { purgeOtherColumnRowsForSlug } from "../board-cards.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -159,6 +160,15 @@ export async function claimCard(opts: {
     previous: card,
     next: updated,
   });
+  const claimBoard = await ensureBoardRecord(opts.node, opts.cfg, updated.board);
+  await purgeOtherColumnRowsForSlug(
+    opts.node,
+    opts.cfg,
+    updated.board,
+    updated.slug,
+    updated.column,
+    claimBoard.columns,
+  );
 
   return {
     result: "claimed",
@@ -405,6 +415,16 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     next: updated,
     terminalColumn: terminalColumn(columns),
   });
+  // Previous-SK janitor only knows the tip SK. Leftover rows in other columns
+  // (the live todo+doing dual-list bug) need prefix deletes on those columns.
+  await purgeOtherColumnRowsForSlug(
+    opts.node,
+    opts.cfg,
+    updated.board,
+    updated.slug,
+    updated.column,
+    columns,
+  );
   const promotedDependents =
     opts.column === terminalColumn(columns)
       ? await promoteUnblockedBacklogDependents({ cfg: opts.cfg, node: opts.node, dependency: updated })

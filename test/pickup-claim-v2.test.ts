@@ -209,8 +209,13 @@ describe("pickup claim v2 LastDB adapter", () => {
 
     expect(result).toMatchObject({ result: "claimed", dry_run: true, card: { slug: "candidate" } });
     const boardReads = node.queries.filter((query) => query.schemaHash === "boardcardshash");
-    expect(boardReads.map(prefixOf)).toEqual(["todo#", "doing#"]);
-    expect(boardReads.every((query) => !query.filter || !("HashKey" in query.filter))).toBe(true);
+    // Column prefixes plus one HashKey spine so list can drop other-column
+    // leftovers without a per-row Card get on the happy path.
+    expect(boardReads.map(prefixOf).filter((prefix) => prefix !== undefined)).toEqual([
+      "todo#",
+      "doing#",
+    ]);
+    expect(boardReads.some((query) => query.filter && "HashKey" in query.filter)).toBe(true);
     const dependencyReads = node.queries.filter((query) =>
       query.schemaHash === "cardhash" && query.filter?.HashKey === "done-dep"
     );
