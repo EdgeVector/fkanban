@@ -1,4 +1,3 @@
-lastgit
-# Gate of record: LastGit lastdb:///fkanban.
-# GitHub is a public read-only mirror for clone/browse only.
-# Do not use GitHub PRs for merge policy. Mirror via .lastgit/sync-github-mirror.sh.
+forgejo
+# Gate of record for EdgeVector/fkanban: Forgejo (http://localhost:3300), Tom 2026-09-05.
+# The LastGit repo lastdb:///fkanban is disabled: no CRs, no pushes. Workflow: sop-forge-pr-workflow.

@@ -1,37 +1,138 @@
-# Forgejo Actions CI for the local EdgeVector forge (http://localhost:3300).
+# Forge CI for fkanban on the local Forgejo forge, the gate of record since
+# 2026-09-05 (brain: decision-2026-09-05-factory-repos-venue-back-to-forgejo).
 #
-# This lives in `.forgejo/workflows/` (not `.github/workflows/`) so it runs ONLY
-# on the Forgejo forge, never on GitHub — GitHub keeps using `.github/workflows/ci.yml`.
-# It is deliberately self-contained (no GitHub-hosted actions): checkout comes from
-# code.forgejo.org and bun is installed via its official script, so CI can execute
-# with no dependency on github.com. Runner + labels: fbrain `infra-forgejo-local-forge`.
+# ci-required runs the same .lastgit/ci.sh that gated LastGit change requests,
+# on the Mac host lane (macos-arm64), so the gate itself does not change with
+# the venue. Branch protection on main requires this context.
+#
+# publish runs only on a push to main. It builds the host-track artifact,
+# publishes it into the local LastGit artifact CAS (~/.lastgit/artifacts), and
+# promotes it to the stable channel with `lastgit artifact promote --gate
+# forgejo` (EdgeVector/lastgit#591), which reads THIS commit's Forge CI status
+# instead of a LastGit ci-required row. The repo is disabled on LastGit, so no
+# step here pushes code to lastdb:///fkanban; host-track then installs the
+# channel head on its next refresh.
+# Runner requirement (measured 2026-09-05): the macos-arm64 host runner's
+# LaunchAgent must run at ProcessType Standard. At ProcessType Background,
+# macOS clamps every job step to background QoS, and with lastdbd busy a
+# 0.3-second fetch from localhost:3300 took 9m38s and this gate died at its
+# 10-minute limit. See brain
+# papercut-forge-host-runner-processtype-background-throttles-every-job-step-under-node-load-20260905.
 name: Forge CI
 
 on:
-  push:
   pull_request:
+    branches: [main]
+  push:
+    branches: [main]
 
 jobs:
-  test:
-    name: Typecheck + Tests
-    # Matches a label advertised by the local mac-forge-runner (Docker backend,
-    # node:20-bookworm container).
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
+  ci-required:
+    name: ci-required
+    runs-on: macos-arm64
+    timeout-minutes: 10
 
-      - name: Install bun
+    steps:
+      # Host-mode runners cannot use actions/checkout: the local runner's URL
+      # patch rewrites the forge remote to host.docker.internal, which only
+      # resolves inside Docker jobs, and fetching the action itself from
+      # code.forgejo.org took 8 minutes and failed on the first run. Clone from
+      # the forge ROOT_URL by hand, the way fold's Mac-lane jobs do.
+      - name: Checkout repository (host runner)
+        env:
+          FORGE_TOKEN: ${{ secrets.FORGEJO_TOKEN || github.token }}
         run: |
           set -euo pipefail
-          curl -fsSL https://bun.sh/install | bash
-          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          server_url="${GITHUB_SERVER_URL%/}"
+          server_url="${server_url//host.docker.internal/localhost}"
+          repo_url="${server_url}/${GITHUB_REPOSITORY}.git"
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$repo_url"
+          if ! git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags origin "$GITHUB_SHA"; then
+            git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          fi
+          git checkout -q --detach "$GITHUB_SHA"
+          git reset -q --hard
+          git clean -ffdxq
+          echo "checked out $(git rev-parse --short HEAD) from $repo_url"
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Host toolchains on PATH
+        run: |
+          for d in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.cargo/bin" /opt/homebrew/bin; do
+            echo "$d" >> "$GITHUB_PATH"
+          done
 
-      - name: Typecheck
-        run: bun run typecheck
+      # The runner forces color into every step. The LastGit watcher never did,
+      # and two list-output tests compare plain text ("TODO  (0)"), so forced
+      # color turned them red on the first run here. Pin the gate to plain text.
+      - name: Merge gate (.lastgit/ci.sh)
+        env:
+          NO_COLOR: "1"
+          FORCE_COLOR: "0"
+        run: bash .lastgit/ci.sh
 
-      - name: Test
-        run: bun test
+  publish:
+    name: publish host-track artifact
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci-required
+    runs-on: macos-arm64
+    timeout-minutes: 20
+    env:
+      FORGE_TOKEN: ${{ secrets.FORGEJO_TOKEN || github.token }}
+      LASTGIT_FORGE_URL: http://localhost:3300
+
+    steps:
+      # Host-mode runners cannot use actions/checkout: the local runner's URL
+      # patch rewrites the forge remote to host.docker.internal, which only
+      # resolves inside Docker jobs, and fetching the action itself from
+      # code.forgejo.org took 8 minutes and failed on the first run. Clone from
+      # the forge ROOT_URL by hand, the way fold's Mac-lane jobs do.
+      - name: Checkout repository (host runner)
+        env:
+          FORGE_TOKEN: ${{ secrets.FORGEJO_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          server_url="${GITHUB_SERVER_URL%/}"
+          server_url="${server_url//host.docker.internal/localhost}"
+          repo_url="${server_url}/${GITHUB_REPOSITORY}.git"
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$repo_url"
+          if ! git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags origin "$GITHUB_SHA"; then
+            git -c http.extraHeader="Authorization: token $FORGE_TOKEN" fetch -q --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          fi
+          git checkout -q --detach "$GITHUB_SHA"
+          git reset -q --hard
+          git clean -ffdxq
+          echo "checked out $(git rev-parse --short HEAD) from $repo_url"
+
+      - name: Host toolchains on PATH
+        run: |
+          for d in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.cargo/bin" /opt/homebrew/bin; do
+            echo "$d" >> "$GITHUB_PATH"
+          done
+
+      - name: Build the artifact tree
+        run: bun run build
+
+      - name: Publish into the artifact CAS and promote stable
+        run: |
+          set -euo pipefail
+          app="$(jq -r '.artifacts[0].app' .lastgit/artifacts.json)"
+          paths="$(jq -r '.artifacts[0].paths | join(",")' .lastgit/artifacts.json)"
+          digest="$(lastgit artifact publish --app "$app" --repo fkanban --oid "$GITHUB_SHA" --input . --paths "$paths" --json 2>/dev/null \
+            | jq -r 'select(.manifest_digest != null) | .manifest_digest' | tail -n 1)"
+          test -n "$digest"
+          echo "published $app manifest=$digest oid=$GITHUB_SHA"
+          # The success status for this push is written when ci-required finishes;
+          # give the forge a moment before reading it back.
+          for attempt in 1 2 3 4 5 6; do
+            if lastgit artifact promote --gate forgejo --app "$app" --channel stable \
+                 --manifest "$digest" --repo fkanban --oid "$GITHUB_SHA"; then
+              exit 0
+            fi
+            echo "promote attempt $attempt did not pass the forge gate yet; retrying in 10s" >&2
+            sleep 10
+          done
+          exit 1
