@@ -1112,6 +1112,75 @@ export async function upsertBoardCard(
       opts,
     );
   }
+  // Drain what those writes queued, HERE — the queue is process-local and
+  // nothing outside this module drains it on a mutation path.
+  //
+  // `retireSupersededRows` (above) enqueues the source sk of every move, and
+  // until 2026-09-05 the only production callers of `sweepBoardCardJanitor`
+  // were `removeBoardCardsBatch` and `groom board-cards-heal`. `kanban move`
+  // reaches neither: it goes `moveCmd` -> `updateCardRecord` ->
+  // `writeCardMembership` -> here, the CLI process exits, and the queued
+  // delete goes with it. So EVERY move left its source row in the partition
+  // permanently. Measured on the live `default` board 2026-09-05T02:05Z:
+  // 9 of the 13 rows `kanban list --column doing` returned had a different
+  // point-truth column — a 69% phantom lane.
+  //
+  // The gap was invisible because the tests sweep by hand:
+  // `board-cards-move-durability.test.ts` called `sweepBoardCardJanitor(node)`
+  // itself and then asserted one surviving row. Coverage of the function, none
+  // of its callers.
+  //
+  // The janitor's contract is "not in the create/update REQUEST", not "not in
+  // this command" — see its module docstring. Sweeping after the destination
+  // write has resolved satisfies it exactly, and keeps the ordering the long
+  // comment in `upsertBoardCardOnHash` argues for: write the destination,
+  // then retire the source, never the reverse and never overlapped.
+  await sweepBoardCardJanitor(node);
+}
+
+/**
+ * Retire every OTHER BoardCards row this card holds on its board, keeping the
+ * row at the card's current address.
+ *
+ * This is the repair `move` runs, and it is deliberately not on the shared
+ * write path: it costs one partition spine read (measured 336 rows in 195ms,
+ * `scripts/probe-boardcard-purge-reach.ts`), which is the right price for a
+ * command an operator reaches for and the wrong one for every `set`/`mark`.
+ *
+ * **Self-gated.** It deletes nothing unless the SAME spine read that finds the
+ * stale rows also sees `keepSk`. A BoardCards write is durable but unreadable
+ * for ~0.5-2.4s after its own ack, so a purge that trusted the caller's
+ * intended address could delete every row the card has while its destination
+ * was still invisible — the "card on no board" state the write path is built
+ * to avoid. Requiring the destination in the same page makes that impossible
+ * rather than unlikely, and costs no extra round trip.
+ *
+ * @returns how many delete attempts ran (0 when the destination is not yet
+ *   visible, or when the card holds no other row).
+ */
+export async function purgeStaleBoardCardRows(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+): Promise<number> {
+  const slug = card.slug;
+  if (!slug) return 0;
+  const board = card.board || "default";
+  const keepSk = boardCardSk(card.column, card.position, slug);
+  if (!keepSk) return 0;
+
+  let removed = 0;
+  for (const schemaHash of boardCardsWriteHashes(cfg)) {
+    const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
+    const part = await listBoardCardsPartitionSpine(node, oneHashCfg, board);
+    if (!part) continue;
+    if (!part.some((row) => row.sk === keepSk)) continue;
+    const doomed = part
+      .filter((row) => row.slug === slug && row.sk !== keepSk)
+      .map((row) => row.sk);
+    removed += await deleteBoardCardSksBatched(node, schemaHash, board, doomed);
+  }
+  return removed;
 }
 
 /**

@@ -141,6 +141,15 @@ describe("host-track refresh", () => {
   // A slow/loaded node (observed: LastGit git-protocol round trips averaging
   // 8.5s, p95/max ~30s — papercut-fkanban-host-track-refresh-hangs-and-drifted)
   // must produce a fast, attributed failure instead of an unbounded hang.
+  /**
+   * How long the fake git sleeps on the step under test, and the wall-clock
+   * ceiling the bounded run must come in under. The ceiling only has to be
+   * BELOW the sleep to prove the timeout fired; the gap between the 1s step
+   * timeout and the ceiling is deliberate slack for a loaded runner.
+   */
+  const FAKE_GIT_SLEEP_S = 45;
+  const ELAPSED_CEILING_MS = 30_000;
+
   test("bounds a slow git step and reports it by name instead of hanging", async () => {
     const root = tempRoot();
     const remote = resolve(root, "remote.git");
@@ -207,7 +216,7 @@ describe("host-track refresh", () => {
       ...baseEnv,
       PATH: `${fakeGitDir}:${process.env.PATH ?? ""}`,
       FAKE_GIT_SLOW_STEP: "fetch",
-      FAKE_GIT_SLEEP: "5",
+      FAKE_GIT_SLEEP: String(FAKE_GIT_SLEEP_S),
       FKANBAN_HOST_TRACK_GIT_TIMEOUT: "1",
     };
     const start = performance.now();
@@ -217,9 +226,25 @@ describe("host-track refresh", () => {
     expect(slow.code).toBe(124);
     expect(slow.stderr).toContain("step 'git fetch' timed out after 1s");
     expect(slow.stderr).toContain("lastdb ops");
-    // Bounded by the 1s step timeout, not the fake git's 5s sleep.
-    expect(elapsedMs).toBeLessThan(4000);
-  }, 60_000);
+    // Bounded by the 1s step timeout, not the fake git's sleep.
+    //
+    // The ceiling is DERIVED from the sleep it has to discriminate against,
+    // not from how fast a refresh feels: a run that waited the fake git out
+    // cannot finish in less than FAKE_GIT_SLEEP_S, so anything below that is
+    // proof the timeout fired, and everything between the 1s timeout and the
+    // ceiling is host slop this test does not care about.
+    //
+    // It used to read `sleep 5` / `toBeLessThan(4000)` — a 3-second slop
+    // allowance for one whole `host-track-refresh` invocation, which is a
+    // feel, not a measurement. It failed at 18673.86 ms on a loaded CI host
+    // (fkanban cr-mtnr6o73-8317, 2026-09-05T02:23Z) and blocked an unrelated
+    // BoardCards fix; the same commit's gate passed twice locally. Widening
+    // the sleep instead of the tolerance keeps the assertion meaningful:
+    // ELAPSED_CEILING_MS is still well under the sleep, so the guard fails if
+    // the bound stops working, and it now tolerates 30s of load rather than 3.
+    expect(elapsedMs).toBeLessThan(ELAPSED_CEILING_MS);
+    expect(ELAPSED_CEILING_MS).toBeLessThan(FAKE_GIT_SLEEP_S * 1000);
+  }, 120_000);
 
   // A refresh whose gate ref (what "current" actually means) has moved past
   // what got fetched/merged must fail loud, not print the same "refreshed"

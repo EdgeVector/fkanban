@@ -1,7 +1,15 @@
 /**
  * Create/update of a BoardCards row does not run janitor purge on that
- * request. Previous-sk / orphans enqueue; a later sweeper request contains
- * the deletes. Drives the shipped upsertBoardCard path, not a copy.
+ * REQUEST. Previous-sk / orphans enqueue; a later sweeper REQUEST contains the
+ * deletes. Drives the shipped upsertBoardCard path, not a copy.
+ *
+ * "Later request", not "later command". Until 2026-09-05 this file read
+ * `upsertBoardCard` -> queue still full -> caller sweeps, and asserted the
+ * middle state as the contract. No production mutation path ever swept, so the
+ * queued delete died with the CLI process and every `kanban move` left its
+ * source row in the partition (9 of 13 rows in the live `doing` lane were
+ * phantom on 2026-09-05T02:05Z). The request boundary is the invariant; the
+ * command boundary was an accident, and pinning it hid the leak.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 
@@ -71,7 +79,7 @@ describe("BoardCards create/update batches contain no Purge", () => {
     resetBoardCardJanitorForTests();
   });
 
-  test("a move's mutation batch contains only updates/creates", async () => {
+  test("the destination write request carries no delete", async () => {
     const node = fakeNode();
     const prev = card({ column: "todo", position: "1" });
     const next = card({ column: "doing", position: "2", updated_at: "2026-01-03T00:00:00.000Z" });
@@ -80,14 +88,18 @@ describe("BoardCards create/update batches contain no Purge", () => {
     await upsertBoardCard(node, cfg, next, prev);
 
     const bc = node.writes.filter((w) => w.schemaHash === BC);
-    expect(bc.every((w) => w.op === "update" || w.op === "create")).toBe(true);
-    expect(bc.some((w) => w.op === "delete")).toBe(false);
-    expect(peekBoardCardJanitor().some((t) => t.sk === boardCardSk("todo", "1", "move-me"))).toBe(
-      true,
+    const destAt = bc.findIndex(
+      (w) => w.op !== "delete" && w.rangeKey === boardCardSk("doing", "2", "move-me"),
     );
+    expect(destAt).toBeGreaterThanOrEqual(0);
+    // Every delete is a strictly later entry, so none of them rode along on
+    // the create/update that put the destination row down.
+    for (const [i, w] of bc.entries()) {
+      if (w.op === "delete") expect(i).toBeGreaterThan(destAt);
+    }
   });
 
-  test("a later sweeper request contains the deletes", async () => {
+  test("the deletes go out as their own request, and the queue is left empty", async () => {
     resetBoardCardJanitorForTests();
     const node = fakeNode();
     const prev = card({ column: "todo", position: "1" });
@@ -95,14 +107,16 @@ describe("BoardCards create/update batches contain no Purge", () => {
     seedRow(node, prev);
 
     await upsertBoardCard(node, cfg, next, prev);
-    const beforeSweep = node.writes.filter((w) => w.schemaHash === BC && w.op === "delete");
-    expect(beforeSweep).toHaveLength(0);
 
-    const attempted = await sweepBoardCardJanitor(node);
-    expect(attempted).toBeGreaterThan(0);
+    // `deleteBatches` is the separate request. A non-empty queue here is the
+    // 2026-09-05 leak: nothing downstream of `upsertBoardCard` drains it.
+    expect(node.deleteBatches.length).toBeGreaterThan(0);
+    expect(peekBoardCardJanitor()).toHaveLength(0);
     const deletes = node.writes.filter((w) => w.schemaHash === BC && w.op === "delete");
     expect(deletes.some((w) => w.rangeKey === boardCardSk("todo", "1", "move-me"))).toBe(true);
-    expect(node.deleteBatches.length).toBeGreaterThan(0);
+
+    // A second sweep has nothing left to do — the first one was real.
+    expect(await sweepBoardCardJanitor(node)).toBe(0);
 
     const rows = await listAllBoardCards(node, cfg, [{ slug: "default" }]);
     expect(rows).toHaveLength(1);
