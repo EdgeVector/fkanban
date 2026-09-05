@@ -74,7 +74,7 @@ beforeEach(async () => {
   writeFileSync(join(repo, "README.md"), "hi\n");
   await git(repo, ["add", "."]);
   await git(repo, ["commit", "-q", "-m", "init"]);
-});
+}, SPAWN_TEST_TIMEOUT_MS);
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });

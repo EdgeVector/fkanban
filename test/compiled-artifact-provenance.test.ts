@@ -35,7 +35,7 @@ import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
+import { COMPILE_TEST_TIMEOUT_MS, SPAWN_TEST_TIMEOUT_MS } from "./helpers/spawn-test-timeout";
 
 const REPO_ROOT = fileURLToPath(import.meta.url).replace(/\/test\/[^/]+$/, "");
 
@@ -61,7 +61,7 @@ beforeAll(() => {
   if (build.exitCode !== 0) {
     throw new Error(`could not compile the artifact under test: ${build.stderr.toString()}`);
   }
-});
+}, COMPILE_TEST_TIMEOUT_MS);
 
 afterAll(() => {
   if (workdir) rmSync(workdir, { recursive: true, force: true });
@@ -228,7 +228,7 @@ describe("the compiled artifact prints a registration command that works", () =>
     // clearing PATH, so the shim lookup genuinely runs and genuinely misses.
     noShimPath = mkdtempSync(join(tmpdir(), "fkanban-noshim-"));
     installs.push(noShimPath);
-  });
+  }, COMPILE_TEST_TIMEOUT_MS);
 
   function probeWith(path: string, env: Record<string, string> = {}, exe = probe): Record<string, unknown> {
     const proc = Bun.spawnSync([exe], { env: { PATH: path, ...env } });
