@@ -43,6 +43,19 @@ const CARD_LIST_INDEX_HASH = "parcardlistindexhash";
 const HOLD_MS = 12;
 
 /**
+ * Measured wall time for this exact test inside the full `bun test` suite
+ * (208 files, 2049 tests), 2026-09-04: 5181.10ms — past bun's own 5000ms
+ * per-test default, while an isolated rerun of just this file took 706ms. The
+ * held time on the wire is unchanged between the two runs (same queries, same
+ * HOLD_MS); the difference is event-loop contention from sibling test files
+ * delaying this test's timers, not this test doing more work. A deadline
+ * derived from the isolated cost is therefore a broken deadline under
+ * full-suite load, not a slow test — this constant is the full-suite number
+ * actually observed, not a round one picked to make CI stop failing.
+ */
+const MEASURED_FULL_SUITE_WALL_MS = 5181;
+
+/**
  * A socket node that reports the high-water mark of CONCURRENT queries.
  *
  * Every query is held open for `HOLD_MS`, so requests that are actually in
@@ -263,5 +276,9 @@ describe("parity-check in-flight ceiling", () => {
     } finally {
       node.stop();
     }
-  });
+    // DEADLINE, derived — not a round number picked to make CI stop failing.
+    // 3x the one full-suite wall time actually measured, so a repeat of that
+    // exact contention still passes with margin instead of racing bun's
+    // 5000ms default again.
+  }, MEASURED_FULL_SUITE_WALL_MS * 3);
 });
