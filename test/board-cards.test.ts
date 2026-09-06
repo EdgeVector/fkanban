@@ -588,6 +588,7 @@ describe("board-cards heal read cost", () => {
         updated_at: "2026-01-01T00:00:00.000Z",
       },
     });
+    const slugs: string[] = [];
     for (let i = 0; i < count; i += 1) {
       const c = card({ slug: `card-${i}`, position: String(i), body: "x".repeat(4096) });
       await node.createRecord({
@@ -595,7 +596,21 @@ describe("board-cards heal read cost", () => {
         keyHash: c.slug,
         fields: { ...c, body: c.body },
       });
+      slugs.push(c.slug);
     }
+    // None of these cards has a BoardCards row — discovering them (without a
+    // Card scan, see kanban-groom-heal-stop-card-list-scan-20260904) requires
+    // naming them in the legacy `all_cards` rollup. SLUG ONLY, deliberately no
+    // `body`: heal must never trust or need any other field off this row.
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card_list_index!,
+      keyHash: CARD_LIST_INDEX_KEY,
+      fields: {
+        key: CARD_LIST_INDEX_KEY,
+        payload_json: JSON.stringify(slugs.map((slug) => ({ slug }))),
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    });
   }
 
   test("never asks the node for card bodies it is about to discard", async () => {
