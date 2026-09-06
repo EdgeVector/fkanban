@@ -1,44 +1,26 @@
 // `board-cards heal` must not report a clean board from a run whose discovery
 // never happened.
 //
-// This is the same defect class the file already names for the OTHER half of
-// its reads. `sweepBoardCardsPartition` reports `failedLeads`, and heal renders
-// them as a loud `⚠ INCOMPLETE`, with the reason spelled out at the call site:
-// "silence would make the next run's `missing_card: 0` look like convergence."
+// This file used to be about a bare `catch {}` around the candidate-discovery
+// Card scan swallowing a load error and reporting a clean board instead. That
+// scan (`scanCardSummariesForReconcile`, a Card key-list enumeration plus a
+// per-row hydrate) is now GONE — see
+// kanban-groom-heal-stop-card-list-scan-20260904 /
+// papercut-fkanban-board-cards-heal-slug-still-scans-card-list-20260903.
+// Measured against the primary 2026-09-04: client
+// `kanban-groom-board-cards-heal`, schema `Card`, 108305 queries over 16h45m
+// (~6465/h) — the scan ran on EVERY invocation, `--slug`-scoped or not,
+// because a manual `--slug` heal still paid for the whole-board discovery it
+// never needed. LastDB has no scan; this command's discovery is now
+// BoardCards HashRange (the per-board partition reads) plus the legacy
+// `all_cards` rollup, a single cheap point-read.
 //
-// Twelve lines earlier, the candidate-discovery scan was wrapped in a bare
-// `catch {}` that did exactly that.
-//
-// ## Why the documented fallback is not one
-//
-// The comment on that catch said "fall back to the rollup". Measured on the
-// live primary 2026-08-05 (`probe-heal-discovery-fallback.ts`):
-//
-//   board_cards bound:                      true
-//   rollup SUPERSEDED (write path retired): true
-//   all_cards rollup entries:               0
-//   Card full scan:                         217 distinct slugs in 822ms
-//
-// `cardListIndexIsSuperseded(cfg)` is true whenever `board_cards` is bound —
-// i.e. on every current node — and both `writeCardListIndex` and
-// `patchCardListIndex` return early in that case. So the rollup is FROZEN, and
-// on this node it has already been emptied by `card-list-index-retire`. The
-// fallback is a fallback to ZERO candidates.
-//
-// The two halves of heal fail in opposite directions, which is why only one of
-// them was noticed:
-//
-//   - a refused partition LEAD costs heal rows it could have DELETED
-//     (under-reap: safe, and already reported);
-//   - a refused SCAN costs heal every card whose Card record is live and whose
-//     BoardCards row is missing — cards invisible to `kanban list` entirely,
-//     which is the condition heal exists to repair. Nothing else re-derives
-//     them, and the run reports `missing_card=0 drifted=0` and exits 0.
-//
-// `last-stack-fkanban-watch` has run this command hourly with `--apply` since
-// 2026-07-30. A `service_timeout` or "too many concurrent reads" on that one
-// read — both documented as routine load signals on this node — produced a run
-// indistinguishable from a converged one.
+// The first describe block below used to prove the scan's failure was
+// reported, not swallowed. With the scan removed there is nothing left for it
+// to prove about a FAILURE — instead it proves the ACCEPTED GAP the removal
+// reopens (a card missing from every BoardCards partition AND the rollup is
+// no longer discoverable) is explicit and stays that way, and that neither a
+// scoped nor an unscoped run ever key-lists Card again.
 //
 // ## And the unbound case, which claims work it did not do
 //
@@ -85,8 +67,6 @@ const cfgUnbound: Config = {
   schemaHashes: { card: "cardhash", board: "boardhash", card_list_index: "cardlistindexhash" },
 };
 
-/** The load signal CLAUDE.md documents as routine on this node, not a dead node. */
-const LOAD_ERROR = "too many concurrent reads";
 
 function card(over: Partial<Card> & { slug: string }): Card {
   const now = nowIso();
@@ -151,29 +131,33 @@ function seedMembership(node: FakeNode, c: Card, at?: { column: string; position
 }
 
 /**
- * A node that refuses Card key-list discovery and answers every keyed read normally.
- *
- * Narrow on purpose: the point-reads that authorize repairs must keep working,
- * so the only thing this run loses is candidate DISCOVERY. A fake that failed
- * every Card read would prove something else entirely.
+ * A node that throws if anything key-lists Card — the exact regression this
+ * heal must never reintroduce, scoped or not. Every other schema (BoardCards,
+ * Board, the legacy rollup) still answers normally.
  */
-function withFailingCardScan(node: FakeNode): FakeNode {
+function explodingIfCardKeyListed(node: FakeNode): FakeNode {
   return {
     ...node,
-    listRecordKeys: (async (schemaHash: string) => {
-      if (schemaHash === "cardhash") throw new Error(LOAD_ERROR);
-      return node.listRecordKeys!(schemaHash);
+    listRecordKeys: (async (schemaHash: string, opts) => {
+      if (schemaHash === "cardhash") {
+        throw new Error("REGRESSION: board-cards-heal key-listed the Card schema");
+      }
+      return node.listRecordKeys!(schemaHash, opts);
     }) as FakeNode["listRecordKeys"],
   };
 }
 
-describe("a heal whose discovery scan was refused must not report a clean board", () => {
+describe("board-cards heal discovers membership without ever key-listing Card", () => {
   let node: FakeNode;
-  // Card truth is live; BoardCards row is missing. Invisible to `kanban list`
-  // until heal restores it, and ONLY the discovery scan can find it.
+  // Card truth is live; BoardCards row is missing on every board, and the
+  // legacy rollup (frozen — `board_cards` is bound in `cfg`) has no entry for
+  // it either. Only a Card scan could ever have found this one, and the scan
+  // is gone — see the file header. This is an ACCEPTED gap, not a bug: the
+  // test below pins that heal reports it honestly (no action, no false
+  // "discovery_failed" either — nothing failed, the source no longer exists).
   const unmembered = card({ slug: "card-with-no-membership-row" });
   // Membership row exists but sits in the wrong column. Visible on the
-  // partition, so heal finds it WITHOUT the scan — the control.
+  // BoardCards partition, so heal finds and repairs it without any scan.
   const misplaced = card({ slug: "card-in-wrong-column", column: "doing", position: "n" });
 
   beforeEach(() => {
@@ -184,62 +168,59 @@ describe("a heal whose discovery scan was refused must not report a clean board"
     seedMembership(node, misplaced, { column: "todo", position: "n" });
   });
 
-  // NON-VACUITY. Every negative assertion below is only meaningful if the
-  // fixture really reproduces the hazard: with a WORKING scan the unmembered
-  // card must be discovered and repaired. A fixture that quietly stopped
-  // seeding it would make the rest of this file pass for the wrong reason.
-  test("control: a working scan discovers the unmembered card", async () => {
+  test("a card missing from every BoardCards partition and the rollup is not discovered", async () => {
     const { report, text } = await boardCardsHealResult({ cfg, node, json: true });
 
-    const action = report.actions.find((a) => a.slug === unmembered.slug);
-    expect(action?.action).toBe("upsert-truth");
+    expect(report.actions.find((a) => a.slug === unmembered.slug)).toBeUndefined();
+    // Not a failure — there is no discovery step left that CAN fail. A caller
+    // must not read `discovery_failed: null` as "heal looked and found
+    // nothing"; `missing_card`/`upsert-truth` for this class are simply not
+    // produced by this command any more.
     expect(report.discovery_failed).toBeNull();
     expect(text).not.toContain("DISCOVERY");
   });
 
-  test("a refused scan is reported, not swallowed", async () => {
-    const { report } = await boardCardsHealResult({ cfg, node: withFailingCardScan(node), json: true });
-
-    expect(report.discovery_failed).toContain(LOAD_ERROR);
-  });
-
-  test("the operator's line says the counts are a lower bound, not a clean board", async () => {
-    const { text } = await boardCardsHealResult({ cfg, node: withFailingCardScan(node), json: false });
-
-    // Loud, and it must name the CONSEQUENCE — a bare error string next to
-    // `missing_card=0` still reads as a clean board with a hiccup.
-    expect(text).toContain("⚠");
-    expect(text).toContain("DISCOVERY INCOMPLETE");
-    expect(text).toContain(LOAD_ERROR);
-    expect(text.toLowerCase()).toContain("lower bound");
-  });
-
-  test("it still repairs what it can see — reporting is not refusing", async () => {
+  test("a card with a stale BoardCards row is still found and repaired, no scan needed", async () => {
     const { report } = await boardCardsHealResult({
       cfg,
-      node: withFailingCardScan(node),
+      node: explodingIfCardKeyListed(node),
       apply: true,
       json: true,
     });
 
-    // The misplaced row is on the partition, so the scan was never needed for
-    // it. A transient scan timeout must not disable the hourly heal outright:
-    // heal under-repairing is safe, heal not running is not.
     const action = report.actions.find((a) => a.slug === misplaced.slug);
     expect(action?.action).toBe("delete-stale-and-upsert");
     expect(report.healed).toBeGreaterThan(0);
     expect(report.blocked).toBe(false);
   });
 
-  test("the unmembered card is absent from the run, which is exactly what the warning is for", async () => {
-    const { report } = await boardCardsHealResult({ cfg, node: withFailingCardScan(node), json: true });
+  test("neither an unscoped run nor a --slug run ever key-lists Card", async () => {
+    const guarded = explodingIfCardKeyListed(node);
 
-    // Not a bug to fix here — heal cannot repair what the node would not
-    // enumerate. The defect was claiming otherwise.
-    expect(report.actions.find((a) => a.slug === unmembered.slug)).toBeUndefined();
-    // `not.toBeNull()` would pass on the old `undefined` field and make this a
-    // vacuous green of exactly the kind the file is about.
-    expect(typeof report.discovery_failed).toBe("string");
+    await expect(
+      boardCardsHealResult({ cfg, node: guarded, json: true }),
+    ).resolves.toBeTruthy();
+    await expect(
+      boardCardsHealResult({ cfg, node: guarded, slugs: [misplaced.slug], json: true }),
+    ).resolves.toBeTruthy();
+  });
+
+  test("--slug seeds the named card directly and upserts its missing membership", async () => {
+    const { report } = await boardCardsHealResult({
+      cfg,
+      node: explodingIfCardKeyListed(node),
+      slugs: [unmembered.slug],
+      apply: true,
+      json: true,
+    });
+
+    // Named explicitly via `--slug`, so it IS the candidate set this run —
+    // no rollup, no scan, just the point-read this file's other tests
+    // already prove every action goes through.
+    const action = report.actions.find((a) => a.slug === unmembered.slug);
+    expect(action?.action).toBe("upsert-truth");
+    expect(report.healed).toBe(1);
+    expect(report.discovery_failed).toBeNull();
   });
 });
 
@@ -251,6 +232,11 @@ describe("a heal with BoardCards unbound must not claim repairs it cannot write"
     node = fakeNode();
     seedBoard(node, "default");
     seedCardTruth(node, c);
+    // A stale-column membership row, not a missing one: with the discovery
+    // scan gone, only BoardCards HashRange (or the rollup) can offer a
+    // candidate, so this fixture must give heal something to find via the
+    // partition rather than relying on scan-only discovery.
+    seedMembership(node, c, { column: "wrong-column", position: "z" });
   });
 
   test("it reports NOT CHECKED rather than a per-card repair count", async () => {
@@ -276,6 +262,6 @@ describe("a heal with BoardCards unbound must not claim repairs it cannot write"
     const { report } = await boardCardsHealResult({ cfg, node, json: true });
 
     expect(report.board_cards_bound).toBe(true);
-    expect(report.actions.find((a) => a.slug === c.slug)?.action).toBe("upsert-truth");
+    expect(report.actions.find((a) => a.slug === c.slug)?.action).toBe("delete-stale-and-upsert");
   });
 });

@@ -26,14 +26,13 @@ import {
   type BoardCardsReadDivergence,
 } from "../board-cards.ts";
 import { BOARD_CARDS_FIELDS } from "../schemas.ts";
-import { readCardListIndex, cardListIndexIsSuperseded, type CardSummary } from "../card-list-index.ts";
+import { readCardListIndex, type CardSummary } from "../card-list-index.ts";
 import {
   cardExists,
   findCardSummaryForReconcile,
   findMilestone,
   isMilestoneState,
   listBoards,
-  scanCardSummariesForReconcile,
   type Card,
   emptyStructuredFields,
 } from "../record.ts";
@@ -478,64 +477,48 @@ export async function boardCardsHealResult(
 
   const slugFilter = opts.slugs?.length ? new Set(opts.slugs) : null;
 
-  // Bulk discovery of slugs that may have no BoardCards row. Candidates only —
-  // every one is verified by a point-read of Card truth below.
+  // Candidate slugs for "missing BoardCards row" repair. Every one is still
+  // verified by a point-read of Card truth below — this set only NAMES
+  // candidates, it never authorizes a write.
   //
-  // Card scan first where BoardCards is bound: the `all_cards` rollup is a
-  // lost-update-prone copy (whole-document read-modify-write, no CAS), so a card
-  // it dropped was invisible to heal forever, and its write is now retired. Card
-  // is the source of truth, so scanning it finds rows missing from BOTH indexes.
-  // A scan is correct in a reconciler; it is only banned on hot read paths.
+  // No Card scan, named or unnamed. This used to run a full Card key-list
+  // enumeration (`scanCardSummariesForReconcile`, list + hydrate every row)
+  // on EVERY invocation, scoped or not, to catch a card missing from BOTH the
+  // BoardCards partitions and the legacy rollup. Measured against the primary
+  // 2026-09-04: client `kanban-groom-board-cards-heal`, schema `Card`, 108305
+  // queries over 16h45m (~6465/h), 4h49m of cumulative hydrate time — LastDB
+  // has no scan, and this was one in a client the node cannot distinguish
+  // from a hot read path. See
+  // papercut-fkanban-board-cards-heal-slug-still-scans-card-list-20260903.
   //
-  // `all_cards` is still unioned in while it holds entries, so a node that has
-  // not cut over — and a cutover node whose index is not yet cleared — keeps the
-  // old discovery too. Its tombstones (entries whose Card is gone) cost one
-  // point-read each and then fall out as "no rows, no card".
-  // SLUGS ONLY. Discovery names candidates; it never says anything about where
-  // they live. This used to keep the whole scan row and read `.board` off it to
-  // pick a partition — but the scan does not establish `board` (blank on 99 of
-  // 410 winning rows on the live primary, 2026-07-31), and the 47 slugs the
-  // scan returns twice resolve last-write-wins, so which of the two rows won
-  // was arbitrary. Truth decides the board, below, after a keyed read.
+  // `--slug <s>` already knows exactly which cards to heal, so it seeds the
+  // candidate set directly and skips discovery (including the rollup read)
+  // entirely — there is nothing to discover when the caller already named
+  // the target.
+  //
+  // Without `--slug`, the legacy `all_cards` rollup remains the only
+  // still-cheap discovery source: one point-read of a single document, not an
+  // enumeration. It is frozen wherever `board_cards` is bound
+  // (`cardListIndexIsSuperseded` — every node in production today), so on
+  // those nodes it holds whatever it did at cutover, typically empty. That is
+  // an accepted, explicit gap this change reopens: a card whose Card record
+  // is live but carries NO BoardCards row on ANY board, and is also absent
+  // from the frozen rollup, is not discoverable by this command without a
+  // scan. BoardCards HashRange (the per-board partition reads below) remains
+  // the membership source for every slug that DOES have a row somewhere,
+  // scoped or not.
   const candidateSlugs = new Set<string>();
-  // Non-null once the scan has failed. Reported, never swallowed — see below.
-  let discoveryFailed: string | null = null;
-  if (cardListIndexIsSuperseded(opts.cfg)) {
-    try {
-      for (const c of await scanCardSummariesForReconcile(opts.node, opts.cfg)) {
-        if (c.slug) candidateSlugs.add(c.slug);
-      }
-    } catch (err) {
-      // THIS IS NOT A FALLBACK, and the comment that used to sit here said it
-      // was. `cardListIndexIsSuperseded` is true exactly when `board_cards` is
-      // bound — i.e. whenever this branch runs at all — and both
-      // `writeCardListIndex` and `patchCardListIndex` return early in that
-      // case. The rollup read below is therefore frozen at whatever it held
-      // when the cutover happened, and on the primary
-      // `groom card-list-index-retire` has already emptied it. Measured
-      // 2026-08-05: rollup 0 entries, scan 217 distinct slugs in 822ms. So the
-      // "fallback" is a fallback to ZERO candidates.
-      //
-      // The consequence is asymmetric with the partition-read failure handled
-      // further down, which is why only that one had a signal. A refused LEAD
-      // costs heal rows it could have DELETED — under-reaping, the safe
-      // direction. A refused SCAN costs heal every card whose Card record is
-      // live and whose BoardCards row is missing: cards invisible to
-      // `kanban list` entirely, which is the condition this command exists to
-      // repair, and which nothing else re-derives.
-      //
-      // Still not fatal, for the reason `sweepBoardCardsPartition` gives about
-      // its own failures: heal under-repairing is safe, heal not running is
-      // not, and `service_timeout` / "too many concurrent reads" are documented
-      // load signals on this node rather than a broken one. So the run
-      // continues on the partitions it CAN read — and says, where the operator
-      // reads the result, that it did not look.
-      discoveryFailed = err instanceof Error ? err.message : String(err);
+  // Always null now — nothing left in this function can fail to discover.
+  // Kept on the report shape for API stability (see `discoveryWarn` below,
+  // which stays dead code until a future discovery source needs it again).
+  const discoveryFailed: string | null = null;
+  if (slugFilter) {
+    for (const slug of slugFilter) candidateSlugs.add(slug);
+  } else {
+    const indexed = (await readCardListIndex(opts.node, opts.cfg)) ?? [];
+    for (const c of indexed) {
+      if (c.slug) candidateSlugs.add(c.slug);
     }
-  }
-  const indexed = (await readCardListIndex(opts.node, opts.cfg)) ?? [];
-  for (const c of indexed) {
-    if (c.slug) candidateSlugs.add(c.slug);
   }
 
   // Raw BoardCards partitions (may include multi-row orphans per slug).

@@ -1,13 +1,23 @@
-// A scan may SUPPLY a board. It may never DENY one.
+// A discovery source may SUPPLY a board. It may never DENY one.
 //
 // Sibling of `scan-ghost-row-false-empty-body.test.ts`, which pinned the same
-// rule for `body`. This file pins the OTHER field `board_cards_heal` was
-// reading off the Card full scan: `board`.
+// rule for `body`. This file pins the OTHER field `board_cards_heal` used to
+// read off a discovery source: `board`.
 //
-// `scanCardSummariesForReconcile` is documented "SLUG ORACLE ONLY", and the
-// primary bears that out — measured 2026-07-31, 99 of 410 winning scan rows
-// carry `board: ""` on cards that point-read fine, and 47 slugs come back
-// twice, so which row wins a last-write-wins map is arbitrary. Heal honoured
+// The discovery source was the Card full scan (`scanCardSummariesForReconcile`)
+// until kanban-groom-heal-stop-card-list-scan-20260904 removed it entirely — it
+// cost 108305 Card-schema queries over 16h45m on the primary. Discovery for a
+// candidate with no membership row anywhere is now the legacy `all_cards`
+// rollup only (see `board_cards_heal.ts`), which carries the exact same
+// "SLUG ORACLE ONLY" contract the scan did: a caller must not trust any field
+// on a rollup row except `slug`. This file's fixture now seeds that hazard
+// into the rollup instead of a scan ghost row — same defect class, current
+// discovery source.
+//
+// `scanCardSummariesForReconcile` was documented "SLUG ORACLE ONLY", and the
+// primary bore that out — measured 2026-07-31, 99 of 410 winning scan rows
+// carried `board: ""` on cards that point-read fine, and 47 slugs came back
+// twice, so which row won a last-write-wins map was arbitrary. Heal honoured
 // that for WRITES (every repair is authored by a Card point read) but not for
 // two SELECTION decisions:
 //
@@ -41,8 +51,15 @@ const cfg: Config = {
   nodeUrl: "http://unused.invalid",
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
-  schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
+  schemaHashes: {
+    card: "cardhash",
+    board: "boardhash",
+    board_cards: "boardcardshash",
+    card_list_index: "cardlistindexhash",
+  },
 };
+
+const CARD_LIST_INDEX_KEY = "all_cards";
 
 const TEAM = "team";
 
@@ -109,17 +126,22 @@ function seedMembership(node: FakeNode, c: Card): void {
 }
 
 /**
- * The shape the primary actually returns: a second Card row under a DIFFERENT
- * key, carrying the same `slug` and a BLANK `board`. `HashKey(slug)` misses it;
- * only a whole-schema key list that includes every hash would see it. Seeded
- * after truth so it also lands last in scan order — which is what made a
- * last-write-wins map pick it.
+ * A rollup entry naming a slug with a BLANK `board` — the current discovery
+ * source's equivalent of the retired scan's ghost row (99 of 410 winning scan
+ * rows carried `board: ""` on cards that point-read fine, measured
+ * 2026-07-31). `readCardListIndex` only ever extracts `.slug` from a row, but
+ * this fixture seeds a wrong `board` anyway so a regression that started
+ * trusting it would be caught the same way the scan-era one was.
  */
-function seedBlankBoardScanRow(node: FakeNode, c: Card): void {
+function seedBlankBoardRollupEntry(node: FakeNode, slugs: string[]): void {
   node.seed({
-    schemaHash: "cardhash",
-    keyHash: `ghost-key-for-${c.slug}`,
-    fields: cardToFields({ ...c, board: "" }),
+    schemaHash: "cardlistindexhash",
+    keyHash: CARD_LIST_INDEX_KEY,
+    fields: {
+      key: CARD_LIST_INDEX_KEY,
+      payload_json: JSON.stringify(slugs.map((slug) => ({ slug, board: "" }))),
+      updated_at: nowIso(),
+    },
   });
 }
 
@@ -136,28 +158,26 @@ describe("heal must not take a card's board from the scan", () => {
     seedBoard(node, TEAM);
 
     seedCardTruth(node, unmembered);
-    seedBlankBoardScanRow(node, unmembered);
-
     seedCardTruth(node, healthy);
     seedMembership(node, healthy);
-    seedBlankBoardScanRow(node, healthy);
+    seedBlankBoardRollupEntry(node, [unmembered.slug, healthy.slug]);
   });
 
   // NON-VACUITY. Every assertion below is only meaningful if the fixture really
-  // reproduces the hazard: the scan must return a blank board LAST, while the
-  // keyed read returns the real one. A fixture that quietly stopped doing that
-  // would make the rest of this file pass for the wrong reason.
-  test("the fixture reproduces the node: scan says board=\"\", keyed read says team", async () => {
-    const scan = await node.queryAll({
-      schemaHash: "cardhash",
-      fields: ["slug", "board"]
+  // reproduces the hazard: the rollup must carry a blank board while the keyed
+  // read returns the real one. A fixture that quietly stopped doing that would
+  // make the rest of this file pass for the wrong reason.
+  test("the fixture reproduces the hazard: rollup says board=\"\", keyed read says team", async () => {
+    const rollup = await node.queryAll({
+      schemaHash: "cardlistindexhash",
+      fields: ["key", "payload_json"],
+      filter: { HashKey: CARD_LIST_INDEX_KEY },
     });
-    const rows = scan.results.filter(
-      (r) => (r.fields as Record<string, unknown>).slug === unmembered.slug,
-    );
-    expect(rows).toHaveLength(2);
-    // Last-write-wins over this scan lands on the BLANK board — the old bug.
-    expect((rows[rows.length - 1]!.fields as Record<string, unknown>).board).toBe("");
+    const payload = JSON.parse(
+      (rollup.results[0]!.fields as Record<string, unknown>).payload_json as string,
+    ) as Array<{ slug: string; board: string }>;
+    const row = payload.find((r) => r.slug === unmembered.slug);
+    expect(row?.board).toBe("");
 
     const keyed = await node.queryAll({
       schemaHash: "cardhash",
@@ -222,9 +242,9 @@ describe("heal must not take a card's board from the scan", () => {
     await boardCardsHealResult({ cfg, node, board: "default", json: true });
     const fresh = node.reads.slice(before);
 
-    // Key-list hydrates every live Card hash, including `healthy`. The
+    // The rollup names `healthy` as a candidate with a blank board. The
     // membership filter must still be answered by the TEAM partition spine,
-    // not by adopting the ghost scan-row's blank board.
+    // not by adopting that blank board.
 
     // And the cheap census really is what ruled it out.
     const teamPartitionReads = fresh.filter(

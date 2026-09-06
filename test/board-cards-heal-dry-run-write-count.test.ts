@@ -37,8 +37,15 @@ const cfg: Config = {
   nodeUrl: "http://unused.invalid",
   schemaServiceUrl: "http://unused.invalid",
   userHash: "test-user",
-  schemaHashes: { card: "cardhash", board: "boardhash", board_cards: "boardcardshash" },
+  schemaHashes: {
+    card: "cardhash",
+    board: "boardhash",
+    board_cards: "boardcardshash",
+    card_list_index: "cardlistindexhash",
+  },
 };
+
+const CARD_LIST_INDEX_KEY = "all_cards";
 
 const BOARD = "default";
 
@@ -87,6 +94,23 @@ function seedBoard(node: FakeNode): void {
       updated_at: now,
     }),
   });
+  // `listBoards` self-heals `all_boards` (a Board scan + write-back) whenever
+  // that rollup is missing — harmless in production, but with `card_list_index`
+  // now bound in `cfg` for the candidate-discovery fix below, an unseeded
+  // rollup here would add a real (if incidental) write to every dry run in
+  // this file. Seed it converged so heal's own writes are the only ones this
+  // file measures.
+  node.seed({
+    schemaHash: "cardlistindexhash",
+    keyHash: "all_boards",
+    fields: {
+      key: "all_boards",
+      payload_json: JSON.stringify([
+        { slug: BOARD, title: BOARD, body: "", columns: [...DEFAULT_COLUMNS], created_at: now, updated_at: now },
+      ]),
+      updated_at: now,
+    },
+  });
 }
 
 function member(node: FakeNode, c: Card): void {
@@ -116,10 +140,23 @@ function multiRowOrphan(rows: number): FakeNode {
 function twoMissingMemberships(): FakeNode {
   const node = fakeNode();
   seedBoard(node);
-  for (const slug of ["needs-a-row-a", "needs-a-row-b"]) {
+  const slugs = ["needs-a-row-a", "needs-a-row-b"];
+  for (const slug of slugs) {
     const c = card(slug, slug);
     node.seed({ schemaHash: "cardhash", keyHash: c.slug, fields: cardToFields(c) });
   }
+  // No BoardCards row for either slug — discovering them (without a Card
+  // scan, see kanban-groom-heal-stop-card-list-scan-20260904) requires naming
+  // them in the legacy `all_cards` rollup.
+  node.seed({
+    schemaHash: "cardlistindexhash",
+    keyHash: CARD_LIST_INDEX_KEY,
+    fields: {
+      key: CARD_LIST_INDEX_KEY,
+      payload_json: JSON.stringify(slugs.map((slug) => ({ slug }))),
+      updated_at: nowIso(),
+    },
+  });
   return node;
 }
 
