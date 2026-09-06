@@ -1186,8 +1186,11 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "json-arr
 // Per-command allowed flags (beyond UNIVERSAL_FLAGS), keyed by the same command
 // names as COMMAND_HELP. Derived from each command's `--help` text and the
 // flags its dispatch branch actually reads. Commands absent here (e.g. `mark`, `show`,
-// `rm`, `mcp`, `version`) accept only the universal flags.
+// `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
+  // Bare `rm <slug>` deletes a live card. `--board`/`--column` switch to the
+  // row-only orphan path: no Card, address the BoardCards row directly.
+  rm: new Set(["board", "column"]),
   doctor: new Set(["board", "stale-rows"]),
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name", "accept-schema-repin"]),
   add: new Set([
@@ -2616,7 +2619,13 @@ async function dispatch(
       const extra = rejectExtraPositionals(positionals, 2, "rm <slug>");
       if (extra !== undefined) return extra;
       const ctx = loadCtx({ verbose });
-      const res = await rmCmd({ cfg: ctx.cfg, node: ctx.node, slug });
+      const res = await rmCmd({
+        cfg: ctx.cfg,
+        node: ctx.node,
+        slug,
+        board: values.board as string | undefined,
+        column: values.column as string | undefined,
+      });
       console.log(formatRm(res, values.json as boolean | undefined));
       return 0;
     }
