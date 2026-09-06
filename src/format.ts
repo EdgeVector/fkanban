@@ -77,6 +77,9 @@ export interface RmResult {
    * branch of `formatRm`'s unit test, which now cover nothing reachable.
    */
   orphanedDependents: string[];
+  /** Set when `--board`/`--column` deleted a BoardCards row with no Card. */
+  rowOnly?: boolean;
+  deletedRows?: number;
 }
 
 export interface MilestoneAddResult {
@@ -221,7 +224,10 @@ export function formatTag(res: TagResult, json?: boolean): string {
 }
 
 export function formatRm(res: RmResult, json?: boolean): string {
-  return emit(res, `removed card ${res.slug}`, json);
+  const text = res.rowOnly
+    ? `removed orphan BoardCards row ${res.slug} (${res.deletedRows ?? 0} row${res.deletedRows === 1 ? "" : "s"})`
+    : `removed card ${res.slug}`;
+  return emit(res, text, json);
 }
 
 // Name a silently-healed driver identically wherever it happened, so `milestone

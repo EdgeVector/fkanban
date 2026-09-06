@@ -4,15 +4,31 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import { FkanbanError } from "../client.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
-import { deleteCardRecord, ensureBoardRecord, listCardStatuses, requireCard } from "../record.ts";
+import {
+  deleteCardRecord,
+  ensureBoardRecord,
+  findCard,
+  findMilestone,
+  isMilestoneState,
+  listCardStatuses,
+  requireCard,
+} from "../record.ts";
 import { proofHoldReason, readProofCardRefs } from "../proof_card_refs.ts";
 import { DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "../schemas.ts";
+import { deleteBoardCardRowsBySk, listBoardCardsPartitionSpine } from "../board-cards.ts";
+import { type RmResult } from "../format.ts";
 
 export async function rmCmd(opts: {
   cfg: Config;
   node: NodeClient;
   slug: string;
-}): Promise<{ slug: string; orphanedDependents: string[] }> {
+  /** Row-only orphan delete: requires both `board` and `column`. */
+  board?: string;
+  column?: string;
+}): Promise<RmResult> {
+  if (opts.board !== undefined || opts.column !== undefined) {
+    return await rmOrphanRow(opts);
+  }
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Before deleting, scan live cards for dependents. A deleted dep becomes
   // unresolvable to normal reads, so refuse the delete instead of creating a
@@ -67,4 +83,84 @@ export async function rmCmd(opts: {
 
   await deleteCardRecord(opts, card);
   return { slug: card.slug, orphanedDependents: [] };
+}
+
+/**
+ * Delete a BoardCards row that has no backing Card record — the shape
+ * `board-cards-heal` calls a card orphan, targeted by an operator who already
+ * knows the exact `board`/`column` (from `kanban list --column <x>`, which
+ * shows the ghost, rather than `kanban show`/`kanban rm`, which both refuse it
+ * with "No card with slug").
+ *
+ * `groom board-cards-heal --slug <slug> --apply` is the general-purpose orphan
+ * reaper and stays the only path that DISCOVERS an orphan's board/column. This
+ * path never discovers one: it takes both coordinates from the caller and does
+ * a single column-scoped prefix read, so it costs one query instead of heal's
+ * whole-partition scan (N field-lead queries plus a cross-board membership
+ * census — minutes on a board carrying hundreds of rows, measured live
+ * 2026-09-06 on `mini-cutover-post-flip-soak`). That is a real gap: heal is
+ * "the ONLY path that may delete BoardCards rows for orphans" as a matter of
+ * WHERE the delete is authorized (an orphan verdict, never a guess), not WHERE
+ * it is nominated from — the request still requires proving no Card exists and
+ * (for a milestone-state column) no Milestone claims the slug, exactly as heal
+ * does, before it deletes anything.
+ */
+async function rmOrphanRow(opts: {
+  cfg: Config;
+  node: NodeClient;
+  slug: string;
+  board?: string;
+  column?: string;
+}): Promise<RmResult> {
+  const board = opts.board?.trim();
+  const column = opts.column?.trim();
+  if (!board || !column) {
+    throw new FkanbanError({
+      code: "orphan_row_requires_board_and_column",
+      message: "Deleting a BoardCards row by address requires both --board and --column.",
+      hint:
+        "Find them with `kanban list --column <x> --json` (the column that lists the ghost), " +
+        `then retry \`kanban rm ${opts.slug} --board <board> --column <column>\`.`,
+    });
+  }
+
+  const existing = await findCard(opts.node, opts.cfg, opts.slug);
+  if (existing) {
+    throw new FkanbanError({
+      code: "card_exists",
+      message: `Card "${opts.slug}" still exists (column "${existing.column}") — --board/--column is only for a row with no Card.`,
+      hint: `Use \`kanban rm ${opts.slug}\` (no --board/--column) to delete the live card.`,
+    });
+  }
+
+  const spine = await listBoardCardsPartitionSpine(opts.node, opts.cfg, board, { column });
+  if (spine === null) {
+    throw new FkanbanError({
+      code: "board_cards_not_bound",
+      message: "BoardCards is not bound in this config; cannot address rows by board/column.",
+    });
+  }
+  const sks = spine.filter((row) => row.slug === opts.slug).map((row) => row.sk);
+  if (sks.length === 0) {
+    throw new FkanbanError({
+      code: "row_not_found",
+      message: `No BoardCards row for "${opts.slug}" in ${board}/${column}.`,
+      hint: "Nothing to delete — the row may already be gone, or the column is wrong.",
+    });
+  }
+
+  if (isMilestoneState(column)) {
+    const ms = await findMilestone(opts.node, opts.cfg, opts.slug);
+    if (ms) {
+      throw new FkanbanError({
+        code: "row_is_milestone_membership",
+        message:
+          `"${opts.slug}" in ${board}/${column} is live milestone-state membership, not a card orphan.`,
+        hint: "Use `kanban milestone state` to change it instead of deleting the row.",
+      });
+    }
+  }
+
+  const deletedRows = await deleteBoardCardRowsBySk(opts.node, opts.cfg, board, sks);
+  return { slug: opts.slug, orphanedDependents: [], rowOnly: true, deletedRows };
 }
