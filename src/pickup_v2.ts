@@ -1,3 +1,9 @@
+import {
+  assertLivePrMilestone,
+  normalizeBlockStatus,
+  normalizeKind,
+} from "./record.ts";
+
 export type PickupV2Card = {
   slug: string;
   column: string;
@@ -6,7 +12,118 @@ export type PickupV2Card = {
   repo: string;
   deps: string[];
   surfaces: string[];
+  /**
+   * Eligibility fields. Optional on the TYPE so existing fixtures and callers
+   * still compile, but NOT optional in practice: `PICKUP_V2_ELIGIBILITY_FIELDS`
+   * lists them and `pickup_claim_v2` must project every one. A field left
+   * `undefined` is treated as "not read", which is why the projection is pinned
+   * by a test — an unprojected hold is exactly the bug this pair prevents.
+   */
+  board?: string;
+  kind?: string;
+  block_status?: string;
+  milestone?: string;
 };
+
+/**
+ * The card fields {@link pickupV2HoldReason} reads. Any keyed list that feeds
+ * {@link firstEligible} has to project all of them.
+ *
+ * WHY THIS CONSTANT EXISTS (2026-09-07): `pickup claim-v2 --dry-run` returned
+ * `result=claimed` for `fold-aws-ci-fallback-20260906`, a card carrying
+ * `block_status=deferred`, while `pickup status` counted it parked and
+ * `pickup explain` said `eligible_for_claim: NO` with two failing gates. The
+ * selection code was not wrong about the card it saw — the todo projection
+ * simply never fetched `block_status`, so the hold could not be seen and came
+ * back `""` in the claim envelope too. The routine-local ready gate derives
+ * readiness from that dry-run, so six pickup lanes were dispatched at work the
+ * board itself forbids in `default/todo`.
+ * Papercut: papercut-pickup-gate-dry-run-accepts-unattached-outcome-20260906.
+ */
+export const PICKUP_V2_ELIGIBILITY_FIELDS = [
+  "board",
+  "kind",
+  "block_status",
+  "milestone",
+] as const;
+
+export const HUMAN_BOARD_SLUG = "human";
+
+/**
+ * Field-local mirror of the `classifyPickupCard` rules that keep a card out of
+ * the pickup lane, in the same order that classifier applies them.
+ *
+ * Deliberately field-local: every rule reads only fields already on the
+ * candidate, so this adds ZERO node reads. `claim-v2` exists because
+ * `pickup status` measured 86.8s against 2.74s for the keyed dry-run; a fix
+ * that re-ran the full classifier would hand back the cost the cheap path was
+ * built to avoid.
+ *
+ * Returns a human-readable reason, or `null` when nothing holds the card.
+ * A field that was not projected (`undefined`) cannot hold the card — see
+ * {@link PICKUP_V2_ELIGIBILITY_FIELDS}.
+ */
+export type PickupV2EligibilityOpts = {
+  /**
+   * Mirror of `cfg.enforceLivePrMilestone`, the same flag `classifyPickupCard`
+   * reads as `requireLiveMilestone` and `move`/`add` pass to the write guard.
+   * The unattached-outcome rule is POLICY, not a defect in the card, so it must
+   * be enforced here exactly when the rest of the CLI enforces it. Hardcoding
+   * it would swap one status/claim disagreement for its mirror image.
+   */
+  enforceLivePrMilestone?: boolean;
+};
+
+export function pickupV2HoldReason(
+  card: PickupV2Card,
+  opts?: PickupV2EligibilityOpts,
+): string | null {
+  if (card.board !== undefined && card.board === HUMAN_BOARD_SLUG) {
+    return "card is parked on the human board";
+  }
+
+  if (card.block_status !== undefined) {
+    const blockStatus = normalizeBlockStatus(card.block_status);
+    if (blockStatus === "needs_human" || blockStatus === "design_first") {
+      return `intentional hold: ${blockStatus}`;
+    }
+    if (blockStatus === "deferred") return "deferred hold";
+  }
+
+  if (card.kind !== undefined) {
+    const kind = normalizeKind(card.kind);
+    if (kind !== "pr") return `non-pickup kind: ${kind}`;
+  }
+
+  // Unattached outcome. `livePrMilestoneGate` is pure and field-local (slug,
+  // kind, column, milestone), so asking it here costs nothing and keeps one
+  // implementation of the rule. Pass no milestone state: without the milestone
+  // map only the "no milestone at all" arm can fire, which is the arm that
+  // matches this gate on an unhydrated projection. `classifyPickupCard` makes
+  // the identical call when its milestone map is absent.
+  if (
+    opts?.enforceLivePrMilestone === true &&
+    card.kind !== undefined &&
+    card.milestone !== undefined
+  ) {
+    try {
+      assertLivePrMilestone(
+        {
+          slug: card.slug,
+          kind: card.kind,
+          column: card.column,
+          milestone: card.milestone,
+        },
+        false,
+        { milestoneState: "", enforce: true },
+      );
+    } catch (err) {
+      return err instanceof Error ? err.message : "unattached outcome";
+    }
+  }
+
+  return null;
+}
 
 export type DependencyStatuses = Readonly<Record<string, boolean>>;
 
@@ -92,11 +209,16 @@ export function firstEligible<T extends PickupV2Card>(
   todo: readonly T[],
   doing: readonly PickupV2Card[],
   dependencyStatuses: DependencyStatuses,
+  opts?: PickupV2EligibilityOpts,
 ): T | undefined {
   const ordered = [...todo].sort(comparePickupV2Cards);
   return ordered.find((candidate) =>
     candidate.column === "todo" &&
     candidate.repo.trim().length > 0 &&
+    // A stored hold outranks board order. Without this the first card in the
+    // range wins even when the board forbids it in `default/todo`, and an
+    // ineligible card at the top also hides every ready card behind it.
+    pickupV2HoldReason(candidate, opts) === null &&
     dependenciesAreTerminal(candidate, dependencyStatuses) &&
     !doing.some((peer) => peer.column === "doing" && surfacesOverlap(candidate, peer))
   );

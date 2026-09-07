@@ -1,6 +1,10 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
-import { firstEligible, type DependencyStatuses } from "../pickup_v2.ts";
+import {
+  firstEligible,
+  PICKUP_V2_ELIGIBILITY_FIELDS,
+  type DependencyStatuses,
+} from "../pickup_v2.ts";
 import {
   listCardsByColumn,
   listDependencyStatusesForCards,
@@ -9,7 +13,11 @@ import {
 } from "../record.ts";
 import { claimCard, ClaimConflictError } from "./move.ts";
 
-const TODO_FIELDS = [
+// `PICKUP_V2_ELIGIBILITY_FIELDS` is spread in, not retyped: the projection and
+// the predicate that reads it must not drift. `test/pickup-v2-eligibility.test.ts`
+// pins that every eligibility field is present here, because a hold this list
+// forgets is a hold `firstEligible` cannot see.
+export const TODO_FIELDS = [
   "slug",
   "column",
   "position",
@@ -17,6 +25,7 @@ const TODO_FIELDS = [
   "repo",
   "deps",
   "surfaces",
+  ...PICKUP_V2_ELIGIBILITY_FIELDS,
 ] as const;
 
 const DOING_FIELDS = [
@@ -114,7 +123,9 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
   const liveDoing: Card[] = [...doing];
 
   while (true) {
-    const candidate = firstEligible(todo, liveDoing, statuses);
+    const candidate = firstEligible(todo, liveDoing, statuses, {
+      enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
+    });
     if (!candidate) return { result: "none", dry_run: opts.dryRun === true };
 
     if (opts.dryRun) {
