@@ -24,11 +24,33 @@ describe("planDoingClaim", () => {
     expect(plan).toEqual({ kind: "stamp", assignee: "last-stack-fkanban-pickup" });
   });
 
-  test("keeps existing assignee", () => {
+  // An explicit actor is a statement of intent, and this plan only runs when the
+  // card is NOT already in `doing` — so there is no live claim to protect. A
+  // requeue to default/todo leaves `assignee` set, so keeping the old name here
+  // let `pickup claim --worker B` move a card into doing still owned by A.
+  test("an explicit actor takes over a leftover assignee", () => {
     const plan = planDoingClaim({
       currentAssignee: "already-mine",
       explicitActor: "other",
       env: {},
+    });
+    expect(plan).toEqual({ kind: "stamp", assignee: "other" });
+  });
+
+  test("keeps existing assignee when no explicit actor is given", () => {
+    const plan = planDoingClaim({
+      currentAssignee: "already-mine",
+      env: {},
+    });
+    expect(plan).toEqual({ kind: "keep", assignee: "already-mine" });
+  });
+
+  // An env actor is ambient, not intent: a bare `move … doing` inside a routine
+  // shell must not quietly rename someone else's claim.
+  test("an env actor does not take over an existing assignee", () => {
+    const plan = planDoingClaim({
+      currentAssignee: "already-mine",
+      env: { DRIVEN_BY: "routine", AUTOMATION_ID: "last-stack-fkanban-pickup" },
     });
     expect(plan).toEqual({ kind: "keep", assignee: "already-mine" });
   });

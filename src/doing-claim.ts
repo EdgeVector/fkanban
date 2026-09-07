@@ -41,10 +41,27 @@ export type DoingClaimPlan =
 /**
  * Decide how a move into `doing` should treat assignee.
  *
- * - already assigned → keep (still a durable claim)
- * - explicit / env actor → stamp
+ * - explicit actor (`--worker` / `--assignee`) → stamp, even over a leftover
+ *   assignee (see below)
+ * - already assigned, no explicit actor → keep (still a durable claim)
+ * - env actor → stamp
  * - allowUnclaimed → leave empty (operator opt-out)
  * - else refuse silent unclaimed doing
+ *
+ * WHY THE EXPLICIT ACTOR OUTRANKS `currentAssignee` (2026-09-07): this block
+ * only runs when the card is NOT already in `doing`, so there is no live claim
+ * to protect. A requeue to default/todo clears `branch` and `pr_url`
+ * (`sanitizeDefaultTodoLaneMetadata`) but NOT `assignee`, so a card bounced
+ * back from an orphaned worker sits in `todo` still wearing that worker's name.
+ * Under the old precedence the next `pickup claim --worker B` moved it to
+ * `doing` and KEPT worker A — the claim reported success for a card it did not
+ * take ownership of. Measured 2026-09-07T08:56Z: claim by
+ * `last-stack-fkanban-pickup-w3` returned `claimed:true` while `show` reported
+ * `assignee: last-stack-fkanban-pickup-w2`.
+ *
+ * An env-derived actor still loses to a stored assignee: it is ambient, not a
+ * statement of intent, so a bare `move … doing` inside a routine shell must not
+ * quietly rename someone else's claim.
  */
 export function planDoingClaim(input: {
   currentAssignee?: string | null;
@@ -52,10 +69,13 @@ export function planDoingClaim(input: {
   allowUnclaimed?: boolean;
   env?: Record<string, string | undefined>;
 }): DoingClaimPlan {
+  const explicit = normalizeCreatedBy(input.explicitActor ?? undefined);
+  if (explicit) return { kind: "stamp", assignee: explicit };
+
   const current = normalizeCreatedBy(input.currentAssignee ?? undefined);
   if (current) return { kind: "keep", assignee: current };
 
-  const actor = resolveClaimActor(input.explicitActor, input.env ?? process.env);
+  const actor = resolveClaimActor(undefined, input.env ?? process.env);
   if (actor) return { kind: "stamp", assignee: actor };
 
   if (input.allowUnclaimed) return { kind: "keep", assignee: "" };

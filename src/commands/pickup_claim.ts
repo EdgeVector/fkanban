@@ -45,7 +45,7 @@ import {
   type LaneId,
 } from "../pickup_lanes.ts";
 import { type SituationPreflight } from "../situations.ts";
-import { ClaimConflictError, moveCmd } from "./move.ts";
+import { ClaimConflictError, moveCmd, type MoveResult } from "./move.ts";
 import { claimedRepo, hydrateOverlapPeers, overlapAgainstCards } from "./overlap.ts";
 
 export type PickupClaimOptions = {
@@ -96,7 +96,7 @@ export type PickupClaimCardSummary = {
 
 export type PickupClaimResult = {
   claimed: boolean;
-  /** no-eligible | at-capacity | dry-run | claimed */
+  /** no-eligible | at-capacity | dry-run | claimed | claim-unverified */
   reason: string;
   card?: PickupClaimCardSummary;
   from?: string;
@@ -382,6 +382,82 @@ async function selfHealTargetTodoBlockers(opts: {
   return nextCards;
 }
 
+/**
+ * Re-read the winning candidate's own Card record before claiming it.
+ *
+ * Selection runs on the BoardCards list projection; `pickup explain` classifies
+ * from the Card point read. When those two disagree — a stale or duplicated
+ * membership row still listing a slug under `todo#` after the card moved on —
+ * selection offers a candidate that `explain` already calls
+ * `collision - card is already in doing`, and the claim reported it as won.
+ * One point read of the ONE card about to be claimed settles the disagreement
+ * on the authority `explain` uses, so the two commands answer
+ * `eligible_for_claim` the same way.
+ *
+ * The check mirrors the classifier's collision rule (`pickup.ts`: a card in
+ * `doing` is a collision) and stops there on purpose. A `todo` card carrying a
+ * leftover `assignee` from an orphaned worker is NOT refused: `todo` is the
+ * statement that nobody owns the card, and refusing it would park real work
+ * forever behind a dead worker's name. `planDoingClaim` overwrites that stale
+ * name with the claiming worker.
+ */
+async function confirmCandidateClaimable(opts: {
+  cfg: Config;
+  node: NodeClient;
+  candidate: Card;
+}): Promise<{ ok: true; card: Card } | { ok: false; skip: PickupClaimSkip; column: string }> {
+  const fresh = await findCard(opts.node, opts.cfg, opts.candidate.slug);
+  if (!fresh) {
+    return {
+      ok: false,
+      column: "",
+      skip: {
+        slug: opts.candidate.slug,
+        reason: "card_vanished",
+        detail: "listed for pickup but has no Card record",
+      },
+    };
+  }
+  if (fresh.column !== "todo") {
+    const owner = (fresh.assignee ?? "").trim();
+    return {
+      ok: false,
+      column: fresh.column,
+      skip: {
+        slug: fresh.slug,
+        reason: "collision",
+        detail: `current=${fresh.column}${owner ? ` owner=${owner}` : ""}`,
+      },
+    };
+  }
+  return { ok: true, card: fresh };
+}
+
+/**
+ * Did the move that just returned actually hand this worker the card?
+ *
+ * `claimed:true` is a claim of ownership, so it needs evidence of ownership,
+ * not merely evidence that a command returned. `moveCmd` reports the column it
+ * moved the card FROM and the assignee it wrote, which is enough to answer
+ * without a second read — and a second read would not answer it anyway, since
+ * the keyed Card read can still serve the pre-claim row right after the write
+ * (`test/pickup-claim-show-coherence.test.ts`).
+ *
+ * Returns null when the claim is sound, or a description of the gap.
+ */
+function claimOwnershipGap(moved: MoveResult, worker: string | undefined): string | null {
+  if (moved.from !== "todo") {
+    return `move reported from=${moved.from}, not a todo->doing transition`;
+  }
+  const requested = (worker ?? "").trim();
+  if (!requested) return null;
+  const stamped = (moved.assignee ?? "").trim();
+  if (stamped !== requested) {
+    return `move stamped assignee=${stamped || "(none)"} claim=${moved.claim ?? "(none)"}, requested worker=${requested}`;
+  }
+  return null;
+}
+
 export async function pickupClaimResult(opts: PickupClaimOptions): Promise<PickupClaimResult> {
   const board = opts.board ?? "default";
   const preferRepo = normalizeRepoList(opts.preferRepo);
@@ -531,11 +607,32 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
       ? { overlap_unadjudicated: overlap.warnings }
       : {};
 
+    // Settle selection against the Card record before reporting anything about
+    // this card — the dry run makes the same claim about claimability that the
+    // real claim does, so it needs the same evidence.
+    const confirmed = await confirmCandidateClaimable({
+      cfg: opts.cfg,
+      node: opts.node,
+      candidate,
+    });
+    if (!confirmed.ok) {
+      skipped.push(confirmed.skip);
+      // Keep local board state honest so later candidates' overlap gate sees
+      // where this card actually is.
+      if (confirmed.column) {
+        liveCards = liveCards.map((c) =>
+          c.slug === candidate.slug ? { ...c, column: confirmed.column } : c
+        );
+      }
+      continue;
+    }
+    const claimable = confirmed.card;
+
     if (opts.dryRun) {
       return {
         claimed: true,
         reason: "dry-run",
-        card: cardSummary(candidate, priorityOf(candidate)),
+        card: cardSummary(claimable, priorityOf(claimable)),
         from: "todo",
         to: "doing",
         worker: opts.worker,
@@ -554,12 +651,36 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
       const moved = await moveCmd({
         cfg: opts.cfg,
         node: opts.node,
-        slug: candidate.slug,
+        slug: claimable.slug,
         column: "doing",
         expectColumn: "todo",
         situationPreflight: opts.situationPreflight,
         worker: opts.worker,
       });
+
+      // A move that did not take ownership is not a claim. Reported as one, it
+      // sends a worker to build a card another worker owns, and it hides the
+      // defect behind a success envelope — measured 2026-09-07T08:56Z, where
+      // `claimed:true` came back for a card `show` still attributed to a
+      // different worker. Answered from the write result, not a re-read.
+      const gap = claimOwnershipGap(moved, opts.worker);
+      if (gap) {
+        skipped.push({
+          slug: claimable.slug,
+          reason: "claim_unverified",
+          detail: gap,
+        });
+        return {
+          claimed: false,
+          reason: "claim-unverified",
+          scanned_ready: readyCards.length,
+          todo_count: todoCount,
+          ...todoBlockerFields(diagnostics),
+          skipped,
+          worker: opts.worker,
+          diagnostics,
+        };
+      }
 
       // Do not re-read and re-write here. The keyed Card read can still serve
       // the pre-claim row after move returns. A former fallback assignee stamp
@@ -567,9 +688,9 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
       // durable claim. `moved` is the write result; the response needs its
       // placement and owner, while `show` joins the same claim projection.
       const claimedCard: Card = {
-        ...candidate,
+        ...claimable,
         column: moved.to,
-        assignee: moved.assignee ?? candidate.assignee,
+        assignee: moved.assignee ?? claimable.assignee,
         updated_at: nowIso(),
       };
 
