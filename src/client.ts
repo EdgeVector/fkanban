@@ -352,6 +352,16 @@ export type LoadedSchema = {
   // `null` when the node omits `key` (older nodes); callers must then fall back
   // rather than treat a missing layout as a match.
   key: { hash_field: string; range_field: string | null } | null;
+  // Catalog lifecycle state (`Available` / `Blocked` / ...) as `/api/schemas`
+  // reports it. Only an `Available` schema answers a name resolution or accepts
+  // a write, so every claimant count fkanban derives from this list is scoped to
+  // it. `null` when the node omits the field; `isAvailableSchema` reads that as
+  // Available, because a node that lists a schema at all has it loaded.
+  //
+  // Optional so it matches `LoadedSchemaCandidate` in `schemas.ts` — the pure
+  // structural type every resolver takes. A required field here would let the
+  // two shapes drift apart on the one property that decides claimant counts.
+  state?: string | null;
 };
 
 // Read a `/api/schemas` entry's key layout. Returns `null` — NOT a zero value —
@@ -1250,6 +1260,7 @@ export function newNodeClient(opts: {
           ? (s.fields as unknown[]).filter((v): v is string => typeof v === "string")
           : [],
         key: readKeyLayout(s.key),
+        state: typeof s.state === "string" && s.state.length > 0 ? s.state : null,
       }));
     },
     async getSchema(schemaHash: string) {

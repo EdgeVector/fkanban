@@ -51,6 +51,8 @@ import {
   UNIQUE_SCHEMAS,
   allPinnedSchemas,
   checkPinnedSchemaIdentity,
+  duplicateDeclaredSchemaNames,
+  formatDuplicateDeclaredName,
   formatSchemaIdentityMismatch,
   isAcceptedPinDeviation,
   resolveLoadedSchema,
@@ -277,6 +279,58 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // This makes `doctor` red — not cosmetically green — when writes are broken.
   try {
     const loaded = await node.listSchemas();
+
+    // Is each name fkanban declares answered by exactly ONE Available schema?
+    //
+    // Asked before every pin check because it is upstream of all of them. A pin
+    // is a hash, so a machine that HAS a config is immune to a duplicated name
+    // and every check below it reads green. The name is only resolved on a
+    // machine that has no config yet — `kanban init` — which is precisely the
+    // run no doctor observes. That is how this class stayed invisible for six
+    // weeks while it failed the public install path from thelastdb.com/llms.txt
+    // twice (2026-09-04T20:35Z, 2026-09-06T20:15Z): five Available fkanban
+    // schemas answered to `BoardCards_hashrange_v1`, a fresh install resolved
+    // the milestone-keyed rekey predecessor, and init correctly refused.
+    //
+    // ADVISORY, not a red — and that is a decision, not an oversight.
+    //
+    // Card `kanban-boardcards-name-collides-with-rekey-predecessor-20260907`
+    // asked for a FAIL. Two decisions already in this file's tests forbid one:
+    //
+    //   - `doctor-write-probe.test.ts`, "green: config pinned to a wide hash
+    //     survives a narrower WRITABLE version listed first". Measured on the
+    //     primary 2026-07-30: six `fkanban/Card` schemas, four write-compatible,
+    //     a node restart moved the resolver's tiebreak and doctor exited 1 over a
+    //     board whose writes had never broken — advising `kanban init`, which
+    //     declares by definition and returns the same hash, so the red was
+    //     UNCLEARABLE. The settled answer is the `resolution is ambiguous`
+    //     advisory a few checks below: say it, do not gate on it.
+    //   - `doctor-accepted-pin-identity.test.ts`, whose whole subject is "can
+    //     doctor ever go green on the primary?". The primary's `Milestone` and
+    //     `BoardCards_hashrange_v1` both have several Available claimants today,
+    //     and no supported node route retires one (`/api/schemas` has declare and
+    //     get, no rename and no delete — a rename would change the identity hash,
+    //     since `descriptive_name` folds into it). A red no operator can clear is
+    //     the environment the next REAL mismatch arrives into.
+    //
+    // So it is said in full, every run, with the exact claimant hashes, and it
+    // does not gate. `init` no longer depends on the name resolving uniquely
+    // (`correctDeclaredSchemaIdentities` picks the declared identity), so nothing
+    // downstream of this line is broken by the duplication either.
+    const dupes = duplicateDeclaredSchemaNames(loaded);
+    if (dupes.length === 0) {
+      check(true, "declared schema names unique", `${allPinnedSchemas().length} pinned keys`);
+    } else {
+      for (const d of dupes) {
+        info(
+          `${d.key} declared name is not unique`,
+          `${formatDuplicateDeclaredName(d)}. A name resolution (what \`kanban init\` does on a ` +
+            `machine with no config) can return any of them; init picks the declared identity ` +
+            `itself, so this does not break a fresh install. Retire the stale claimants in the ` +
+            `node catalog so "${d.descriptive_name}" addresses one schema.`,
+        );
+      }
+    }
 
     // Identity first, and for ALL SEVEN pinned keys — including the four
     // membership/projection indexes that `resolveLoadedSchema` and

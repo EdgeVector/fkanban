@@ -627,7 +627,19 @@ export type LoadedSchemaCandidate = {
   // See `resolveLoadedSchema` step 2 for why fields alone cannot separate an
   // entity from its own membership index.
   key?: { hash_field: string; range_field: string | null } | null;
+  // Catalog lifecycle state as `/api/schemas` reports it. Only an `Available`
+  // schema answers a name resolution or accepts a write, so every claimant
+  // count in this file is scoped to that state. Absent/empty means the node did
+  // not report one — treated as `Available`, because a node that lists a schema
+  // at all has it loaded, and reading silence as "not available" would make an
+  // older node's catalog look empty rather than unknown.
+  state?: string | null;
 };
+
+/** Does this loaded schema answer name resolutions and accept writes? */
+export function isAvailableSchema(s: { state?: string | null }): boolean {
+  return s.state == null || s.state === "" || s.state === "Available";
+}
 
 export type SchemaResolution =
   // `hash` is the RANKED-BEST write target; `compatible` is every write target,
@@ -899,4 +911,215 @@ export function resolveLoadedSchema(
     .sort((a, b) => b.fields.length - a.fields.length)[0]!;
   const missingFields = localFields.filter((f) => !best.fields.includes(f));
   return { kind: "narrower", hash: best.name, missingFields };
+}
+
+// ---------------------------------------------------------------------------
+// Declared-name claimants: one name, several Available identities
+// ---------------------------------------------------------------------------
+//
+// `descriptive_name` is what `POST /api/apps/declare-schema` resolves on, and
+// the node returns ONE identity for it. Nothing makes that name unique in the
+// catalog, so a rekey that mints a new identity leaves the predecessor holding
+// the same name, and the resolution a FRESH machine gets is whichever of them
+// the node picks. Measured on the primary 2026-09-07: `BoardCards_hashrange_v1`
+// had FIVE Available fkanban schemas -
+//
+//     39a0424f  key=milestone/sk  24 fields   (rekey predecessor)
+//     e2bc8e6d  key=board/sk      24 fields
+//     595de0c7  key=board/sk      22 fields
+//     ad3cf9d6  key=board/sk      23 fields
+//     1ef2e7a3  key=board/sk      29 fields   (the decided product pin)
+//
+// - and a first install resolved the milestone-keyed predecessor, so
+// `kanban init` refused with `board_cards (39a0424f...) is registered as
+// "BoardCards_hashrange_v1" -- key: declared HashRange(board, sk), pinned schema
+// is HashRange(milestone, sk)`. Every machine with a config was immune, because
+// its pin names the identity by hash. Only the public first-install path from
+// thelastdb.com/llms.txt took the resolve path, and it failed there twice
+// (2026-09-04T20:35Z, 2026-09-06T20:15Z, same signature).
+//
+// The refusal is correct and stays. What was missing is that fkanban knew which
+// identity it wanted and never said so: `resolveLoadedSchema` already ranks
+// exactly this candidate set, but it is keyed on `RecordType`, so it structurally
+// cannot be called for the five `EXTRA_SCHEMAS` - `board_cards` among them.
+
+/**
+ * The fields a loaded schema must carry for fkanban to write every field it
+ * emits for `entryKey`.
+ *
+ * Keyed on the CONFIG KEY, not `RecordType`, so it answers for all eight pinned
+ * keys. `card` is the one entry with optional fields: a Card row may omit them,
+ * so a loaded schema missing them is still a usable write target.
+ */
+export function requiredDeclaredFields(entryKey: string, def: SchemaDefinition): string[] {
+  const optional =
+    entryKey === "card" ? new Set<string>(CARD_OPTIONAL_SCHEMA_FIELDS) : new Set<string>();
+  return def.fields.filter((f) => !optional.has(f));
+}
+
+/**
+ * Every Available loaded schema that IS the identity `entry` declares - same
+ * owner app, same descriptive name, same key layout - and can take a write of
+ * every field fkanban emits, ranked best-first.
+ *
+ * The ranking is `resolveLoadedSchema`'s, for the reason documented there:
+ * widest field set first, then hash ascending, never the node's listing order,
+ * which is not stable across restarts.
+ *
+ * The key-layout filter is strict here - `keyLayoutMatches`, not
+ * `checkPinnedSchemaIdentity`'s sibling-hash allowance. A sibling layout is a
+ * deviation an operator may ACCEPT on an existing pin; it is never something to
+ * newly adopt when the exactly-declared identity is sitting in the same catalog.
+ */
+export function declaredIdentityCandidates(
+  entry: { key: string; schema: AddSchemaRequest },
+  loaded: LoadedSchemaCandidate[],
+): string[] {
+  const def = entry.schema.schema;
+  const required = requiredDeclaredFields(entry.key, def);
+  return loaded
+    .filter(
+      (s) =>
+        s.name.length > 0 &&
+        isAvailableSchema(s) &&
+        s.owner_app_id === def.owner_app_id &&
+        s.descriptive_name === def.descriptive_name &&
+        keyLayoutMatches(def.key, s.key) &&
+        required.every((f) => s.fields.includes(f)),
+    )
+    .sort(
+      (a, b) =>
+        b.fields.length - a.fields.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    )
+    .map((s) => s.name);
+}
+
+export type DeclaredIdentityChoice =
+  // The node's resolution already IS the declared identity. Nothing to do.
+  | { kind: "resolved-ok" }
+  // The node resolved a different identity under this name, and the declared
+  // one is loaded - adopt it and say so.
+  | { kind: "corrected"; hash: string; from: string; compatible: string[]; ambiguous: boolean }
+  // The node resolved something else and the declared identity is NOT in the
+  // catalog. There is nothing to correct to; the caller's identity guard refuses.
+  | { kind: "no-candidate"; from: string };
+
+/**
+ * Pick the identity fkanban DECLARED when the node's name resolution handed
+ * back a different one.
+ *
+ * This does NOT relax `assertResolvedSchemaIdentities`. That guard still runs,
+ * on the hash this function returns, and still refuses when no loaded schema is
+ * the declared identity - which is the whole `no-candidate` arm. What changes is
+ * that a catalog holding BOTH the right identity and a stale claimant on its
+ * name now resolves to the right one deterministically, instead of to whichever
+ * the node's resolver reached first.
+ *
+ * Existing installs are unaffected by construction: a correction that moved a
+ * live pin surfaces as a pin MOVE in `schemaPinMoves`, and
+ * `assertNoSilentSchemaRepin` refuses those without `--accept-schema-repin`.
+ */
+export function correctResolvedSchemaIdentity(
+  entry: { key: string; schema: AddSchemaRequest },
+  resolvedHash: string | undefined,
+  loaded: LoadedSchemaCandidate[],
+): DeclaredIdentityChoice {
+  if (!resolvedHash) return { kind: "resolved-ok" };
+  if (checkPinnedSchemaIdentity(entry, resolvedHash, loaded).kind === "ok") {
+    return { kind: "resolved-ok" };
+  }
+  const ranked = declaredIdentityCandidates(entry, loaded);
+  if (ranked.length === 0) return { kind: "no-candidate", from: resolvedHash };
+  const best = ranked[0]!;
+  if (best === resolvedHash) return { kind: "resolved-ok" };
+  return {
+    kind: "corrected",
+    hash: best,
+    from: resolvedHash,
+    compatible: ranked,
+    ambiguous: ranked.length > 1,
+  };
+}
+
+/** One declared name that more than one Available schema answers to. */
+export type DuplicateDeclaredName = {
+  /** The config key that declares this name. */
+  key: string;
+  descriptive_name: string;
+  owner_app_id: string;
+  /** Available claimants whose key layout matches the declaration. */
+  sameLayout: string[];
+  /** Available claimants under the same name with a DIFFERENT key layout. */
+  otherLayout: string[];
+};
+
+/**
+ * Every name fkanban declares that more than one Available schema answers to.
+ *
+ * Scoped to fkanban's own declared names on purpose. The primary carries 93
+ * names with more than one Available schema across all apps (1268 schemas, 1131
+ * distinct names, measured 2026-09-07); reporting that whole class here would
+ * make `kanban doctor` fail on other apps' catalog hygiene, which no fkanban
+ * operator can act on. These eight names are the ones that decide what a fresh
+ * `kanban init` pins.
+ *
+ * Both layout buckets are reported because they are different faults with
+ * different remedies. A `sameLayout` duplicate is two addresses for ONE record
+ * type - the shape a rekey leaves behind. An `otherLayout` duplicate is a
+ * DIFFERENT record type wearing this name, which is what actually broke the
+ * public install path: the resolver handed a fresh machine a milestone-keyed
+ * schema for a board-keyed pin.
+ */
+export function duplicateDeclaredSchemaNames(
+  loaded: LoadedSchemaCandidate[],
+): DuplicateDeclaredName[] {
+  const out: DuplicateDeclaredName[] = [];
+  const seen = new Set<string>();
+  const byHash = (a: LoadedSchemaCandidate, b: LoadedSchemaCandidate) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  for (const entry of allPinnedSchemas()) {
+    const def = entry.schema.schema;
+    const id = `${def.owner_app_id} ${def.descriptive_name}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const claimants = loaded.filter(
+      (s) =>
+        s.name.length > 0 &&
+        isAvailableSchema(s) &&
+        s.owner_app_id === def.owner_app_id &&
+        s.descriptive_name === def.descriptive_name,
+    );
+    if (claimants.length < 2) continue;
+    out.push({
+      key: entry.key,
+      descriptive_name: def.descriptive_name,
+      owner_app_id: def.owner_app_id,
+      sameLayout: claimants
+        .filter((s) => keyLayoutMatches(def.key, s.key))
+        .sort(byHash)
+        .map((s) => s.name),
+      otherLayout: claimants
+        .filter((s) => !keyLayoutMatches(def.key, s.key))
+        .sort(byHash)
+        .map((s) => s.name),
+    });
+  }
+  return out;
+}
+
+/** One-line human rendering of a duplicate-name finding, for doctor. */
+export function formatDuplicateDeclaredName(d: DuplicateDeclaredName): string {
+  const total = d.sameLayout.length + d.otherLayout.length;
+  const parts = [
+    `${total} Available schemas answer to "${d.descriptive_name}"`,
+    `${d.sameLayout.length} with the declared key layout` +
+      (d.sameLayout.length > 0 ? ` (${d.sameLayout.map((h) => h.slice(0, 12)).join(", ")})` : ""),
+  ];
+  if (d.otherLayout.length > 0) {
+    parts.push(
+      `${d.otherLayout.length} with a different one ` +
+        `(${d.otherLayout.map((h) => h.slice(0, 12)).join(", ")})`,
+    );
+  }
+  return parts.join("; ");
 }

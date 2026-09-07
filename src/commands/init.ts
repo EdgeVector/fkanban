@@ -30,6 +30,7 @@ import {
   DEFAULT_COLUMNS,
   allPinnedSchemas,
   checkPinnedSchemaIdentity,
+  correctResolvedSchemaIdentity,
   formatSchemaIdentityMismatch,
 } from "../schemas.ts";
 import { membershipPinLayoutFailures } from "../membership_schema_guard.ts";
@@ -227,6 +228,25 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     if (degraded) return degraded;
     throw freshSetupSocketError(err, socketPath, "/api/apps/declare-schema") ?? err;
   }
+
+  // Mini resolves a declaration by `descriptive_name`, and nothing makes that
+  // name unique in the catalog. A rekey mints a new identity and leaves the
+  // predecessor holding the same name, so a machine WITHOUT a config gets
+  // whichever claimant the node's resolver reaches first. Measured on the
+  // primary 2026-09-07: five Available fkanban schemas answered to
+  // `BoardCards_hashrange_v1` and a fresh install resolved the milestone-keyed
+  // predecessor, which is why the public thelastdb.com/llms.txt install path
+  // failed twice with `board_cards (39a0424f...) is registered as ...`.
+  //
+  // Correct it BEFORE the write probe: probing the wrong identity answers a
+  // question nobody asked, and on this catalog the wrong identity happens to
+  // pass (24 fields, superset of the declaration) so the probe cannot catch it.
+  //
+  // This does NOT waive `assertResolvedSchemaIdentities` below. That guard runs
+  // on the corrected hash and still refuses when no loaded schema IS the
+  // declared identity. Existing installs are unaffected: a correction that moved
+  // a live pin surfaces as a pin MOVE and `assertNoSilentSchemaRepin` refuses it.
+  schemaHashes = await correctDeclaredSchemaIdentities(node, schemaHashes, print);
 
   // Step 3: WRITE-PROBE each declared hash before adopting it. The declaration
   // response is the source of truth for the canonical identity; the probe is
@@ -764,4 +784,56 @@ export function printNextSteps(
     print("");
     print(`Already initialized — run \`${invocation} list\` to see your board.`);
   }
+}
+
+/**
+ * Replace any resolved hash that is not the identity fkanban declared with the
+ * declared identity, when the node has it loaded.
+ *
+ * Pure decision lives in `correctResolvedSchemaIdentity`; this wrapper owns the
+ * I/O (one `listSchemas`) and the operator-facing lines.
+ *
+ * A node whose schema list is unreadable is left alone and says so, rather than
+ * passing quietly: the correction is an improvement on the node's answer, never
+ * a precondition for it, so a missing list must not fail init.
+ *
+ * `no-candidate` is deliberately NOT reported here. It means the declared
+ * identity is absent from the catalog, which is exactly what
+ * `assertResolvedSchemaIdentities` refuses a few lines later with the full
+ * diagnosis. Printing a second, weaker version of that refusal first would put
+ * the less actionable message closest to the error.
+ */
+export async function correctDeclaredSchemaIdentities(
+  node: NodeClient,
+  schemaHashes: Record<string, string>,
+  print: (line: string) => void,
+): Promise<Record<string, string>> {
+  let loaded: LoadedSchema[];
+  try {
+    loaded = await node.listSchemas();
+  } catch {
+    print(`        ** declared identities NOT cross-checked - node schema list unavailable **`);
+    return schemaHashes;
+  }
+  const corrected = { ...schemaHashes };
+  for (const entry of allPinnedSchemas()) {
+    const choice = correctResolvedSchemaIdentity(entry, corrected[entry.key], loaded);
+    if (choice.kind !== "corrected") continue;
+    corrected[entry.key] = choice.hash;
+    print(
+      `        ** ${entry.key} resolution CORRECTED: the node answered ` +
+        `${choice.from.slice(0, 16)}... for "${entry.schema.schema.descriptive_name}", ` +
+        `which is not the identity fkanban declared; adopting ${choice.hash.slice(0, 16)}... **`,
+    );
+    if (choice.ambiguous) {
+      print(
+        `        ** "${entry.schema.schema.descriptive_name}" has ${choice.compatible.length} ` +
+          `Available claimants with the declared key layout ` +
+          `(${choice.compatible.map((h) => h.slice(0, 12)).join(", ")}); ` +
+          `picked the widest. Run \`kanban doctor\` - the catalog needs the ` +
+          `stale claimants retired. **`,
+      );
+    }
+  }
+  return corrected;
 }
