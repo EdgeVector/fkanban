@@ -3,8 +3,10 @@
  *
  * A leftover todo row after a move to doing used to appear in both
  * `list --column todo` and `list --column doing` while `show` reported one
- * column. List now drops overlap losers against the Card tip. Move deletes
- * other-column rows even when the tip is already in the target column.
+ * column. List drops overlap losers against the Card tip only when
+ * `healStaleRows` is true (HashKey of the whole partition). The happy path
+ * keeps the prefix page as-is. Move still deletes other-column rows even
+ * when the tip is already in the target column.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 
@@ -111,6 +113,40 @@ describe("column list membership is exclusive", () => {
       (w) => w.op === "delete" && w.rangeKey === boardCardSk("todo", "1", tip.slug),
     );
     expect(leftover.length).toBeGreaterThan(0);
+  });
+
+  test("healStaleRows false does not HashKey the whole BoardCards partition", async () => {
+    const node = fakeNode();
+    const tip = card({ column: "doing", position: "2" });
+    const staleTodo = card({ column: "todo", position: "1", updated_at: "2026-01-01T00:00:00.000Z" });
+    seedAll(node, tip, [staleTodo]);
+    node.reads.length = 0;
+
+    const todo = await listCardsByColumn(node, cfg, "todo", ["slug", "column"], "default");
+    expect(todo.map((c) => c.slug)).toContain(tip.slug);
+
+    const boardCardReads = node.reads.filter((q) => q.schemaHash === BC);
+    expect(boardCardReads.length).toBeGreaterThan(0);
+    for (const q of boardCardReads) {
+      expect(q.filter).not.toHaveProperty("HashKey");
+      const prefix = (q.filter as { HashRangePrefix?: { prefix?: string } } | undefined)?.HashRangePrefix;
+      expect(prefix?.prefix).toBe("todo#");
+    }
+    expect(node.writes.filter((w) => w.op === "delete")).toHaveLength(0);
+  });
+
+  test("healStaleRows true still HashKeys the partition to drop overlap losers", async () => {
+    const node = fakeNode();
+    const tip = card({ column: "doing", position: "2" });
+    const staleTodo = card({ column: "todo", position: "1", updated_at: "2026-01-01T00:00:00.000Z" });
+    seedAll(node, tip, [staleTodo]);
+    node.reads.length = 0;
+
+    const todo = await listCardsByColumn(node, cfg, "todo", ["slug", "column"], "default", {
+      healStaleRows: true,
+    });
+    expect(todo.map((c) => c.slug)).not.toContain(tip.slug);
+    expect(node.reads.some((q) => q.schemaHash === BC && q.filter?.HashKey === "default")).toBe(true);
   });
 
   test("move into the current column still deletes leftover other-column rows", async () => {

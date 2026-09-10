@@ -167,8 +167,10 @@ export type ListOptions = {
   // The default envelope path does not warn on stderr (truncation is structural).
   warn?: WarnSink;
   /**
-   * After a column list, delete BoardCards rows whose Card tip is another
-   * column. Default off: MCP list is read-only. The CLI sets this.
+   * After a column list, HashKey the whole BoardCards partition and delete
+   * rows whose Card tip is another column. Default off: the happy path
+   * (`kanban list --column`, MCP list, pickup ready) must not hydrate the
+   * full partition. Pass true only from heal/janitor callers.
    */
   healStaleRows?: boolean;
 };

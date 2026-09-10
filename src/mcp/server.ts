@@ -14,7 +14,7 @@ import { markCmd } from "../commands/mark.ts";
 import { setCmd } from "../commands/set.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
-import { pickupStatusResult } from "../commands/pickup_status.ts";
+import { pickupReadyResult } from "../commands/pickup_status.ts";
 import { pickupClaimResult, formatPickupClaim } from "../commands/pickup_claim.ts";
 import {
   formatPickupClaimV2,
@@ -515,7 +515,7 @@ export function createFkanbanMcpServer(
     {
       title: "Report pickup eligibility",
       description:
-        "Classify every active card as pickup-ready, blocked-on-dependency, human-gated, malformed-routing, unattached-outcome, parked/non-work, collision, or stale-metadata. malformed-routing means nothing can route the card (no Repo:/Base:); unattached-outcome means it is well-formed but needs a --milestone. Read-only: answers what can be picked up now and why other cards were skipped.",
+        "Classify default/todo cards as pickup-ready, blocked-on-dependency, human-gated, malformed-routing, unattached-outcome, parked/non-work, collision, or stale-metadata. Uses the cheap todo HashRangePrefix path (`pickup ready`); CLI `pickup status` remains the full-board audit. malformed-routing means nothing can route the card (no Repo:/Base:); unattached-outcome means it is well-formed but needs a --milestone. Read-only: answers what can be picked up now and why other todo cards were skipped.",
       annotations: { title: "Report pickup eligibility", readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
       outputSchema: {
@@ -528,7 +528,7 @@ export function createFkanbanMcpServer(
     async () => {
       try {
         const { cfg, node } = requireConfig();
-        const { text, report } = await pickupStatusResult({ cfg, node });
+        const { text, report } = await pickupReadyResult({ cfg, node });
         return toolResult(text, report);
       } catch (err) {
         return errorResult(err);
