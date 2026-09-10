@@ -178,9 +178,11 @@ describe("list read amplification — cost must not scale with card count", () =
     const out = await listCmd({ cfg: cfgWithIndexes, node, column: "todo", json: true });
 
     expect((cardsFromJson(out) as Card[]).map((c) => c.slug)).toContain("todo-0");
-    // Prefix for the listed column plus one HashKey spine to find other-column
-    // occupancy. Card tip is read only for slugs in two columns.
-    expect(boardCardQueries(node)).toHaveLength(2);
+    // Happy-path column list is the listed column's HashRangePrefix only.
+    // The HashKey spine that finds other-column occupancy belongs on
+    // `healStaleRows: true`, not every `list --column`.
+    expect(boardCardQueries(node)).toHaveLength(1);
+    expect(boardCardQueries(node)[0]!.filter).not.toHaveProperty("HashKey");
     expect(cardQueries(node)).toHaveLength(0);
   });
 

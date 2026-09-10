@@ -241,6 +241,30 @@ describe("pickup ready (cheap gate path) agrees with pickup status (full report)
     expect(prefixes.every((p) => p.hash === "default")).toBe(true);
     expect(prefixes.every((p) => p.prefix === "todo#")).toBe(true);
     expect(prefixes.length).toBeGreaterThan(0);
+    // A HashKey here is the whole-partition spine that used to ride along
+    // every column list. Ready is the pickup gate; it must not hydrate ~365
+    // BoardCards atoms to classify default/todo.
+    expect(boardCardReads.some((q) => q.filter?.HashKey !== undefined)).toBe(false);
+  });
+
+  test("the cheap path does not call listCards({ activeOnly }) over every board", async () => {
+    await seedCard(node, card({ slug: "ready-one", column: "todo" }));
+    await seedCard(node, card({ slug: "collision-doing", column: "doing" }));
+    await seedCard(node, card({ slug: "parked-backlog", column: "backlog" }));
+
+    node.queries.length = 0;
+    await pickupReadyResult({ cfg, node, board: "default" });
+
+    const boardCardReads = node.queries.filter((q) => q.schemaHash === "boardcardshash");
+    // listCards({ activeOnly: true }) walks every active column (HashRangeRange
+    // or HashKey of the board). Ready must stay on one todo# prefix.
+    expect(boardCardReads.length).toBeGreaterThan(0);
+    for (const q of boardCardReads) {
+      const prefix = (q.filter as { HashRangePrefix?: { prefix?: string } } | undefined)?.HashRangePrefix;
+      expect(prefix?.prefix).toBe("todo#");
+      expect(q.filter).not.toHaveProperty("HashKey");
+      expect(q.filter).not.toHaveProperty("HashRangeRange");
+    }
   });
 
   test("every pickup category is representable so the comparison is not vacuous", async () => {
@@ -264,5 +288,11 @@ describe("pickup ready (cheap gate path) agrees with pickup status (full report)
     ] satisfies (typeof PICKUP_CATEGORIES)[number][]) {
       expect(seen.has(category)).toBe(true);
     }
+  });
+
+  test("MCP fkanban_pickup_status uses pickupReadyResult, not pickupStatusResult", async () => {
+    const src = await Bun.file(new URL("../src/mcp/server.ts", import.meta.url)).text();
+    expect(src).not.toMatch(/\bpickupStatusResult\b/);
+    expect(src).toMatch(/\bpickupReadyResult\b/);
   });
 });

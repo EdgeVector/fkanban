@@ -209,13 +209,13 @@ describe("pickup claim v2 LastDB adapter", () => {
 
     expect(result).toMatchObject({ result: "claimed", dry_run: true, card: { slug: "candidate" } });
     const boardReads = node.queries.filter((query) => query.schemaHash === "boardcardshash");
-    // Column prefixes plus one HashKey spine so list can drop other-column
-    // leftovers without a per-row Card get on the happy path.
+    // Column prefixes only. The HashKey spine that drops other-column leftovers
+    // belongs on `healStaleRows: true`, not the claim hot path.
     expect(boardReads.map(prefixOf).filter((prefix) => prefix !== undefined)).toEqual([
       "todo#",
       "doing#",
     ]);
-    expect(boardReads.some((query) => query.filter && "HashKey" in query.filter)).toBe(true);
+    expect(boardReads.some((query) => query.filter && "HashKey" in query.filter)).toBe(false);
     const dependencyReads = node.queries.filter((query) =>
       query.schemaHash === "cardhash" && query.filter?.HashKey === "done-dep"
     );

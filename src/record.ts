@@ -3697,9 +3697,14 @@ export async function listCardsByColumn(
 /**
  * Drop BoardCards rows in `column` whose Card tip lives in another column.
  *
- * Other-column occupancy comes from one HashKey spine read (slug + SK), not a
- * per-row Card get. Card tip is read only for slugs that already appear in two
- * columns, so the happy path stays O(1) BoardCards queries.
+ * The occupancy check is a HashKey of the whole BoardCards partition (~365
+ * atoms on the live default board). That belongs on the heal/janitor path
+ * only. The happy path (`healStaleRows` false: MCP list, pickup ready,
+ * `kanban list --column`) returns the prefix page as-is.
+ *
+ * When `heal` is set, other-column occupancy comes from one HashKey spine
+ * read (slug + SK), not a per-row Card get. Card tip is read only for slugs
+ * that already appear in two columns.
  *
  * Unique membership in the listed column is kept even when the tip differs —
  * deleting that row would hide the card. Overlap losers enqueue for the janitor
@@ -3713,7 +3718,7 @@ async function dropStaleColumnMembership(
   part: Card[],
   heal: boolean,
 ): Promise<Card[]> {
-  if (part.length === 0) return part;
+  if (!heal || part.length === 0) return part;
   const spine = await listBoardCardsPartitionSpine(node, cfg, board);
   if (!spine) return part;
   const otherSlugs = new Set<string>();

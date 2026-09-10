@@ -2136,7 +2136,7 @@ async function dispatch(
         fullBody: fullBodyList,
         groupByMilestone: values["group-by-milestone"] as boolean | undefined,
         jsonArray: Boolean(values["json-array"]),
-        healStaleRows: true,
+        healStaleRows: false,
       });
       console.log(out);
       return 0;
