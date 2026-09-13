@@ -730,6 +730,72 @@ function keyLayoutMatches(
 }
 
 // ---------------------------------------------------------------------------
+// What a loaded schema's `name` and `descriptive_name` may look like
+// ---------------------------------------------------------------------------
+//
+// Both were measured on a FRESH node (no `~/.kanban/config.json`, host daemon
+// 0.23.3-1908, prod Schema Service) on 2026-09-13, inside the run that proved
+// the public install path — card
+// `kanban-catalog-boardcards-resolves-milestone-hash-on-fresh-install-20260913`.
+//
+// 1. `/api/schemas` on a fresh node lists TWO rows per app schema: the catalog
+//    identity, named by its hash, and a local ALIAS row named
+//    `fkanban/<Name>` (`fkanban/Milestone`, `fkanban/BoardCards`, ...). The
+//    alias carries the same descriptive_name and key, so every name-keyed
+//    filter in this file matched it, and `correctResolvedSchemaIdentity`
+//    handed `init` the string `fkanban/Milestone` as the identity to pin.
+//    Config then read `"milestone": "fkanban/Milestone"`. The write probe
+//    passed and `kanban list` passed, so nothing said a word — a pin that is
+//    not a catalog hash is exactly the shape `checkPinnedSchemaIdentity` can
+//    no longer reason about once the alias goes away. The primary lists no
+//    alias rows at all, which is why no existing install ever saw this.
+//
+// 2. Schema Service de-collides a `descriptive_name` that collides with a
+//    purpose-distinct canonical in the same owner namespace: it registers the
+//    proposal under `"<name> (<Type>)"` (`Milestone (Hash)`,
+//    `FkanbanMilestonePortfolioByBoardIndex (HashRange)`), optionally with a
+//    numeric variant (`"<name> (<Type> 2)"`). That is the identity the node's
+//    OWN declare returned for fkanban's proposal, and the exact-string name
+//    check then called it a mismatch — which is what pushed `init` onto the
+//    alias in (1). The suffix is a storage artifact, and Schema Service's own
+//    matcher strips it before comparing names (`strip_decollision_suffix` in
+//    `schema_service/crates/core/src/state_matching.rs`, same grammar).
+
+/**
+ * Is `name` a catalog identity, as opposed to the local alias row a fresh node
+ * lists beside it? The alias grammar is `<owner_app_id>/<Name>`; a catalog
+ * identity is a bare hash and never carries a `/`. Deliberately not "is 64 hex
+ * chars": that would reject a hash shape an older node reports and read its
+ * catalog as empty, when the only row that must never be pinned is the alias.
+ */
+export function isCatalogHashName(name: string): boolean {
+  return name.length > 0 && !name.includes("/");
+}
+
+const DECOLLISION_TYPES = new Set(["Single", "Hash", "Range", "HashRange"]);
+
+/**
+ * Strip Schema Service's cross-schema_type de-collision suffix from a
+ * descriptive_name: `"Milestone (Hash)"` → `"Milestone"`,
+ * `"Milestone (HashRange 2)"` → `"Milestone"`. Any other trailing
+ * parenthetical is part of the name and stays.
+ */
+export function stripDecollisionSuffix(desc: string): string {
+  const trimmed = desc.trimEnd();
+  const open = trimmed.lastIndexOf(" (");
+  if (open < 0 || !trimmed.endsWith(")")) return desc;
+  const parts = trimmed.slice(open + 2, -1).split(/\s+/).filter((p) => p.length > 0);
+  if (parts.length === 0 || parts.length > 2 || !DECOLLISION_TYPES.has(parts[0]!)) return desc;
+  if (parts.length === 2 && !/^[0-9]+$/.test(parts[1]!)) return desc;
+  return trimmed.slice(0, open);
+}
+
+/** Does a loaded schema's descriptive_name answer to the declared one? */
+export function descriptiveNameMatches(declared: string, loaded: string): boolean {
+  return loaded === declared || stripDecollisionSuffix(loaded) === declared;
+}
+
+// ---------------------------------------------------------------------------
 // Pinned-hash identity check (every config key, not just the three RecordTypes)
 // ---------------------------------------------------------------------------
 //
@@ -802,7 +868,7 @@ export function checkPinnedSchemaIdentity(
   if (match.owner_app_id !== def.owner_app_id) {
     mismatches.push({ what: "owner_app_id", expected: def.owner_app_id, actual: match.owner_app_id });
   }
-  if (match.descriptive_name !== def.descriptive_name) {
+  if (!descriptiveNameMatches(def.descriptive_name, match.descriptive_name)) {
     mismatches.push({
       what: "descriptive_name",
       expected: def.descriptive_name,
@@ -881,11 +947,13 @@ export function resolveLoadedSchema(
   const optionalFields =
     type === "card" ? new Set<string>(CARD_OPTIONAL_SCHEMA_FIELDS) : new Set<string>();
   const localFields = def.fields.filter((f) => !optionalFields.has(f));
+  // Hash-named rows only: a fresh node also lists `fkanban/<Name>` alias rows
+  // with the same descriptive_name and key, and a pin must be a catalog hash.
   const candidates = loaded.filter(
     (s) =>
       s.owner_app_id === def.owner_app_id &&
-      s.descriptive_name === def.descriptive_name &&
-      s.name.length > 0 &&
+      descriptiveNameMatches(def.descriptive_name, s.descriptive_name) &&
+      isCatalogHashName(s.name) &&
       keyLayoutMatches(def.key, s.key),
   );
   if (candidates.length === 0) return { kind: "missing" };
@@ -977,13 +1045,16 @@ export function declaredIdentityCandidates(
 ): string[] {
   const def = entry.schema.schema;
   const required = requiredDeclaredFields(entry.key, def);
+  // `isCatalogHashName`, not just non-empty: on a fresh node the alias row
+  // `fkanban/<Name>` passes every other filter here, and adopting it pinned
+  // config to `"milestone": "fkanban/Milestone"` (measured 2026-09-13).
   return loaded
     .filter(
       (s) =>
-        s.name.length > 0 &&
+        isCatalogHashName(s.name) &&
         isAvailableSchema(s) &&
         s.owner_app_id === def.owner_app_id &&
-        s.descriptive_name === def.descriptive_name &&
+        descriptiveNameMatches(def.descriptive_name, s.descriptive_name) &&
         keyLayoutMatches(def.key, s.key) &&
         required.every((f) => s.fields.includes(f)),
     )
@@ -1082,9 +1153,14 @@ export function duplicateDeclaredSchemaNames(
     const id = `${def.owner_app_id} ${def.descriptive_name}`;
     if (seen.has(id)) continue;
     seen.add(id);
+    // Exact name only, on purpose: a de-collided `"<name> (<Type>)"` identity
+    // is a claimant of ITS name, not of this one, and the node resolves
+    // declarations by exact string. Hash-named rows only: the fresh-node alias
+    // row `fkanban/<Name>` is a second address for the same identity, not a
+    // second claimant.
     const claimants = loaded.filter(
       (s) =>
-        s.name.length > 0 &&
+        isCatalogHashName(s.name) &&
         isAvailableSchema(s) &&
         s.owner_app_id === def.owner_app_id &&
         s.descriptive_name === def.descriptive_name,
