@@ -1076,7 +1076,16 @@ export async function milestoneReconcileResult(opts: {
   // that is the only case where "absent" and "sparse" are in question.
   const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
     && (await cardExists(opts.node, opts.cfg, milestone.proof_card!));
-  const snapshot = milestoneReconcileFromSnapshot(milestone, children, statuses, proofCard, proofCardSparse);
+  const snapshot = milestoneReconcileFromSnapshot(
+    milestone,
+    children,
+    statuses,
+    proofCard,
+    proofCardSparse,
+    // The whole board is in hand from the wave above; the NS cross-check is a
+    // filter over it, not a read.
+    northStarOnlyDoneCards(milestone, boardCards),
+  );
   // A shed index read belongs in `warnings` as well as in the banner, because
   // the two surfaces have different readers. The banner is for the human
   // reading `reconcile`; `warnings` is the machine-readable array that
@@ -1112,6 +1121,11 @@ export function milestoneReconcileFromSnapshot(
   // card that is sitting right there. Defaults false so a caller that hasn't
   // checked keeps the old, conservative "missing" wording.
   proofCardSparse = false,
+  // Done Kind:pr under the same North Star that no milestone claims — see
+  // `northStarOnlyDoneCards`. Callers pass only the milestone's own children as
+  // `boardCards`, so this evidence has to arrive separately. Defaults empty so
+  // a caller that has not looked keeps the old read.
+  nsOnlyDone: Card[] = [],
 ): MilestoneReconcileResult {
   const children = boardCards.filter((card) => card.milestone === milestone.slug);
   const childStatuses = children.map((card): MilestoneChildStatus => {
@@ -1150,6 +1164,17 @@ export function milestoneReconcileFromSnapshot(
   const hasImplementationWork = implementationChildren.length > 0;
   const allImplementationDone = hasImplementationWork && incomplete.length === 0;
   const inFlight = incomplete.some((child) => child.column === "doing");
+  // A `children=[]` read that disagrees with the board: done Kind:pr sit under
+  // this North Star with no milestone link. Said here, on the read the driver
+  // actually runs (`milestone detail` → this snapshot), so the evidence is on
+  // the same screen as the empty column list instead of one brain get away.
+  if (!hasImplementationWork && nsOnlyDone.length > 0 && milestone.state !== "complete" && milestone.state !== "abandoned") {
+    warnings.push({
+      code: "ns-only-done-evidence",
+      message: `No child cards link this milestone, but ${nsOnlyDone.length} done Kind:pr under north_star=${milestone.north_star} set no milestone: ${nsOnlyDone.map((card) => card.slug).join(", ")}.`,
+      hint: `Check them against the acceptance before decomposing; relink each that applies with \`kanban set <slug> --milestone ${milestone.slug}\`.`,
+    });
+  }
   if (milestone.state === "active" && incomplete.length > 0 && ready.length === 0 && !inFlight) warnings.push({ code: "active-no-ready-card", message: "Active milestone has implementation work but no ready or in-flight card frontier.", hint: "Resolve dependencies/holds or promote the next implementation card to todo." });
   // Only when real implementation work exists and is fully terminal, with proof still not PASS.
   // Zero children / proof-only milestones must NOT get this warning (false factory-fill poison).
@@ -1271,7 +1296,14 @@ function renderMilestoneReconcile(result: MilestoneReconcileResult, repairs?: Mi
   ].join("\n");
 }
 
-async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{ milestones: Milestone[]; cards: Card[]; reconciled: MilestoneReconcileResult[] }> {
+async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient; board?: string }): Promise<{
+  milestones: Milestone[];
+  /** Cards linked to some listed milestone by their `milestone` field. */
+  cards: Card[];
+  /** Every card on every board read — the superset `cards` was cut from. */
+  board_cards: Card[];
+  reconciled: MilestoneReconcileResult[];
+}> {
   // ONE board list, then the milestone list and the card partitions run
   // CONCURRENTLY.
   //
@@ -1402,6 +1434,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   return {
     milestones,
     cards,
+    board_cards: knownCards,
     reconciled: milestones.map((milestone, i) =>
       milestoneReconcileFromSnapshot(
         milestone,
@@ -1409,6 +1442,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
         statuses,
         proofs.get(milestone.proof_card) ?? null,
         sparseProofs.has(milestone.proof_card),
+        northStarOnlyDoneCards(milestone, boardCards.get(milestone.board) ?? []),
       )),
   };
 }
@@ -1517,6 +1551,7 @@ export type MilestoneGapStatus =
   | "in_flight"
   | "idle_promoteable"
   | "idle_empty"
+  | "idle_ns_evidence"
   | "idle_blocked"
   | "proof_pending"
   | "proof_ready";
@@ -1562,6 +1597,13 @@ export type MilestoneGapEntry = {
   promoteable: string[];
   /** Kind:pr in backlog that are dep-blocked, held, hollow, or body-stopped. */
   blocked_backlog: string[];
+  /**
+   * Done Kind:pr on the same board that set `north_star` to this milestone's
+   * North Star but never set `milestone` at all. See
+   * {@link northStarOnlyDoneCards} — these are the completion checkpoints a
+   * `children=[]` read cannot see.
+   */
+  ns_only_done: string[];
   has_proof_card: boolean;
   proof_passing: boolean;
   reason: string;
@@ -1593,8 +1635,49 @@ function legalizeGapEntry(milestone: Milestone, entry: MilestoneGapEntry): Miles
 }
 
 /**
+ * Done Kind:pr cards under this milestone's North Star that no milestone
+ * claims.
+ *
+ * A Kind:pr card is filed with `north_star` and, when a live milestone exists,
+ * `milestone`. In practice the second field is often missing: the card was
+ * filed before the milestone existed (exemem-cloud-account, milestone created
+ * 2026-08-26 weeks after the PRs merged), or the filer only stamped the North
+ * Star (project-zeus, ms-fold-gate-back-under-10-minutes). Both reconcile and
+ * gap-report key children on `milestone`, so such a milestone reads
+ * `children=[]` while the North Star's brain record already carries completion
+ * checkpoints for the very PRs its acceptance bullets describe. gap-report
+ * then scored it `idle_empty` → `decompose`, and `last-stack-milestone-driver`
+ * spent a slot per hour re-discovering that every nameable slice had already
+ * merged — 8+ recorded runs across 3+ milestones, 2026-08-29 through
+ * 2026-09-13 (brain
+ * `papercut-milestone-gap-report-idle-empty-ignores-ns-only-completion-checkpoints`).
+ *
+ * The board already holds the evidence the driver went to the brain for: a
+ * done Kind:pr with a matching `north_star` and an EMPTY `milestone`. Cards
+ * linked to a DIFFERENT milestone are that milestone's business and are not
+ * returned. The proof card is excluded for the same reason it is excluded from
+ * the `pr_*` tally. Pure and exported for unit tests.
+ */
+export function northStarOnlyDoneCards(milestone: Milestone, boardCards: Card[]): Card[] {
+  const northStar = String(milestone.north_star ?? "").trim();
+  if (!northStar) return [];
+  return boardCards.filter((card) =>
+    card.board === milestone.board
+    && card.slug !== milestone.proof_card
+    && String(card.north_star ?? "").trim() === northStar
+    && !String(card.milestone ?? "").trim()
+    && normalizeKind(card.kind) === "pr"
+    && card.column === TERMINAL_COLUMN);
+}
+
+/**
  * Pure classifier: given one milestone + its board cards + dep-resolved child
  * statuses, decide gap status. Exported for unit tests.
+ *
+ * `boardCards` may be the whole board (the gap-report passes it so that
+ * {@link northStarOnlyDoneCards} can see cards no milestone claims) or only the
+ * milestone's own children; the tallies below only ever look up the slugs in
+ * `childStatuses`, so a wider set changes nothing but the NS cross-check.
  */
 export function classifyMilestoneGap(
   milestone: Milestone,
@@ -1638,6 +1721,7 @@ export function classifyMilestoneGap(
   const pr_live = pr_todo + pr_doing + pr_backlog;
   const has_proof_card = Boolean(milestone.proof_card);
   const proof_passing = Boolean(proof?.passingEvidence && (proof.terminal || milestone.proof_status === "passing"));
+  const ns_only_done = northStarOnlyDoneCards(milestone, boardCards).map((card) => card.slug);
 
   const base = {
     slug: milestone.slug,
@@ -1651,6 +1735,7 @@ export function classifyMilestoneGap(
     pr_live,
     promoteable,
     blocked_backlog,
+    ns_only_done,
     has_proof_card,
     proof_passing,
   };
@@ -1690,6 +1775,19 @@ export function classifyMilestoneGap(
     } else {
       classified = { ...base, status: "proof_pending", action: "await_proof", reason: "implementation Kind:pr done; terminal proof still pending" };
     }
+  } else if (pr_live === 0 && pr_done === 0 && ns_only_done.length > 0) {
+    // `children=[]` by the `milestone` key, but the board holds done Kind:pr
+    // under the same North Star that nothing claims. That is evidence the
+    // acceptance may already be met, not a gap to decompose: routing this to
+    // `decompose` is how the driver came to re-verify the same merged PRs every
+    // hour. `skip` keeps it out of `work_queue`; the reason names the repair
+    // (relink) that turns this into an ordinary `pr_done>0` read.
+    classified = {
+      ...base,
+      status: "idle_ns_evidence",
+      action: "skip",
+      reason: `no Kind:pr children by milestone link, but ${ns_only_done.length} done Kind:pr under north_star=${milestone.north_star} with no milestone set: ${ns_only_done.join(", ")} — verify against acceptance before decomposing; relink with \`kanban set <slug> --milestone ${milestone.slug}\``,
+    };
   } else if (pr_live === 0 && pr_done === 0) {
     classified = {
       ...base,
@@ -1737,6 +1835,7 @@ export function buildMilestoneGapReport(
     in_flight: 0,
     idle_promoteable: 0,
     idle_empty: 0,
+    idle_ns_evidence: 0,
     idle_blocked: 0,
     proof_pending: 0,
     proof_ready: 0,
@@ -1794,10 +1893,13 @@ export async function milestoneGapReportResult(opts: {
   board?: string;
 }): Promise<{ report: MilestoneGapReport; text: string }> {
   const snapshot = await milestonePortfolioSnapshot(opts);
-  const report = buildMilestoneGapReport(snapshot.reconciled, snapshot.cards, { board: opts.board });
+  // The WHOLE board, not only milestone-linked cards: `classifyMilestoneGap`
+  // tallies by `childStatuses` either way, and the NS cross-check needs to see
+  // the cards no milestone claims.
+  const report = buildMilestoneGapReport(snapshot.reconciled, snapshot.board_cards, { board: opts.board });
   const lines = [
     `Milestone gap-report  (generated ${report.generated_at})`,
-    `counts: in_flight=${report.counts.in_flight} idle_promoteable=${report.counts.idle_promoteable} idle_empty=${report.counts.idle_empty} idle_blocked=${report.counts.idle_blocked} proof_pending=${report.counts.proof_pending} proof_ready=${report.counts.proof_ready} complete=${report.counts.complete} no_north_star=${report.counts.no_north_star} blocked=${report.counts.blocked}`,
+    `counts: in_flight=${report.counts.in_flight} idle_promoteable=${report.counts.idle_promoteable} idle_empty=${report.counts.idle_empty} idle_ns_evidence=${report.counts.idle_ns_evidence} idle_blocked=${report.counts.idle_blocked} proof_pending=${report.counts.proof_pending} proof_ready=${report.counts.proof_ready} complete=${report.counts.complete} no_north_star=${report.counts.no_north_star} blocked=${report.counts.blocked}`,
     `actions: promote=${report.action_counts.promote} decompose=${report.action_counts.decompose} await_proof=${report.action_counts.await_proof} complete_proof=${report.action_counts.complete_proof} skip=${report.action_counts.skip}`,
     `work_queue (${report.work_queue.length}):`,
     ...(report.work_queue.length
