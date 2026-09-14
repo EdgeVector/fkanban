@@ -2,7 +2,7 @@ import { FkanbanError, type AppSchemaDeclaration, type NodeClient } from "../cli
 
 export const FKANBAN_APP_ID = "fkanban";
 export const GATES_LOCAL_SCHEMA = "Reference";
-export const OPEN_DECISIONS_SLUG = "open-decisions";
+const OPEN_DECISIONS_SLUG = "open-decisions";
 
 export type GateEntry = {
   status: "open" | "cleared";
