@@ -134,7 +134,7 @@ export type AppSchemaDeclaration = {
 // Single-request page size for the /api/query pagination loop — the node caps
 // individual pages at 1000. fkanban boards stay well under that, so in
 // practice one round trip resolves the whole schema.
-export const QUERY_PAGE_SIZE = 1000;
+const QUERY_PAGE_SIZE = 1000;
 const QUERY_PAGE_LIMIT = 1000;
 
 // `X-LastDB-Client` ops-attribution labels. Real board work carries the plain
