@@ -103,7 +103,9 @@ function boardWithDriftedCard(): FakeNode {
   });
   const truth = truthCard();
   node.seed({ schemaHash: "cardhash", keyHash: SLUG, fields: cardToFields(truth) });
-  const stale = { ...truth, column: STALE_COLUMN };
+  // Empty title makes the stale sk BoardCards-visible drift so unscoped heal
+  // still HashKey-gets Card. A complete-looking wrong-column row is skipped.
+  const stale = { ...truth, column: STALE_COLUMN, title: "" };
   node.seed({
     schemaHash: "boardcardshash",
     keyHash: BOARD,

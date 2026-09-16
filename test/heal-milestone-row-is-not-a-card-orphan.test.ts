@@ -201,7 +201,15 @@ describe("board-cards-heal: a milestone row is not a card orphan", () => {
 
   test("board-column row is still reaped even when a Milestone shares the slug", async () => {
     const node = seedBoard();
-    member(node, "shared-slug", "todo", "1");
+    // Untitled so unscoped heal still treats the row as BoardCards-visible
+    // drift (complete-looking board-column rows skip the Card point-get).
+    const c = { ...card("shared-slug", "todo", "1"), title: "" };
+    node.seed({
+      schemaHash: "boardcardshash",
+      keyHash: BOARD,
+      rangeKey: boardCardSk("todo", "1", "shared-slug"),
+      fields: boardCardFieldsFromCard(c),
+    });
     node.seed({
       schemaHash: "milestonehash",
       keyHash: "shared-slug",

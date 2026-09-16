@@ -99,7 +99,7 @@ function boardWithOrphans(count: number): FakeNode {
     }),
   });
   for (let i = 0; i < count; i += 1) {
-    const c = orphanCard(`orphan-${i}`, `p${i}`);
+    const c = { ...orphanCard(`orphan-${i}`, `p${i}`), title: "" };
     node.seed({
       schemaHash: "boardcardshash",
       keyHash: c.board,

@@ -112,7 +112,12 @@ function board(live: number, orphans: number): FakeNode {
     member(c);
     node.seed({ schemaHash: "cardhash", keyHash: c.slug, fields: cardToFields(c) });
   }
-  for (let i = 0; i < orphans; i += 1) member(card(`orphan-${i}`, `o${i}`));
+  // Untitled membership is BoardCards-visible drift, so unscoped heal still
+  // point-gets Card and can classify the orphan. Complete-looking orphans
+  // are skipped (no Card query per healthy row).
+  for (let i = 0; i < orphans; i += 1) {
+    member({ ...card(`orphan-${i}`, `o${i}`), title: "" });
+  }
   return node;
 }
 
