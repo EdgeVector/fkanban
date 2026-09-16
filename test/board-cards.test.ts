@@ -431,10 +431,22 @@ describe("board-cards membership integrity", () => {
       fields: boardCardFieldsFromCard(doing),
     });
 
-    const dry = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    // Complete-looking wrong-column rows are not BoardCards-visible drift;
+    // `--slug` still hydrates Card and repairs.
+    const dry = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [done.slug],
+      apply: false,
+    });
     expect(dry.report.drifted).toBeGreaterThanOrEqual(1);
 
-    const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
+    const applied = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [done.slug],
+      apply: true,
+    });
     expect(applied.report.healed).toBeGreaterThanOrEqual(1);
 
     const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
@@ -527,7 +539,12 @@ describe("board-cards membership integrity", () => {
       fields: boardCardFieldsFromCard(doing),
     });
 
-    const dry = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    const dry = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [done.slug],
+      apply: false,
+    });
     expect(dry.report.drifted).toBe(1);
     expect(dry.report.actions[0]).toMatchObject({
       slug: "my-card",
@@ -536,9 +553,19 @@ describe("board-cards membership integrity", () => {
       action: "delete-stale-and-upsert",
     });
 
-    const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
+    const applied = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [done.slug],
+      apply: true,
+    });
     expect(applied.report.healed).toBe(1);
-    const clean = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    const clean = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [done.slug],
+      apply: false,
+    });
     expect(clean.report.drifted).toBe(0);
 
     const listed = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);
@@ -716,14 +743,25 @@ describe("board-cards-heal thin-field drift", () => {
       fields: boardCardFieldsFromCard(staleRow),
     });
 
-    const dry = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: false });
+    // Thin-field-only drift is not BoardCards-visible; `--slug` still hydrates.
+    const dry = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [truth.slug],
+      apply: false,
+    });
     expect(dry.report.drifted).toBe(1);
     const drift = dry.report.actions.find((a) => a.action === "refresh-thin-fields");
     expect(drift).toBeDefined();
     expect(drift!.reason).toContain("title");
     expect(drift!.reason).toContain("milestone");
 
-    const applied = await boardCardsHealResult({ cfg: cfgWithBoardCards, node, apply: true });
+    const applied = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [truth.slug],
+      apply: true,
+    });
     expect(applied.report.healed).toBe(1);
 
     const rows = await listAllBoardCards(node, cfgWithBoardCards, [{ slug: "default" }]);

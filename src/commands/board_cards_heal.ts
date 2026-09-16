@@ -1,9 +1,14 @@
 // Heal BoardCards membership drift: list/column previews must agree with
-// authoritative card column. Card point-reads are the source of truth;
-// CardListIndex only discovers slugs that have no BoardCards row yet.
+// authoritative card column. Card HashKey point-reads are the source of
+// truth for drifted candidates; CardListIndex only discovers slugs that have
+// no BoardCards row yet. Unscoped/scheduled heal does not hydrate Card for
+// every membership row — only BoardCards-visible drift (sparse, duplicate,
+// SK mismatch, invalid column, missing membership). `--slug` still
+// point-gets the named cards.
 //
 // This is the ONLY path that may delete BoardCards rows for "orphans."
 // List/reconcile is read-only on Card miss (incident 2026-07-23/24).
+// Complete-looking orphans are an accepted unscoped gap; `--slug` still reaps.
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -39,17 +44,12 @@ import {
 import { renderSweepWrites } from "../sweep_report.ts";
 
 /**
- * Resolve Card truth for every candidate slug, bounded-parallel.
+ * Resolve Card truth for candidate slugs, bounded-parallel.
  *
- * Truth is still one Card point-read per slug — the bulk scan above only
- * *proposes* candidates, and a scan miss must never authorize a delete
- * (incident 2026-07-23/24). What changes is cost, not authority: reads are
- * body-free and overlap instead of running strictly one-at-a-time.
- *
- * Reading every candidate up front also shortens the TOCTOU window under
- * `--apply`: previously a card examined last was point-read minutes after the
- * first one, so its "truth" was already several minutes stale by the time the
- * write landed.
+ * Truth is still one Card HashKey point-read per slug — a scan miss must never
+ * authorize a delete (incident 2026-07-23/24). Unscoped heal no longer passes
+ * every membership slug: only BoardCards-visible drift candidates (and
+ * `--slug`) reach this function. See {@link membershipNeedsCardTruth}.
  *
  * The fan-out width lives in `concurrency.ts` — this path discovered why it has
  * to be bounded, but every other N-read path needs the same ceiling.
@@ -414,6 +414,46 @@ function thinFieldDrift(row: Card, truth: Card): string[] {
   return drift;
 }
 
+/**
+ * Whether unscoped heal must HashKey-get Card for this (board, slug).
+ *
+ * Scheduled heal used to point-get Card for every membership row. On a ~250
+ * card board that is hundreds of Card queries per hour and fails the
+ * milestone bar (under 50/h). Live 2026-09-16: client
+ * `kanban-groom-board-cards-heal` kind=query schema=Card CALLS=529 in 21.6 min
+ * (~1470/h), LOAD/CALL=297.7. A HashKey point-get does not load ~298 shards;
+ * hydrating the whole board is the cost. `--slug` already names its targets
+ * and still point-gets only those.
+ *
+ * BoardCards-visible drift is the candidate filter. A single complete row
+ * whose sk matches its copied column/position is left alone — Card vs index
+ * column disagreement on that shape is an accepted gap for the unscoped
+ * path (use `--slug` to force a Card read). Sparse, duplicate, SK-mismatch,
+ * missing-membership, invalid-column, and milestone-state rows still
+ * point-get. Complete-looking orphans are the same accepted gap as cards
+ * missing from every partition AND the rollup: the hourly run must not
+ * query Card for every healthy row to find them.
+ */
+export function membershipNeedsCardTruth(
+  rows: ReadonlyArray<{ column: string; position: string; slug: string; full: Card }>,
+  spineSks: readonly string[] | undefined,
+  boardColumns: readonly string[] = [],
+): boolean {
+  if (rows.length === 0) return true;
+  if (rows.length !== 1) return true;
+  if ((spineSks?.length ?? 0) > 1) return true;
+  const row = rows[0]!;
+  if (isMilestoneState(row.column)) return true;
+  if (boardColumns.length > 0 && !boardColumns.includes(row.column)) return true;
+  if (!String(row.full.title ?? "").trim()) return true;
+  if (!row.column || String(row.position) === "") return true;
+  if (spineSks?.length === 1) {
+    const reconstructed = boardCardSk(row.column, row.position, row.slug);
+    if (spineSks[0] !== reconstructed) return true;
+  }
+  return false;
+}
+
 export async function boardCardsHealResult(
   opts: BoardCardsHealOptions,
 ): Promise<{ text: string; report: BoardCardsHealReport }> {
@@ -771,19 +811,45 @@ export async function boardCardsHealResult(
   // queued) does not pay for two extra partition reads it has no use for.
   let deletesEnqueued = false;
 
-  // One point-read per distinct slug, not per (board, slug) key: the Card is
-  // keyed by slug alone, so the same card claimed by two boards resolved the
-  // identical record twice.
-  const truthBySlug = await resolveTruthBySlug(
-    opts,
-    [...new Set([...byKey.keys()].map((key) => key.split("\0")[1] as string))],
+  // Card HashKey only for slugs that already look drifted (or `--slug`).
+  // Unscoped heal used to point-get every membership slug; that is the
+  // 529 Card queries / 21 min the scheduled client still emits. A single
+  // complete BoardCards row whose sk matches its copies is not a candidate.
+  const columnsByBoard = new Map<string, string[]>();
+  for (const b of boards) columnsByBoard.set(b.slug, b.columns ?? []);
+  for (const b of targetBoards) {
+    if (!columnsByBoard.has(b.slug)) columnsByBoard.set(b.slug, b.columns ?? []);
+  }
+  const truthSlugSet = new Set<string>();
+  if (slugFilter) {
+    for (const key of byKey.keys()) {
+      const slug = key.split("\0")[1] as string;
+      if (slug) truthSlugSet.add(slug);
+    }
+  } else {
+    for (const [key, rows] of byKey) {
+      const [boardFromKey, slug] = key.split("\0") as [string, string];
+      if (
+        membershipNeedsCardTruth(
+          rows,
+          spineSksBySlug.get(key),
+          columnsByBoard.get(boardFromKey) ?? [],
+        )
+      ) {
+        truthSlugSet.add(slug);
+      }
+    }
+  }
+  const truthBySlug = await resolveTruthBySlug(opts, [...truthSlugSet]);
+  const classifiedByKey = new Map(
+    [...byKey].filter(([key]) => truthSlugSet.has(key.split("\0")[1] as string)),
   );
 
   // Resolved BEFORE the removal ceiling, because it changes what the ceiling is
   // counting: these rows are not removal intent.
   const milestoneMembershipSlugs = await resolveMilestoneMembershipSlugs(
     opts,
-    byKey,
+    classifiedByKey,
     truthBySlug,
   );
 
@@ -864,7 +930,7 @@ export async function boardCardsHealResult(
   // practice: 0 sparse-veto rows of 218 on the live board, 2026-08-03.
   const removalCeiling = resolveRemovalCeiling(opts.maxRemovals, rawRows.length);
   const removalsPossible = countPossibleOrphanRemovals(
-    byKey,
+    classifiedByKey,
     truthBySlug,
     milestoneMembershipSlugs,
   );
@@ -906,6 +972,22 @@ export async function boardCardsHealResult(
   for (const [key, rows] of byKey) {
     const [boardFromKey, slug] = key.split("\0") as [string, string];
     const board = boardFromKey || "default";
+
+    if (!truthSlugSet.has(slug)) {
+      if (opts.json && rows.length === 1) {
+        actions.push({
+          slug,
+          board,
+          list_column: rows[0]!.column,
+          list_position: rows[0]!.position,
+          truth_column: rows[0]!.column,
+          truth_position: rows[0]!.position,
+          action: "noop-match",
+          reason: "BoardCards row is internally consistent; Card point-get skipped",
+        });
+      }
+      continue;
+    }
 
     const point = truthBySlug.get(slug) ?? null;
     if (!point) {

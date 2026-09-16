@@ -214,7 +214,7 @@ describe("compound: sparse Card under hash_else_lead is not an orphan", () => {
     seedBoard(node);
     const ghost = membershipCard({
       slug: "ghost-orphan",
-      title: "ghost",
+      title: "",
       column: "todo",
       position: "z",
     });

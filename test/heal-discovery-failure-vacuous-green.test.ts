@@ -165,7 +165,10 @@ describe("board-cards heal discovers membership without ever key-listing Card", 
     seedBoard(node, "default");
     seedCardTruth(node, unmembered);
     seedCardTruth(node, misplaced);
-    seedMembership(node, misplaced, { column: "todo", position: "n" });
+    // Empty title makes the stale row BoardCards-visible drift so unscoped
+    // heal still point-gets Card. A complete-looking wrong-column row is
+    // an accepted unscoped gap (Card point-get only for drifted candidates).
+    seedMembership(node, { ...misplaced, title: "" }, { column: "todo", position: "n" });
   });
 
   test("a card missing from every BoardCards partition and the rollup is not discovered", async () => {
