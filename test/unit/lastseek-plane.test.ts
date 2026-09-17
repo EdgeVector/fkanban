@@ -61,11 +61,17 @@ describe("lastseek plane", () => {
     // The plane resolves readable names, identity hashes and registry names
     // itself, so the client must not translate or collapse them.
     process.env.LASTSEEK_BIN = fakeLastSeek(
-      `printf '{"ok":true,"results":[{"score":1,"schema_identity":"i","schema":null,"key_hash":"%s","key_range":null,"fragment_key":"body","text":"t"}]}' "$*"`,
+      `printf '{"ok":true,"results":[{"score":1,"schema_identity":"i","schema":null,"key_hash":"%s","key_range":null,"fragment_key":"body","text":"t"}]}' "$LASTSEEK_CALLER:$*"`,
     );
-    const hits = queryLastSeek({ query: "q", k: 7, schemas: ["Card", "abc"] });
+    const hits = queryLastSeek({
+      query: "q",
+      k: 7,
+      caller: "kanban/search",
+      schemas: ["Card", "abc"],
+    });
     expect(hits![0]!.key_hash).toContain("--schema Card --schema abc");
     expect(hits![0]!.key_hash).toContain("--k 7");
+    expect(hits![0]!.key_hash).toContain("kanban/search:");
   });
 
   test("an unresolvable schema throws instead of reporting no matches", () => {

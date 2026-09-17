@@ -118,6 +118,8 @@ async function querySemantic(opts: {
 export async function querySearchPlane(opts: {
   query: string;
   k?: number;
+  /** Stable command role for LastSeek operator metrics. */
+  caller?: string;
   schemas?: string[];
   searchHome?: string;
 }): Promise<SearchPlaneHit[] | null> {
@@ -128,6 +130,7 @@ export async function querySearchPlane(opts: {
   // with `[]` — and the confident-empty answer LastSeek exists to remove would
   // be back, reintroduced by the fallback meant to be safe.
   const seek = queryLastSeek({
+    caller: opts.caller,
     query: opts.query,
     k: opts.k ?? 50,
     schemas: opts.schemas,
