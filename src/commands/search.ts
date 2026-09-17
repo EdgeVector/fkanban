@@ -155,6 +155,7 @@ async function nativeIndexCandidateSlugs(
     const semanticHits = await querySearchPlane({
       query: opts.query,
       k: NATIVE_INDEX_RESULT_CAP,
+      caller: "kanban/search",
       schemas: cardHash ? [cardHash] : undefined,
     });
     if (semanticHits !== null && semanticHits.length > 0) {
