@@ -163,7 +163,7 @@ function makeNode(cards: CardSpec[]) {
         const keyHash = (body!.key_value as { hash: string }).hash;
         if ((body!.mutation_type as string) === "delete") store.delete(`${schema}::${keyHash}`);
         else store.set(`${schema}::${keyHash}`, (body!.fields_and_values ?? {}) as Record<string, unknown>);
-        return Response.json({ ok: true, success: true });
+        return Response.json({ ok: true, success: true, mutation_id: "m-test" });
       }
       if (url.pathname === "/api/list") {
         const schema = url.searchParams.get("schema") ?? "";

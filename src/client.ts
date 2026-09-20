@@ -31,6 +31,7 @@ import {
   CapabilityDeniedError,
   CasConflictError,
   LastDbClient,
+  NodeTooOldError,
   PermissionDeniedError,
   RequestRejectedError,
   TransportError,
@@ -43,8 +44,10 @@ import {
   type QueryResult as SdkQueryResult,
   type RowFields,
   type SearchResult as SdkSearchResult,
+  type NodeVersion as SdkNodeVersion,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
+import { KANBAN_APP_LABEL, MIN_LASTDB_API_VERSION } from "./lastdb-version.ts";
 
 import { isMalformedQuery, recordNodeRejection } from "./diagnostics.ts";
 
@@ -396,6 +399,13 @@ export type NodeClient = {
     | { provisioned: false; reason: string }
   >;
   bootstrap(name: string): Promise<{ userHash: string }>;
+  // GET /api/version — the client↔node compatibility handshake (app-sdk
+  // `version()`). A node that predates the route reports `apiVersion: 0`,
+  // `handshake: false`; never an error. `kanban doctor` prints it. The gate
+  // that ENFORCES `MIN_LASTDB_API_VERSION` runs once per client before the
+  // first request (see `requireNodeApiVersion` in `newNodeClient`). Optional
+  // on the type so hand-written test doubles stay small.
+  nodeVersion?(): Promise<SdkNodeVersion>;
   loadSchemas(schemas?: string[]): Promise<{
     available_schemas_loaded: number;
     schemas_loaded_to_db: number;
@@ -688,6 +698,10 @@ export function newNodeClient(opts: {
   // with real board work in `lastdb ops` — see nodeHeaders() for why that
   // distinction is load-bearing rather than cosmetic.
   opsLabel?: string;
+  // Skip the client↔node version gate. Only `kanban doctor` sets this: doctor
+  // is the tool that DESCRIBES an old node (its `node api_version` check), so
+  // it must be allowed to look at one. Every other command keeps the gate.
+  skipApiVersionGate?: boolean;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
@@ -814,6 +828,23 @@ export function newNodeClient(opts: {
   const isNotAttested = (status: number, body: unknown): boolean =>
     status === 403 && bodyError(body) === "transport_not_attested";
 
+  // The client↔node version gate (app-sdk "Version handshake"). Resolved ONCE
+  // per client before the first request on either wire path (the SDK
+  // transport and `callJson`). With `MIN_LASTDB_API_VERSION` = 0 it resolves
+  // without IO; with a positive floor it reads `GET /api/version` and throws
+  // the SDK's NodeTooOldError — one line that names the fix — so a kanban
+  // newer than the node stops before its first write, not on a bare 400
+  // after it. The version route and `/health` are exempt (they ARE the gate).
+  let apiVersionGate: Promise<void> | null = null;
+  const requireNodeApiVersion = (path: string): Promise<void> => {
+    if (isVersionGateExempt(path)) return Promise.resolve();
+    apiVersionGate ??=
+      MIN_LASTDB_API_VERSION > 0 && !opts.skipApiVersionGate
+        ? gateOnNodeApiVersion(dataClient())
+        : Promise.resolve();
+    return apiVersionGate;
+  };
+
   const sdkTransport: SdkTransport = {
     target: socketPath ? `unix:${socketPath}` : url,
     async send(
@@ -821,6 +852,7 @@ export function newNodeClient(opts: {
       path: string,
       options: { headers?: Record<string, string>; body?: unknown } = {},
     ): Promise<{ status: number; body: unknown }> {
+      await requireNodeApiVersion(path);
       await ensureAttested();
       const sendOnce = async () => {
         const { res, readBody } = await verboseFetch({
@@ -1059,6 +1091,7 @@ export function newNodeClient(opts: {
     method: "GET" | "POST",
     body?: unknown,
   ): Promise<{ status: number; body: unknown }> => {
+    await requireNodeApiVersion(path);
     await ensureAttested();
     const sendOnce = async () => {
       const { res, readBody } = await verboseFetch({
@@ -1206,6 +1239,9 @@ export function newNodeClient(opts: {
   return {
     baseUrl: url,
     userHash,
+    nodeVersion() {
+      return dataClient().version();
+    },
     async autoIdentity() {
       const { status, body } = await callJson("/api/system/auto-identity", "GET");
       if (status === 200) {
@@ -2140,6 +2176,21 @@ function connectionError(
   });
 }
 
+// Paths the version gate never waits on: the handshake itself and the
+// liveness probe, so describing an old node (`kanban doctor`) still works.
+function isVersionGateExempt(path: string): boolean {
+  const bare = path.split("?")[0] ?? path;
+  return bare === "/api/version" || bare === "/health" || bare === "/api/health";
+}
+
+// Resolve the version gate: the SDK's NodeTooOldError propagates to the
+// caller (it is the one line that names the fix), so this only narrows the
+// resolved type. An async function, not a promise chain, so a
+// floating-promise guard sees the rejection path.
+async function gateOnNodeApiVersion(sdk: LastDbClient): Promise<void> {
+  await sdk.requireApiVersion(MIN_LASTDB_API_VERSION, KANBAN_APP_LABEL);
+}
+
 function mapSdkDataError(
   err: unknown,
   baseUrl: string,
@@ -2193,6 +2244,13 @@ function mapSdkDataError(
       if (v !== null && v !== undefined) modeled[k] = v;
     }
     return new FkanbanError({ code: "cas_conflict", message: err.message, cause: modeled });
+  }
+  // NB: NodeTooOldError subclasses RequestRejectedError — order matters. Its
+  // message is already the one line an operator needs (who needs what, what
+  // the node reports, the brew command); wrapping it as "HTTP 400" would bury
+  // the fact that the NODE is the side that moved.
+  if (err instanceof NodeTooOldError) {
+    return new FkanbanError({ code: "node_too_old", message: err.message, cause: err });
   }
   if (err instanceof RequestRejectedError) {
     return mapNodeError(400, err.body ?? { kind: err.kind, error: err.message }, path);

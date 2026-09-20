@@ -15,7 +15,7 @@
  */
 import { type CapabilityStore } from './capabilityStore.js';
 import { type Transport } from './transport.js';
-import type { ConnectOptions, ConsentScope, AutoIdentityResult, ChangesOptions, ChangesResult, LoadedSchema, MutationOp, MutationResult, QueryAllOptions, QueryFilter, QueryResult, RequestConsentResult, SchemaDescriptor, SchemaResolver, SearchOptions, SearchResult } from './types.js';
+import type { ConnectOptions, ConsentScope, AutoIdentityResult, ChangesOptions, ChangesResult, ListOptions, ListResult, LoadedSchema, NodeVersion, MutationOp, MutationResult, QueryAllOptions, QueryFilter, QueryResult, RequestConsentResult, SchemaDescriptor, SchemaResolver, SearchOptions, SearchResult } from './types.js';
 /** Options for {@link LastDbClient.awaitConsent}. */
 export interface AwaitConsentOptions {
     /** Hard client-side ceiling. Throws {@link ConsentTimeoutError} past it. */
@@ -49,6 +49,11 @@ export interface LastDbClientOptions {
     verifyCapability?: boolean;
     /** See `ConnectOptions.schemaResolver`. Default pass-through. */
     schemaResolver?: SchemaResolver;
+    /**
+     * Canonical DB locator this client targets (also sent as `X-LastDB-Db`).
+     * Defaults to personal when omitted.
+     */
+    dbLocator?: string;
 }
 /** A connected LastDB app client. Construct via {@link connect}. */
 export declare class LastDbClient {
@@ -62,6 +67,8 @@ export declare class LastDbClient {
     private readonly nodeTarget;
     private readonly verifyCapability;
     private readonly schemaResolver;
+    /** Canonical multi-DB locator forwarded on every data-path request. */
+    readonly dbLocator: string;
     constructor(appId: string, transport: Transport, store: CapabilityStore, capability: string | null, 
     /** The node-scoped capability-store key: `capabilityStoreKey(appId, node)`. */
     storeKey: string, 
@@ -71,6 +78,21 @@ export declare class LastDbClient {
     get target(): string;
     /** Whether a capability is currently loaded. */
     get hasCapability(): boolean;
+    /**
+     * `GET /api/version` — the client↔node compatibility handshake. Reads no
+     * node state and needs no capability. A node that predates the route (404)
+     * yields `{ apiVersion: 0, handshake: false }` rather than an error, so a
+     * caller can still print what it learned.
+     */
+    version(): Promise<NodeVersion>;
+    /**
+     * Refuse to proceed against a node whose `api_version` is below `required`.
+     * Throws {@link NodeTooOldError}, whose message is the one line an operator
+     * needs (`… Run: brew upgrade lastdb …`). Returns the node's version on
+     * success so a caller can log it. `connect({ requireApiVersion })` calls
+     * this for you.
+     */
+    requireApiVersion(required: number, appLabel?: string): Promise<NodeVersion>;
     /**
      * `POST /api/apps/request-consent`. Returns a `requestId` to poll with
      * {@link awaitConsent}. The owner grants via `folddb consent grant <appId>`.
@@ -102,6 +124,13 @@ export declare class LastDbClient {
      * automatically by `connect`.
      */
     loadCapability(): Promise<string | null>;
+    /**
+     * `GET /api/list` — return one page of live record keys without hydrating
+     * atom bodies. Use this for membership, then point-read the keys whose
+     * fields you need. A page is not a census: follow `next_cursor` while
+     * `has_more` is true.
+     */
+    list(schemaName: string, opts?: ListOptions): Promise<ListResult>;
     /**
      * `POST /api/query`. Reads fields from `schemaName` (a schema or a view).
      * Auto-attaches the capability headers when one is loaded.
@@ -204,6 +233,8 @@ export declare class LastDbClient {
     /** Extract an `error` string from a node error body, with a fallback. */
     private errorText;
 }
+/** Parse a successful keys-only `GET /api/list` response. */
+export declare function parseListResponse(body: unknown): ListResult;
 /**
  * Parse a `200` `/api/query` body into a {@link QueryResult}, surfacing the
  * full per-row envelope (gap #3).
@@ -234,6 +265,12 @@ export declare function parseChangesResponse(body: unknown): ChangesResult;
  */
 export declare function parseSearchResponse(body: unknown): SearchResult;
 /** Parse `GET /api/system/auto-identity` success JSON. */
+/**
+ * Parse a `GET /api/version` 200 body. Tolerant of a node that omits a
+ * field: a missing `api_version` reads as `0`, the same as a 404, because a
+ * handshake that cannot state its version has not stated compatibility.
+ */
+export declare function parseNodeVersion(body: unknown): NodeVersion;
 export declare function parseAutoIdentityResponse(body: unknown): AutoIdentityResult;
 /** Parse `GET /api/schemas` JSON into normalized loaded-schema entries. */
 export declare function parseSchemaListResponse(body: unknown): LoadedSchema[];

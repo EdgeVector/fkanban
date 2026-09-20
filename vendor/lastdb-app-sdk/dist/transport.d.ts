@@ -34,6 +34,10 @@ export interface Transport {
     send(method: 'GET' | 'POST', path: string, options?: {
         headers?: Record<string, string>;
         body?: unknown;
+        /** Override this transport's timeout for one request. */
+        timeoutMs?: number;
+        /** Raise, but never shorten, the effective timeout for one request. */
+        minimumTimeoutMs?: number;
     }): Promise<RawResponse>;
 }
 /** Per-transport behavior shared by TCP and Unix-domain-socket HTTP. */

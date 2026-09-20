@@ -2,6 +2,7 @@
 // reachable + provisioned, both schemas resolved on the node, a query
 // round-trips.
 
+import { MIN_LASTDB_API_VERSION } from "../lastdb-version.ts";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
@@ -169,6 +170,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     verbose: opts.verbose,
     socketPath,
     opsLabel: DOCTOR_OPS_LABEL,
+    // doctor describes an old node instead of refusing to look at it.
+    skipApiVersionGate: true,
   });
 
   // Which transport the node calls take. Local nodes are socket-only (the
@@ -254,6 +257,36 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     const detail = formatDoctorError(err);
     check(false, "node reachable + provisioned", detail);
     return false;
+  }
+
+  // The client↔node version handshake (`GET /api/version`). PASS when the
+  // node's api_version meets kanban's declared floor (package.json
+  // `lastdb.minApiVersion`); a node that predates the route reports 0 and
+  // still PASSES while the floor is 0. This is the one line that explains a
+  // `400 unknown_key` before anyone sees one.
+  if (node.nodeVersion) {
+    try {
+      const nv = await node.nodeVersion();
+      const build = nv.build ? ` build ${nv.build}` : "";
+      const reported = nv.handshake
+        ? `api_version ${nv.apiVersion}${build}`
+        : "no /api/version (node predates the handshake)";
+      const meets = nv.apiVersion >= MIN_LASTDB_API_VERSION;
+      check(
+        meets,
+        "node api_version",
+        `${reported}; kanban needs >= ${MIN_LASTDB_API_VERSION}` +
+          (meets ? "" : " — brew upgrade lastdb && brew services restart lastdb"),
+      );
+    } catch {
+      // Reachability was proven just above, so a failed version read means
+      // the node (or this transport) does not serve the route. Informational:
+      // the floor is enforced by the client gate, not by doctor.
+      info(
+        "node api_version",
+        `no answer from GET /api/version (older node or transport); kanban needs >= ${MIN_LASTDB_API_VERSION}`,
+      );
+    }
   }
 
   if (opts.staleRows) {

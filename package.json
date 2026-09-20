@@ -29,5 +29,8 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@sentry/node": "^10.65.0",
     "zod": "^4.4.3"
+  },
+  "lastdb": {
+    "minApiVersion": 0
   }
 }

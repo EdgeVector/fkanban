@@ -127,7 +127,7 @@ function makeNode(declaredCardHash: string, opts: { legacyDeclareResponse?: bool
         }
         if (mtype === "delete") store.delete(`${schema}::${keyHash}`);
         else store.set(`${schema}::${keyHash}`, fields);
-        return Response.json({ ok: true, success: true });
+        return Response.json({ ok: true, success: true, mutation_id: "m-test" });
       }
       if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") {

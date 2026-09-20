@@ -91,7 +91,7 @@ function makeNode(cardSchemas: Array<{ name: string; fields: string[] }>) {
         }
         if (mtype === "delete") store.delete(`${schema}::${keyHash}`);
         else store.set(`${schema}::${keyHash}`, fields);
-        return Response.json({ ok: true, success: true });
+        return Response.json({ ok: true, success: true, mutation_id: "m-test" });
       }
       if (url.pathname === "/api/list") return handleApiListFromPrefixedStore(url, store);
       if (url.pathname === "/api/query") {
@@ -278,7 +278,7 @@ describe("doctor write-probe", () => {
         }
         if (path === "/api/list") return handleApiList(url);
         if (path === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
-        if (path === "/api/mutation") return Response.json({ ok: true });
+        if (path === "/api/mutation") return Response.json({ ok: true, success: true, mutation_id: "m-test" });
         return Response.json({ error: "unexpected_socket_path" }, { status: 500 });
       },
     });

@@ -173,7 +173,7 @@ describe("newNodeClient attestation wiring", () => {
           }
           // Retry must carry the freshly re-minted session token.
           expect(req.headers.get("X-Folddb-Session")).toBe("sess-from-pc-2");
-          return Response.json({ ok: true });
+          return Response.json({ ok: true, success: true, mutation_id: "m-test" });
         }
         return Response.json({ error: "unexpected" }, { status: 500 });
       },

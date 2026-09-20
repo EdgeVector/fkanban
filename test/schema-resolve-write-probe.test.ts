@@ -297,7 +297,7 @@ const server = Bun.serve({
       }
       if (mtype === "delete") store.delete(k(schema, keyHash));
       else store.set(k(schema, keyHash), fields);
-      return Response.json({ ok: true, success: true });
+      return Response.json({ ok: true, success: true, mutation_id: "m-test" });
     }
 
     if (url.pathname === "/api/list") return handleApiListFromPrefixedStore(url, store);
