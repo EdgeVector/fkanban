@@ -77,7 +77,7 @@ function makeNode() {
         const addr = `${schema}::${key.hash}::${key.range ?? ""}`;
         if (mtype === "delete") store.delete(addr);
         else store.set(addr, (body!.fields_and_values ?? {}) as Record<string, unknown>);
-        return Response.json({ ok: true, success: true });
+        return Response.json({ ok: true, success: true, mutation_id: "m-test" });
       }
       if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") {

@@ -70,7 +70,7 @@ const server = Bun.serve({
 
       if (mtype === "delete") store.delete(addr(schema, key.hash, range));
       else store.set(addr(schema, key.hash, range), { fields, hash: key.hash, range });
-      return Response.json({ ok: true, success: true });
+      return Response.json({ ok: true, success: true, mutation_id: "m-test" });
     }
 
     if (url.pathname === "/api/list") return handleApiList(url);

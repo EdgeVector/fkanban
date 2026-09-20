@@ -16,16 +16,18 @@ node, scoped to what they consented to.
 > is documented in **[CONTRACT.md](CONTRACT.md)**. This README is the full API
 > reference; CONTRACT.md is the boundary guarantee.
 
-> **⚠️ Local dev-node version requirement.** To exercise this SDK against a
-> local `folddb dev` node, the node must be **built from `main`** (or a release
-> **after `v0.1.0`**). The shipped **`v0.1.0`** `folddb dev` binary serves the
-> dev-loop `/dev/*` surface only — it has **no `/api/*` data path, no `app
-> trust` verb, and no `/api/app/search`**, so this SDK's `query` / `mutate` /
-> `search` calls will not reach it. Build from source with
-> `cargo build --release -p fold_db_node --bin lastdb --bin folddb --features dev-mode`
-> and confirm `folddb dev app trust --list` is a recognized command.
-> (A production `fold_db_node` already
-> serves `/api/*`; this caveat is only about the *dev* node.)
+> **Primary node: Mini `lastdbd` over UDS.** The supported local data plane is
+> the Mini binary (`lastdbd` / brew `lastdb`) on a Unix-domain socket — typically
+> `~/.lastdb/data/folddb.sock` (alias env: `LASTDB_SOCKET_PATH` /
+> `FOLDDB_SOCKET_PATH`). Connect with **`socketPath`**, not a deleted
+> `fold_db_node` crate or TCP `:9101` as the primary path. Optional loopback
+> TCP (`baseUrl`) remains a discovery fallback for remote/browser-style
+> clients; it is not how local apps should talk to the primary brain.
+>
+> **Local CLI/dev.** Prefer an installed Mini (`lastdb` / `folddb` on your
+> PATH). Do **not** instruct `cargo build -p fold_db_node` — that package is
+> gone from the product tree. For ephemeral app-trust loops, use the current
+> `folddb` / Mini tooling from `main` or a post-Mini release.
 
 ## Install
 
@@ -37,11 +39,16 @@ npm install @lastdb/app-sdk
 
 ```ts
 import { connect } from '@lastdb/app-sdk';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
-// Transport: a production node's TCP HTTP surface (`baseUrl`) OR a node's
-// UDS control socket (`socketPath`). Against a `fold_db_node::dev_mode` the app data
-// surface is UDS-only — use `socketPath` (see "What the dev node supports").
-const fold = await connect({ baseUrl: 'http://127.0.0.1:9101', appId: 'fbrain' });
+// Primary: Mini owner/app UDS (lastdbd). Prefer socketPath over TCP baseUrl.
+const fold = await connect({
+  socketPath: process.env.LASTDB_SOCKET_PATH
+    ?? process.env.FOLDDB_SOCKET_PATH
+    ?? join(homedir(), '.lastdb', 'data', 'folddb.sock'),
+  appId: 'fbrain',
+});
 
 if (!fold.hasCapability) {                                    // first run: no stored capability
   const { requestId } = await fold.requestConsent('wildcard'); // ask for fbrain/*
@@ -59,6 +66,48 @@ for (const row of rows) {
   console.log(row.key, row.fields, row.authorPubKey); // full envelope per row
 }
 ```
+
+## Version handshake: is this node new enough for my app?
+
+Every strict request type on the node is `deny_unknown_fields`. Before this
+handshake, an app one grammar ahead of the node got the same 11-byte
+`Bad Request` as a typo (brain 0.8.0 → a 0.23.3-1435 primary, 2026-09-03).
+
+Declare the node request-grammar version your app needs and let `connect`
+refuse an older node on one line that names the fix:
+
+```ts
+import { connect, LASTDB_SDK_API_VERSION, NodeTooOldError } from '@lastdb/app-sdk';
+
+try {
+  const fold = await connect({
+    socketPath,
+    appId: 'brain',
+    appLabel: `brain ${pkg.version}`,          // who is asking, for the message
+    requireApiVersion: LASTDB_SDK_API_VERSION, // or the number from your app manifest
+  });
+} catch (e) {
+  if (e instanceof NodeTooOldError) {
+    console.error(e.message);
+    // brain 0.8.1 needs LastDB api_version >= 1; this node reports api_version 0.
+    // Run: brew upgrade lastdb && brew services restart lastdb
+    process.exit(3);
+  }
+  throw e;
+}
+```
+
+- `GET /api/version` answers on both sockets with no node state:
+  `{ok, api_version, build, capabilities, instance_id}`. `fold.version()`
+  reads it; a node that predates the route reports `apiVersion: 0`,
+  `handshake: false`.
+- `requireApiVersion: 0` (or unset) declares no requirement and skips the
+  read. Raise the number only when the app starts sending a key an older node
+  would refuse — `LASTDB_SDK_API_VERSION` is the grammar this SDK was written
+  against and is pinned to the node's Rust constant by a test.
+- A data route answering `400 {kind:"unknown_key"}` throws `NodeTooOldError`
+  too (`.kind === 'unknown_key'`). It subclasses `RequestRejectedError`, so an
+  existing `catch` keeps working. The node never echoes the unknown key.
 
 ## Choosing a socket: your own apps vs published apps
 
@@ -206,25 +255,29 @@ flow, not a runtime fallback.
 ## Transports
 
 Pass exactly one of `baseUrl` (HTTP) or `socketPath` (the node's Unix-domain
-control socket); the transport is chosen by which is present.
+control socket); the transport is chosen by which is present. **Local Mini
+nodes should always use `socketPath`** (or let socket-first discovery land on
+`~/.lastdb/data/folddb.sock`).
 
 ```ts
-await connect({ baseUrl: 'http://127.0.0.1:9101', appId: 'fbrain' });          // socket-first (see below)
-await connect({ socketPath: '/path/to/<session>.sock', appId: 'fbrain' });     // explicit UDS, no discovery
+// Explicit UDS — preferred for Mini / lastdbd:
+await connect({ socketPath: join(homedir(), '.lastdb', 'data', 'folddb.sock'), appId: 'fbrain' });
+
+// Optional: TCP baseUrl triggers socket-first discovery, then TCP fallback:
+await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain' });
 ```
 
 ### Socket-first discovery (the default app path)
 
-When you pass `baseUrl` — the local-node case — the SDK **prefers the node's
-Unix-domain data-plane socket** and falls back to the `baseUrl` TCP listener
-only when no socket file is present. The socket is the normal app path
-(`folddb.sock`, peer-credential authenticated); TCP is the legacy fallback that
-keeps working during the migration. This mirrors the discovery order the Rust
-client (`FoldDbHttpClient`, used by the CLI + MCP) follows — with the
-brand-forward `LASTDB_SOCKET_PATH` preferred ahead of the Rust client's
-`FOLDDB_SOCKET_PATH` — so a TypeScript app and the Rust client agree on where
-the socket lives (both explicit overrides point at the same socket when only
-one is set):
+When you pass `baseUrl` — typically a loopback HTTP URL — the SDK **prefers the
+node's Unix-domain data-plane socket** and falls back to the `baseUrl` TCP
+listener only when no socket file is present. The socket is the normal app path
+(`folddb.sock`, peer-credential authenticated); TCP is the optional fallback for
+remote or non-Unix clients. This mirrors the discovery order the Rust client
+(`FoldDbHttpClient`, used by the CLI + MCP) follows — with the brand-forward
+`LASTDB_SOCKET_PATH` preferred ahead of the Rust client's `FOLDDB_SOCKET_PATH`
+— so a TypeScript app and the Rust client agree on where the socket lives
+(both explicit overrides point at the same socket when only one is set):
 
 1. **`LASTDB_SOCKET_PATH`** — canonical explicit socket-path override
    (brand-forward; SDK-preferred). Used when the file exists; a missing path
@@ -261,10 +314,11 @@ platforms there is no UDS transport, so discovery always yields TCP.
 
 ## Default headers (production-node identity)
 
-A **production `fold_db_node`** HTTP server is stateless: it resolves the
-calling user from an `X-User-Hash` header on *every* request and answers
-`401 MISSING_USER_CONTEXT` when it is absent. Pass `defaultHeaders` to attach
-such a header to every request the client sends (consent flow + data path):
+A **Mini / production `lastdbd` TCP HTTP surface** (when enabled) is
+stateless: it resolves the calling user from an `X-User-Hash` header on
+*every* request and answers `401 MISSING_USER_CONTEXT` when it is absent.
+Pass `defaultHeaders` to attach such a header to every request the client
+sends (consent flow + data path):
 
 ```ts
 await connect({
@@ -274,11 +328,11 @@ await connect({
 });
 ```
 
-A per-call header of the same name wins. This applies to a **production
-node's TCP HTTP surface**. A `fold_db_node::dev_mode`'s app data surface is the
-**UDS control socket** (a TCP `/api/*` caller is refused — see
-[below](#what-the-dev-node-supports-vs-production)) and ignores
-`X-User-Hash`, so setting it is always safe.
+A per-call header of the same name wins. This applies to the **optional TCP
+HTTP surface**. The **UDS control socket** (the primary Mini path) authenticates
+via kernel peer credentials and ignores `X-User-Hash`, so setting it is always
+safe. Prefer `socketPath` for local Mini; see
+[below](#what-the-dev-node-supports-vs-production) for app-surface notes.
 
 ## Request timeout
 
@@ -288,6 +342,12 @@ cannot leave SDK calls pending forever. Override it per client when needed:
 ```ts
 await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain', timeoutMs: 5000 });
 ```
+
+An exact durable Delete with `cloudPublication: 'wait'` raises the effective
+request timeout to at least 150s. The built-in transports use the larger of
+that floor and the configured `timeoutMs`; they never shorten a larger caller
+budget. Set `timeoutMs` above the server's exact-route budget when the server
+uses a handler-timeout override that makes that route exceed 150s.
 
 ## Capability storage
 
@@ -334,6 +394,34 @@ a custom `capabilityStore`.
 > honor `expectedNode` in `load`. Build the key with the exported
 > `capabilityStoreKey(appId, nodeTarget)` helper.
 
+## Keys-only membership
+
+Use `list()` when an app needs the live members of a schema without loading
+field atoms. It calls `GET /api/list`; it does not delegate to an unfiltered
+`queryAll()` scan. The cursor is opaque and exclusive, so pass it back exactly
+as returned until `has_more` is false:
+
+```ts
+const first = await db.list('SomeSchema', { limit: 100 });
+const second = first.has_more
+  ? await db.list('SomeSchema', { limit: 100, cursor: first.next_cursor! })
+  : null;
+
+for (const key of first.keys) {
+  // Point-read only the members whose fields the app actually needs.
+  await db.query('SomeSchema', {
+    filter: key.range === undefined
+      ? { HashKey: key.hash }
+      : { HashRangeKey: { hash: key.hash, range: key.range } },
+  });
+}
+```
+
+`list()` returns only `{ schema, keys, next_cursor, has_more, truncated }`.
+One page is never a census: `truncated` mirrors `has_more`, and callers that
+need every available key must drain every cursor page. The walk is not a
+snapshot; concurrent writes or deletes can change membership between pages.
+
 ## Query result envelope
 
 `query()` returns the node's **full per-row envelope**, not a bare field map.
@@ -347,7 +435,7 @@ Each `QueryRow` carries:
 | `metadata` | per-field write metadata as the node stores it (atom/molecule ids, `writer_pubkey`, …), keyed by field name |
 | `authorPubKey` | the pubkey that authored the row (first non-empty `writer_pubkey`), or `null` |
 
-This is the exact shape production `fold_db_node`'s `/api/query` builds
+This is the exact shape Mini / production `lastdbd`'s `/api/query` builds
 (`{key, fields, metadata, author_pub_key}` per result key); the SDK surfaces
 those fields faithfully and invents none. A node that returns bare field-map
 rows is still accepted (the object becomes `fields`; `key`/`metadata`/
@@ -355,15 +443,15 @@ rows is still accepted (the object becomes `fields`; `key`/`metadata`/
 
 ## Pagination
 
-Production `fold_db_node` **always pages `/api/query`**: with no `limit` it
+Mini / production `lastdbd` **always pages `/api/query`**: with no `limit` it
 still caps the response at its default page size (100, `DEFAULT_QUERY_LIMIT`),
 so a plain `query()` against a >100-row schema is silently truncated. The SDK
 exposes the node's pagination params and metadata:
 
 - `query(schema, { limit, offset })` — forwarded verbatim as the request's
-  top-level pagination fields, **only when set**. Both production
-  `fold_db_node` and the dev node (`fold_db_node::dev_mode`) honor them with the same
-  default/clamp and page metadata.
+  top-level pagination fields, **only when set**. Both production Mini and
+  local `folddb`/dev tooling honor them with the same default/clamp and page
+  metadata.
 - `QueryResult.page` — the node's pagination metadata (`totalCount`,
   `returnedCount`, `limit`, `offset`, `hasMore`), or `null` when the node
   reported none. `page?.hasMore` is the truncation signal.
@@ -519,6 +607,7 @@ Every node failure maps to a specific error class — there is no catch-all.
 | `CapabilityDeniedError` | a 403 whose body carries a discriminated `reason` (the app_identity v3.1 capability-verifier contract, plus search's `capability_required`) — subclasses `PermissionDeniedError`; carries `.reason` verbatim + `.detail` |
 | `CapabilityVerificationError` | a granted/inline capability failed client-side verification under `verifyCapability` — `.problem` ∈ `malformed` / `audience_mismatch` / `integrity_mismatch` |
 | `RequestRejectedError` | query/mutation/search 400 — carries the node's `kind`, its message (`error` or `message`), and the raw parsed `.body` verbatim |
+| `NodeTooOldError` | the node is older than this client: `connect({ requireApiVersion })` read a lower `api_version` (or a 404 = `0`), or a data route answered `400 {kind:"unknown_key"}` — subclasses `RequestRejectedError`; `.message` is the one-line remedy, `.detail` the facts |
 | `CasConflictError` | mutation 409 `{error:"cas_conflict"}` — a `MutationOp.expected` precondition did not hold; carries `.schema` / `.field` / `.key` / `.expected` / `.actual` (+ verbatim `.body`) so an app can re-read and retry |
 | `TransportError` / `UnexpectedResponseError` | network failure / unmodeled status |
 
@@ -540,6 +629,7 @@ class LastDbClient {
   storeCapability(capability: string): Promise<void>   // keyed by (appId, node)
   loadCapability(): Promise<string | null>             // wrong-node / failed-verification ⇒ null
 
+  list(schemaName: string, opts?: ListOptions): Promise<ListResult>
   query(schemaName: string, filter?: QueryFilter): Promise<QueryResult>
   queryAll(schemaName: string, filter?: Omit<QueryFilter, 'limit' | 'offset'>,
            opts?: QueryAllOptions): Promise<QueryResult>  // auto-paginates past the node's page cap
@@ -640,28 +730,28 @@ verifyCapabilityBlob(blob: string, expectedAppId: string): CapabilityBlobVerific
 
 The consent + capability-enforcement endpoints
 (`/api/apps/request-consent`, `/api/apps/consent-status/{id}`, and the
-`X-App-Capability` write gate) are served by a **production `fold_db_node`**.
-`fold_db_node::dev_mode` serves the same data dialect (`/api/query`,
+`X-App-Capability` write gate) are served by a **production Mini `lastdbd`**.
+Local `folddb`/dev tooling serves the same data dialect (`/api/query`,
 `/api/mutation`, `/api/schemas`) but gates app isolation via pid-based dev-trust
 (`folddb app trust`) rather than the capability header, and does **not**
-serve the consent endpoints. **The app data surface is UDS-only on the dev
-node:** `/api/query`, `/api/mutation`, and `/api/app/search` over the TCP
-port are refused with `403 tcp_app_surface_closed` — the TCP surface runs as
-the node owner, so serving the app routes there would bypass isolation.
-Connect with `socketPath`, not `baseUrl`. So:
+serve the consent endpoints. **The app data surface is UDS-first on Mini and
+on local dev tooling:** prefer `socketPath` (typically
+`~/.lastdb/data/folddb.sock`). Where TCP app routes are closed, a TCP
+`/api/*` caller is refused with `403 tcp_app_surface_closed` — the TCP surface
+runs as the node owner, so serving the app routes there would bypass isolation.
+Connect with `socketPath`, not `baseUrl`, for local work. So:
 
-- Against `folddb dev`: `connect` (via `socketPath`) + `query` + `mutate`
-  work end to end once you've `folddb app trust`ed your binary (the
-  capability header is accepted-but-ignored; the connecting pid's app
-  identity is what's enforced). This is what `e2e/roundtrip.mjs` exercises —
-  over the control socket, including the full query-row envelope (`key` +
-  `fields` + `metadata` + `authorPubKey`): the dev node's `/api/query` emits
-  the same envelope production does, so an app's query parsing is identical
+- Against Mini / local `folddb`: `connect` (via `socketPath`) + `query` +
+  `mutate` work end to end once you've `folddb app trust`ed your binary when
+  required (the capability header may be accepted-but-ignored; the connecting
+  pid's app identity is what's enforced). This is what `e2e/roundtrip.mjs`
+  exercises — over the control socket, including the full query-row envelope
+  (`key` + `fields` + `metadata` + `authorPubKey`): local `/api/query` emits
+  the same envelope production Mini does, so an app's query parsing is identical
   against either node. The e2e also drives the paginated read path
-  (`limit`/`offset` + `page` metadata) and a `queryAll` drain, since the dev
-  node now implements production-parity pagination.
+  (`limit`/`offset` + `page` metadata) and a `queryAll` drain.
 - The consent flow (`requestConsent` / `awaitConsent`) targets a production
-  node. It is covered by the SDK's unit tests (mock transport asserting the
+  Mini node. It is covered by the SDK's unit tests (mock transport asserting the
   exact request/poll JSON + the full error taxonomy).
 
 > **CLI vs SDK mutation shape.** This SDK's `mutate(schema, op)` and the
@@ -677,10 +767,10 @@ Connect with `socketPath`, not `baseUrl`. So:
 > doc's "CLI vs SDK mutation shape" table:
 > [`docs/developer-onboarding.md`](../../docs/developer-onboarding.md#cli-vs-sdk-mutation-shape).
 - `search()` targets the node-authoritative `POST /api/app/search` (fold #693).
-  `fold_db_node::dev_mode`'s `/api/*` mirror **routes it** (#130): the dev mirror serves
+  Mini / local dev `/api/*` **routes it** (#130): the node serves
   `POST /api/app/search` with node-authoritative scope (it resolves `S(A)` from
   the caller's verified posture against the active namespace ACL — the app never
-  names its own scope). `e2e/search.mjs` drives the SDK against an ephemeral dev
+  names its own scope). `e2e/search.mjs` drives the SDK against an ephemeral
   node end-to-end.
 
 ## Owner / Host Helpers

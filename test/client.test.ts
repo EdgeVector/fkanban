@@ -772,7 +772,7 @@ describe("socket-first covers owner data socket routes", () => {
         }
         return Response.json({ ok: true, results: [], has_more: false });
       }
-      if (path === "/api/mutation") return Response.json({ ok: true });
+      if (path === "/api/mutation") return Response.json({ ok: true, success: true, mutation_id: "m-test" });
       if (path === "/api/system/auto-identity") {
         return Response.json({ user_hash: "test-user" });
       }

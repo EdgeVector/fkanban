@@ -143,7 +143,7 @@ function makeCountingNode(opts: { boards: string[]; cardsPerBoard: number }) {
         const mtype = body!.mutation_type as string;
         if (mtype === "delete") store.delete(`${schema}::${keyHash}`);
         else store.set(`${schema}::${keyHash}`, fields);
-        return Response.json({ ok: true, success: true });
+        return Response.json({ ok: true, success: true, mutation_id: "m-test" });
       }
       if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") {

@@ -94,7 +94,7 @@ function makeNode() {
         if (!key) return Response.json({ error: "not found" }, { status: 404 });
         return Response.json({ schema: schemaRowFor(key) });
       }
-      if (url.pathname === "/api/mutation") return Response.json({ ok: true, success: true });
+      if (url.pathname === "/api/mutation") return Response.json({ ok: true, success: true, mutation_id: "m-test" });
       if (url.pathname === "/api/list") return handleApiList(url);
       if (url.pathname === "/api/query") return Response.json({ ok: true, results: [], has_more: false });
       return Response.json({ error: "unexpected", path: url.pathname }, { status: 500 });

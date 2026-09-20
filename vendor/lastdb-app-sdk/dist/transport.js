@@ -36,7 +36,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export function httpTransport(baseUrl, defaultHeaders = {}, options = {}) {
     const url = new URL(baseUrl);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-        throw new TransportError(`baseUrl must be http:// or https://, got '${url.protocol}'`);
+        throw new TransportError(`baseUrl must be http:// or https://, got '${url.protocol}'`, 'protocol');
     }
     const target = {
         kind: 'tcp',
@@ -199,10 +199,19 @@ class NodeHttpTransport {
         this.defaultHeaders = defaultHeaders;
         this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
         if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
-            throw new TransportError(`transport timeoutMs must be a positive finite number, got ${String(options.timeoutMs)}`);
+            throw new TransportError(`transport timeoutMs must be a positive finite number, got ${String(options.timeoutMs)}`, 'protocol');
         }
     }
     send(method, path, options = {}) {
+        const requestedTimeoutMs = options.timeoutMs ?? this.timeoutMs;
+        const minimumTimeoutMs = options.minimumTimeoutMs ?? 0;
+        if (!Number.isFinite(requestedTimeoutMs) ||
+            requestedTimeoutMs <= 0 ||
+            !Number.isFinite(minimumTimeoutMs) ||
+            minimumTimeoutMs < 0) {
+            return Promise.reject(new TransportError(`request timeoutMs must be a positive finite number, got ${String(options.timeoutMs ?? options.minimumTimeoutMs)}`, 'protocol'));
+        }
+        const timeoutMs = Math.max(requestedTimeoutMs, minimumTimeoutMs);
         const payload = options.body === undefined ? undefined : JSON.stringify(options.body);
         const headers = {
             accept: 'application/json',
@@ -227,14 +236,14 @@ class NodeHttpTransport {
                 method,
                 path,
                 headers,
-                timeout: this.timeoutMs,
+                timeout: timeoutMs,
             }
             : {
                 socketPath: this.t.socketPath,
                 method,
                 path,
                 headers,
-                timeout: this.timeoutMs,
+                timeout: timeoutMs,
             };
         return new Promise((resolve, reject) => {
             const req = httpRequest(requestOptions, (res) => {
@@ -251,7 +260,7 @@ class NodeHttpTransport {
                         catch {
                             // The node always answers JSON on these routes; a non-JSON body
                             // is a transport-level surprise, not a typed protocol error.
-                            reject(new TransportError(`non-JSON response (${status}) from ${this.target}${path}: ${text.slice(0, 200)}`));
+                            reject(new TransportError(`non-JSON response (${status}) from ${this.target}${path}: ${text.slice(0, 200)}`, 'protocol', { status }));
                             return;
                         }
                     }
@@ -259,14 +268,14 @@ class NodeHttpTransport {
                 });
             });
             req.on('timeout', () => {
-                req.destroy(new TransportError(`request to ${this.target}${path} timed out after ${this.timeoutMs}ms`));
+                req.destroy(new TransportError(`request to ${this.target}${path} timed out after ${timeoutMs}ms`, 'timeout'));
             });
             req.on('error', (err) => {
                 if (err instanceof TransportError) {
                     reject(err);
                     return;
                 }
-                reject(new TransportError(`request to ${this.target}${path} failed: ${err.message}`));
+                reject(new TransportError(`request to ${this.target}${path} failed: ${err.message}`, 'connect'));
             });
             if (payload !== undefined) {
                 req.write(payload);
