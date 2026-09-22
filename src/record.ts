@@ -4892,13 +4892,34 @@ export async function listMilestonesOnBoard(node: NodeClient, cfg: Config, board
  * milestone set, and no other board's success can supply it. See
  * {@link listAllBoardMilestones}.
  */
+/**
+ * Waits before each retry of a failed BoardMilestones partition read. Tests
+ * set KANBAN_MILESTONE_INDEX_RETRY_MS=0 to keep the retry without the wait.
+ */
+function milestoneIndexRetryMs(): number[] {
+  const raw = process.env.KANBAN_MILESTONE_INDEX_RETRY_MS?.trim();
+  if (raw === "0") return [0, 0];
+  return [2_000, 5_000];
+}
+
 export async function listMilestones(
   node: NodeClient,
   cfg: Config,
   opts: BoardListOpt = {},
 ): Promise<Milestone[]> {
   const boards = opts.boards ?? (await listBoards(node, cfg));
-  const fromIndex = await listAllBoardMilestones(node, cfg, boards);
+  let fromIndex = await listAllBoardMilestones(node, cfg, boards);
+  // A failed partition read is usually node backpressure. Two bounded retries
+  // before refusing: `milestone portfolio` used to fail the whole
+  // feature-prove run on one shed read
+  // (papercut-feature-prove-milestone-portfolio-backpressure-20260922).
+  if (fromIndex === null && boardMilestonesHash(cfg)) {
+    for (const waitMs of milestoneIndexRetryMs()) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      fromIndex = await listAllBoardMilestones(node, cfg, boards);
+      if (fromIndex !== null) break;
+    }
+  }
   if (fromIndex !== null) return hydrateMilestonesFromPrimary(node, cfg, fromIndex);
 
   // `null` above means one of two very different things, and substituting the
@@ -4925,12 +4946,14 @@ export async function listMilestones(
   // than saying we could not read — a caller can retry a failure; it cannot
   // detect a plausible wrong list.
   if (boardMilestonesHash(cfg)) {
-    throw new Error(
-      "BoardMilestones partition read failed — refusing to answer from the Milestone product scan, " +
+    throw new FkanbanError({
+      code: "board_milestones_unreadable",
+      message:
+      "BoardMilestones partition read failed (after " + (milestoneIndexRetryMs().length + 1) + " attempts) — refusing to answer from the Milestone product scan, " +
         "which on this data misses live milestones and surfaces unreachable slug-only rows. " +
         "This is usually node backpressure (service_timeout / too many concurrent reads): retry. " +
         "If the index is genuinely stale, run `kanban groom milestone-indexes-heal`.",
-    );
+    });
   }
 
   // Index UNBOUND (fresh node, pre-backfill) — enumerate Milestone keys, then

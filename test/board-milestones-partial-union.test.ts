@@ -141,18 +141,44 @@ describe("BoardMilestones union: a failed partition is not an empty one", () => 
     expect(got).toBeNull();
   });
 
-  test("listMilestones refuses to answer a shed from the product scan", async () => {
+  test("listMilestones retries a single shed and answers from the index", async () => {
+    // papercut-feature-prove-milestone-portfolio-backpressure-20260922: one shed
+    // read used to fail the whole portfolio call.
+    process.env.KANBAN_MILESTONE_INDEX_RETRY_MS = "0";
+    try {
+      const node = await seededNode(["ms-alpha", "ms-beta", "ms-gamma"]);
+      shedPartitionOnce(node, "default");
+      const got = await listMilestones(node, cfg, { boards: BOARDS });
+      expect(got.map((m) => m.slug).sort()).toEqual(["ms-alpha", "ms-beta", "ms-gamma"]);
+    } finally {
+      delete process.env.KANBAN_MILESTONE_INDEX_RETRY_MS;
+    }
+  });
+
+  test("listMilestones refuses to answer a persistent shed from the product scan", async () => {
+    process.env.KANBAN_MILESTONE_INDEX_RETRY_MS = "0";
     const node = await seededNode(["ms-alpha", "ms-beta", "ms-gamma"]);
-    shedPartitionOnce(node, "default");
+    const base = node.queryAll.bind(node);
+    node.queryAll = async (req) => {
+      const filter = req.filter as QueryFilter & { HashKey?: string };
+      if (req.schemaHash === cfg.schemaHashes.board_milestones && filter?.HashKey === "default") {
+        throw new Error("service_timeout: too many concurrent reads");
+      }
+      return base(req);
+    };
 
     // The index is BOUND, so null from the union means a partition threw. The
     // Milestone product scan is not a safe substitute on real data — measured
     // on the primary it misses 24 live milestones and surfaces 54 unreachable
     // slug-only rows — so this must surface the failure, not a plausible wrong
     // list. A caller can retry a throw; it cannot detect a wrong list.
-    await expect(listMilestones(node, cfg, { boards: BOARDS })).rejects.toThrow(
-      /BoardMilestones partition read failed/,
-    );
+    try {
+      await expect(listMilestones(node, cfg, { boards: BOARDS })).rejects.toThrow(
+        /BoardMilestones partition read failed/,
+      );
+    } finally {
+      delete process.env.KANBAN_MILESTONE_INDEX_RETRY_MS;
+    }
   });
 
   test("an UNBOUND index still falls back to the product scan — that is what it is for", async () => {
