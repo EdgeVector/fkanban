@@ -7,6 +7,7 @@ import {
   type PickupStatusReport,
 } from "../pickup.ts";
 import { type SituationPreflight } from "../situations.ts";
+import { hydrateOverlapPeers, overlapAgainstCards } from "./overlap.ts";
 
 export type PickupStatusOptions = {
   cfg: Config;
@@ -73,17 +74,66 @@ export type PickupReadyOptions = {
  * column only — a real but partial view. Use `pickupStatusResult` for the
  * full per-category audit; use this only for the `ready` number/set.
  */
+export type PickupReadyReport = PickupStatusReport & {
+  /**
+   * Ready cards that `pickup claim` could take right now: ready AND not fenced
+   * by a live surface overlap with a `doing` card (the same overlap test, with
+   * the same stall bound, the claim applies). `ready` alone overstated the
+   * claimable work: gate said ready=4 while every claim path skipped all four
+   * for surface overlap (papercut-kanban-pickup-gate-ready-overstates-eligible-20260922).
+   * Absent when the doing column could not be read.
+   */
+  claimable?: number;
+  /** Ready cards fenced by a live doing peer, with the peers that fence them. */
+  fenced?: Array<{ slug: string; peers: string[] }>;
+};
+
 export async function pickupReadyResult(opts: PickupReadyOptions): Promise<{
   text: string;
-  report: PickupStatusReport;
+  report: PickupReadyReport;
 }> {
   const board = opts.board ?? "default";
   const todoCards = await listCardsByColumn(opts.node, opts.cfg, "todo", CARD_LIST_FIELDS, board);
-  const report = await buildPickupStatusReportWithSituations(todoCards, opts.situationPreflight, {
+  const report: PickupReadyReport = await buildPickupStatusReportWithSituations(todoCards, opts.situationPreflight, {
     cfg: opts.cfg,
     node: opts.node,
   });
-  return { text: renderPickupStatus(report), report };
+  if (report.ready > 0) {
+    try {
+      const doing = await hydrateOverlapPeers(
+        opts.node,
+        opts.cfg,
+        await listCardsByColumn(opts.node, opts.cfg, "doing", CARD_LIST_FIELDS, board),
+      );
+      const bySlug = new Map(todoCards.map((c) => [c.slug, c]));
+      const fenced: Array<{ slug: string; peers: string[] }> = [];
+      let claimable = 0;
+      for (const c of report.cards) {
+        if (!c.ready) continue;
+        const card = bySlug.get(c.slug);
+        if (!card) continue;
+        const overlap = overlapAgainstCards(card, doing);
+        if (overlap.conflicts.length > 0) {
+          fenced.push({ slug: c.slug, peers: overlap.conflicts.map((p) => p.slug) });
+        } else {
+          claimable += 1;
+        }
+      }
+      report.claimable = claimable;
+      report.fenced = fenced;
+    } catch {
+      // Leave `claimable` absent: an unread doing column is not "0 fenced".
+    }
+  } else {
+    report.claimable = 0;
+    report.fenced = [];
+  }
+  const fencedLine = report.fenced && report.fenced.length > 0
+    ? `\nclaimable=${report.claimable} fenced=${report.fenced.map((f) => `${f.slug}<-${f.peers.join("+")}`).join(",")}`
+    : report.claimable !== undefined
+      ? `\nclaimable=${report.claimable}`
+      : "";
+  return { text: renderPickupStatus(report) + fencedLine, report };
 }
 
 export async function pickupReadyCmd(opts: PickupReadyOptions): Promise<string> {

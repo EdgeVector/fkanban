@@ -175,7 +175,11 @@ describe("board-cards-heal: reaping orphans must not re-read the partition per r
     // before it deletes anything, at the cost of one more whole-partition read
     // whenever this run enqueued any delete. Derived from the field list, so
     // the bound tracks the schema instead of drifting into a magic number, and
-    // the thing being asserted stays "nothing scales with ORPHANS".
-    expect(partitionReads(node)).toBeLessThanOrEqual(1 + BOARD_CARDS_FIELDS.length + 1 + 1);
+    // the thing being asserted stays "nothing scales with ORPHANS". The last
+    // extra `1` is the post-sweep verification read: one list read per BOARD
+    // (not per orphan) that proves the orphan rows are gone before they count
+    // as healed
+    // (papercut-fkanban-board-cards-heal-apply-reports-healed-but-orphan-row-survives-20260921).
+    expect(partitionReads(node)).toBeLessThanOrEqual(1 + BOARD_CARDS_FIELDS.length + 1 + 1 + 1);
   });
 });

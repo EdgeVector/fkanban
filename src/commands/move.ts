@@ -17,6 +17,7 @@ import {
   applyDbLocatorForWrite,
   assertDbLocatorMatchesCard,
   depStatus,
+  claimHoldReason,
   doneAtForColumnTransition,
   firstDoingAtForColumnTransition,
   ensureBoardRecord,
@@ -85,6 +86,22 @@ export class ClaimConflictError extends FkanbanError {
   }
 }
 
+/**
+ * The card is in the expected column but carries a hold (block_status or a
+ * body-declared human gate) that forbids an unattended claim.
+ */
+export class ClaimHeldError extends FkanbanError {
+  readonly holdReason: string;
+
+  constructor(opts: { slug: string; reason: string }) {
+    super({
+      code: "claim_held",
+      message: `claim_held: Card "${opts.slug}" is held: ${opts.reason}.`,
+    });
+    this.holdReason = opts.reason;
+  }
+}
+
 export type AtomicClaimResult = {
   result: "claimed";
   card: Card;
@@ -123,6 +140,8 @@ export async function claimCard(opts: {
       current: card.column,
     });
   }
+  const hold = claimHoldReason(card);
+  if (hold) throw new ClaimHeldError({ slug: card.slug, reason: hold });
 
   const claimedAt = nowIso();
   const updated: Card = {

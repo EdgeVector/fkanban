@@ -249,9 +249,11 @@ describe("--force waives the lifecycle pipeline-status gate out loud", () => {
 
     // …and a GATED card does read, so the 0 above means "short-circuited",
     // not "this gate never reads", which would make the assertion vacuous.
+    // A Forgejo-venue card resolves its commit from a Head-Oid header only
+    // (LastGit ref/CR lookups are retired), so give the gated card one.
     await assertLifecycleMoveAllowed({
       node: counting,
-      card: lifecycleCard(),
+      card: lifecycleCard({ body: `${GATED_BODY}Head-Oid: ${"a".repeat(40)}\n` }),
       targetColumn: "done",
       terminalColumn: "done",
       force: true,

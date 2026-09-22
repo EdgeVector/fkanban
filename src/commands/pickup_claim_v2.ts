@@ -2,6 +2,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
   firstEligible,
+  pickupV2IneligibleReason,
   PICKUP_V2_ELIGIBILITY_FIELDS,
   type DependencyStatuses,
 } from "../pickup_v2.ts";
@@ -11,7 +12,7 @@ import {
   TERMINAL_COLUMN,
   type Card,
 } from "../record.ts";
-import { claimCard, ClaimConflictError } from "./move.ts";
+import { claimCard, ClaimConflictError, ClaimHeldError } from "./move.ts";
 
 // `PICKUP_V2_ELIGIBILITY_FIELDS` is spread in, not retyped: the projection and
 // the predicate that reads it must not drift. `test/pickup-v2-eligibility.test.ts`
@@ -55,6 +56,10 @@ export type PickupClaimV2Result =
   | {
       result: "none";
       dry_run: boolean;
+      /** Todo cards scanned on the board. */
+      scanned: number;
+      /** Why each scanned card was passed over (first 20, board order). */
+      skipped: Array<{ slug: string; reason: string }>;
     };
 
 export type PickupClaimV2Error = {
@@ -81,7 +86,13 @@ export function formatPickupClaimV2(
 ): string {
   if (json) return JSON.stringify(pickupClaimV2Payload(result), null, 2);
   if (result.result === "error") return `pickup error: ${result.code}`;
-  if (result.result === "none") return "no claim";
+  if (result.result === "none") {
+    if (result.skipped.length === 0) return `no claim (scanned=${result.scanned} todo card(s))`;
+    return [
+      `no claim (scanned=${result.scanned} todo card(s)); passed over:`,
+      ...result.skipped.map((s) => `  ${s.slug}: ${s.reason}`),
+    ].join("\n");
+  }
   return `${result.dry_run ? "would claim" : "claimed"}: ${result.card.slug}`;
 }
 
@@ -121,12 +132,23 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
   );
   const statuses = dependencyStatuses(todo, knownStatuses);
   const liveDoing: Card[] = [...doing];
+  const scanned = todo.length;
+  const eligibilityOpts = { enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true };
+  /** Cards dropped at claim time (conflict or hold), with the reason. */
+  const droppedAtClaim: Array<{ slug: string; reason: string }> = [];
 
   while (true) {
-    const candidate = firstEligible(todo, liveDoing, statuses, {
-      enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
-    });
-    if (!candidate) return { result: "none", dry_run: opts.dryRun === true };
+    const candidate = firstEligible(todo, liveDoing, statuses, eligibilityOpts);
+    if (!candidate) {
+      const skipped = [
+        ...droppedAtClaim,
+        ...todo.map((card) => ({
+          slug: card.slug,
+          reason: pickupV2IneligibleReason(card, liveDoing, statuses, eligibilityOpts) ?? "not selected",
+        })),
+      ].slice(0, 20);
+      return { result: "none", dry_run: opts.dryRun === true, scanned, skipped };
+    }
 
     if (opts.dryRun) {
       return {
@@ -148,7 +170,13 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
       });
       return { ...claimed, dry_run: false };
     } catch (err) {
+      if (err instanceof ClaimHeldError) {
+        droppedAtClaim.push({ slug: candidate.slug, reason: err.holdReason });
+        todo = todo.filter((card) => card.slug !== candidate.slug);
+        continue;
+      }
       if (!(err instanceof ClaimConflictError)) throw err;
+      droppedAtClaim.push({ slug: candidate.slug, reason: `claim conflict (current=${err.current})` });
       todo = todo.filter((card) => card.slug !== candidate.slug);
       if (err.current === "doing" || err.current === "unknown") {
         liveDoing.push({ ...candidate, column: "doing" });

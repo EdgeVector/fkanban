@@ -1066,6 +1066,48 @@ export function normalizeBlockStatus(s: string): BlockStatus {
 
 export const OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
+/** `Requires-Actor:` values that an unattended pickup worker satisfies. */
+const UNATTENDED_ACTORS = new Set(["agent", "any", "routine", "unattended", "pickup"]);
+/** `Human-Gate:` values that mean "no gate". */
+const CLEARED_GATE_VALUES = new Set(["none", "no", "cleared", "false", "0"]);
+
+/**
+ * A human or interactive-actor gate the card BODY declares, independent of
+ * `block_status`. Two body headers are recognized:
+ *
+ *   Requires-Actor: interactive   (or human, operator, non-routinesd, …)
+ *   Human-Gate: <short reason token>
+ *
+ * `block_status` alone was the only gate pickup honored, and an ungate that
+ * cleared it while the brief still said "keep in backlog until a
+ * non-routinesd actor runs install-daemon" let pickup claim the card
+ * (papercut-kanban-pickup-claims-human-gated-card-after-ungate-20260922).
+ * A header in the body survives any block_status write, so the brief itself
+ * can hold the gate. Returns the reason, or null when the body declares none.
+ */
+export function bodyDeclaredHumanGate(body: string): string | null {
+  if (!body) return null;
+  const actor = parseBodyHeader(body, "Requires-Actor").trim().toLowerCase();
+  if (actor && !UNATTENDED_ACTORS.has(actor)) return `body declares Requires-Actor: ${actor}`;
+  const gate = parseBodyHeader(body, "Human-Gate").trim().toLowerCase();
+  if (gate && !CLEARED_GATE_VALUES.has(gate)) return `body declares Human-Gate: ${gate}`;
+  return null;
+}
+
+/**
+ * Why a freshly point-read card must not be claimed, or null. The last check
+ * before a claim write: a hold set after the candidate list was read, or a
+ * gate declared only in the body, both stop the claim here.
+ */
+export function claimHoldReason(card: Pick<Card, "block_status" | "body">): string | null {
+  const blockStatus = normalizeBlockStatus(card.block_status);
+  if (blockStatus === "needs_human" || blockStatus === "design_first") {
+    return `intentional hold: ${blockStatus}`;
+  }
+  if (blockStatus === "deferred") return "deferred hold";
+  return bodyDeclaredHumanGate(card.body ?? "");
+}
+
 // Read a `Name: value` header from a card body, used to backfill the structured
 // fields from the legacy body-header convention. All callers (repo/base/
 // north_star) carry SINGLE-TOKEN values (an owner/name, a branch, a slug), so
@@ -1277,6 +1319,14 @@ export function sanitizeDefaultTodoLaneMetadata(card: Card): TodoLaneField[] {
   // claimable unit. Clear so the next pickup can own it (or watch can re-attach
   // after move to doing). Agents set pr_url after claiming into doing.
   if (card.pr_url.trim()) {
+    // Keep the locator in the brief. The structured field must go (the lane
+    // invariant), but a re-dispatched worker has to find the PR it resumes.
+    // A body that already names the URL keeps it; otherwise append one
+    // `Prior-PR:` line (papercut-kanban-todo-clears-pr-metadata-on-redispatch).
+    const prior = card.pr_url.trim();
+    if (!card.body.includes(prior)) {
+      card.body = `${card.body.replace(/\s*$/, "")}\nPrior-PR: ${prior}\n`;
+    }
     card.pr_url = "";
     cleared.push("pr_url");
   }
@@ -1309,7 +1359,8 @@ export function warnClearedTodoLaneMetadata(opts: {
   emit(
     `warning: cleared ${opts.cleared.join(" and ")} on "${opts.slug}" — ` +
       "default/todo is the pickup claim lane and in-flight metadata blocks the claim. " +
-      `Re-attach after moving it back to doing (previous pr_url: ${opts.previousPrUrl || "none"}).`,
+      `Re-attach after moving it back to doing (previous pr_url: ${opts.previousPrUrl || "none"}; ` +
+      "the body keeps it as a `Prior-PR:` line when it did not already name it).",
   );
 }
 

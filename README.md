@@ -350,6 +350,29 @@ missing base branches, intentional `block_status` holds, and non-pickup
 put human-gated, deferred, tracker, program, capstone, validation, and other
 non-pickup work on a parking surface until it is split into concrete PR work.
 
+### A human gate in the brief
+
+`block_status` is not the only hold. A card body can declare a gate that no
+`block_status` write can clear:
+
+```text
+Requires-Actor: interactive     # or human, operator, non-routinesd, ...
+Human-Gate: launchctl-kickstart # any token except none/no/cleared
+```
+
+`pickup status` classifies such a card as `human-gated`, and `pickup claim` /
+`pickup claim-v2` re-read the Card record just before the claim and refuse it.
+`Requires-Actor: agent` (or `any`, `routine`, `unattended`) means no gate.
+When `pickup claim-v2` claims nothing, its `none` result lists each todo card
+it passed over with the reason (`skipped: [{slug, reason}]`).
+
+### JSON shapes
+
+`kanban list --json` and `kanban search --json` print an object, not an array:
+`{"cards": [...], "total": N, "truncated": bool}`. Iterate with
+`jq '.cards[]'`. `jq '.[]'` iterates the envelope and fails with
+`Cannot index array with string "slug"`.
+
 Use `pickup status` before grooming or pickup:
 
 ```bash

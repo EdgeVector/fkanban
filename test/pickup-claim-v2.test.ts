@@ -254,7 +254,23 @@ describe("pickup claim v2 LastDB adapter", () => {
     await expect(pickupClaimV2Result({ cfg, node, dryRun: true })).resolves.toEqual({
       result: "none",
       dry_run: true,
+      scanned: 1,
+      skipped: [{ slug: "candidate", reason: "surface overlap with doing card peer" }],
     });
+  });
+
+  test("a card whose brief declares a human actor is not claimed, and the miss names why", async () => {
+    const node = fakeNode();
+    await seedCard(
+      node,
+      card({ slug: "gated", body: "Repo: EdgeVector/fkanban\nRequires-Actor: interactive\n\n## GOAL\nx\n" }),
+    );
+
+    const res = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
+    expect(res.result).toBe("none");
+    if (res.result !== "none") return;
+    expect(res.skipped).toEqual([{ slug: "gated", reason: "body declares Requires-Actor: interactive" }]);
+    expect(await findCard(node, cfg, "gated")).toMatchObject({ column: "todo" });
   });
 
   test("a claim conflict continues to the next eligible card", async () => {

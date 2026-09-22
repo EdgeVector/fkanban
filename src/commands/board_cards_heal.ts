@@ -325,6 +325,12 @@ export type BoardCardsHealReport = {
    */
   unverified_upserts?: number;
   /**
+   * `delete-orphan` rows this `--apply` run asked to delete that the list read
+   * still returned after the sweep (and a short bounded wait). They are NOT
+   * counted in `healed`. A nonzero value means the delete did not land.
+   */
+  unverified_deletes?: number;
+  /**
    * True when the delete sweep at the end of this run was skipped because a
    * re-check of partition/column agreement — run immediately before the
    * sweep, not only at plan time — found the node's views had diverged since
@@ -807,6 +813,9 @@ export async function boardCardsHealResult(
   let milestone_rows_skipped = 0;
   let drifted = 0;
   let unverified_upserts = 0;
+  /** Orphan rows this run asked the sweep to delete, re-read after the sweep. */
+  const orphanDeletes: Array<{ board: string; slug: string }> = [];
+  let unverified_deletes = 0;
   // Set whenever this run enqueues a janitor delete. Gates the pre-sweep
   // divergence recheck below so a run that healed only by upsert (no deletes
   // queued) does not pay for two extra partition reads it has no use for.
@@ -866,8 +875,18 @@ export async function boardCardsHealResult(
   // about" would still have written on a view known to be wrong. The board is
   // not damaged by waiting — heal is hourly, the rows returned by themselves
   // after the daemon restarted, and the run that comes back finds them.
+  //
+  // The refusal is PER PARTITION. One board whose two reads disagree says
+  // nothing about another board's partition, and blocking every board on one
+  // bad partition left the `default` board unrepaired for days while
+  // `agent-dogfood-scratch` served 2 column-only rows
+  // (papercut-board-cards-heal-inconsistent-partition-read-20260921). A
+  // diverged board gets no writes at all; the run blocks only when every
+  // target board diverged.
   const diverged = readDivergence.filter(boardCardsReadDiverged);
-  if (opts.apply && diverged.length > 0) {
+  const divergedBoards = new Set(diverged.map((d) => d.board));
+  const healthyTargets = targetBoards.filter((b) => !divergedBoards.has(b.slug));
+  if (opts.apply && diverged.length > 0 && healthyTargets.length === 0) {
     const blockedReport: BoardCardsHealReport = {
       scanned_index_rows: rawRows.length,
       drifted: 0,
@@ -973,6 +992,7 @@ export async function boardCardsHealResult(
   for (const [key, rows] of byKey) {
     const [boardFromKey, slug] = key.split("\0") as [string, string];
     const board = boardFromKey || "default";
+    if (opts.apply && boardFromKey && divergedBoards.has(board)) continue;
 
     if (!truthSlugSet.has(slug)) {
       if (opts.json && rows.length === 1) {
@@ -1049,6 +1069,16 @@ export async function boardCardsHealResult(
 
       missing_card += 1;
       drifted += 1;
+      // Delete by the REAL range keys the completeness sweep captured, the
+      // same rule the delete-stale branch follows. Rebuilding the key from the
+      // row's copied `position` targets a key that never existed when that
+      // copy is empty or refreshed: the legacy ghost rows carry
+      // `position: ""` while their physical key holds a real position, so a
+      // rebuilt `backlog#000…#slug` delete acked, healed=N was reported, and
+      // the rows survived for weeks
+      // (papercut-fkanban-board-cards-heal-apply-reports-healed-but-orphan-row-survives-20260921).
+      const orphanExactSks = spineSksBySlug.get(`${boardFromKey}\0${slug}`) ?? [];
+      let orphanEnqueued = false;
       for (const row of rows) {
         actions.push({
           slug,
@@ -1073,12 +1103,13 @@ export async function boardCardsHealResult(
           // exactly the rows it cannot see.
           const schemaHash = boardCardsHash(opts.cfg);
           if (schemaHash) {
-            enqueueBoardCardJanitor([{
-              schemaHash,
-              board,
-              sk: boardCardSk(row.column, row.position, slug),
-            }]);
+            const sks = orphanExactSks.length > 0
+              ? (orphanEnqueued ? [] : orphanExactSks)
+              : [boardCardSk(row.column, row.position, slug)];
+            enqueueBoardCardJanitor(sks.map((sk) => ({ schemaHash, board, sk })));
+            orphanEnqueued = true;
             deletesEnqueued = true;
+            orphanDeletes.push({ board, slug });
           }
           healed += 1;
         }
@@ -1094,6 +1125,7 @@ export async function boardCardsHealResult(
     // `board`, so this cannot be answered before the point read above. Rows
     // that DO exist were already narrowed by partition (`targetBoards`).
     if (rows.length === 0 && boardFilter && truthBoard !== boardFilter) continue;
+    if (opts.apply && divergedBoards.has(truthBoard)) continue;
 
     const truthSk = boardCardSk(truth.column, truth.position, truth.slug);
     const matching = rows.filter(
@@ -1261,6 +1293,7 @@ export async function boardCardsHealResult(
   for (const [key, sks] of spineSksBySlug) {
     if (sks.length < 2) continue;
     const [board, slug] = key.split("\0") as [string, string];
+    if (opts.apply && divergedBoards.has(board)) continue;
     const dup = await classifyBoardCardDuplicateRows(opts.node, opts.cfg, board, slug, sks);
     if (!dup || dup.sparseSks.length === 0) continue;
     drifted += 1;
@@ -1303,7 +1336,7 @@ export async function boardCardsHealResult(
     // costs nothing but a delayed reap of rows the next heal run will still
     // see and classify fresh.
     const recheck = await Promise.all(
-      targetBoards.map((b) => readBoardCardsPartitionDivergence(opts.node, opts.cfg, b.slug, b.columns ?? [])),
+      healthyTargets.map((b) => readBoardCardsPartitionDivergence(opts.node, opts.cfg, b.slug, b.columns ?? [])),
     );
     const stillDiverged = recheck.filter(
       (d): d is BoardCardsReadDivergence => d !== null && boardCardsReadDiverged(d),
@@ -1313,6 +1346,35 @@ export async function boardCardsHealResult(
       readDivergence.push(...stillDiverged);
     } else {
       await sweepBoardCardJanitor(opts.node);
+    }
+  }
+
+  // A delete is a repair only once the row is gone from the read `kanban list`
+  // serves. The sweep's ack is not that proof: the ghost rows above acked and
+  // stayed. Re-read each touched board (one partition read per board, not per
+  // row), give settling deletes a short bounded wait, and stop counting any
+  // orphan that is still listed as `healed`.
+  if (opts.apply && orphanDeletes.length > 0) {
+    if (deleteSweepSkipped) {
+      healed -= orphanDeletes.length;
+    } else {
+      const sleep = opts.visibilitySleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+      let pending = orphanDeletes.slice();
+      for (let attempt = 0; attempt < 3 && pending.length > 0; attempt += 1) {
+        if (attempt > 0) await sleep(500);
+        const listedByBoard = new Map<string, Set<string> | null>();
+        for (const b of new Set(pending.map((o) => o.board))) {
+          const part = await listBoardCardsPartition(opts.node, opts.cfg, b);
+          listedByBoard.set(b, part ? new Set(part.map((c) => c.slug)) : null);
+        }
+        pending = pending.filter((o) => {
+          const listed = listedByBoard.get(o.board);
+          // An unreadable partition cannot confirm the delete.
+          return listed === null || listed === undefined || listed.has(o.slug);
+        });
+      }
+      unverified_deletes = pending.length;
+      healed -= pending.length;
     }
   }
 
@@ -1336,6 +1398,7 @@ export async function boardCardsHealResult(
     removal_ceiling: removalCeiling,
     removals_possible: removalsPossible,
     unverified_upserts,
+    unverified_deletes,
     delete_sweep_skipped: deleteSweepSkipped,
     actions: opts.json ? actions : actions.filter((a) => a.action !== "noop-match"),
   };
@@ -1398,6 +1461,25 @@ export async function boardCardsHealResult(
       `    were left in place rather than removed. Re-run heal; a live card never lost membership.`,
     ]
     : [];
+  const unverifiedDeleteWarn = report.unverified_deletes
+    ? [
+      `  ⚠ UNVERIFIED DELETE — ${report.unverified_deletes} orphan row(s) are still listed after`,
+      `    the delete sweep. They are not counted as healed. The delete did not land on the`,
+      `    row \`kanban list\` serves; inspect with --slug <s> --json before re-running.`,
+    ]
+    : [];
+  const divergedSkipWarn = opts.apply && divergedBoards.size > 0
+    ? [
+      `  ⚠ PARTITION SKIPPED — the node served inconsistent views of ` +
+      `${[...divergedBoards].join(", ")}; no writes on ${divergedBoards.size === 1 ? "that board" : "those boards"}.`,
+      ...diverged.map(
+        (d) =>
+          `    ${d.board}: ${d.wholeOnly.length} row(s) only the whole-partition read saw, ` +
+          `${d.columnOnly.length} only a column read saw`,
+      ),
+      `    Other boards were repaired. This is a node-side read degradation; do not restart on it.`,
+    ]
+    : [];
   const sweepSkippedWarn = report.delete_sweep_skipped
     ? [
       `  ⚠ DELETE SWEEP SKIPPED — a re-check just before the delete sweep found the node's`,
@@ -1411,6 +1493,8 @@ export async function boardCardsHealResult(
     ...warn,
     ...milestoneNote,
     ...unverifiedWarn,
+    ...unverifiedDeleteWarn,
+    ...divergedSkipWarn,
     ...sweepSkippedWarn,
     ...lines,
   ].join("\n");

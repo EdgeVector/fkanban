@@ -84,6 +84,7 @@ export function clearLastgitSchemaHashCache(): void {
   schemaHashCache.clear();
   schemaLayoutCache.clear();
   ciStatusLightCache.clear();
+  schemaAbsenceVoiced.clear();
 }
 
 /**
@@ -495,6 +496,25 @@ async function querySchema(
     });
     return res.results ?? [];
   } catch (err) {
+    // A 400 whose message says the schema itself is not loaded is NOT a query
+    // we built wrong: the schema-map (or an old listSchemas answer) names a
+    // hash this node does not carry. LastGit is retired as a venue
+    // (decision-2026-09-06-all-repos-venue-forgejo-no-lastgit-default), so its
+    // schemas are absent on the primary and every `show` used to print a
+    // "malformed query" warning for them. Remember the absence for this
+    // process, say so once in plain words, and skip the schema from now on.
+    if (isSchemaNotLoaded(err)) {
+      schemaHashCache.set(logical, null);
+      schemaLayoutCache.delete(schemaHash);
+      if (!schemaAbsenceVoiced.has(logical)) {
+        schemaAbsenceVoiced.add(logical);
+        console.error(
+          `kanban: note: the ${logical} schema (${schemaHash.slice(0, 12)}…) is not loaded on this node; ` +
+            `the ${logical} lookup is skipped for this process.`,
+        );
+      }
+      return [];
+    }
     // Schema missing / permission / busy — treat as unavailable for best-effort paths.
     // Drop a bad cache entry so a later attempt can re-resolve via listSchemas.
     schemaHashCache.delete(logical);
@@ -524,6 +544,33 @@ async function querySchema(
   }
 }
 
+/** Logical schemas whose absence this process already reported. */
+const schemaAbsenceVoiced = new Set<string>();
+
+/**
+ * True when the node rejected a query because the schema hash is not loaded
+ * (`Schema '<hash>' not found`). That is an environment fact, not a client bug.
+ */
+export function isSchemaNotLoaded(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /Schema '[^']*' not found/i.test(msg);
+}
+
+/**
+ * True when a card still points at a LastGit change request or a lastdb:///
+ * repo. Only those cards may have LastgitChangeRequest / LastgitRef rows.
+ * Forgejo-venue cards (every repo since 2026-09-06) do not, so their `show`
+ * must not query LastGit schemas at all. Set KANBAN_LASTGIT_LOOKUPS=1 to force
+ * the lookups for every card.
+ */
+export function isLastgitVenueCard(card: Pick<Card, "repo" | "body" | "pr_url">): boolean {
+  if (process.env.KANBAN_LASTGIT_LOOKUPS?.trim() === "1") return true;
+  const repo = card.repo || parseBodyHeader(card.body, "Repo");
+  if (/^lastdb:\/\/\//i.test(repo.trim())) return true;
+  const locators = [card.pr_url, parseBodyHeader(card.body, "PR"), parseBodyHeader(card.body, "CR")];
+  return locators.some((l) => /lastdb:\/\/\/|lastgit:\/\/|(^|[\s/])cr-[A-Za-z0-9]/i.test(l.trim()));
+}
+
 // `isMalformedQuery` now lives in `src/diagnostics.ts`, next to the recorder
 // that also uses it. Two copies of the predicate would be two chances to widen
 // one and not the other — and the console line here and the durable record in
@@ -536,12 +583,20 @@ async function querySchema(
  */
 export async function resolveCardOid(
   node: NodeClient,
-  opts: { repoSlug: string; body: string; branch: string; prUrl: string },
+  opts: {
+    repoSlug: string;
+    body: string;
+    branch: string;
+    prUrl: string;
+    /** Query LastGit CR/ref rows. Default true; `show` passes false for Forgejo cards. */
+    lastgitLookups?: boolean;
+  },
 ): Promise<OidResolution> {
   const fromHeader = parseHeadOidHeader(opts.body);
   if (fromHeader) return { oid: fromHeader, via: "head-oid" };
 
   if (!opts.repoSlug) return { oid: "", via: "none" };
+  if (opts.lastgitLookups === false) return { oid: "", via: "none" };
 
   const crId = parseCrId(opts.prUrl, opts.body);
   if (crId) {
@@ -723,6 +778,7 @@ export async function attachPipelineStatus(
       body: card.body,
       branch: card.branch,
       prUrl: card.pr_url,
+      lastgitLookups: isLastgitVenueCard(card),
     });
   } catch {
     oidRes = { oid: "", via: "none" };
