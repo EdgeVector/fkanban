@@ -359,10 +359,77 @@ describe("pickup claim", () => {
     const result = await pickupClaimResult({ cfg, node });
     expect(result.claimed).toBe(true);
     expect(result.card?.slug).toBe("other-repo");
-    expect(result.skipped.some((s) => s.slug === "overlap-todo" && s.reason === "surface-overlap")).toBe(true);
+    expect(result.skipped.some((s) => s.slug === "overlap-todo" && s.reason === "surface-overlap-live")).toBe(true);
     // The gate adjudicated here — both sides declared surfaces, so a claim that
     // survives it really did clear a collision check.
     expect(result.overlap_unadjudicated).toBeUndefined();
+  });
+
+  test("stalled overlap peers stop fencing a four-card ready slice", async () => {
+    const now = "2026-09-22T12:00:00.000Z";
+    await seedCard(node, card({
+      slug: "stalled-peer",
+      column: "doing",
+      repo: "EdgeVector/fold",
+      surfaces: ["src/engine/**"],
+      first_doing_at: "2026-09-22T05:59:00.000Z",
+      body: "Repo: EdgeVector/fold\nBase: main\nSurfaces: src/engine/**\n\nStalled.",
+    }));
+    for (let i = 1; i <= 4; i += 1) {
+      await seedCard(node, card({
+        slug: `overlap-ready-${i}`,
+        repo: "EdgeVector/fold",
+        surfaces: ["src/engine/foo.ts"],
+        tags: ["p0"],
+        body: "Repo: EdgeVector/fold\nBase: main\nPriority: P0\nSurfaces: src/engine/foo.ts\n\nReady.",
+        created_at: `2026-01-0${i}T00:00:00.000Z`,
+      }));
+    }
+
+    const result = await pickupClaimResult({
+      cfg,
+      node,
+      worker: "worker-a",
+      now,
+      surfaceOverlapStallMs: 6 * 60 * 60 * 1000,
+    });
+
+    expect(result.claimed).toBe(true);
+    expect(result.card?.slug).toBe("overlap-ready-1");
+    expect(result.surface_overlap_stalled).toEqual(["stalled-peer"]);
+    expect(result.skipped).toEqual([]);
+  });
+
+  test("fresh overlap peers remain hard live conflicts", async () => {
+    const now = "2026-09-22T12:00:00.000Z";
+    await seedCard(node, card({
+      slug: "fresh-peer",
+      column: "doing",
+      repo: "EdgeVector/fold",
+      surfaces: ["src/engine/**"],
+      first_doing_at: "2026-09-22T11:59:00.000Z",
+      body: "Repo: EdgeVector/fold\nBase: main\nSurfaces: src/engine/**\n\nFresh.",
+    }));
+    await seedCard(node, card({
+      slug: "overlap-ready",
+      repo: "EdgeVector/fold",
+      surfaces: ["src/engine/foo.ts"],
+      body: "Repo: EdgeVector/fold\nBase: main\nSurfaces: src/engine/foo.ts\n\nReady.",
+    }));
+
+    const result = await pickupClaimResult({
+      cfg,
+      node,
+      worker: "worker-a",
+      now,
+      surfaceOverlapStallMs: 6 * 60 * 60 * 1000,
+    });
+
+    expect(result.claimed).toBe(false);
+    expect(result.reason).toBe("no-eligible");
+    expect(result.skipped).toEqual([
+      { slug: "overlap-ready", reason: "surface-overlap-live", detail: "live=fresh-peer" },
+    ]);
   });
 
   test("records that the overlap gate could not adjudicate when the candidate declares no surfaces", async () => {
@@ -1082,7 +1149,7 @@ describe("pickup claim", () => {
     expect(loser.reason).toBe("no-eligible");
     expect(loser.skipped).toEqual(expect.arrayContaining([
       expect.objectContaining({ slug: "first", reason: "claim_conflict" }),
-      expect.objectContaining({ slug: "second", reason: "surface-overlap" }),
+      expect.objectContaining({ slug: "second", reason: "surface-overlap-live" }),
     ]));
     expect(loser.skipped.every((skip) => skip.reason.trim().length > 0)).toBe(true);
     expect(isTrueIdlePickupClaim(loser)).toBe(false);

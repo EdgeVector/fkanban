@@ -27,6 +27,7 @@ export type OverlapResult = {
   repo: string;
   surfaces: string[];
   conflicts: SurfaceConflict[];
+  stalledPeers: string[];
   warnings: string[];
   /**
    * In-flight peers that were REACHED but could not be compared — no repo, no
@@ -61,6 +62,32 @@ export type OverlapResult = {
  * — essentially nothing declares surfaces.
  */
 export type OverlapVerdict = "conflict" | "clear" | "unknown" | "partial";
+
+// A stale peer must not fence every ready card forever. The pickup path
+// downgrades such a peer to a warning and lets a new worker claim the slice;
+// last-stack consumes that warning to alert on repeated starvation.
+export const DEFAULT_SURFACE_OVERLAP_STALL_MS = 6 * 60 * 60 * 1000;
+export const SURFACE_OVERLAP_STALL_ENV = "FKANBAN_PICKUP_SURFACE_OVERLAP_STALL_MS";
+
+export function surfaceOverlapStallMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env[SURFACE_OVERLAP_STALL_ENV]?.trim();
+  if (!raw) return DEFAULT_SURFACE_OVERLAP_STALL_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SURFACE_OVERLAP_STALL_MS;
+}
+
+export type OverlapOptions = {
+  now?: string;
+  stallMs?: number;
+};
+
+function stalledPeerAgeMs(card: Card, nowMs: number): number | null {
+  if (!card.first_doing_at) return null;
+  const firstDoingMs = Date.parse(card.first_doing_at);
+  if (!Number.isFinite(firstDoingMs)) return null;
+  const ageMs = nowMs - firstDoingMs;
+  return ageMs >= 0 ? ageMs : null;
+}
 
 export function overlapVerdict(result: OverlapResult): OverlapVerdict {
   if (result.conflicts.length > 0) return "conflict";
@@ -177,11 +204,21 @@ function matchedPairs(candidate: string[], other: string[]): Array<{ candidate: 
 }
 
 /** Pure overlap check against an in-memory card list (used by pickup claim). */
-export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResult {
+export function overlapAgainstCards(
+  candidate: Card,
+  cards: Card[],
+  options: OverlapOptions = {},
+): OverlapResult {
   const repo = claimedRepo(candidate);
   const surfaces = claimedSurfaces(candidate);
+  const nowMs = Date.parse(options.now ?? new Date().toISOString());
+  const configuredStallMs = options.stallMs;
+  const stallMs = configuredStallMs !== undefined && Number.isFinite(configuredStallMs) && configuredStallMs > 0
+    ? configuredStallMs
+    : surfaceOverlapStallMs();
   const warnings: string[] = [];
   const conflicts: SurfaceConflict[] = [];
+  const stalledPeers: string[] = [];
   const unevaluatedPeers: string[] = [];
 
   if (!repo) {
@@ -207,6 +244,7 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
       surfaces,
       conflicts,
       warnings,
+      stalledPeers,
       unevaluatedPeers,
       candidateUndeclared: true,
     };
@@ -237,6 +275,15 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
       unevaluatedPeers.push(card.slug);
       continue;
     }
+    const ageMs = Number.isFinite(nowMs) ? stalledPeerAgeMs(card, nowMs) : null;
+    if (ageMs !== null && ageMs >= stallMs) {
+      stalledPeers.push(card.slug);
+      warnings.push(
+        `${card.slug} is a stalled doing peer for ${repo} (${Math.round(ageMs / 60_000)}m); ` +
+        `surface-overlap is advisory after ${Math.round(stallMs / 60_000)}m`,
+      );
+      continue;
+    }
     const matches = matchedPairs(surfaces, otherSurfaces);
     if (matches.length > 0) {
       conflicts.push({
@@ -254,6 +301,7 @@ export function overlapAgainstCards(candidate: Card, cards: Card[]): OverlapResu
     repo,
     surfaces,
     conflicts,
+    stalledPeers,
     warnings,
     unevaluatedPeers,
     candidateUndeclared: false,
