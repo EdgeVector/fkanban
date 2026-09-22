@@ -93,6 +93,7 @@ function emptyCard(over: Partial<Card> = {}): Card {
     created_at: now,
     updated_at: now,
     done_at: "",
+    first_doing_at: "",
     repo: "EdgeVector/fkanban",
     db: "",
     base: "main",

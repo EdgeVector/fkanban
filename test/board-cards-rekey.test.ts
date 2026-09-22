@@ -42,6 +42,7 @@ function card(slug = "rekey-card"): Card {
     created_by: "test",
     updated_at: "2026-08-11T00:00:00Z",
     done_at: "",
+    first_doing_at: "",
     db: "",
     repo: "EdgeVector/fkanban",
     base: "main",

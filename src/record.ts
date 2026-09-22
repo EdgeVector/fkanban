@@ -88,6 +88,28 @@ export type Card = {
   // First time the card entered its board's terminal column. Empty for legacy
   // or not-yet-complete cards; immutable once set.
   done_at: string;
+  // Start of the card's CURRENT unresolved work attempt: the first time it
+  // entered `doing` since it last left the todo/doing work loop.
+  //
+  // `position` cannot answer this. It is the column-enter stamp and part of the
+  // BoardCards sort key `column#position#slug`, so every todo -> doing move
+  // rewrites it. A card that a watch routine re-dispatches (`move <slug> todo`,
+  // pickup claims it back into `doing`) therefore reads as brand new on every
+  // cycle, and so does a pickup budget handoff that leaves the card in `doing`.
+  //
+  // That is not a hypothetical. Card `lastdb-streaming-file-blob-put` fenced 4
+  // ready cards and 6 pickup workers from 2026-09-17 to 2026-09-22. Its
+  // doing-age, measured on `position`, reset to ~0 twice on the final day alone
+  // (8.17h -> 0.54h, 6.53h -> 0.16h), so the factory-health 5h band and the
+  // kanban-watch 60m reclaim both stayed blind for five days. See brain
+  // `papercut-kanban-doing-age-clock-resets-on-re-dispatch`.
+  //
+  // This field is that measurement, and it is monotone across the re-dispatch
+  // it must survive: set on entry to `doing` when unset, PRESERVED on a move
+  // back to `todo`, cleared only when the card leaves the work loop entirely
+  // (`backlog` or the terminal column). Empty for legacy cards and for any card
+  // that has never been claimed.
+  first_doing_at: string;
   // ── Structured pickup-decision + reconcile fields ───────────────────────
   // (fbrain design `fkanban-card-structured-fields`). Stored as plain String
   // schema fields; enum-valued ones (kind/block_status) are normalized on use
@@ -208,6 +230,11 @@ function isHiddenCard(card: Card): boolean {
 // migrated in memory, but never write `dep:<slug>` tags for dependency edges.
 export const DEP_TAG_PREFIX = "dep:";
 export const DONE_AT_TAG_PREFIX = "done_at:";
+// Like `done_at`, carried as a tag rather than a schema field so no LastDB
+// schema rekey is needed. `rowToCard`/`cardFromBoardCardFields` lift it into
+// `Card.first_doing_at` and strip it from `tags`, so it never reaches a
+// caller as a visible tag.
+export const FIRST_DOING_AT_TAG_PREFIX = "first_doing_at:";
 
 export function isDepTag(tag: string): boolean {
   return tag.startsWith(DEP_TAG_PREFIX);
@@ -223,6 +250,19 @@ export function isDoneAtTag(tag: string): boolean {
 
 export function doneAtTag(doneAt: string): string {
   return `${DONE_AT_TAG_PREFIX}${doneAt}`;
+}
+
+export function isFirstDoingAtTag(tag: string): boolean {
+  return tag.startsWith(FIRST_DOING_AT_TAG_PREFIX);
+}
+
+export function firstDoingAtTag(iso: string): string {
+  return `${FIRST_DOING_AT_TAG_PREFIX}${iso}`;
+}
+
+/** Read the `first_doing_at:` stamp out of a raw tag array. */
+export function firstDoingAtFromTags(tags: readonly string[]): string {
+  return tags.find(isFirstDoingAtTag)?.slice(FIRST_DOING_AT_TAG_PREFIX.length) ?? "";
 }
 
 // Clean a tag list: trim, drop blanks, dedupe (order-stable). The label
@@ -319,6 +359,21 @@ export function blockedByHint(): string {
 // (No `review` — incomplete work stays todo/doing; terminal is done.)
 export const WORKING_COLUMNS = ["doing", "done"] as const;
 
+/**
+ * The column a card occupies while a worker holds it.
+ *
+ * Named because `first_doing_at` and the overlap fence both key on it, and a
+ * bare `"doing"` string literal in three files is how the two drift apart.
+ */
+export const DOING_COLUMN = "doing";
+
+/**
+ * The column a card returns to for ANOTHER attempt at the same unresolved work
+ * — what `kanban-watch` means by "re-dispatch". `first_doing_at` survives this
+ * move on purpose; see `firstDoingAtForColumnTransition`.
+ */
+export const REDISPATCH_COLUMN = "todo";
+
 export function isWorkingColumn(column: string): boolean {
   return (WORKING_COLUMNS as readonly string[]).includes(column);
 }
@@ -344,6 +399,37 @@ export function doneAtForColumnTransition(
   if (existing) return existing;
   const fromColumn = card?.column ?? "";
   return fromColumn !== terminal ? now : "";
+}
+
+/**
+ * The stall clock for `Card.first_doing_at` — see that field for why
+ * `position` cannot serve.
+ *
+ * Three rules, and the middle one is the whole point:
+ *
+ * - into `doing`   — stamp `now` when unset, else KEEP the earlier stamp. The
+ *                    second and third build attempt must not look like a first.
+ * - into `todo`    — KEEP. This is the re-dispatch lane. A watch routine that
+ *                    bounces a red PR back for another builder has not resolved
+ *                    anything, so the attempt, and its clock, continue.
+ * - anything else  — CLEAR. `backlog` and `done` both end the attempt. A card
+ *                    parked for a human decision for three weeks and then
+ *                    released must not wake up three weeks stale, and a card
+ *                    that ships and is later reopened starts a fresh attempt.
+ *
+ * Deliberately NOT keyed on the terminal column alone: `backlog` is the park
+ * lane, and treating a deliberate park as an ongoing stall is the one way this
+ * clock could produce a false alarm loud enough to get it switched off.
+ */
+export function firstDoingAtForColumnTransition(
+  card: Pick<Card, "first_doing_at"> | null,
+  targetColumn: string,
+  now: string,
+): string {
+  const existing = card?.first_doing_at ?? "";
+  if (targetColumn === DOING_COLUMN) return existing || now;
+  if (targetColumn === REDISPATCH_COLUMN) return existing;
+  return "";
 }
 
 // ── Repo/Base header auto-derivation ────────────────────────────────────────
@@ -2162,10 +2248,11 @@ export function repairStructuredFieldsFromBody(
 // Fields that default empty on fresh/test Card literals.
 export function emptyStructuredFields(): Pick<
   Card,
-  "done_at" | "db" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "milestone" | "pr_url" | "branch" | "surfaces"
+  "done_at" | "first_doing_at" | "db" | "repo" | "base" | "kind" | "block_status" | "block_reason" | "north_star" | "milestone" | "pr_url" | "branch" | "surfaces"
 > {
   return {
     done_at: "",
+    first_doing_at: "",
     db: "",
     repo: "",
     base: "",
@@ -2617,6 +2704,7 @@ export function rowToCard(row: QueryRow): Card {
     allTags
       .find(isDoneAtTag)
       ?.slice(DONE_AT_TAG_PREFIX.length) ?? "";
+  const firstDoingAt = firstDoingAtFromTags(allTags);
   return {
     slug,
     title: stringField(f, "title"),
@@ -2626,7 +2714,7 @@ export function rowToCard(row: QueryRow): Card {
     position: stringField(f, "position"),
     assignee: stringField(f, "assignee"),
     // Legacy dep tags are migrated into `deps`; everything else stays.
-    tags: allTags.filter((t) => !isDepTag(t) && !isDoneAtTag(t)),
+    tags: allTags.filter((t) => !isDepTag(t) && !isDoneAtTag(t) && !isFirstDoingAtTag(t)),
     deps: normalizeDeps([...deps, ...legacyTagDeps], slug),
     surfaces: structuredSurfaces.length > 0 ? structuredSurfaces : parseBodyListHeader(body, "Surfaces"),
     created_at: stringField(f, "created_at"),
@@ -2636,6 +2724,7 @@ export function rowToCard(row: QueryRow): Card {
       UNKNOWN_CREATED_BY,
     updated_at: stringField(f, "updated_at"),
     done_at: doneAt,
+    first_doing_at: firstDoingAt,
     // New fields default to "" for cards written before the schema gained them.
     db: stringField(f, "db") || normalizeDbLocator(parseBodyHeader(body, "Db")),
     repo: stringField(f, "repo"),
@@ -4641,8 +4730,9 @@ export function cardToFields(c: Card): Record<string, unknown> {
     position: c.position,
     assignee: c.assignee,
     tags: [
-      ...c.tags.filter((t) => !isDepTag(t) && !isDoneAtTag(t)),
+      ...c.tags.filter((t) => !isDepTag(t) && !isDoneAtTag(t) && !isFirstDoingAtTag(t)),
       ...(c.done_at ? [doneAtTag(c.done_at)] : []),
+      ...(c.first_doing_at ? [firstDoingAtTag(c.first_doing_at)] : []),
     ],
     deps: normalizeDeps(c.deps, c.slug),
     surfaces: normalizeSurfaces(c.surfaces ?? []),

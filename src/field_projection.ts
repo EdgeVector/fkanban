@@ -19,6 +19,7 @@ const FIELD_ALIASES: Record<string, string> = {
 const DERIVED_FIELD_NAMES = [
   "deps",
   "done_at",
+  "first_doing_at",
   "blocked",
   "blockedBy",
   "missingDeps",
@@ -40,6 +41,7 @@ const DISPLAY_ONLY_FIELDS = new Set([
   "deps",
   "created_at",
   "done_at",
+  "first_doing_at",
   "blocked",
   "blockedBy",
   "missingDeps",

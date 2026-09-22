@@ -29,6 +29,7 @@ function card(slug: string): Card {
     created_by: "test",
     updated_at: now,
     done_at: "",
+    first_doing_at: "",
     db: "",
     repo: "EdgeVector/fkanban",
     base: "main",

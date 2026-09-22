@@ -153,6 +153,7 @@ export function cardFromMilestoneCardFields(fields: Record<string, unknown>): Ca
     created_by: str("created_by") || "unknown",
     updated_at: str("updated_at"),
     done_at: "",
+    first_doing_at: "",
     db: str("db"),
     repo: str("repo"),
     base: str("base"),

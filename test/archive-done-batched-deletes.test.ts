@@ -71,6 +71,7 @@ function card(partial: Partial<Card> & { slug: string }): Card {
     created_by: "test",
     updated_at: hoursAgo(500),
     done_at: "",
+    first_doing_at: "",
     db: "",
     repo: "",
     base: "",

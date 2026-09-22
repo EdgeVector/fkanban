@@ -18,6 +18,7 @@ import {
   assertDbLocatorMatchesCard,
   depStatus,
   doneAtForColumnTransition,
+  firstDoingAtForColumnTransition,
   ensureBoardRecord,
   ensureColumn,
   findCard,
@@ -123,13 +124,18 @@ export async function claimCard(opts: {
     });
   }
 
+  const claimedAt = nowIso();
   const updated: Card = {
     ...card,
     column: "doing",
     position: appendPosition(),
     assignee: worker,
-    updated_at: nowIso(),
+    updated_at: claimedAt,
     done_at: "",
+    // KEEPS an earlier stamp. A claim is not proof of fresh work: pickup claims
+    // a card back after every watch re-dispatch, and that is exactly the case
+    // the stall clock must see through.
+    first_doing_at: firstDoingAtForColumnTransition(card, "doing", claimedAt),
   };
 
   try {
@@ -302,6 +308,7 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     assignee: assigneeForWrite,
     updated_at: now,
     done_at: doneAtForColumnTransition(card, opts.column, columns, now),
+    first_doing_at: firstDoingAtForColumnTransition(card, opts.column, now),
   };
   applyDbLocatorForWrite(updated, opts.dbLocator, "move");
   const rawBody = updated.body;

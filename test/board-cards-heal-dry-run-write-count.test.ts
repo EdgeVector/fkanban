@@ -65,6 +65,7 @@ function card(slug: string, position: string): Card {
     created_at: now,
     updated_at: now,
     done_at: "",
+    first_doing_at: "",
     db: "",
     kind: "pr",
     priority: "",

@@ -49,6 +49,10 @@ export type CardSummary = {
   created_at: string;
   created_by?: string;
   updated_at: string;
+  // Declared explicitly, unlike `done_at`, which a summary genuinely does not
+  // carry. The index signature below would otherwise type this `unknown` and
+  // silently defeat the `first_doing_at` round trip through BoardCards.
+  first_doing_at: string;
   db: string;
   repo: string;
   base: string;

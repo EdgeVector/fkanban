@@ -247,6 +247,7 @@ const cardShape = {
   created_by: z.string(),
   updated_at: z.string(),
   done_at: z.string(),
+  first_doing_at: z.string(),
 } as const;
 const cardSchema = z.object(cardShape);
 

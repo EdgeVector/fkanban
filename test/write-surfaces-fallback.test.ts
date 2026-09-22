@@ -41,6 +41,7 @@ function testCard(): Card {
     created_at: ts,
     updated_at: ts,
     done_at: "",
+    first_doing_at: "",
     db: "lastdb://personal",
     repo: "EdgeVector/fkanban",
     base: "main",

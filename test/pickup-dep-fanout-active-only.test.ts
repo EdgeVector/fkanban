@@ -35,6 +35,7 @@ function card(partial: Partial<Card> & { slug: string }): Card {
     created_by: "test",
     updated_at: "",
     done_at: "",
+    first_doing_at: "",
     db: "",
     repo: "EdgeVector/fkanban",
     base: "main",

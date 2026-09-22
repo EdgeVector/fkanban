@@ -59,6 +59,7 @@ function card(over: Partial<Card> & { slug: string }): Card {
     created_at: now,
     updated_at: now,
     done_at: "",
+    first_doing_at: "",
     db: "",
     kind: "pr",
     block_status: "none",

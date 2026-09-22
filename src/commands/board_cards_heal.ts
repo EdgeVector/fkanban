@@ -717,6 +717,7 @@ export async function boardCardsHealResult(
           surfaces: [],
           created_at: "",
           updated_at: "",
+          first_doing_at: "",
           db: "",
           repo: "",
           base: "",

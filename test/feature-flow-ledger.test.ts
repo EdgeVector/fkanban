@@ -86,6 +86,7 @@ function card(overrides: Partial<Card> = {}): Card {
     created_by: "test",
     updated_at: "2026-08-31T10:00:00.000Z",
     done_at: "",
+    first_doing_at: "",
     repo: "EdgeVector/fkanban",
     db: "",
     base: "main",
@@ -145,6 +146,7 @@ describe("keyed feature-flow ledger", () => {
       ...review,
       column: "done",
       done_at: "2026-08-31T10:30:00.000Z",
+      first_doing_at: "",
       updated_at: "2026-08-31T10:30:00.000Z",
     });
     const reopened = card({
@@ -152,6 +154,7 @@ describe("keyed feature-flow ledger", () => {
       column: "todo",
       assignee: "",
       done_at: "",
+      first_doing_at: "",
       updated_at: "2026-08-31T10:40:00.000Z",
     });
     const reclaimed = card({
@@ -164,6 +167,7 @@ describe("keyed feature-flow ledger", () => {
       ...reclaimed,
       column: "done",
       done_at: "2026-08-31T11:00:00.000Z",
+      first_doing_at: "",
       updated_at: "2026-08-31T11:00:00.000Z",
     });
 
@@ -196,6 +200,7 @@ describe("keyed feature-flow ledger", () => {
       slug: "ship-two",
       column: "done",
       done_at: "2026-08-31T10:20:00.000Z",
+      first_doing_at: "",
       updated_at: "2026-08-31T10:20:00.000Z",
     });
     await recordFeatureFlowMutation({ cfg, node, previous: null, next: waiting });

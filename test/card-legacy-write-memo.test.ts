@@ -36,6 +36,7 @@ function testCard(): Card {
     created_at: "2026-07-17T00:00:00.000Z",
     updated_at: "2026-07-17T00:00:00.000Z",
     done_at: "",
+    first_doing_at: "",
     repo: "EdgeVector/fkanban",
     db: "",
     base: "main",

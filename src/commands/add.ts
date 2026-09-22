@@ -28,6 +28,7 @@ import {
   CARD_KINDS,
   createCardRecord,
   doneAtForColumnTransition,
+  firstDoingAtForColumnTransition,
   emptyStructuredFields,
   ensureBoardRecord,
   ensureColumn,
@@ -404,6 +405,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       deps: nextDeps,
       updated_at: now,
       done_at: doneAtForColumnTransition(existing, targetColumn, columns, now),
+      first_doing_at: firstDoingAtForColumnTransition(existing, targetColumn, now),
     };
     applyDbLocatorForWrite(updated, opts.dbLocator, "update");
     const rawBody = updated.body;
@@ -533,6 +535,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     ...emptyStructuredFields(),
   };
   card.done_at = doneAtForColumnTransition(null, targetColumn, columns, now);
+  card.first_doing_at = firstDoingAtForColumnTransition(null, targetColumn, now);
   applyDbLocatorForWrite(card, opts.dbLocator, "create");
   const rawBody = card.body;
   applyExplicitStructuredFields(card, opts);

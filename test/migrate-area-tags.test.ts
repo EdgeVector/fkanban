@@ -68,6 +68,7 @@ function seedRawCard(node: NodeClient, card: Partial<Card> & { slug: string }): 
     created_at: card.created_at ?? now,
     updated_at: card.updated_at ?? now,
     done_at: card.done_at ?? "",
+    first_doing_at: "",
     db: card.db ?? "",
     repo: card.repo ?? "",
     base: card.base ?? "",

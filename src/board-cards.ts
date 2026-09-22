@@ -23,7 +23,12 @@ import {
   POINT_READ_CONCURRENCY,
 } from "./concurrency.ts";
 import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
-import { type Card } from "./record.ts";
+import {
+  firstDoingAtFromTags,
+  firstDoingAtTag,
+  isFirstDoingAtTag,
+  type Card,
+} from "./record.ts";
 import { toCardSummary, type CardSummary } from "./card-list-index.ts";
 import {
   enqueueBoardCardJanitor,
@@ -323,7 +328,16 @@ export function boardCardFieldsFromCard(card: Card | CardSummary): Record<string
     column: summary.column,
     position: String(summary.position),
     assignee: summary.assignee,
-    tags: summary.tags,
+    // `first_doing_at` rides the projected `tags` array rather than a field of
+    // its own, so BoardCards needs no rekey to carry it. `cardFromBoardCardFields`
+    // lifts it back out. Without this append the stamp would exist on the Card
+    // schema and be invisible to `kanban list`, which is the ONLY reader that
+    // matters here: `last-stack-factory-health` ages the doing column from
+    // `kanban list --json --all`.
+    tags: [
+      ...summary.tags.filter((t) => !isFirstDoingAtTag(t)),
+      ...(summary.first_doing_at ? [firstDoingAtTag(summary.first_doing_at)] : []),
+    ],
     deps: summary.deps,
     surfaces: summary.surfaces,
     created_at: summary.created_at,
@@ -358,13 +372,14 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
     column: str("column"),
     position: str("position"),
     assignee: str("assignee"),
-    tags: arr("tags"),
+    tags: arr("tags").filter((t) => !isFirstDoingAtTag(t)),
     deps: arr("deps"),
     surfaces: arr("surfaces"),
     created_at: str("created_at"),
     created_by: str("created_by") || "unknown",
     updated_at: str("updated_at"),
     done_at: "",
+    first_doing_at: firstDoingAtFromTags(arr("tags")),
     db: str("db"),
     repo: str("repo"),
     base: str("base"),
