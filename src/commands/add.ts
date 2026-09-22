@@ -134,8 +134,35 @@ function applyExplicitStructuredFields(card: Card, opts: AddOptions): Card {
   if (opts.milestone !== undefined) card.milestone = opts.milestone;
   if (opts.prUrl !== undefined) card.pr_url = opts.prUrl;
   if (opts.branch !== undefined) card.branch = opts.branch;
-  if (opts.surfaces !== undefined) card.surfaces = opts.surfaces;
+  if (opts.surfaces !== undefined) {
+    card.surfaces = opts.surfaces;
+    warnBareSurfaceTokens(card.slug, opts.surfaces);
+  }
   return card;
+}
+
+/**
+ * A bare surface token (no `/`, no glob) matches every path that has it as a
+ * segment, so `fold_db_core` fences the whole core crate against every other
+ * card in the repo. Say so when the author writes one; the author is the only
+ * one who can narrow it
+ * (papercut-kanban-bare-subsystem-surface-fences-a-whole-crate-silently).
+ */
+export function bareSurfaceTokens(surfaces: readonly string[]): string[] {
+  return surfaces
+    .map((s) => s.trim().replace(/^\.\//, "").replace(/^\/+/, "").replace(/\/+$/, ""))
+    .filter((s) => s.length > 0 && !s.includes("/") && !/[*?[]/.test(s));
+}
+
+function warnBareSurfaceTokens(slug: string, surfaces: readonly string[]): void {
+  const bare = bareSurfaceTokens(surfaces);
+  if (bare.length === 0) return;
+  console.error(
+    `warning: "${slug}" declares bare surface token(s) ${bare.map((b) => `"${b}"`).join(", ")}. ` +
+      "A bare token fences EVERY path that contains it as a segment (a whole crate or " +
+      "directory tree), so each doing card in the same repo that touches it blocks this " +
+      "card and this card blocks them. Prefer a path such as <crate>/src/<module>/.",
+  );
 }
 
 // Validate + clean a user-supplied dep list for `slug`, reject any missing dep

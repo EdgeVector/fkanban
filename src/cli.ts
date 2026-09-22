@@ -178,6 +178,9 @@ Global flags:
   --verbose            echo HTTP requests + responses
   --json               machine-readable output (add/move/dep/rm/board create/
                        board rm echo the write result as JSON; read commands too)
+                       list/search --json print an OBJECT, not an array:
+                       {"cards":[...],"total":N,"truncated":bool}. Iterate
+                       with jq '.cards[]', never '.[]'.
   --help, -h           print this help
   --version, -V        print the fkanban version and exit
 
@@ -2708,7 +2711,17 @@ async function dispatch(
       // unrelated token (`frobnicate`) yields no suggestion and falls back to
       // the full help unchanged.
       {
-        const suggestion = cmd ? suggestClosest(cmd, Object.keys(COMMAND_HELP)) : null;
+        // A subcommand typed at the top level (`kanban archive-done`) names the
+        // group that owns it (`kanban groom archive-done`). TOP_HELP lists
+        // every grouped subcommand as `  <group> <sub>`, so read the owner
+        // from there rather than keep a second list
+        // (papercut-kanban-archive-done-advertised-but-unavailable).
+        const owner = cmd ? groupOwningSubcommand(cmd) : null;
+        const suggestion = owner
+          ? `${owner} ${cmd}`
+          : cmd
+            ? suggestClosest(cmd, Object.keys(COMMAND_HELP))
+            : null;
         if (suggestion) console.error(`kanban: Did you mean "${suggestion}"?`);
       }
       console.error("");
@@ -2857,4 +2870,14 @@ if (import.meta.main) {
       }
       process.exit(1);
     });
+}
+
+/** The command group whose help lists `<group> <sub>`, or null. */
+export function groupOwningSubcommand(sub: string): string | null {
+  const groups = new Set(Object.keys(COMMAND_HELP));
+  for (const line of TOP_HELP.split("\n")) {
+    const m = line.match(/^\s{2}([a-z][a-z-]*) ([a-z][a-z0-9-]*)\b/);
+    if (m && m[2] === sub && groups.has(m[1]!) && m[1] !== sub) return m[1]!;
+  }
+  return null;
 }

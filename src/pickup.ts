@@ -4,6 +4,7 @@ import { isDefaultColumn } from "./schemas.ts";
 import {
   assertBodyLoaded,
   assertLivePrMilestone,
+  bodyDeclaredHumanGate,
   captureFkanbanError,
   depStatus,
   hasPrWorkBrief,
@@ -316,6 +317,16 @@ export function classifyPickupCard(
   }
   if (blockStatus === "deferred") {
     return out("parked/non-work", "deferred hold", "Keep deferred work outside default todo until its sequence opens.");
+  }
+  {
+    const bodyGate = isBodyOmitted(card) ? null : bodyDeclaredHumanGate(card.body);
+    if (bodyGate) {
+      return out(
+        "human-gated",
+        bodyGate,
+        "The brief declares a human/interactive actor. Keep it out of default/todo, or remove the header when an unattended worker may take it.",
+      );
+    }
   }
   if (kind !== "pr") {
     return out("parked/non-work", `non-pickup kind: ${kind}`, "Leave grouping/tracker/program/capstone/validation cards out of default todo, or split a concrete PR card.");

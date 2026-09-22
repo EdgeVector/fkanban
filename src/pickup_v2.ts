@@ -200,8 +200,30 @@ export function comparePickupV2Cards(left: PickupV2Card, right: PickupV2Card): n
   return left.created_at.localeCompare(right.created_at) || left.slug.localeCompare(right.slug);
 }
 
-function dependenciesAreTerminal(card: PickupV2Card, statuses: DependencyStatuses): boolean {
-  return card.deps.every((slug) => statuses[slug] === true);
+/**
+ * Why one todo card is not claimable under v2, or null when it is. The same
+ * predicate {@link firstEligible} applies, in the same order, so a `none`
+ * result can name the reason for every card it passed over
+ * (papercut-kanban-pickup-claim-v2-ready-none-20260921).
+ */
+export function pickupV2IneligibleReason(
+  candidate: PickupV2Card,
+  doing: readonly PickupV2Card[],
+  dependencyStatuses: DependencyStatuses,
+  opts?: PickupV2EligibilityOpts,
+): string | null {
+  if (candidate.column !== "todo") return `not in todo (column=${candidate.column})`;
+  if (candidate.repo.trim().length === 0) return "no structured repo";
+  // A stored hold outranks board order. Without this the first card in the
+  // range wins even when the board forbids it in `default/todo`, and an
+  // ineligible card at the top also hides every ready card behind it.
+  const hold = pickupV2HoldReason(candidate, opts);
+  if (hold !== null) return hold;
+  const openDeps = candidate.deps.filter((slug) => dependencyStatuses[slug] !== true);
+  if (openDeps.length > 0) return `unfinished deps: ${openDeps.join(",")}`;
+  const peer = doing.find((p) => p.column === "doing" && surfacesOverlap(candidate, p));
+  if (peer) return `surface overlap with doing card ${peer.slug}`;
+  return null;
 }
 
 /** Return the first eligible todo card in stable board order. */
@@ -213,13 +235,6 @@ export function firstEligible<T extends PickupV2Card>(
 ): T | undefined {
   const ordered = [...todo].sort(comparePickupV2Cards);
   return ordered.find((candidate) =>
-    candidate.column === "todo" &&
-    candidate.repo.trim().length > 0 &&
-    // A stored hold outranks board order. Without this the first card in the
-    // range wins even when the board forbids it in `default/todo`, and an
-    // ineligible card at the top also hides every ready card behind it.
-    pickupV2HoldReason(candidate, opts) === null &&
-    dependenciesAreTerminal(candidate, dependencyStatuses) &&
-    !doing.some((peer) => peer.column === "doing" && surfacesOverlap(candidate, peer))
+    pickupV2IneligibleReason(candidate, doing, dependencyStatuses, opts) === null
   );
 }

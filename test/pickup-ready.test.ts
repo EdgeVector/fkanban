@@ -236,10 +236,12 @@ describe("pickup ready (cheap gate path) agrees with pickup status (full report)
     const prefixes = boardCardReads
       .map((q) => (q.filter as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)?.HashRangePrefix)
       .filter((p): p is { hash?: string; prefix?: string } => p !== undefined);
-    // Exactly the default board's todo# partition — never backlog#/doing#/done#,
-    // and never the human board.
+    // Exactly the default board's todo# partition, plus its doing# range when
+    // a card is ready (the overlap fence that decides `claimable`) — never
+    // backlog#/done#, and never the human board.
     expect(prefixes.every((p) => p.hash === "default")).toBe(true);
-    expect(prefixes.every((p) => p.prefix === "todo#")).toBe(true);
+    expect(prefixes.every((p) => p.prefix === "todo#" || p.prefix === "doing#")).toBe(true);
+    expect(prefixes.some((p) => p.prefix === "todo#")).toBe(true);
     expect(prefixes.length).toBeGreaterThan(0);
     // A HashKey here is the whole-partition spine that used to ride along
     // every column list. Ready is the pickup gate; it must not hydrate ~365
@@ -261,7 +263,7 @@ describe("pickup ready (cheap gate path) agrees with pickup status (full report)
     expect(boardCardReads.length).toBeGreaterThan(0);
     for (const q of boardCardReads) {
       const prefix = (q.filter as { HashRangePrefix?: { prefix?: string } } | undefined)?.HashRangePrefix;
-      expect(prefix?.prefix).toBe("todo#");
+      expect(["todo#", "doing#"]).toContain(prefix?.prefix ?? "");
       expect(q.filter).not.toHaveProperty("HashKey");
       expect(q.filter).not.toHaveProperty("HashRangeRange");
     }
@@ -294,5 +296,33 @@ describe("pickup ready (cheap gate path) agrees with pickup status (full report)
     const src = await Bun.file(new URL("../src/mcp/server.ts", import.meta.url)).text();
     expect(src).not.toMatch(/\bpickupStatusResult\b/);
     expect(src).toMatch(/\bpickupReadyResult\b/);
+  });
+});
+
+describe("pickup ready reports claimable after the surface-overlap fence", () => {
+  // papercut-kanban-pickup-gate-ready-overstates-eligible-20260922
+  test("a ready card fenced by a live doing peer is ready but not claimable", async () => {
+    const node = fakeNode();
+    await seedBoard(node, board({ slug: "default", columns: [...DEFAULT_COLUMNS] }));
+    const now = new Date().toISOString();
+    await seedCard(node, card({ slug: "ready-fenced", column: "todo", surfaces: ["src/a.ts"] }));
+    await seedCard(node, card({ slug: "ready-free", column: "todo", surfaces: ["src/b.ts"] }));
+    await seedCard(
+      node,
+      card({
+        slug: "peer",
+        column: "doing",
+        surfaces: ["src/a.ts"],
+        first_doing_at: now,
+        updated_at: now,
+        position: String(Date.now()),
+      }),
+    );
+
+    const { report, text } = await pickupReadyResult({ cfg, node, board: "default" });
+    expect(report.ready).toBe(2);
+    expect(report.claimable).toBe(1);
+    expect(report.fenced).toEqual([{ slug: "ready-fenced", peers: ["peer"] }]);
+    expect(text).toContain("claimable=1");
   });
 });

@@ -10,6 +10,7 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config, schemaHashFor } from "../config.ts";
 import {
   boardToFields,
+  claimHoldReason,
   findCard,
   isBodyOmitted,
   includePointReadableReferencedMilestones,
@@ -433,6 +434,17 @@ async function confirmCandidateClaimable(opts: {
         reason: "collision",
         detail: `current=${fresh.column}${owner ? ` owner=${owner}` : ""}`,
       },
+    };
+  }
+  // The candidate list can be minutes old and body-free. The fresh Card
+  // record is the last word: a hold set since, or a gate declared only in the
+  // brief, stops the claim here.
+  const hold = claimHoldReason(fresh);
+  if (hold) {
+    return {
+      ok: false,
+      column: fresh.column,
+      skip: { slug: fresh.slug, reason: "human-gated", detail: hold },
     };
   }
   return { ok: true, card: fresh };
