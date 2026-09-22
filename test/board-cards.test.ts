@@ -653,6 +653,48 @@ describe("board-cards heal read cost", () => {
     for (const read of cardReads) expect(read.fields).not.toContain("body");
   });
 
+  test("named heal reads one spine and the matching column only", async () => {
+    const { node, queries } = recordingNode(fakeNode());
+    const target = card({ slug: "named-fast", column: "todo", position: "7" });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board!,
+      keyHash: "default",
+      fields: {
+        slug: "default",
+        title: "Default",
+        body: "",
+        columns: [...DEFAULT_COLUMNS],
+        created_at: target.created_at,
+        updated_at: target.updated_at,
+      },
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.card!,
+      keyHash: target.slug,
+      fields: { ...target, body: target.body },
+    });
+    await node.createRecord({
+      schemaHash: cfgWithBoardCards.schemaHashes.board_cards!,
+      keyHash: target.board,
+      rangeKey: boardCardSk(target.column, target.position, target.slug),
+      fields: boardCardFieldsFromCard(target),
+    });
+    queries.length = 0;
+
+    const dry = await boardCardsHealResult({
+      cfg: cfgWithBoardCards,
+      node,
+      slugs: [target.slug],
+      apply: false,
+    });
+    expect(dry.report.drifted).toBe(0);
+
+    const partitionReads = queries.filter(
+      (q) => q.schemaHash === cfgWithBoardCards.schemaHashes.board_cards,
+    );
+    expect(partitionReads).toHaveLength(2);
+  });
+
   test("--apply does not re-list the partition once per repaired card", async () => {
     const { node, queries } = recordingNode(fakeNode());
     await seedUnprojectedCards(node, 5);

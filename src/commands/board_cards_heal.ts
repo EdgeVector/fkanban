@@ -460,6 +460,8 @@ export function membershipNeedsCardTruth(
   return false;
 }
 
+type HealRawRow = { board: string; column: string; position: string; slug: string; full: Card };
+
 export async function boardCardsHealResult(
   opts: BoardCardsHealOptions,
 ): Promise<{ text: string; report: BoardCardsHealReport }> {
@@ -522,6 +524,32 @@ export async function boardCardsHealResult(
   }
 
   const slugFilter = opts.slugs?.length ? new Set(opts.slugs) : null;
+  // A named heal already has the Card HashKey. Resolve it before reading
+  // BoardCards so the fast path can address only the authoritative board.
+  // An unscoped heal still searches every board because it must find stale
+  // cross-board membership and orphan rows.
+  const namedTruth = slugFilter
+    ? await resolveTruthBySlug(opts, [...slugFilter])
+    : null;
+  const namedBoardsKnown = Boolean(
+    namedTruth && [...namedTruth.values()].every((truth) => Boolean(truth?.board)),
+  );
+  if (slugFilter && namedBoardsKnown && !boardFilter) {
+    const truthBoards = new Set(
+      [...namedTruth!.values()].map((truth) => truth!.board || "default"),
+    );
+    targetBoards = boards.filter((b) => truthBoards.has(b.slug));
+    if (targetBoards.length === 0) {
+      targetBoards = [...truthBoards].map((slug) => ({
+        slug,
+        title: slug,
+        body: "",
+        columns: ["backlog", "todo", "doing", "done"],
+        created_at: "",
+        updated_at: "",
+      }));
+    }
+  }
 
   // Candidate slugs for "missing BoardCards row" repair. Every one is still
   // verified by a point-read of Card truth below — this set only NAMES
@@ -570,7 +598,7 @@ export async function boardCardsHealResult(
   // Raw BoardCards partitions (may include multi-row orphans per slug).
   // `full` keeps the parsed row so the thin-field comparison below can judge
   // the projection's copied fields, not just its membership sk.
-  const rawRows: Array<{ board: string; column: string; position: string; slug: string; full: Card }> = [];
+  const rawRows: HealRawRow[] = [];
   // `<board>:<field>` for every completeness lead the node refused. Each one
   // means this run's view of that partition is a lower bound.
   const incompleteLeads: string[] = [];
@@ -595,6 +623,74 @@ export async function boardCardsHealResult(
   // scale with rows repaired (see heal-orphan-reap-partition-rescan.test.ts).
   const spineSksBySlug = new Map<string, string[]>();
   for (const b of targetBoards) {
+    if (slugFilter) {
+      // A named heal does not need a board census. Read the narrow spine once,
+      // then read only columns that contain the requested slug. This avoids
+      // the 24-lead completeness sweep and the whole-board divergence probe,
+      // which made a one-card verification exceed its 10-second bar.
+      const spine = await listBoardCardsPartitionSpine(opts.node, opts.cfg, b.slug);
+      if (!spine) continue;
+      enumeratedBoards.add(b.slug);
+      const matches = spine.filter((row) => slugFilter.has(row.slug));
+      for (const row of matches) {
+        const key = `${b.slug}\0${row.slug}`;
+        const sks = spineSksBySlug.get(key) ?? [];
+        if (row.sk.length > 0 && !sks.includes(row.sk)) sks.push(row.sk);
+        spineSksBySlug.set(key, sks);
+      }
+
+      const columns = [...new Set(matches.map((row) => row.column).filter(Boolean))];
+      const wideParts = await Promise.all(
+        columns.map((column) =>
+          listBoardCardsPartition(opts.node, opts.cfg, b.slug, {
+            column,
+            fields: BOARD_CARDS_FIELDS,
+          }),
+        ),
+      );
+      const wideRows = wideParts.flatMap((part) =>
+        (part ?? []).filter((row) => slugFilter.has(row.slug)),
+      );
+      const wideAddresses = new Set(
+        wideRows.map((row) => `${row.slug}\0${row.column}\0${row.position}`),
+      );
+      for (const row of wideRows) {
+        rawRows.push({
+          board: b.slug,
+          column: row.column,
+          position: String(row.position),
+          slug: row.slug,
+          full: row,
+        });
+      }
+      // A sparse row can disappear from the wide projection. Keep its physical
+      // address from the spine so Card truth can authorize a safe repair.
+      for (const row of matches) {
+        if (wideAddresses.has(`${row.slug}\0${row.column}\0${row.position}`)) continue;
+        rawRows.push({
+          board: b.slug,
+          column: row.column,
+          position: row.position,
+          slug: row.slug,
+          full: thinCard({
+            slug: row.slug,
+            title: "",
+            body: "",
+            board: b.slug,
+            column: row.column,
+            position: row.position,
+            assignee: "",
+            tags: [],
+            deps: [],
+            created_at: "",
+            updated_at: "",
+            ...emptyStructuredFields(),
+          }),
+        });
+      }
+      continue;
+    }
+
     // Explicit full write shape: heal's wide pass must project every atom so
     // sparse/partial rows are catalogued against the product drop gate (see
     // the SPARSE ROWS block below). Default partition projection is list-width
@@ -617,7 +713,6 @@ export async function boardCardsHealResult(
     if (divergence) readDivergence.push(divergence);
     const seenSlugs = new Set<string>();
     for (const c of part) {
-      if (slugFilter && !slugFilter.has(c.slug)) continue;
       seenSlugs.add(c.slug);
       rawRows.push({
         board: c.board || b.slug,
@@ -673,7 +768,6 @@ export async function boardCardsHealResult(
     }
     const spine = sweep.rows;
     for (const s of spine) {
-      if (slugFilter && !slugFilter.has(s.slug)) continue;
       const board = s.board || b.slug;
       // Dedupe by SLUG, not by sort key. The obvious thing — recompute the wide
       // row's sk from its column/position fields and compare — is wrong here:
@@ -786,6 +880,7 @@ export async function boardCardsHealResult(
   const enumeratedSlugSources = new Set(targetBoards.map((b) => b.slug));
   for (const b of boards) {
     if (enumeratedSlugSources.has(b.slug)) continue;
+    if (slugFilter && namedBoardsKnown) continue;
     // Spine, not the complete sweep, and the asymmetry is deliberate. This set
     // only SUPPRESSES candidates, so a row it misses can cost at most one extra
     // repair — heal writes a row here for a slug that turned out to be membered
@@ -850,7 +945,9 @@ export async function boardCardsHealResult(
       }
     }
   }
-  const truthBySlug = await resolveTruthBySlug(opts, [...truthSlugSet]);
+  const truthBySlug = slugFilter
+    ? namedTruth!
+    : await resolveTruthBySlug(opts, [...truthSlugSet]);
   const classifiedByKey = new Map(
     [...byKey].filter(([key]) => truthSlugSet.has(key.split("\0")[1] as string)),
   );
@@ -1326,26 +1423,33 @@ export async function boardCardsHealResult(
 
   let deleteSweepSkipped = false;
   if (opts.apply && deletesEnqueued) {
-    // Re-check partition/column agreement immediately before the delete sweep
-    // runs, not only at plan time above. The plan-time guard is evaluated once
-    // before this run's first write; if the node's read view degrades to a
-    // whole-partition-vs-column disagreement while this run's own writes are
-    // still landing, the deletes queued below are authorized by a plan this
-    // run can no longer stand behind. Every upsert already issued stands —
-    // upserts only ever add or refresh membership — so skipping the sweep here
-    // costs nothing but a delayed reap of rows the next heal run will still
-    // see and classify fresh.
-    const recheck = await Promise.all(
-      healthyTargets.map((b) => readBoardCardsPartitionDivergence(opts.node, opts.cfg, b.slug, b.columns ?? [])),
-    );
-    const stillDiverged = recheck.filter(
-      (d): d is BoardCardsReadDivergence => d !== null && boardCardsReadDiverged(d),
-    );
-    if (stillDiverged.length > 0) {
-      deleteSweepSkipped = true;
-      readDivergence.push(...stillDiverged);
-    } else {
+    if (slugFilter) {
+      // The named path already captured the exact target sks from its spine
+      // read. A second whole-board divergence probe would defeat its latency
+      // contract; delete only those captured addresses.
       await sweepBoardCardJanitor(opts.node);
+    } else {
+      // Re-check partition/column agreement immediately before the delete sweep
+      // runs, not only at plan time above. The plan-time guard is evaluated once
+      // before this run's first write; if the node's read view degrades to a
+      // whole-partition-vs-column disagreement while this run's own writes are
+      // still landing, the deletes queued below are authorized by a plan this
+      // run can no longer stand behind. Every upsert already issued stands —
+      // upserts only ever add or refresh membership — so skipping the sweep here
+      // costs nothing but a delayed reap of rows the next heal run will still
+      // see and classify fresh.
+      const recheck = await Promise.all(
+        targetBoards.map((b) => readBoardCardsPartitionDivergence(opts.node, opts.cfg, b.slug, b.columns ?? [])),
+      );
+      const stillDiverged = recheck.filter(
+        (d): d is BoardCardsReadDivergence => d !== null && boardCardsReadDiverged(d),
+      );
+      if (stillDiverged.length > 0) {
+        deleteSweepSkipped = true;
+        readDivergence.push(...stillDiverged);
+      } else {
+        await sweepBoardCardJanitor(opts.node);
+      }
     }
   }
 
