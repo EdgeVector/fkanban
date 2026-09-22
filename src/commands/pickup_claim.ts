@@ -63,6 +63,9 @@ export type PickupClaimOptions = {
   maxDoing?: number;
   /** Select the next card without moving it. */
   dryRun?: boolean;
+  /** Clock and fence bound overrides for deterministic tests. */
+  now?: string;
+  surfaceOverlapStallMs?: number;
   json?: boolean;
   situationPreflight?: SituationPreflight;
 };
@@ -122,6 +125,8 @@ export type PickupClaimResult = {
    * the absence of a conflict is never read as proof of safety.
    */
   overlap_unadjudicated?: string[];
+  /** Doing peers past the stall bound no longer fence this claim. */
+  surface_overlap_stalled?: string[];
   /** Sample of non-ready todo cards blocking pickup hygiene. */
   todo_blocker_exemplars?: PickupClaimDiagnosticExemplar[];
   diagnostics?: PickupClaimDiagnostics;
@@ -579,7 +584,11 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
       continue;
     }
 
-    let overlap = overlapAgainstCards(candidate, liveCards);
+    const overlapOptions = {
+      now: opts.now,
+      stallMs: opts.surfaceOverlapStallMs,
+    };
+    let overlap = overlapAgainstCards(candidate, liveCards, overlapOptions);
     if (overlap.conflicts.length > 0) {
       liveCards = await refreshOverlapConflictCards({
         cfg: opts.cfg,
@@ -587,14 +596,14 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         cards: liveCards,
         conflicts: overlap.conflicts,
       });
-      overlap = overlapAgainstCards(candidate, liveCards);
+      overlap = overlapAgainstCards(candidate, liveCards, overlapOptions);
     }
     if (overlap.conflicts.length > 0) {
       const peers = overlap.conflicts.map((c) => c.slug).join(",");
       skipped.push({
         slug: candidate.slug,
-        reason: "surface-overlap",
-        detail: peers,
+        reason: "surface-overlap-live",
+        detail: `live=${peers}`,
       });
       continue;
     }
@@ -603,8 +612,14 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
     // compare; `warnings` is how `overlapAgainstCards` says it did not. Carry
     // them onto the result rather than dropping them here — see
     // `PickupClaimResult.overlap_unadjudicated`.
-    const overlapUnadjudicated = overlap.warnings.length > 0
-      ? { overlap_unadjudicated: overlap.warnings }
+    const unadjudicatedWarnings = overlap.warnings.filter(
+      (warning) => !overlap.stalledPeers.some((slug) => warning.startsWith(`${slug} is a stalled doing peer`)),
+    );
+    const overlapUnadjudicated = unadjudicatedWarnings.length > 0
+      ? { overlap_unadjudicated: unadjudicatedWarnings }
+      : {};
+    const stalledOverlapPeers = overlap.stalledPeers.length > 0
+      ? { surface_overlap_stalled: overlap.stalledPeers }
       : {};
 
     // Settle selection against the Card record before reporting anything about
@@ -641,6 +656,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         ...todoBlockerFields(diagnostics),
         skipped,
         ...overlapUnadjudicated,
+        ...stalledOverlapPeers,
         ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
     }
@@ -715,6 +731,7 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
         ...todoBlockerFields(diagnostics),
         skipped,
         ...overlapUnadjudicated,
+        ...stalledOverlapPeers,
         ...(claimDiagnosticsIfActionable ? { diagnostics: claimDiagnosticsIfActionable } : {}),
       };
     } catch (err) {
@@ -789,6 +806,10 @@ export function formatPickupClaim(result: PickupClaimResult, json?: boolean): st
       lines.push(`  surface-overlap gate did not adjudicate (${result.overlap_unadjudicated.length}):`);
       for (const w of result.overlap_unadjudicated.slice(0, 6)) lines.push(`    - ${w}`);
       lines.push("    declare Surfaces: on these cards to make the collision gate effective");
+    }
+    if (result.surface_overlap_stalled?.length) {
+      lines.push(`  surface-overlap stalled peers downgraded to warnings (${result.surface_overlap_stalled.length}):`);
+      for (const slug of result.surface_overlap_stalled.slice(0, 6)) lines.push(`    - ${slug}`);
     }
     if (result.diagnostics) appendTodoBlockerDiagnostics(lines, result.diagnostics);
     return lines.join("\n");
