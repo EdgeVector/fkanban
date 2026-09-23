@@ -427,6 +427,8 @@ export type NodeClient = {
     /** HashRange range component; omit/null for Hash schemas. */
     rangeKey?: string | null;
     expected?: CasExpectation;
+    /** `durable`: the node acks only after a local persistence barrier. */
+    durability?: "durable";
   }): Promise<void>;
   updateRecord(opts: {
     schemaHash: string;
@@ -434,6 +436,8 @@ export type NodeClient = {
     keyHash: string;
     rangeKey?: string | null;
     expected?: CasExpectation;
+    /** `durable`: the node acks only after a local persistence barrier. */
+    durability?: "durable";
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string; rangeKey?: string | null }): Promise<void>;
   /**
@@ -1349,23 +1353,25 @@ export function newNodeClient(opts: {
         bindEligible: true,
       };
     },
-    async createRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
+    async createRecord({ schemaHash, fields, keyHash, rangeKey, expected, durability }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
           mutationType: "create",
           fields: fields as RowFields,
           key: recordKey(keyHash, rangeKey),
           ...(expected !== undefined ? { expected } : {}),
+          ...(durability !== undefined ? { durability } : {}),
         }),
       );
     },
-    async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
+    async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected, durability }) {
       await sdkDataPath("/api/mutation", (client) =>
         client.mutate(schemaHash, {
           mutationType: "update",
           fields: fields as RowFields,
           key: recordKey(keyHash, rangeKey),
           ...(expected !== undefined ? { expected } : {}),
+          ...(durability !== undefined ? { durability } : {}),
         }),
       );
     },
@@ -2335,5 +2341,50 @@ function mapNodeError(status: number, body: unknown, path: string): FkanbanError
     // 400 with an unusual shape is never reduced to a bare status (fkanban #94).
     message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : errCode ? "" : rawBodySuffix(body)}${errCode ? ` [${errCode}]` : ""}.`,
     hint: status >= 500 ? "Check the node log; this looks like a node-side bug." : undefined,
+  });
+}
+
+/**
+ * A view of `node` whose single-record writes ask for a durable receipt.
+ *
+ * The node default is a queued ack: the write is acknowledged before the
+ * local persistence barrier, so a daemon that stops without a clean drain can
+ * lose it. That is acceptable for most board writes and not for a claim: the
+ * claim is the pickup lease, and a lost claim lets a second worker take the
+ * same card. Measured 2026-09-21T22:50Z: a claim acked, the worker opened a
+ * PR, lastdbd entered supervised shutdown without a clean drain, and the card
+ * came back in todo with no claim, branch or PR
+ * (papercut-kanban-pickup-claim-lost-across-unclean-lastdbd-restart-20260922).
+ *
+ * Reads and every other method pass through unchanged. A daemon that predates
+ * the `durability` field answers HTTP 400; the write is then retried once as a
+ * queued write and the downgrade is said out loud, so an old node never turns
+ * a claim into a failure.
+ */
+export function withDurableWrites(node: NodeClient): NodeClient {
+  let voiced = false;
+  const durable = async (
+    write: (o: Parameters<NodeClient["updateRecord"]>[0]) => Promise<void>,
+    o: Parameters<NodeClient["updateRecord"]>[0],
+  ): Promise<void> => {
+    try {
+      await write({ ...o, durability: "durable" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/\b400\b/.test(msg) || !/durab/i.test(msg)) throw err;
+      if (!voiced) {
+        voiced = true;
+        console.error("kanban: note: this node does not accept durable writes; the claim was written queued.");
+      }
+      await write({ ...o });
+    }
+  };
+  return new Proxy(node, {
+    get(target, prop, receiver) {
+      if (prop === "updateRecord") return (o: Parameters<NodeClient["updateRecord"]>[0]) => durable((x) => target.updateRecord(x), o);
+      if (prop === "createRecord") return (o: Parameters<NodeClient["createRecord"]>[0]) => durable((x) => target.createRecord(x), o);
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
   });
 }
