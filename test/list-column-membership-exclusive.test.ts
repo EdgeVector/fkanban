@@ -170,3 +170,24 @@ describe("column list membership is exclusive", () => {
     expect(todo.map((c) => c.slug)).not.toContain(tip.slug);
   });
 });
+
+// papercut-kanban-list-emits-unreadable-legacy-columns-20260923: a milestone's
+// membership row shares the BoardCards partition, keyed by its state
+// (active/planned/complete). A whole-board list must not emit it as a card.
+describe("whole-board list skips milestone membership rows", () => {
+  beforeEach(() => {
+    resetBoardCardJanitorForTests();
+  });
+
+  test("a row whose column is a milestone state is not listed", async () => {
+    const node = fakeNode();
+    const tip = card({ slug: "real-card", column: "todo", position: "1" });
+    const milestoneRow = card({ slug: "some-milestone", column: "active", position: "", assignee: "" });
+    seedAll(node, tip, [milestoneRow]);
+
+    const out = await listCmd({ cfg, node, json: true, all: true });
+    const slugs = cardsFromJson(out).map((c) => c.slug);
+    expect(slugs).toContain("real-card");
+    expect(slugs).not.toContain("some-milestone");
+  });
+});
