@@ -440,6 +440,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     // still-empty structured fields from the body/tags.
     applyExplicitStructuredFields(updated, opts);
     await stampCardForWrite(opts.node, opts.cfg, updated, {
+      previousBody: existing.body,
       forcedRepo: opts.repo,
       explicitBlockStatus: opts.blockStatus !== undefined,
       explicitPriority: opts.priority !== undefined,

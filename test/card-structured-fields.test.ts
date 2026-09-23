@@ -990,6 +990,37 @@ describe("deriveStructuredFields (backfill)", () => {
     ).toBe("lastgit://last-stack/cr/cr-xyz99");
   });
 
+  // papercut-kanban-body-write-resources-pr-url-from-stale-pr-header-20260923
+  test("an unchanged PR:/Branch: header does not revert a newer structured value", () => {
+    const body = "PR: http://forge/EdgeVector/x/pulls/132 closed-not-merged\nBranch: kanban/old\n\nbrief";
+    const c = card({
+      pr_url: "http://forge/EdgeVector/x/pulls/137",
+      branch: "kanban/new",
+      body: `${body}\nPROGRESS: appended line`,
+    });
+    repairStructuredFieldsFromBody(c, {}, body);
+    expect(c.pr_url).toBe("http://forge/EdgeVector/x/pulls/137");
+    expect(c.branch).toBe("kanban/new");
+  });
+
+  test("a PR:/Branch: header this write changed is still the source of truth", () => {
+    const c = card({
+      pr_url: "http://forge/EdgeVector/x/pulls/132",
+      branch: "kanban/old",
+      body: "PR: http://forge/EdgeVector/x/pulls/140\nBranch: kanban/new\n\nbrief",
+    });
+    repairStructuredFieldsFromBody(c, {}, "PR: http://forge/EdgeVector/x/pulls/132\nBranch: kanban/old\n\nbrief");
+    expect(c.pr_url).toBe("http://forge/EdgeVector/x/pulls/140");
+    expect(c.branch).toBe("kanban/new");
+  });
+
+  test("an empty structured pr_url is still backfilled from an unchanged header", () => {
+    const body = "PR: http://forge/EdgeVector/x/pulls/7\n\nbrief";
+    const c = card({ pr_url: "", body });
+    repairStructuredFieldsFromBody(c, {}, body);
+    expect(c.pr_url).toBe("http://forge/EdgeVector/x/pulls/7");
+  });
+
   test("write-time repair keeps explicit --pr-url authoritative", () => {
     const c = card({
       pr_url: "https://example.invalid/already-set",

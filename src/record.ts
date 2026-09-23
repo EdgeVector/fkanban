@@ -1008,6 +1008,8 @@ export async function stampCardForWrite(
     explicitBlockStatus?: boolean;
     explicitPriority?: boolean;
     explicitStructuredFields?: StructuredFieldRepairOptions;
+    /** Body before this write (updates only); see repairStructuredFieldsFromBody. */
+    previousBody?: string;
     warn?: (msg: string) => void;
   } = {},
 ): Promise<Card> {
@@ -1019,7 +1021,7 @@ export async function stampCardForWrite(
       { forcedRepo: opts.forcedRepo },
     ),
   );
-  repairStructuredFieldsFromBody(card, opts.explicitStructuredFields);
+  repairStructuredFieldsFromBody(card, opts.explicitStructuredFields, opts.previousBody);
   applyBodyPriorityTag(card, opts.explicitPriority === true);
   const explicitBlockStatus = opts.explicitBlockStatus === true;
   const areaPeers = card.column === "todo" && !explicitBlockStatus ? await listPickupAreaPeers(node, cfg, card) : [];
@@ -2254,7 +2256,23 @@ export type StructuredFieldRepairOptions = {
 export function repairStructuredFieldsFromBody(
   card: Card,
   explicit: StructuredFieldRepairOptions = {},
+  /**
+   * The body as it stood before this write, when this is an update.
+   *
+   * `branch` and `pr_url` are claim metadata that `set --pr-url` / `add
+   * --branch` write directly. A body header for them is the operator's source
+   * of truth only when THIS write put it there. Without this, any later body
+   * write (`mark`, a brief edit) re-sourced pr_url from an old `PR:` line and
+   * reverted a newer `set --pr-url`: measured 2026-09-23 on
+   * last-stack-boardcards-query-rate-still-high-20260923, where a
+   * `PR: …/pulls/132 closed-not-merged` note came back as pr_url after PR 137
+   * was stamped, and board-closeout then rolled the live card back to todo
+   * (papercut-kanban-body-write-resources-pr-url-from-stale-pr-header-20260923).
+   */
+  previousBody?: string,
 ): Card {
+  const headerUnchanged = (read: (body: string) => string): boolean =>
+    previousBody !== undefined && read(previousBody) === read(card.body);
   Object.assign(card, deriveStructuredFields(card));
 
   if (!explicit.repo) {
@@ -2277,11 +2295,13 @@ export function repairStructuredFieldsFromBody(
     const milestone = parseBodyHeader(card.body, "Milestone");
     if (milestone) card.milestone = milestone;
   }
-  if (!explicit.branch) {
+  const branchKept = Boolean(card.branch) && headerUnchanged((b) => parseBodyHeader(b, "Branch"));
+  if (!explicit.branch && !branchKept) {
     const branch = parseBodyHeader(card.body, "Branch");
     if (branch) card.branch = branch;
   }
-  if (!explicit.prUrl) {
+  const prUrlKept = Boolean(card.pr_url) && headerUnchanged((b) => extractPrUrlFromBody(b, card.repo));
+  if (!explicit.prUrl && !prUrlKept) {
     const pr = extractPrUrlFromBody(card.body, card.repo);
     if (pr) card.pr_url = pr;
   }

@@ -255,6 +255,7 @@ async function promoteUnblockedBacklogDependents(opts: {
     const rawBody = updated.body;
     try {
       await stampCardForWrite(opts.node, opts.cfg, updated, {
+        previousBody: candidate.body,
         warn: () => {},
       });
       let milestoneState = "";
@@ -332,6 +333,7 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   applyDbLocatorForWrite(updated, opts.dbLocator, "move");
   const rawBody = updated.body;
   await stampCardForWrite(opts.node, opts.cfg, updated, {
+    previousBody: card.body,
     warn: !opts.force && updated.board === "default" && updated.column === "todo" ? () => {} : undefined,
   });
   // A requeue into default/todo drops in-flight metadata by design. Say which
