@@ -848,6 +848,67 @@ describe("moveCmd lifecycle gate", () => {
     expect(res.to).toBe("done");
   });
 
+  // papercut-kanban-lifecycle-gate-uses-stale-requires-deploy-line-20260922
+  test("Forgejo card: a positive PROOF after the last Requires-* line meets the gate", async () => {
+    const card = emptyCard({
+      slug: "gate-proof-after",
+      column: "doing",
+      body: [
+        "Repo: EdgeVector/fkanban",
+        "Kind: pr",
+        "Requires-Deploy: deploy-pipeline host-track soak. host_head=c90e96c soak=soaking",
+        "PROOF: passed post-merge END STATE; host_head=gate_head=869dc13",
+      ].join("\n"),
+    });
+    const node = fakeNode({ cards: [card], ci: [] });
+    const res = await moveCmd({ cfg, node, slug: "gate-proof-after", column: "done" });
+    expect(res.to).toBe("done");
+  });
+
+  test("Forgejo card: an older PROOF before the Requires-* line does not meet it", async () => {
+    const card = emptyCard({
+      slug: "gate-proof-before",
+      column: "doing",
+      body: [
+        "Repo: EdgeVector/fkanban",
+        "Kind: pr",
+        "PROOF: passed fixture tests",
+        "Requires-Deploy: deploy-dev",
+      ].join("\n"),
+    });
+    const node = fakeNode({ cards: [card], ci: [] });
+    await expect(moveCmd({ cfg, node, slug: "gate-proof-before", column: "done" }))
+      .rejects.toMatchObject({ code: "lifecycle_status_blocked" });
+  });
+
+  test("LastGit-venue card: a PROOF line does not replace LastgitCiStatus", async () => {
+    const card = emptyCard({
+      slug: "gate-lastgit-proof",
+      column: "doing",
+      body: [
+        "Repo: lastdb:///fkanban",
+        `Head-Oid: ${oid}`,
+        "Kind: pr",
+        "Requires-Status: ci-required",
+        "PROOF: passed",
+      ].join("\n"),
+    });
+    const node = fakeNode({
+      cards: [card],
+      ci: [{
+        status_key: `fkanban:${oid}:ci-required`,
+        repo: "fkanban",
+        oid,
+        context: "ci-required",
+        state: "failure",
+        log_excerpt: "red",
+        updated_at: "2026-07-17T00:00:00.000Z",
+      }],
+    });
+    await expect(moveCmd({ cfg, node, slug: "gate-lastgit-proof", column: "done" }))
+      .rejects.toMatchObject({ code: "lifecycle_status_blocked" });
+  });
+
   test("no Requires-* → move to done without CI rows", async () => {
     const card = emptyCard({
       slug: "no-gate",
