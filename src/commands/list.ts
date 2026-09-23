@@ -368,7 +368,14 @@ export async function listResult(
       boardCards = [...bySlug.values()];
     }
   } else {
-    boardCards = boardCardsSettled.value;
+    // A milestone's membership row shares this partition's key shape: its
+    // "column" is the milestone state (active, planned, complete, ...), and it
+    // has no Card record (board-cards-heal reports these as
+    // skip-milestone-membership). They are not cards, and `list --column
+    // active` rejects the label, so a whole-board list must not emit them
+    // (papercut-kanban-list-emits-unreadable-legacy-columns-20260923).
+    const boardColumns = new Set(resolvedBoard.columns);
+    boardCards = boardCardsSettled.value.filter((c) => boardColumns.has(c.column));
     cards = sortCards(
       boardCards.filter(
         (c) =>

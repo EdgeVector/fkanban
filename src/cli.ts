@@ -31,7 +31,7 @@ import { listCmd } from "./commands/list.ts";
 import { rankCmd } from "./commands/rank.ts";
 import { searchCmd } from "./commands/search.ts";
 import { flowCmd } from "./commands/flow.ts";
-import { showCmd } from "./commands/show.ts";
+import { showCmd, showResult } from "./commands/show.ts";
 import { rmCmd } from "./commands/rm.ts";
 import { boardCreateCmd, boardListCmd, boardRmCmd } from "./commands/board.ts";
 import { milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcilePayload, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "./commands/milestone.ts";
@@ -115,6 +115,7 @@ Commands:
   set <slug>           metadata-only update (north-star/milestone/tags/…); NEVER touches body or stdin
   mark <slug> <line>   append one marker line to a card body, idempotently
   move <slug> <col>    move a card to a column (--from/--expect COL claim guard, --position N, --force past a block)
+  dep list <slug>      list a card's dependency edges (done | blocking | missing)
   dep add <slug> <dep> add a dependency edge (card <slug> depends on <dep>)
   dep rm <slug> <dep>  remove a dependency edge
   tag add <slug> <tag> add one or more tags to a card (incremental; keeps the rest)
@@ -1990,8 +1991,32 @@ async function dispatch(
 
     case "dep": {
       const sub = positionals[1];
+      // `dep list` is the read an agent reaches for before `dep add`
+      // (papercut-kanban-dep-list-subcommand-missing-20260923). It is the
+      // card's dep edges with the same done/blocking/missing verdict `show` uses.
+      if (sub === "list" || sub === "ls") {
+        const slug = requirePositional(positionals[2], "dep list <slug>");
+        const extraList = rejectExtraPositionals(positionals, 3, "dep list <slug>");
+        if (extraList !== undefined) return extraList;
+        const ctx = loadCtx({ verbose });
+        const { card } = await showResult({ cfg: ctx.cfg, node: ctx.node, slug });
+        const blocking = new Set(card.blockedBy);
+        const missing = new Set(card.missingDeps);
+        const rows = card.deps.map((dep) => ({
+          dep,
+          state: missing.has(dep) ? "missing" : blocking.has(dep) ? "blocking" : "done",
+        }));
+        if (values.json) {
+          console.log(JSON.stringify({ slug: card.slug, blocked: card.blocked, deps: rows }, null, 2));
+        } else if (rows.length === 0) {
+          console.log(`${card.slug}: no dependencies`);
+        } else {
+          for (const r of rows) console.log(`${card.slug} -> ${r.dep}  ${r.state}`);
+        }
+        return 0;
+      }
       if (sub !== "add" && sub !== "rm" && sub !== "remove") {
-        console.error(`kanban: Unknown dep subcommand "${sub ?? ""}". Try: dep add | dep rm`);
+        console.error(`kanban: Unknown dep subcommand "${sub ?? ""}". Try: dep list | dep add | dep rm`);
         return 2;
       }
       const slug = requirePositional(positionals[2], "dep <add|rm> <slug> <dep>");

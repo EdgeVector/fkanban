@@ -83,6 +83,16 @@ describe("subcommand validation before context loading", () => {
     expect(stderr).not.toContain("config");
   }, SPAWN_TEST_TIMEOUT_MS);
 
+  test("dep list is a known subcommand; a missing slug is a usage error before context", async () => {
+    const res = await runCli(["dep", "list"]);
+    expect(res.code).toBe(2);
+    expect(res.stderr).not.toContain("Unknown dep subcommand");
+    expect(res.stderr).toContain("dep list <slug>");
+    expect(res.stderr).not.toContain(NO_CONFIG);
+    const bogus = await runCli(["dep", "bogus"]);
+    expect(bogus.stderr).toContain("dep list | dep add | dep rm");
+  }, SPAWN_TEST_TIMEOUT_MS);
+
   test("dep/tag bogus report unknown subcommand before missing arguments or context", async () => {
     const dep = await runCli(["dep", "bogus"]);
     expect(dep.code).toBe(2);

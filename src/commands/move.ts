@@ -4,7 +4,7 @@
 // the default pickup queue: any default/backlog dependents that are now fully
 // unblocked and pass the normal default/todo pickup policy are promoted to todo.
 
-import { FkanbanError, type NodeClient } from "../client.ts";
+import { FkanbanError, type NodeClient, withDurableWrites } from "../client.ts";
 import { type Config } from "../config.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import { recordFeatureFlowMutation } from "../flow-ledger.ts";
@@ -158,8 +158,9 @@ export async function claimCard(opts: {
   };
 
   try {
+    // Durable: the claim is the pickup lease (see withDurableWrites).
     await updateCardRecord(
-      { cfg: opts.cfg, node: opts.node },
+      { cfg: opts.cfg, node: withDurableWrites(opts.node) },
       updated,
       { type: "value", field: "column", value: expectedColumn },
       card,
@@ -366,8 +367,11 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     force: opts.force,
   });
   try {
+    // A worker claim into doing is the pickup lease: ask for a durable ack so
+    // an unclean daemon stop cannot drop it (see withDurableWrites).
+    const claimWrite = opts.worker !== undefined && opts.column === "doing";
     await updateCardRecord(
-      opts,
+      claimWrite ? { ...opts, node: withDurableWrites(opts.node) } : opts,
       updated,
       opts.expectColumn !== undefined
         ? { type: "value", field: "column", value: opts.expectColumn }
