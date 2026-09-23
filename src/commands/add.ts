@@ -391,6 +391,27 @@ function metadataWritePlacementGate(slug: string, existing: Card): void {
   });
 }
 
+/** Kinds that close on a machine predicate rather than a merged PR. */
+const DONE_WHEN_KINDS = new Set(["validation", "capstone", "tracker"]);
+
+/**
+ * A validation / capstone / tracker card closes when its DONE-WHEN predicate
+ * holds (`last-stack-kanban-done-when-eval`). Filed without one, nothing can
+ * ever evaluate it, and groom files a papercut about the card instead
+ * (papercut-kanban-add-accepts-validation-card-without-done-when-20260923).
+ * Warn at creation, where the author can still add the line.
+ */
+export function warnProofCardWithoutDoneWhen(slug: string, kind: string, body: string): void {
+  if (!DONE_WHEN_KINDS.has(kind)) return;
+  if (/^[ \t]*DONE-WHEN[ \t]*:/im.test(body)) return;
+  console.error(
+    `warning: "${slug}" is Kind: ${kind} but has no DONE-WHEN line, so no validator can close it. ` +
+      "Add one of: `DONE-WHEN: file <path> matches /<regex>/`, `brain <slug> exists`, " +
+      "`routine <name> heartbeat matches /<regex>/ after <YYYY-MM-DD>`, `date >= <YYYY-MM-DD>` " +
+      "(join several with ` AND `).",
+  );
+}
+
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
@@ -637,6 +658,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     board: card.board,
     column: card.column,
   });
+  warnProofCardWithoutDoneWhen(card.slug, card.kind, rawBody);
   assertNoExplicitTodoLaneMetadata(card, { branch: opts.branch, prUrl: opts.prUrl });
   // Create path. Explicit flags are already refused above, so a clear here means
   // `stampCardForWrite` backfilled `branch`/`pr_url` out of a `Branch:`/`PR:`
