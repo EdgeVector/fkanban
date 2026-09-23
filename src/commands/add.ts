@@ -342,6 +342,55 @@ function placementOrAbsent(value: string | undefined): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Refuse a metadata-only update (`add` without `--body`, `set`) when the card
+ * read back with NO column.
+ *
+ * A card with no stored column is not placed anywhere, so the update falls
+ * through to the board's first column (`backlog`). For a repair that also
+ * pipes the brief that is the intended recovery (see {@link placementOrAbsent}
+ * and test/add-partial-write-recovery.test.ts). For a metadata stamp it is a
+ * silent demotion of a live card, and the write persists whatever the partial
+ * read held, including an empty body.
+ *
+ * Measured 2026-09-23 in a scheduled last-stack pickup: `kanban add <slug>
+ * --pr-url <u> --branch <b>` on a claimed card reported "updated default/backlog";
+ * `kanban show` then had body length 0 and `kanban mark` refused the card
+ * (papercut-kanban-add-metadata-stamp-erases-card-body-20260923). The read had
+ * lost column and body; the stamp wrote that loss back as the new truth.
+ *
+ * An explicit `--column` or `--body` states the placement or brief the caller
+ * wants, so either one lets the write through. `--force` also does.
+ */
+function assertMetadataWriteHasPlacement(opts: AddOptions, existing: Card): void {
+  if (opts.body !== undefined) return;
+  if (placementOrAbsent(opts.column) !== undefined) return;
+  if (!opts.force) {
+    metadataWritePlacementGate(opts.slug, existing);
+    return;
+  }
+  const waived = captureFkanbanError(() => metadataWritePlacementGate(opts.slug, existing));
+  if (waived) {
+    console.error(forcedGuardWaiverWarning(opts.slug, "partial card read", waived.message));
+  }
+}
+
+/** The verdict half of {@link assertMetadataWriteHasPlacement}: pure, throws. */
+function metadataWritePlacementGate(slug: string, existing: Card): void {
+  if (placementOrAbsent(existing.column) !== undefined) return;
+  const bodyBytes = (existing.body ?? "").length;
+  throw new FkanbanError({
+    code: "partial_card_read",
+    message:
+      `Refusing a metadata-only update to "${slug}": the card read back with no column ` +
+      `(body ${bodyBytes} bytes). The write would move it to the first column and keep ` +
+      "whatever the partial read held.",
+    hint:
+      `Re-read it with \`kanban show ${slug}\` and retry. If the card is really damaged, ` +
+      `pipe the full brief with \`kanban add ${slug} --column <column>\`; --force writes anyway.`,
+  });
+}
+
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
@@ -381,6 +430,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
       });
     }
   }
+  if (existing) assertMetadataWriteHasPlacement(opts, existing);
   const board = await ensureBoardRecord(opts.node, opts.cfg, boardSlug);
   const columns = board.columns;
   // Same rule as `boardSlug`: an empty stored column is no column at all, so it

@@ -675,6 +675,7 @@ describe("which guards --force actually clears is a fact, not a claim in prose",
     "assertDepUnblocked",
     "assertLifecycleMoveAllowed",
     "assertBodyIsNotSourceCode",
+    "assertMetadataWriteHasPlacement",
   ];
   // Named because they are the ones prose has actually gotten wrong. Both sit
   // directly beside force-clearing gates on the same write paths.
