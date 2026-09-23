@@ -38,6 +38,7 @@ export const GROOM_SUBCOMMANDS = [
   "board-cards-heal",
   "board-cards-rekey",
   "board-cards-heal-scheduled",
+  "board-cards-reap-column-only",
   "board-list-heal",
   "milestone-indexes-heal",
   "archive-done",

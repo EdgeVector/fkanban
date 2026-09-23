@@ -65,6 +65,7 @@ import {
   DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO,
 } from "./commands/board_cards_heal.ts";
 import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
+import { boardCardsReapColumnOnlyCmd } from "./commands/board_cards_reap_column_only.ts";
 import { boardCardsRekeyCmd } from "./commands/board_cards_rekey.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
 import {
@@ -135,6 +136,7 @@ Commands:
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
   groom board-cards-rekey backfill/cut over a staged board-keyed BoardCards identity
   groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
+  groom board-cards-reap-column-only dry-run/apply delete BoardCards rows only a column read returns
   groom parity-check   READ-ONLY: is any row invisible to the reads the board serves? (--json)
   groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
                        and missing boards (live board whose cards list can't see)
@@ -760,6 +762,7 @@ Usage:
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]... [--max-removals N|unlimited]
   fkanban groom board-cards-rekey [--apply] [--json] [--board SLUG]
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
+  fkanban groom board-cards-reap-column-only [--apply] [--json] [--board SLUG]
   fkanban groom parity-check [--json] [--board SLUG]
   fkanban groom board-list-heal [--apply] [--json]
   fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--max-removals N|unlimited] [--force-milestone-card-payload-upsert]
@@ -785,6 +788,14 @@ Subcommands:
                        scheduled wrapper for the default board: dry-run first,
                        report drifted count, apply only when drift is non-zero
                        and at or below --max-drift.
+  board-cards-reap-column-only
+                       delete, by exact (board, sk), the BoardCards rows that a
+                       column read returns and the whole-partition read does not
+                       (residue of deleted cards that makes board-cards-heal
+                       refuse the partition). A row is deleted only when a Card
+                       point-read (and, on a milestone-state column, a Milestone
+                       point-read) finds nothing. Dry run by default; it prints
+                       every key.
   board-list-heal      repair the CardListIndex all_boards rollup against Board truth:
                        drop GHOSTS (entry with no Board record — a deleted board that
                        keeps showing in board list and costs a dead partition query
@@ -851,6 +862,7 @@ Examples:
   fkanban groom board-cards-heal
   fkanban groom board-cards-heal --apply
   fkanban groom board-cards-heal-scheduled --json
+  fkanban groom board-cards-reap-column-only --board default
   fkanban groom board-list-heal
   fkanban groom board-list-heal --apply
   fkanban groom milestone-indexes-heal --dry-run
@@ -2475,6 +2487,19 @@ async function dispatch(
           json: values.json as boolean | undefined,
         }));
         return 0;
+      }
+      if (sub === "board-cards-reap-column-only") {
+        const extra = rejectExtraPositionals(positionals, 2, "groom board-cards-reap-column-only");
+        if (extra !== undefined) return extra;
+        const reaped = await boardCardsReapColumnOnlyCmd({
+          cfg: ctx.cfg,
+          node: ctx.node,
+          apply: values.apply as boolean | undefined,
+          json: values.json as boolean | undefined,
+          board: typeof values.board === "string" ? values.board : undefined,
+        });
+        console.log(reaped.output);
+        return reaped.exitCode;
       }
       if (sub === "board-cards-rekey") {
         const extra = rejectExtraPositionals(positionals, 2, "groom board-cards-rekey");
