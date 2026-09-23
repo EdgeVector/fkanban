@@ -3793,10 +3793,19 @@ export async function listPickupAreaPeers(node: NodeClient, cfg: Config, card: C
   // One bulk read; the previous per-column filtered reads sent the node an
   // unsupported field filter (three 400s per `add --column todo`) and then
   // disabled this advisory feature entirely on the live node.
+  //
+  // `activeOnly`: a peer must be in `todo` or `doing`, and the filter below
+  // discards every other row. Reading the whole partition to do that paid for
+  // the append-only `done` archive on every todo-card write — 238 of 268 rows
+  // on the live board 2026-09-23, where a whole-partition BoardCards read was
+  // averaging 3.8s of `hydrate_atoms`. The two-range complement read is the
+  // one `pickup status` already uses; a board with no known column list still
+  // reads whole, and every fallback returns the whole board, so the filter
+  // below stays the authority on membership.
   const fields = withRequiredFields([...PICKUP_AREA_PEER_FIELDS], ["column"]);
-  const summaries = (await listCardsWithFields(node, cfg, fields)).filter((c) =>
-    PICKUP_AREA_ACTIVE_COLUMN_SET.has(c.column),
-  );
+  const summaries = (
+    await listCardsWithFields(node, cfg, fields, undefined, { activeOnly: true })
+  ).filter((c) => PICKUP_AREA_ACTIVE_COLUMN_SET.has(c.column));
   return filterPickupAreaPeers(node, cfg, summaries, targetRepo, targetAreas);
 }
 
