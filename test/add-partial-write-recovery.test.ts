@@ -236,3 +236,61 @@ describe("recovering a card left partial by a timed-out write", () => {
     expect(moved.board).toBe("default");
   });
 });
+
+// papercut-kanban-add-metadata-stamp-erases-card-body-20260923: a metadata-only
+// stamp (`add --pr-url --branch`, no body) on a card that read back with no
+// column moved a claimed card to backlog and persisted an empty body. The
+// repair paths above all pipe a body; a bare stamp must refuse instead.
+describe("metadata-only update on a card that read back with no column", () => {
+  test("add --pr-url --branch without --body is refused and writes nothing", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await seedPartiallyWrittenCard(node, "no-column-stamp", {
+      board: "default",
+      title: "Claimed card",
+      column: "",
+      body: "",
+    });
+
+    await expect(
+      addCmd({
+        cfg,
+        node,
+        slug: "no-column-stamp",
+        prUrl: "http://localhost:3300/EdgeVector/fkanban/pulls/99",
+        branch: "kanban/no-column-stamp",
+      }),
+    ).rejects.toMatchObject({ code: "partial_card_read" });
+
+    const stored = await findCard(node, cfg, "no-column-stamp");
+    expect(stored?.column).toBe("");
+    expect(stored?.pr_url ?? "").toBe("");
+  });
+
+  test("an explicit --column, --body, or --force lets the write through", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await seedPartiallyWrittenCard(node, "no-column-col", { board: "default", column: "" });
+    const withColumn = await addCmd({ cfg, node, slug: "no-column-col", column: "backlog" });
+    expect(withColumn.column).toBe("backlog");
+
+    await seedPartiallyWrittenCard(node, "no-column-force", { board: "default", column: "" });
+    const forced = await addCmd({ cfg, node, slug: "no-column-force", title: "t", force: true });
+    expect(forced.column).toBe(DEFAULT_COLUMNS[0]);
+  });
+
+  test("a healthy card still takes a metadata-only stamp", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await seedPartiallyWrittenCard(node, "healthy-stamp", {
+      board: "default",
+      title: "Healthy",
+      column: "backlog",
+    });
+    const res = await addCmd({ cfg, node, slug: "healthy-stamp", branch: "kanban/healthy-stamp" });
+    expect(res.column).toBe("backlog");
+    const stored = await findCard(node, cfg, "healthy-stamp");
+    expect(stored?.body).toBe(BRIEF);
+    expect(stored?.branch).toBe("kanban/healthy-stamp");
+  });
+});
