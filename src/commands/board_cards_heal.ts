@@ -1439,7 +1439,7 @@ export async function boardCardsHealResult(
       // costs nothing but a delayed reap of rows the next heal run will still
       // see and classify fresh.
       const recheck = await Promise.all(
-        targetBoards.map((b) => readBoardCardsPartitionDivergence(opts.node, opts.cfg, b.slug, b.columns ?? [])),
+        healthyTargets.map((b) => readBoardCardsPartitionDivergence(opts.node, opts.cfg, b.slug, b.columns ?? [])),
       );
       const stillDiverged = recheck.filter(
         (d): d is BoardCardsReadDivergence => d !== null && boardCardsReadDiverged(d),
