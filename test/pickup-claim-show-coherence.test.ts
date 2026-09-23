@@ -117,6 +117,53 @@ describe("pickup claim / show coherence", () => {
     });
   });
 
+  test("a --pr-url/--branch stamp right after the claim is not refused by a stale todo read", async () => {
+    // papercut-kanban-claim-returned-doing-but-metadata-sees-todo-20260923
+    const stale = { ...node.rowAt(CARD_HASH, "claim-me")!.fields };
+    const queryAll = node.queryAll.bind(node);
+    const updateRecord = node.updateRecord.bind(node);
+    let lagCardRead = false;
+
+    node.updateRecord = async (args) => {
+      await updateRecord(args);
+      if (args.schemaHash === CARD_HASH && args.fields.column === "doing") lagCardRead = true;
+    };
+    node.queryAll = async (args): Promise<QueryResponse> => {
+      if (lagCardRead && args.schemaHash === CARD_HASH && args.filter?.HashKey === "claim-me") {
+        return {
+          ok: true,
+          results: [{
+            fields: projected(stale, args.fields),
+            key: { hash: "claim-me", range: null },
+          }],
+          returned_count: 1,
+          total_count: 1,
+        };
+      }
+      return queryAll(args);
+    };
+
+    const claim = await pickupClaimResult({ cfg, node, worker: "worker-a" });
+    expect(claim.claimed).toBe(true);
+
+    const stamped = await addCmd({
+      cfg,
+      node,
+      slug: "claim-me",
+      prUrl: "http://localhost:3300/EdgeVector/fkanban/pulls/1",
+      branch: "kanban/claim-me",
+    });
+    expect(stamped.column).toBe("doing");
+
+    lagCardRead = false;
+    const stored = node.rowAt(CARD_HASH, "claim-me")!.fields;
+    expect(stored.column).toBe("doing");
+    expect(stored.assignee).toBe("worker-a");
+    expect(stored.pr_url).toBe("http://localhost:3300/EdgeVector/fkanban/pulls/1");
+    expect(stored.branch).toBe("kanban/claim-me");
+    expect(stored.body).toBe(body);
+  });
+
   test("a legitimate todo card stays todo when no doing projection exists", async () => {
     node.reads.length = 0;
     const shown = await showResult({ cfg, node, slug: "claim-me" });

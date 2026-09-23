@@ -885,6 +885,45 @@ export function evaluateLifecycleGate(opts: {
   return violations.length === 0 ? { ok: true } : { ok: false, violations };
 }
 
+const LIFECYCLE_HEADER_RE = /^[ \t]*Requires-(?:Status|Deploy)[ \t]*:/i;
+const PROOF_LINE_RE = /^[ \t]*(?:[-*][ \t]*)?PROOF[ \t]*:[ \t]*(.*)$/i;
+const POSITIVE_PROOF_RE =
+  /\b(pass|passed|verified|proven|green|satisfied|met|confirmed|success|successful|complete|completed)\b/i;
+
+/**
+ * True when a positive `PROOF:` line follows the LAST Requires-Status /
+ * Requires-Deploy line in the body. Same positive-word rule as
+ * `last-stack-card-closeout`, so the helper and this gate agree.
+ *
+ * Measured 2026-09-22: a Forgejo card carried a prose `Requires-Deploy:` line
+ * from a soak in progress, then a later `PROOF: passed post-merge END STATE`
+ * with host_head=gate_head. The gate still refused, because LastgitCiStatus
+ * (retired) never answers for a Forgejo repo, and the card closed only with
+ * `--force` (papercut-kanban-lifecycle-gate-uses-stale-requires-deploy-line-20260922).
+ */
+export function hasProofAfterLastLifecycleHeader(body: string): boolean {
+  const lines = body.split(/\r?\n/);
+  let lastHeader = -1;
+  let inFence = false;
+  lines.forEach((line, idx) => {
+    if (/^[ \t]*```/.test(line)) inFence = !inFence;
+    else if (!inFence && LIFECYCLE_HEADER_RE.test(line)) lastHeader = idx;
+  });
+  if (lastHeader < 0) return false;
+  inFence = false;
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const line = lines[idx]!;
+    if (/^[ \t]*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (idx <= lastHeader || inFence) continue;
+    const m = line.match(PROOF_LINE_RE);
+    if (m && POSITIVE_PROOF_RE.test(m[1] ?? "")) return true;
+  }
+  return false;
+}
+
 /**
  * Opt-in gate for moving into a board's terminal column.
  * No-op when the card has no Requires-Status / Requires-Deploy headers.
@@ -943,6 +982,12 @@ export async function assertLifecycleMoveAllowed(opts: {
   });
 
   if (verdict.ok) return;
+  // LastgitCiStatus is only written for LastGit-venue repos. A Forgejo card
+  // (every repo since decision-2026-09-06-all-repos-venue-forgejo-no-lastgit-default)
+  // can never show `success` here, so its gate is met by the proof the
+  // closeout helper already requires: a positive PROOF line recorded AFTER
+  // the last Requires-* line. An older proof does not satisfy a newer gate.
+  if (!isLastgitVenueCard(opts.card) && hasProofAfterLastLifecycleHeader(opts.card.body)) return;
 
   const detail = verdict.violations
     .map((v) => `${v.kind}:${v.context}=${v.state}`)
@@ -959,7 +1004,9 @@ export async function assertLifecycleMoveAllowed(opts: {
     message,
     hint:
       "Wait for LastgitCiStatus success, fix the failing context, set Head-Oid/branch " +
-      "so kanban can resolve the commit, or pass --force to bypass the opt-in gate." +
+      "so kanban can resolve the commit, or pass --force to bypass the opt-in gate. " +
+      "For a Forgejo-venue card, append a positive `PROOF: <live evidence>` line after " +
+      "the last Requires-Status/Requires-Deploy line." +
       FORCE_IS_UNSCOPED,
   });
 }
