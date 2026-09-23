@@ -54,6 +54,7 @@ import {
   type PriorityTier,
 } from "../record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
+import { resolveCurrentClaim } from "../current_claim.ts";
 
 export type AddOptions = {
   cfg: Config;
@@ -342,6 +343,28 @@ function placementOrAbsent(value: string | undefined): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Read the card this write updates.
+ *
+ * A worker stamps `--branch` / `--pr-url` right after `pickup claim`. The keyed
+ * Card read can still serve the pre-claim todo row at that moment (see the
+ * note in `pickup_claim.ts`), and the todo-lane guard then refuses the stamp:
+ * "Card cannot carry --branch / --pr-url in default/todo". Measured 2026-09-23
+ * 06:00Z: claim returned doing, the stamp was refused, and a point read still
+ * said todo (papercut-kanban-claim-returned-doing-but-metadata-sees-todo-20260923).
+ *
+ * `show` already joins the claim-authoritative BoardCards doing row for this
+ * case. The stamp uses the same join, and only when it writes branch/pr_url
+ * without an explicit column, so every other write keeps its one point read.
+ */
+async function readExistingForWrite(opts: AddOptions): Promise<Card | null> {
+  const existing = await findCard(opts.node, opts.cfg, opts.slug);
+  if (!existing) return existing;
+  const stampsClaimMetadata = opts.branch !== undefined || opts.prUrl !== undefined;
+  if (!stampsClaimMetadata || opts.column !== undefined) return existing;
+  return resolveCurrentClaim(opts.node, opts.cfg, existing);
+}
+
 export async function addCmd(opts: AddOptions): Promise<AddResult> {
   validateSlug(opts.slug);
   validateStructuredOpts(opts);
@@ -351,7 +374,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   // Resolve the card BEFORE the board context: on update we must honor the
   // card's existing board when no explicit `--board` is given. An explicit
   // `--board` still moves the card; only the implicit default would be wrong.
-  const existing = await findCard(opts.node, opts.cfg, opts.slug);
+  const existing = await readExistingForWrite(opts);
   const boardSlug = placementOrAbsent(opts.board) ?? placementOrAbsent(existing?.board) ?? "default";
   const milestoneSlug = opts.milestone ?? existing?.milestone ?? "";
   let resolvedMilestoneState = "";
