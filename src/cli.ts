@@ -762,7 +762,7 @@ Usage:
   fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]... [--max-removals N|unlimited]
   fkanban groom board-cards-rekey [--apply] [--json] [--board SLUG]
   fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
-  fkanban groom board-cards-reap-column-only [--apply] [--json] [--board SLUG]
+  fkanban groom board-cards-reap-column-only [--apply] [--json] [--board SLUG] [--reap-stale-milestone-positions]
   fkanban groom parity-check [--json] [--board SLUG]
   fkanban groom board-list-heal [--apply] [--json]
   fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--max-removals N|unlimited] [--force-milestone-card-payload-upsert]
@@ -796,7 +796,10 @@ Subcommands:
                        (node with fold #2175). A row is deleted only when a Card
                        point-read (and, on a milestone-state column, a Milestone
                        point-read) finds nothing. Dry run by default; it prints
-                       every key.
+                       every key. A stale position of a live milestone is kept
+                       unless --reap-stale-milestone-positions is set. CAUTION:
+                       set it only on a node with fold #2182; an older node
+                       also deletes the Milestone record.
   board-list-heal      repair the CardListIndex all_boards rollup against Board truth:
                        drop GHOSTS (entry with no Board record — a deleted board that
                        keeps showing in board list and costs a dead partition query
@@ -1242,7 +1245,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "max-removals", "cutoff-hours", "max", "force-milestone-card-payload-upsert"]),
+  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "max-removals", "cutoff-hours", "max", "force-milestone-card-payload-upsert", "reap-stale-milestone-positions"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -1442,6 +1445,7 @@ async function main(argv: string[]): Promise<number> {
         check: { type: "boolean" },
         "group-by-milestone": { type: "boolean" },
         "stale-rows": { type: "boolean" },
+        "reap-stale-milestone-positions": { type: "boolean" },
       },
     });
   } catch (err) {
@@ -2498,6 +2502,7 @@ async function dispatch(
           apply: values.apply as boolean | undefined,
           json: values.json as boolean | undefined,
           board: typeof values.board === "string" ? values.board : undefined,
+          reapStaleMilestonePositions: values["reap-stale-milestone-positions"] === true,
         });
         console.log(reaped.output);
         return reaped.exitCode;

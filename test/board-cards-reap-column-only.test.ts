@@ -509,3 +509,87 @@ describe("board-cards-heal reaps residue the merged spine makes visible", () => 
     expect(node.rowsOf("boardcardshash").some((r) => r.fields.slug === "live-card")).toBe(true);
   });
 });
+
+// Measured on a CoW copy of the primary with fold #2175 (2026-09-24): the
+// `[slug]` read of `default` returned 462 rows on milestone-state columns.
+// BoardMilestones shares the `slug` molecule and the key shape. 211 rows were
+// the current key of a live milestone, 4 more sat in the BoardMilestones key
+// spine, and 247 were stale milestone positions that nothing else reaps.
+describe("groom board-cards-reap-column-only: milestone positions", () => {
+  const cfgBm: Config = { ...cfg, schemaHashes: { ...cfg.schemaHashes, board_milestones: "bmhash" } };
+
+  function milestoneFixture() {
+    const f = fixture("merge");
+    // ms-one is `active` at position 1 (its current key is f.milestoneRow).
+    const stale = boardCardSk("complete", "00000001", "ms-one");
+    const heldByBm = boardCardSk("planned", "00000001", "ms-one");
+    for (const sk of [stale, heldByBm]) {
+      f.node.seed({ schemaHash: "boardcardshash", keyHash: BOARD, rangeKey: sk, fields: { slug: "ms-one" } });
+    }
+    f.node.seed({ schemaHash: "bmhash", keyHash: BOARD, rangeKey: heldByBm, fields: { board: BOARD, slug: "ms-one" } });
+    return { ...f, stale, heldByBm };
+  }
+
+  test("without the flag a stale milestone position is kept: an old node would delete the Milestone", async () => {
+    const f = milestoneFixture();
+    // A card-column row for the milestone's slug: the same hazard.
+    const cardColumn = boardCardSk("todo", "00000005", "ms-one");
+    f.node.seed({ schemaHash: "boardcardshash", keyHash: BOARD, rangeKey: cardColumn, fields: { slug: "ms-one" } });
+    const { report } = await boardCardsReapColumnOnlyResult({
+      cfg: cfgBm,
+      node: f.node,
+      board: BOARD,
+      apply: true,
+      readBackSleep: async () => {},
+    });
+    const b = report.boards[0]!;
+    const kept = new Map(b.kept.map((k) => [k.sk, k.reason]));
+    expect(kept.get(f.stale)).toBe("milestone-stale-position");
+    expect(kept.get(cardColumn)).toBe("milestone-stale-position");
+    expect(kept.get(f.milestoneRow)).toBe("milestone-exists");
+    expect(kept.get(f.heldByBm)).toBe("milestone-row-live");
+    expect(b.reap.map((r) => r.sk).sort()).toEqual([...f.residue].sort());
+    for (const sk of [f.stale, cardColumn]) expect(boardCardSks(f.node)).toContain(sk);
+  });
+
+  test("with the flag a stale milestone position is reaped; the current key and a BoardMilestones row are kept", async () => {
+    const f = milestoneFixture();
+    const { report } = await boardCardsReapColumnOnlyResult({
+      cfg: cfgBm,
+      node: f.node,
+      board: BOARD,
+      apply: true,
+      reapStaleMilestonePositions: true,
+      readBackSleep: async () => {},
+    });
+    const b = report.boards[0]!;
+    const kept = new Map(b.kept.map((k) => [k.sk, k.reason]));
+    expect(kept.get(f.milestoneRow)).toBe("milestone-exists");
+    expect(kept.get(f.heldByBm)).toBe("milestone-row-live");
+    expect(b.reap.map((r) => r.sk).sort()).toEqual([...f.residue, f.stale].sort());
+    const after = boardCardSks(f.node);
+    expect(after).not.toContain(f.stale);
+    for (const sk of [f.milestoneRow, f.heldByBm]) expect(after).toContain(sk);
+  });
+
+  test("a failed BoardMilestones spine read keeps every milestone-column row", async () => {
+    const f = milestoneFixture();
+    const real = f.node.queryAll.bind(f.node);
+    f.node.queryAll = async (req) => {
+      if (req.schemaHash === "bmhash") throw new Error("node busy");
+      return real(req);
+    };
+    const { report } = await boardCardsReapColumnOnlyResult({
+      cfg: cfgBm,
+      node: f.node,
+      board: BOARD,
+      reapStaleMilestonePositions: true,
+    });
+    const b = report.boards[0]!;
+    const kept = new Map(b.kept.map((k) => [k.sk, k.reason]));
+    expect(kept.get(f.stale)).toBe("truth-read-failed");
+    expect(kept.get(f.heldByBm)).toBe("truth-read-failed");
+    expect(kept.get(f.milestoneRow)).toBe("milestone-exists");
+    expect(b.reap.map((r) => r.sk).sort()).toEqual([...f.residue].sort());
+  });
+});

@@ -32,9 +32,24 @@
 //  3. a Card point-read for the slug finds NO card (`cardExists`, which
 //     projects the hash key alone and so cannot false-negative on a sparse
 //     card), and the read did not fail;
-//  4. when the column is a milestone state, a Milestone point-read finds no
-//     milestone (a milestone's membership row shares this partition's key
-//     shape, and "no Card" is the healthy reading of it).
+//  4. when the column is a milestone state, the row is not a live milestone
+//     row. BoardMilestones shares the `slug` molecule with BoardCards and the
+//     same `(board, state#pos#slug)` key shape, so on a fold #2175 node the
+//     `[slug]` read also returns BoardMilestones rows. A row is kept when a
+//     Milestone point-read gives a milestone whose current key
+//     (`boardMilestoneSk(state, position, slug)` on this board) is the row's
+//     sk, or when the row is in the BoardMilestones key spine
+//     (`[board]` read of this partition). A row that is neither is a stale
+//     milestone position. Measured on a CoW copy of the primary 2026-09-24:
+//     462 milestone-column rows, 211 current, 4 more in the BoardMilestones
+//     key spine, 247 stale.
+//  5. CAUTION: a row whose slug names a live milestone is reaped only with
+//     `--reap-stale-milestone-positions`. Before fold #2182 a BoardCards row
+//     delete also deleted `Milestone(slug)` (the protein delete expanded to
+//     every Hash-keyed record schema that shares the BoardCards protein). On
+//     that CoW copy the reap deleted live Milestone records. Pass the flag
+//     only on a node that has fold #2182. Without it the row is kept as
+//     `milestone-stale-position`.
 //
 // A detector that fails contributes no rows to the reap. The other detector
 // still runs. Rows only the whole read saw are reported and never touched.
@@ -60,7 +75,8 @@ import {
   parseBoardCardSk,
   readBoardCardsPartitionDivergence,
 } from "../board-cards.ts";
-import { cardExists, findMilestone, isMilestoneState, listBoards } from "../record.ts";
+import { cardExists, findMilestone, isMilestoneState, listBoards, type Milestone } from "../record.ts";
+import { boardMilestoneSk, boardMilestonesHash } from "../board-milestones.ts";
 
 export type BoardCardsReapColumnOnlyOptions = {
   cfg: Config;
@@ -69,6 +85,11 @@ export type BoardCardsReapColumnOnlyOptions = {
   board?: string;
   apply?: boolean;
   json?: boolean;
+  /**
+   * Reap a stale position of a live milestone. Needs a node with fold #2182:
+   * an older node also deletes the Milestone record. Default false.
+   */
+  reapStaleMilestonePositions?: boolean;
   /** Test seam for the one read-back retry wait. Omit in production. */
   readBackSleep?: (ms: number) => Promise<void>;
 };
@@ -84,7 +105,13 @@ export type ColumnOnlyRow = {
 };
 
 export type KeptColumnOnlyRow = ColumnOnlyRow & {
-  reason: "card-exists" | "milestone-exists" | "unparseable-sk" | "truth-read-failed";
+  reason:
+    | "card-exists"
+    | "milestone-exists"
+    | "milestone-row-live"
+    | "milestone-stale-position"
+    | "unparseable-sk"
+    | "truth-read-failed";
   detail?: string;
 };
 
@@ -128,27 +155,93 @@ export type BoardCardsReapColumnOnlyReport = {
 
 type Truth = { keep: false } | { keep: true; reason: KeptColumnOnlyRow["reason"]; detail?: string };
 
-async function classifyRow(
+/** What the point reads say about one slug. Read once per slug. */
+type SlugTruth =
+  | { failed: string }
+  | { failed: null; card: boolean; milestone: Milestone | null | undefined };
+
+async function readSlugTruth(
   opts: BoardCardsReapColumnOnlyOptions,
-  row: ColumnOnlyRow,
-): Promise<Truth> {
+  slug: string,
+): Promise<SlugTruth> {
+  let card: boolean;
   try {
-    if (await cardExists(opts.node, opts.cfg, row.slug)) {
-      return { keep: true, reason: "card-exists" };
-    }
+    card = await cardExists(opts.node, opts.cfg, slug);
   } catch (err) {
-    return { keep: true, reason: "truth-read-failed", detail: `card: ${errText(err)}` };
+    return { failed: `card: ${errText(err)}` };
   }
-  if (isMilestoneState(row.column)) {
-    try {
-      if (await findMilestone(opts.node, opts.cfg, row.slug)) {
-        return { keep: true, reason: "milestone-exists" };
-      }
-    } catch (err) {
-      return { keep: true, reason: "truth-read-failed", detail: `milestone: ${errText(err)}` };
-    }
+  // The milestone read runs for every slug, not only for milestone columns:
+  // on a node without fold #2182 a delete of ANY row for a milestone's slug
+  // also deletes that Milestone record.
+  if (card) return { failed: null, card, milestone: undefined };
+  try {
+    return { failed: null, card, milestone: await findMilestone(opts.node, opts.cfg, slug) };
+  } catch (err) {
+    return { failed: `milestone: ${errText(err)}` };
+  }
+}
+
+/**
+ * The per-row verdict.
+ *
+ * `milestoneSpine` is the BoardMilestones key spine of this partition: `null`
+ * when the read failed (keep every milestone-column row whose milestone
+ * exists), `undefined` when BoardMilestones is not bound.
+ */
+function classifyRow(
+  row: ColumnOnlyRow,
+  truth: SlugTruth,
+  milestoneSpine: ReadonlySet<string> | null | undefined,
+  reapStaleMilestonePositions: boolean,
+): Truth {
+  if (truth.failed != null) return { keep: true, reason: "truth-read-failed", detail: truth.failed };
+  if (truth.card) return { keep: true, reason: "card-exists" };
+  const m = truth.milestone;
+  if (!m) return { keep: false };
+  const current = isMilestoneState(row.column)
+    && (m.board || "default") === row.board
+    && boardMilestoneSk(m.state, m.position, m.slug) === row.sk;
+  if (current) return { keep: true, reason: "milestone-exists" };
+  if (milestoneSpine === null) {
+    return { keep: true, reason: "truth-read-failed", detail: "board-milestones key spine read failed" };
+  }
+  if (milestoneSpine?.has(row.sk)) return { keep: true, reason: "milestone-row-live" };
+  // The milestone exists, but this is not its current key and no
+  // BoardMilestones row holds it: a stale milestone position.
+  if (!reapStaleMilestonePositions) {
+    return {
+      keep: true,
+      reason: "milestone-stale-position",
+      detail: "reap with --reap-stale-milestone-positions on a node with fold #2182",
+    };
   }
   return { keep: false };
+}
+
+/**
+ * The BoardMilestones key spine of one partition: the range keys of rows that
+ * carry a `board` atom. It projects `[board]`, the key field, and nothing
+ * else. A `[slug]` read would not do: on a fold #2175 node it merges the
+ * shared `slug` molecule, so it returns BoardCards residue too.
+ * `undefined` when BoardMilestones is not bound; `null` when the read failed.
+ */
+async function readBoardMilestonesKeySpine(
+  opts: BoardCardsReapColumnOnlyOptions,
+  board: string,
+): Promise<Set<string> | null | undefined> {
+  const schemaHash = boardMilestonesHash(opts.cfg);
+  if (!schemaHash) return undefined;
+  try {
+    const res = await opts.node.queryAll({ schemaHash, fields: ["board"], filter: { HashKey: board } });
+    const out = new Set<string>();
+    for (const r of res.results) {
+      const range = r.key?.range;
+      if (typeof range === "string" && range.length > 0) out.add(range);
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 function errText(err: unknown): string {
@@ -241,15 +334,17 @@ async function planBoard(
     }
     rows.push({ board, sk, slug: parsed.slug, column: parsed.column });
   }
-  const keyOf = (r: ColumnOnlyRow) => `${r.slug}\u0000${isMilestoneState(r.column) ? "m" : "c"}`;
-  const distinct = new Map<string, ColumnOnlyRow>();
-  for (const r of rows) if (!distinct.has(keyOf(r))) distinct.set(keyOf(r), r);
-  const entries = [...distinct.entries()];
-  const verdicts = await mapWithConcurrency(entries, ([, r]) => classifyRow(opts, r));
-  const truthByKey = new Map(entries.map(([k], i) => [k, verdicts[i]!]));
+  const slugs = [...new Set(rows.map((r) => r.slug))];
+  const truths = await mapWithConcurrency(slugs, (slug) => readSlugTruth(opts, slug));
+  const truthBySlug = new Map(slugs.map((slug, i) => [slug, truths[i]!]));
+
+  let milestoneSpine: Set<string> | null | undefined;
+  if ([...truthBySlug.values()].some((t) => t.failed == null && t.milestone)) {
+    milestoneSpine = await readBoardMilestonesKeySpine(opts, board);
+  }
 
   for (const r of rows) {
-    const t = truthByKey.get(keyOf(r))!;
+    const t = classifyRow(r, truthBySlug.get(r.slug)!, milestoneSpine, opts.reapStaleMilestonePositions === true);
     if (t.keep) out.kept.push({ ...r, reason: t.reason, ...(t.detail ? { detail: t.detail } : {}) });
     else out.reap.push(r);
   }
