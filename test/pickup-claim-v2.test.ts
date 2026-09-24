@@ -273,6 +273,37 @@ describe("pickup claim v2 LastDB adapter", () => {
     expect(await findCard(node, cfg, "gated")).toMatchObject({ column: "todo" });
   });
 
+  test("a merged card reopened for validation is never claimed, in a real claim or a dry-run", async () => {
+    // 2026-09-24: a Loom land-card walk claimed a reopened CLOSED-ON-MERGE card
+    // and IMPLEMENT failed on "agent produced no commit". The todo projection
+    // is body-free, so the point read before the claim must catch it.
+    const body =
+      "Repo: EdgeVector/last-stack\n\n## GOAL\nx\n\n## END STATE\nlive\n" +
+      "CLOSED-ON-MERGE 2026-09-24T02:14:05Z — card moved to done because a PR merged\n" +
+      "PROOF[reopened-end-state-unmet]: reopened from CLOSED-ON-MERGE: live --list omits it\n";
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "reopened", position: "1", body, surfaces: ["src/a.ts"] }));
+    await seedCard(node, card({ slug: "real-work", position: "2", surfaces: ["src/b.ts"] }));
+
+    const dry = await pickupClaimV2Result({ cfg, node, dryRun: true });
+    expect(dry).toMatchObject({ result: "claimed", dry_run: true, card: { slug: "real-work" } });
+
+    const res = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
+    expect(res).toMatchObject({ result: "claimed", card: { slug: "real-work" } });
+    expect(await findCard(node, cfg, "reopened")).toMatchObject({ column: "todo", assignee: "" });
+  });
+
+  test("a dry-run names the validate-only hold when nothing else is ready", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "reopened", body: "## GOAL\nx\nVALIDATE-ONLY: awaiting host-track\n" }));
+
+    const res = await pickupClaimV2Result({ cfg, node, dryRun: true });
+    expect(res.result).toBe("none");
+    if (res.result !== "none") return;
+    expect(res.skipped[0]?.slug).toBe("reopened");
+    expect(res.skipped[0]?.reason).toContain("validate-only");
+  });
+
   test("a claim conflict continues to the next eligible card", async () => {
     const node = fakeNode({ conflictSlug: "first" });
     await seedCard(node, card({ slug: "first", position: "1", surfaces: ["src/a.ts"] }));
