@@ -947,6 +947,30 @@ async function reconcileMilestoneCardChildren(
   };
 }
 
+/**
+ * Where a reconcile read learns which cards belong to a milestone.
+ *
+ * - `"board-union"`: MilestoneCards (hash=milestone) UNION the milestone's
+ *   whole BoardCards partition (hash=board). The union is the only way to see a
+ *   card whose MilestoneCards row never folded, so the repair verbs use it.
+ * - `"index"`: MilestoneCards only, then one Card point read per member. The
+ *   board partition is read only when the index cannot answer: it is unbound or
+ *   refused, or it names no implementation child that Card truth confirms.
+ *
+ * Why `detail` uses `"index"`: measured 2026-09-23 on the live primary, the
+ * default board partition is 298 rows (238 of them done cards), and each
+ * `milestone detail` spent 7-31s in `hydrate_atoms` on it to keep a handful of
+ * members. The `fkanban-validate` routines call `detail` 12-20 times an hour.
+ *
+ * What `"index"` cannot see: a live card whose MilestoneCards row never folded,
+ * on a milestone that has OTHER indexed members. `detail` omits that card, and
+ * its `repairs` count omits the missing row. `milestone reconcile` (board-union)
+ * is the read that finds it and the verb that repairs it; so is
+ * `groom milestone-indexes-heal`. The card write path folds MilestoneCards from
+ * BoardCards (protein-primary), so the gap is a fold failure, not the norm.
+ */
+export type MilestoneMembershipSource = "board-union" | "index";
+
 export async function milestoneReconcileResult(opts: {
   cfg: Config;
   node: NodeClient;
@@ -964,8 +988,16 @@ export async function milestoneReconcileResult(opts: {
    * Normal reconcile/heal writes BoardCards and relies on protein fold.
    */
   directPayloadUpsert?: boolean;
+  /**
+   * Where child membership comes from. See {@link MilestoneMembershipSource}.
+   * Defaults to `"board-union"`: the repair verbs (`reconcile`,
+   * `groom milestone-indexes-heal`) exist to find a card the index is missing,
+   * and only the board partition can show them one.
+   */
+  membership?: MilestoneMembershipSource;
 }): Promise<MilestoneReconcileResult & { text: string; repairs: MilestoneRepairPlan; boards: Board[] }> {
   const apply = opts.apply ?? true;
+  const membership = opts.membership ?? "board-union";
   const budget = opts.maxRepairs === undefined ? DEFAULT_MILESTONE_REPAIR_BUDGET : opts.maxRepairs;
   const directPayloadUpsert = opts.directPayloadUpsert ?? false;
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
@@ -986,7 +1018,11 @@ export async function milestoneReconcileResult(opts: {
   // Prefer keyed partitions, but union MilestoneCards with current board
   // membership so a lagging/missing milestone-keyed fold cannot hide a live
   // Card whose board row already carries the milestone link.
-  const [fromIndex, indexAddresses, boardCards, boards, proofCard] = await Promise.all([
+  //
+  // `membership: "index"` (read-only `detail`) leaves the board partition OUT
+  // of this wave — see {@link MilestoneMembershipSource} for the numbers — and
+  // reads it below only when the index cannot answer.
+  const [fromIndex, indexAddresses, boardCardsFromWave, boards, proofCard] = await Promise.all([
     listMilestoneCardsPartition(opts.node, opts.cfg, milestone.slug),
     // The ADDRESS enumeration, in the same wave — this read decides which rows
     // exist, and the wide read above only decides what their payloads say.
@@ -1009,13 +1045,14 @@ export async function milestoneReconcileResult(opts: {
     // subsequent run re-derived the same blind classification and re-issued the
     // same non-repair.
     listMilestoneCardsPartitionSpine(opts.node, opts.cfg, milestone.slug),
-    listCardsOnBoard(opts.node, opts.cfg, milestone.board),
+    membership === "board-union"
+      ? listCardsOnBoard(opts.node, opts.cfg, milestone.board)
+      : Promise.resolve(null),
     listBoards(opts.node, opts.cfg),
     milestone.proof_card
       ? findProofCard(opts.node, opts.cfg, milestone.proof_card)
       : Promise.resolve(null),
   ]);
-  const fromBoard = boardCards.filter((card) => card.milestone === milestone.slug);
   // A `null` from either MilestoneCards read means one of two very different
   // things and neither helper can tell them apart: the index is not bound in
   // this config, or the node refused the query. Only the second is a failure,
@@ -1035,7 +1072,17 @@ export async function milestoneReconcileResult(opts: {
     : indexAddresses === null
     ? "addresses"
     : null;
-  const reconciled = fromIndex !== null
+  // Index-first membership falls back to the board partition when the index
+  // cannot answer at all: unbound, or either MilestoneCards read refused. The
+  // old path used board membership alone there, so this fallback keeps that
+  // answer — it only costs the board read on the failure path.
+  let boardCards: Card[] | null = boardCardsFromWave;
+  if (boardCards === null && (fromIndex === null || indexAddresses === null)) {
+    boardCards = await listCardsOnBoard(opts.node, opts.cfg, milestone.board);
+  }
+  const reconcileChildren = async (board: Card[] | null) => {
+    const fromBoard = (board ?? []).filter((card) => card.milestone === milestone.slug);
+    return fromIndex !== null
     // `indexAddresses ?? []` still passes an empty address set on a shed spine
     // read, and that is deliberately NOT changed here: the resulting upserts
     // carry `previous: null`, which routes to `purgeOtherMilestoneCardRows` for
@@ -1067,11 +1114,31 @@ export async function milestoneReconcileResult(opts: {
         index_read_failed: indexReadFailed,
       } satisfies MilestoneRepairPlan,
     };
+  };
+  let reconciled = await reconcileChildren(boardCards);
+  // The second index-first fallback: the index names no implementation child
+  // that Card truth confirms. Two things need the board there, and both are
+  // exactly the old output:
+  //
+  //  - a MilestoneCards fold that never landed for ANY member reads as an empty
+  //    milestone, which a driver would decompose again. An empty answer is the
+  //    one index answer that is never trusted without the board.
+  //  - the `ns-only-done-evidence` warning only fires on an empty milestone,
+  //    and it is a filter over NON-member cards, which only the board holds.
+  //
+  // A milestone with members skips this, and that is the common case the
+  // validate routines poll. The cost of the rare case is one extra wave.
+  if (boardCards === null && !reconciled.children.some((card) => card.slug !== milestone.proof_card)) {
+    boardCards = await listCardsOnBoard(opts.node, opts.cfg, milestone.board);
+    reconciled = await reconcileChildren(boardCards);
+  }
   const children = reconciled.children;
-  // The whole board is already in hand from the wave above, so a dep edge
-  // pointing at a same-board card resolves locally instead of costing a point
-  // read — the same `knownCards` narrowing the portfolio path already uses.
-  const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children, boardCards);
+  // When the whole board is in hand, a dep edge pointing at a same-board card
+  // resolves locally instead of costing a point read — the same `knownCards`
+  // narrowing the portfolio path already uses. On the index-only path the
+  // off-milestone deps are point-read instead: one keyed read per distinct dep
+  // slug, against ~300 hydrated board rows.
+  const statuses = await listDependencyStatusesForCards(opts.node, opts.cfg, children, boardCards ?? undefined);
   // Only pay for the extra key-only read when the wide read came back empty —
   // that is the only case where "absent" and "sparse" are in question.
   const proofCardSparse = Boolean(milestone.proof_card) && !proofCard
@@ -1084,7 +1151,10 @@ export async function milestoneReconcileResult(opts: {
     proofCardSparse,
     // The whole board is in hand from the wave above; the NS cross-check is a
     // filter over it, not a read.
-    northStarOnlyDoneCards(milestone, boardCards),
+    // Index-only (`boardCards === null`) is only reached with at least one
+    // implementation child, and the NS cross-check never fires on a milestone
+    // that has one — so `[]` here changes no output.
+    northStarOnlyDoneCards(milestone, boardCards ?? []),
   );
   // A shed index read belongs in `warnings` as well as in the banner, because
   // the two surfaces have different readers. The banner is for the human
@@ -1491,7 +1561,7 @@ export async function milestonePortfolioResult(opts: { cfg: Config; node: NodeCl
  * that fixes it.
  */
 export async function milestoneDetailResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{ detail: MilestoneReconcileResult & { columns: Record<string, MilestoneChildStatus[]> }; repairs: MilestoneRepairPlan; text: string }> {
-  const result = await milestoneReconcileResult({ ...opts, apply: false });
+  const result = await milestoneReconcileResult({ ...opts, apply: false, membership: "index" });
   // Reconcile already read the board list (it needs terminal columns to decide
   // done-ness), so re-reading it here bought nothing and cost a whole extra
   // wave — ~190ms on an idle node — for bytes that were already in memory.

@@ -1172,7 +1172,13 @@ describe("milestone HashRange indexes", () => {
     expect((await listMilestoneCardsPartition(node, cfg, "ms-unbounded"))?.length).toBe(3);
   });
 
-  test("detail reports a missing index row without repairing it", async () => {
+  // `detail` is index-first (MilestoneMembershipSource "index"): it does not
+  // read the whole board partition, so a member whose MilestoneCards row never
+  // folded is invisible to it while the milestone has OTHER indexed members.
+  // That is the documented trade (298 board rows, 7-31s per detail, measured
+  // 2026-09-23). `reconcile` is the read that still finds the card, and the
+  // verb that repairs the row.
+  test("detail is index-first; reconcile finds and repairs a missing index row", async () => {
     const node = fakeNode();
     await seedMilestoneWithCards(node, "ms-look", ["look-a", "look-b"]);
     await dropIndexRow(node, "ms-look", "look-a");
@@ -1180,13 +1186,22 @@ describe("milestone HashRange indexes", () => {
     node.directMilestoneCardMutations.length = 0;
     const detail = await milestoneDetailResult({ cfg, node, slug: "ms-look" });
 
-    // Reported from Card truth ...
-    expect(detail.detail.children.map((c) => c.slug).sort()).toEqual(["look-a", "look-b"]);
-    // ... and the index left exactly as found.
+    // Detail answers from the index it read, and writes nothing.
+    expect(detail.detail.children.map((c) => c.slug)).toEqual(["look-b"]);
     expect(node.directMilestoneCardMutations).toEqual([]);
+    expect(detail.repairs).toMatchObject({ applied: false, upserts: 0, issued: 0, deferred: 0 });
+
+    // A dry-run reconcile still unions the board and names the drift ...
+    const looked = await milestoneReconcileResult({ cfg, node, slug: "ms-look", apply: false });
+    expect(looked.children.map((c) => c.slug).sort()).toEqual(["look-a", "look-b"]);
+    expect(looked.repairs).toMatchObject({ applied: false, upserts: 1, issued: 0, deferred: 1 });
+    expect(looked.text).toContain("kanban milestone reconcile ms-look");
     expect((await listMilestoneCardsPartition(node, cfg, "ms-look"))?.map((c) => c.slug)).toEqual(["look-b"]);
-    expect(detail.repairs).toMatchObject({ applied: false, upserts: 1, issued: 0, deferred: 1 });
-    expect(detail.text).toContain("kanban milestone reconcile ms-look");
+
+    // ... and a real reconcile repairs it, after which detail sees the card.
+    await milestoneReconcileResult({ cfg, node, slug: "ms-look" });
+    const after = await milestoneDetailResult({ cfg, node, slug: "ms-look" });
+    expect(after.detail.children.map((c) => c.slug).sort()).toEqual(["look-a", "look-b"]);
   });
 
   test("gap-report sees north_star via folded BoardMilestones", async () => {
