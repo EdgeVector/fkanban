@@ -357,6 +357,19 @@ export function boardCardFieldsFromCard(card: Card | CardSummary): Record<string
   };
 }
 
+/**
+ * True when this row carried a `board` atom.
+ *
+ * Residue is a `slug` atom and no `board` atom. LastDB fold #2175 can return
+ * that row from a scoped read. It is not a card. {@link listBoardCardsPartition}
+ * drops it. A missing atom is not the `default` board.
+ */
+export function boardCardRowHasBoardAtom(fields: unknown): boolean {
+  if (!fields || typeof fields !== "object") return false;
+  const board = (fields as Record<string, unknown>).board;
+  return typeof board === "string" && board.length > 0;
+}
+
 export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
   const str = (k: string) => (typeof fields[k] === "string" ? (fields[k] as string) : "");
   const arr = (k: string): string[] => {
@@ -368,6 +381,8 @@ export function cardFromBoardCardFields(fields: Record<string, unknown>): Card {
     slug: str("slug"),
     title: str("title"),
     body: "", // never stored on BoardCards
+    // List never reaches this default for a row with no `board` atom: the
+    // partition read drops that row first. See {@link boardCardRowHasBoardAtom}.
     board: str("board") || "default",
     column: str("column"),
     position: str("position"),
@@ -1693,6 +1708,11 @@ export async function listBoardCardsPartition(
   // Measured BoardCards hydrate avg ~607ms on HashKey pages of rows≈1000
   // (lastdb ops 2026-08-15); prefer LIST width unless the caller opts in.
   const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
+  const wireFields = boardCardsWireProjection([...projection]);
+  // The list projection leads with `board`, so a returned row that omits it
+  // has no `board` atom. Fold #2175 can merge such a row into a scoped read.
+  // Stamp the filter board only onto rows that actually carry the atom.
+  const requireBoardAtom = wireFields.includes("board");
   // HashRangePrefix / HashRangeRange are fold HashRangeFilter objects;
   // QueryFilter's TS type is string-map only — cast at the edge (runtime
   // accepts the object).
@@ -1706,7 +1726,7 @@ export async function listBoardCardsPartition(
     try {
       return await node.queryAll({
         schemaHash,
-        fields: boardCardsWireProjection([...projection]),
+        fields: [...wireFields],
         filter,
       });
     } catch (err) {
@@ -1727,8 +1747,10 @@ export async function listBoardCardsPartition(
   const responses = await Promise.all(filters.map(readOne));
   return responses
     .flatMap((res) => res.results)
+    .filter((r) => !requireBoardAtom || boardCardRowHasBoardAtom(r.fields))
     // `board` is the filter argument, not a payload copy — same choice, and the
-    // same reasoning, as `spineRowsFromQueryRows`.
+    // same reasoning, as `spineRowsFromQueryRows`. The filter above already
+    // dropped rows that have no `board` atom, so this stamp cannot invent one.
     .map((r) => cardFromBoardCardRow(r, board))
     .filter((c) => c.slug.length > 0)
     .filter((c) => !column || c.column === column)
@@ -1930,6 +1952,58 @@ export async function readBoardCardsPartitionDivergence(
     columnOnly: [...columnSks].filter((sk) => !wholeSks.has(sk)),
     failed: null,
   };
+}
+
+/**
+ * Residue under LastDB fold #2175 (option A).
+ *
+ * A read scoped to one hash merges the key spine with the rows of the first
+ * projected field that is not key material. `board` is the hash field and
+ * `sk` is the range field, so a `[board]` read has no merge field and returns
+ * the key spine only. A `[slug]` read merges the key spine with every row
+ * that has a `slug` atom. Residue (a `slug` atom, no `board` atom) is the
+ * difference.
+ *
+ * Before fold #2175 the `[slug]` whole-partition read does not fall back
+ * while the key spine is non-empty, so this difference is empty. The reaper
+ * unions it with {@link readBoardCardsPartitionDivergence}'s column-only set,
+ * which is how the same residue shows up on a node that does not merge.
+ *
+ * This is not a read-divergence signal. After the merge the column read and
+ * the whole read agree (both include the residue). Heal must not refuse the
+ * partition for that agreement.
+ */
+export type BoardCardsKeySpineDiff = {
+  board: string;
+  /** Range keys in the `[slug]` HashKey read and absent from the `[board]` read. */
+  missingKey: string[];
+  /** A read threw. `missingKey` is then empty — not a claim that the partition is clean. */
+  failed: string | null;
+};
+
+export async function diffBoardCardsPartition(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+): Promise<BoardCardsKeySpineDiff | null> {
+  const schemaHash = boardCardsHash(cfg);
+  if (!schemaHash) return null;
+  const filter = { HashKey: board } as QueryFilter;
+  const readLead = async (lead: "slug" | "board") => {
+    const res = await node.queryAll({ schemaHash, fields: [lead], filter });
+    return spineRowsFromQueryRows(res.results, board);
+  };
+  try {
+    const [slugRows, keyRows] = await Promise.all([readLead("slug"), readLead("board")]);
+    const keySpine = new Set(keyRows.map((r) => r.sk));
+    return {
+      board,
+      missingKey: slugRows.filter((r) => !keySpine.has(r.sk)).map((r) => r.sk),
+      failed: null,
+    };
+  } catch (err) {
+    return { board, missingKey: [], failed: `key-spine diff: ${errText(err)}` };
+  }
 }
 
 function errText(err: unknown): string {

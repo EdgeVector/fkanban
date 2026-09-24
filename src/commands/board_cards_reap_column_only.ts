@@ -1,35 +1,33 @@
-// Reap BoardCards rows that ONLY a column (HashRangePrefix) read can see.
+// Reap BoardCards residue: a `slug` atom and no `board` / `sk` atom.
 //
-// ## Why this command exists (2026-09-23)
+// ## Why this command exists (2026-09-23, detector updated 2026-09-24)
 //
 // `board-cards-heal` refuses every write to a partition whose whole read
 // (`HashKey`) and column reads (`HashRangePrefix`) disagree. On the live primary
 // that refusal fired every hour on `default` (253, later 290 column-only rows)
 // and `agent-dogfood-scratch` (2 rows), so the partition was never repaired.
 //
-// Root cause (papercut-lastdb-boardcards-default-partition-column-only-rows-20260923,
-// fold main c4d9bd602, `hash_range_query.rs` ~334/~362-395/~1479): a HashRange
-// read takes its row spine from the schema key field (`board`). It falls back
-// to the requested field ONLY when the key-field spine of the range is
-// completely empty; it never merges the two. The residue rows carry a `slug`
-// atom and no `board`/`sk` atom. So:
+// Root cause (papercut-lastdb-boardcards-default-partition-column-only-rows-20260923):
+// before LastDB fold #2175 a HashRange read takes its row spine from the key
+// field (`board`) and falls back to the requested field ONLY when that spine
+// is empty for the range. Residue then shows up on a column read of an empty
+// column and not on the whole-partition read.
 //
-//  - `HashKey{default}` finds `board` atoms in the live rows, never falls back,
-//    and never returns the residue;
-//  - `HashRangePrefix{default,"todo#"}` finds no `board` atom in a column with
-//    no live card, falls back to `slug`, and returns the residue.
+// Fold #2175 (option A) merges the key spine with the first projected non-key
+// field. A `[slug]` read of the partition then returns the residue from BOTH
+// the whole read and the column reads, so the column-minus-whole set is empty
+// and this command would reap nothing. The second detector is the merge rule
+// itself: a row in the `[slug]` projection of `HashKey{board}` that is absent
+// from the `[board]` projection (no merge field, key spine only).
 //
-// Every measured residue row belonged to a card that no longer exists. The
-// LastDB read rule is NOT changed here (Tom, 2026-09-23: fix on the fkanban
-// side; the read rule gets its own design decision). This command deletes the
-// residue by its exact key so the two reads agree again.
+// Both detectors run. The candidate set is their union, so a node without
+// fold #2175 and a node with it each yield the residue.
 //
 // ## What it deletes, and the gate on each row
 //
 // A row is deleted only when ALL of these hold:
 //
-//  1. a column read returned it and the whole-partition read did not (the
-//     divergence probe `board-cards-heal` already runs);
+//  1. at least one detector returned it (column-only, or slug-minus-board);
 //  2. the row's sk parses as `column#position#slug`;
 //  3. a Card point-read for the slug finds NO card (`cardExists`, which
 //     projects the hash key alone and so cannot false-negative on a sparse
@@ -38,27 +36,23 @@
 //     milestone (a milestone's membership row shares this partition's key
 //     shape, and "no Card" is the healthy reading of it).
 //
-// A read that fails keeps the row. Rows only the whole read saw are reported
-// and never touched. The delete addresses `(board, sk)` exactly — no range
-// delete, no rebuilt key.
-//
-// ## Limit
-//
-// Residue in a column that also holds a live card is invisible to EVERY read
-// (the key-field spine is not empty there, so no fallback happens). Nothing in
-// fkanban can address it until the column empties. The LastDB design card owns
-// that gap.
+// A detector that fails contributes no rows. The other detector still runs.
+// Rows only the whole read saw are reported and never touched. The delete
+// addresses `(board, sk)` exactly — no range delete, no rebuilt key.
 //
 // Dry run is the default and prints every exact key. `--apply` deletes, then
-// re-reads the partition and reports which reaped keys a column read still
-// returns.
+// re-reads through both detectors and reports which reaped keys are still
+// visible.
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import {
   boardCardsHash,
+  type BoardCardsKeySpineDiff,
+  type BoardCardsReadDivergence,
   deleteBoardCardRowsBySk,
+  diffBoardCardsPartition,
   parseBoardCardSk,
   readBoardCardsPartitionDivergence,
 } from "../board-cards.ts";
@@ -94,8 +88,15 @@ export type BoardCardsReapColumnOnlyBoard = {
   board: string;
   columns_probed: string[];
   whole_only: string[];
+  /** Old detector: column read minus whole-partition read. */
   column_only: number;
-  /** Divergence probe failure: nothing on this board was classified. */
+  /** Fold #2175 detector: `[slug]` HashKey rows absent from the `[board]` read. */
+  missing_key: number;
+  /**
+   * A detector failed. Rows from the detector that succeeded are still
+   * classified. Empty `reap` and `kept` with this set means the board was
+   * skipped.
+   */
   failed: string | null;
   reap: ColumnOnlyRow[];
   kept: KeptColumnOnlyRow[];
@@ -141,27 +142,49 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function detectorRows(
+  divergence: BoardCardsReadDivergence | null,
+  keyDiff: BoardCardsKeySpineDiff | null,
+): { columnOnly: string[]; missingKey: string[]; failed: string | null } {
+  // A failed detector reports an empty set. Do not reap from a probe that
+  // did not finish. The other detector still contributes.
+  const columnOnly = divergence && !divergence.failed ? divergence.columnOnly : [];
+  const missingKey = keyDiff && !keyDiff.failed ? keyDiff.missingKey : [];
+  const failed = [divergence?.failed, keyDiff?.failed].filter((f): f is string => Boolean(f));
+  return {
+    columnOnly,
+    missingKey,
+    failed: failed.length > 0 ? failed.join("; ") : null,
+  };
+}
+
 async function planBoard(
   opts: BoardCardsReapColumnOnlyOptions,
   board: string,
   declaredColumns: readonly string[],
 ): Promise<BoardCardsReapColumnOnlyBoard> {
-  const d = await readBoardCardsPartitionDivergence(opts.node, opts.cfg, board, declaredColumns);
+  const [d, keyDiff] = await Promise.all([
+    readBoardCardsPartitionDivergence(opts.node, opts.cfg, board, declaredColumns),
+    diffBoardCardsPartition(opts.node, opts.cfg, board),
+  ]);
+  const detected = detectorRows(d, keyDiff);
   const out: BoardCardsReapColumnOnlyBoard = {
     board,
     columns_probed: d?.columnsProbed ?? [],
-    whole_only: d?.wholeOnly ?? [],
-    column_only: d?.columnOnly.length ?? 0,
-    failed: d?.failed ?? null,
+    whole_only: d && !d.failed ? d.wholeOnly : [],
+    column_only: detected.columnOnly.length,
+    missing_key: detected.missingKey.length,
+    failed: detected.failed,
     reap: [],
     kept: [],
   };
-  if (!d || d.failed) return out;
+  const candidates = [...new Set([...detected.columnOnly, ...detected.missingKey])].sort();
+  if (candidates.length === 0) return out;
 
   // Truth reads are one point-read per distinct slug, bounded-parallel: the
   // 290 live residue rows named 31 slugs.
   const rows: ColumnOnlyRow[] = [];
-  for (const sk of [...d.columnOnly].sort()) {
+  for (const sk of candidates) {
     const parsed = parseBoardCardSk(sk);
     if (!parsed || parsed.slug.length === 0) {
       out.kept.push({ board, sk, slug: "", column: "", reason: "unparseable-sk" });
@@ -216,18 +239,17 @@ export async function boardCardsReapColumnOnlyResult(
       const p = plans[i]!;
       if (p.reap.length === 0) continue;
       deleted += await deleteBoardCardRowsBySk(opts.node, opts.cfg, p.board, p.reap.map((r) => r.sk));
-      // Read back through the same probe. A reaped key a column read still
+      // Read back through both detectors. A reaped key either one still
       // returns is reported, not retried: the BoardCards index can lag its own
       // ack, so the operator re-runs the dry run to confirm.
       const target = targets[i]!;
       const visibleNow = async (sks: string[]) => {
-        const after = await readBoardCardsPartitionDivergence(
-          opts.node,
-          opts.cfg,
-          p.board,
-          target.columns ?? [],
-        );
-        const visible = new Set(after?.columnOnly ?? []);
+        const [after, keyAfter] = await Promise.all([
+          readBoardCardsPartitionDivergence(opts.node, opts.cfg, p.board, target.columns ?? []),
+          diffBoardCardsPartition(opts.node, opts.cfg, p.board),
+        ]);
+        const again = detectorRows(after, keyAfter);
+        const visible = new Set([...again.columnOnly, ...again.missingKey]);
         return sks.filter((sk) => visible.has(sk));
       };
       let remaining = await visibleNow(p.reap.map((r) => r.sk));
@@ -253,18 +275,19 @@ export async function boardCardsReapColumnOnlyResult(
   const lines: string[] = [];
   lines.push(
     dryRun
-      ? `board-cards-reap-column-only (dry run): ${wouldDelete} column-only row(s) would be deleted by exact key.`
-      : `board-cards-reap-column-only: deleted ${deleted} column-only row(s) by exact key; ${stillVisible} still visible after read-back.`,
+      ? `board-cards-reap-column-only (dry run): ${wouldDelete} residue row(s) would be deleted by exact key.`
+      : `board-cards-reap-column-only: deleted ${deleted} residue row(s) by exact key; ${stillVisible} still visible after read-back.`,
   );
   for (const p of plans) {
-    if (p.failed) {
-      lines.push(`  ${p.board}: divergence probe failed, board skipped: ${p.failed}`);
+    if (p.failed && p.reap.length === 0 && p.kept.length === 0) {
+      lines.push(`  ${p.board}: residue probe failed, board skipped: ${p.failed}`);
       continue;
     }
     lines.push(
-      `  ${p.board}: column_only=${p.column_only} reap=${p.reap.length} kept=${p.kept.length} ` +
-        `whole_only=${p.whole_only.length} (not touched)`,
+      `  ${p.board}: column_only=${p.column_only} missing_key=${p.missing_key} ` +
+        `reap=${p.reap.length} kept=${p.kept.length} whole_only=${p.whole_only.length} (not touched)`,
     );
+    if (p.failed) lines.push(`  ${p.board}: one detector failed, the other still ran: ${p.failed}`);
     for (const r of p.reap) lines.push(`    ${dryRun ? "would-delete" : "delete"} board=${r.board} sk=${r.sk}`);
     for (const k of p.kept) {
       lines.push(`    keep board=${k.board} sk=${k.sk} reason=${k.reason}${k.detail ? ` (${k.detail})` : ""}`);
