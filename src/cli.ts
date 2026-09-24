@@ -136,7 +136,7 @@ Commands:
   groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
   groom board-cards-rekey backfill/cut over a staged board-keyed BoardCards identity
   groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
-  groom board-cards-reap-column-only dry-run/apply delete BoardCards rows only a column read returns
+  groom board-cards-reap-column-only dry-run/apply delete BoardCards residue (column-only or missing board atom)
   groom parity-check   READ-ONLY: is any row invisible to the reads the board serves? (--json)
   groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
                        and missing boards (live board whose cards list can't see)
@@ -789,10 +789,11 @@ Subcommands:
                        report drifted count, apply only when drift is non-zero
                        and at or below --max-drift.
   board-cards-reap-column-only
-                       delete, by exact (board, sk), the BoardCards rows that a
-                       column read returns and the whole-partition read does not
-                       (residue of deleted cards that makes board-cards-heal
-                       refuse the partition). A row is deleted only when a Card
+                       delete, by exact (board, sk), BoardCards residue: a slug
+                       atom and no board atom. Two detectors, union of results —
+                       column read minus whole read (node without fold #2175),
+                       and [slug] HashKey rows absent from the [board] read
+                       (node with fold #2175). A row is deleted only when a Card
                        point-read (and, on a milestone-state column, a Milestone
                        point-read) finds nothing. Dry run by default; it prints
                        every key.
