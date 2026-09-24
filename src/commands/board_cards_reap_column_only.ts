@@ -36,13 +36,17 @@
 //     milestone (a milestone's membership row shares this partition's key
 //     shape, and "no Card" is the healthy reading of it).
 //
-// A detector that fails contributes no rows. The other detector still runs.
-// Rows only the whole read saw are reported and never touched. The delete
-// addresses `(board, sk)` exactly — no range delete, no rebuilt key.
+// A detector that fails contributes no rows to the reap. The other detector
+// still runs. Rows only the whole read saw are reported and never touched.
+// The delete addresses `(board, sk)` exactly — no range delete, no rebuilt key.
 //
 // Dry run is the default and prints every exact key. `--apply` deletes, then
-// re-reads through both detectors and reports which reaped keys are still
-// visible.
+// re-reads through both detectors. A reaped key a successful detector still
+// returns is reported. A failed read-back detector is an unproven repair:
+// its empty set is not proof the key is gone, and both detectors must
+// succeed before a reaped key is cleared. On a fold #2175 node the
+// column-only set stays empty while residue remains, so a failed key-spine
+// diff must not clear the reap.
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -100,8 +104,15 @@ export type BoardCardsReapColumnOnlyBoard = {
   failed: string | null;
   reap: ColumnOnlyRow[];
   kept: KeptColumnOnlyRow[];
-  /** After --apply: reaped sks a column read still returns. */
+  /** After --apply: reaped sks a successful detector still returns. */
   still_visible?: string[];
+  /**
+   * After --apply: reaped sks a failed read-back detector did not clear.
+   * An empty set from that failure is not proof the key is gone.
+   */
+  read_back_unproven?: string[];
+  /** After --apply: why a read-back detector failed. Absent when both ran. */
+  read_back_failed?: string;
 };
 
 export type BoardCardsReapColumnOnlyReport = {
@@ -111,6 +122,8 @@ export type BoardCardsReapColumnOnlyReport = {
   would_delete: number;
   deleted: number;
   still_visible: number;
+  /** Reaped keys a failed read-back detector left unproven. */
+  read_back_unproven: number;
 };
 
 type Truth = { keep: false } | { keep: true; reason: KeptColumnOnlyRow["reason"]; detail?: string };
@@ -156,6 +169,42 @@ function detectorRows(
     missingKey,
     failed: failed.length > 0 ? failed.join("; ") : null,
   };
+}
+
+/**
+ * Whether the reaped keys are gone. Do not use this for the reap itself:
+ * a failed detector must not authorize a delete, and {@link detectorRows}
+ * already drops it there.
+ *
+ * A failed detector's empty set is not proof of absence. Keys it did not
+ * return stay unproven. A hit from a detector that succeeded is residue.
+ * On a fold #2175 node the column-only set stays empty while residue
+ * remains, so a failed key-spine diff must not clear the reap.
+ */
+function classifyReadBack(
+  sks: readonly string[],
+  divergence: BoardCardsReadDivergence | null,
+  keyDiff: BoardCardsKeySpineDiff | null,
+): { still: string[]; unproven: string[]; failed: string | null } {
+  const columnHits = divergence != null && divergence.failed == null
+    ? new Set(divergence.columnOnly)
+    : new Set<string>();
+  const keyHits = keyDiff != null && keyDiff.failed == null
+    ? new Set(keyDiff.missingKey)
+    : new Set<string>();
+  const columnFailed = divergence == null || divergence.failed != null;
+  const keyFailed = keyDiff == null || keyDiff.failed != null;
+  const still: string[] = [];
+  const unproven: string[] = [];
+  for (const sk of sks) {
+    if (columnHits.has(sk) || keyHits.has(sk)) still.push(sk);
+    else if (columnFailed || keyFailed) unproven.push(sk);
+  }
+  const failed = [
+    divergence == null ? "column detector did not run" : divergence.failed,
+    keyDiff == null ? "key-spine detector did not run" : keyDiff.failed,
+  ].filter((part): part is string => Boolean(part));
+  return { still, unproven, failed: failed.length > 0 ? failed.join("; ") : null };
 }
 
 async function planBoard(
@@ -219,6 +268,7 @@ export async function boardCardsReapColumnOnlyResult(
       would_delete: 0,
       deleted: 0,
       still_visible: 0,
+      read_back_unproven: 0,
     };
     return { text: "board-cards-reap-column-only: BoardCards schema is not bound; nothing to do.", report };
   }
@@ -234,32 +284,38 @@ export async function boardCardsReapColumnOnlyResult(
   const wouldDelete = plans.reduce((n, p) => n + p.reap.length, 0);
   let deleted = 0;
   let stillVisible = 0;
+  let readBackUnproven = 0;
   if (!dryRun) {
     for (let i = 0; i < plans.length; i += 1) {
       const p = plans[i]!;
       if (p.reap.length === 0) continue;
       deleted += await deleteBoardCardRowsBySk(opts.node, opts.cfg, p.board, p.reap.map((r) => r.sk));
-      // Read back through both detectors. A reaped key either one still
-      // returns is reported, not retried: the BoardCards index can lag its own
-      // ack, so the operator re-runs the dry run to confirm.
+      // Read back through both detectors. A reaped key a successful detector
+      // still returns is reported, not deleted again: the BoardCards index can
+      // lag its own ack, so the operator re-runs the dry run to confirm.
+      // A failed detector is not fed through detectorRows. That helper turns
+      // a failure into an empty set so the reap will not delete from a probe
+      // that did not finish. Here the same empty set would look like proof
+      // the key is gone.
       const target = targets[i]!;
-      const visibleNow = async (sks: string[]) => {
+      const readBack = async (sks: string[]) => {
         const [after, keyAfter] = await Promise.all([
           readBoardCardsPartitionDivergence(opts.node, opts.cfg, p.board, target.columns ?? []),
           diffBoardCardsPartition(opts.node, opts.cfg, p.board),
         ]);
-        const again = detectorRows(after, keyAfter);
-        const visible = new Set([...again.columnOnly, ...again.missingKey]);
-        return sks.filter((sk) => visible.has(sk));
+        return classifyReadBack(sks, after, keyAfter);
       };
-      let remaining = await visibleNow(p.reap.map((r) => r.sk));
-      if (remaining.length > 0) {
+      let back = await readBack(p.reap.map((r) => r.sk));
+      if (back.still.length > 0 || back.unproven.length > 0) {
         const sleep = opts.readBackSleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
         await sleep(READ_BACK_RETRY_MS);
-        remaining = await visibleNow(remaining);
+        back = await readBack([...back.still, ...back.unproven]);
       }
-      p.still_visible = remaining;
-      stillVisible += remaining.length;
+      p.still_visible = back.still;
+      p.read_back_unproven = back.unproven;
+      if (back.failed) p.read_back_failed = back.failed;
+      stillVisible += back.still.length;
+      readBackUnproven += back.unproven.length;
     }
   }
 
@@ -270,13 +326,16 @@ export async function boardCardsReapColumnOnlyResult(
     would_delete: wouldDelete,
     deleted,
     still_visible: stillVisible,
+    read_back_unproven: readBackUnproven,
   };
 
   const lines: string[] = [];
   lines.push(
     dryRun
       ? `board-cards-reap-column-only (dry run): ${wouldDelete} residue row(s) would be deleted by exact key.`
-      : `board-cards-reap-column-only: deleted ${deleted} residue row(s) by exact key; ${stillVisible} still visible after read-back.`,
+      : `board-cards-reap-column-only: deleted ${deleted} residue row(s) by exact key; ${stillVisible} still visible after read-back` +
+        (readBackUnproven > 0 ? `; ${readBackUnproven} unproven after a failed read-back` : "") +
+        ".",
   );
   for (const p of plans) {
     if (p.failed && p.reap.length === 0 && p.kept.length === 0) {
@@ -292,7 +351,11 @@ export async function boardCardsReapColumnOnlyResult(
     for (const k of p.kept) {
       lines.push(`    keep board=${k.board} sk=${k.sk} reason=${k.reason}${k.detail ? ` (${k.detail})` : ""}`);
     }
+    if (p.read_back_failed && (p.read_back_unproven?.length ?? 0) > 0) {
+      lines.push(`  ${p.board}: read-back unproven, repair not confirmed: ${p.read_back_failed}`);
+    }
     for (const sk of p.still_visible ?? []) lines.push(`    still-visible board=${p.board} sk=${sk}`);
+    for (const sk of p.read_back_unproven ?? []) lines.push(`    read-back-unproven board=${p.board} sk=${sk}`);
   }
   if (dryRun && wouldDelete > 0) lines.push("Re-run with --apply to delete the keys above.");
   return { text: lines.join("\n"), report };
@@ -304,7 +367,9 @@ export async function boardCardsReapColumnOnlyCmd(
   const { text, report } = await boardCardsReapColumnOnlyResult(opts);
   return {
     output: opts.json ? JSON.stringify(report, null, 2) : text,
-    // A reaped key that a column read still returns is a failed repair.
-    exitCode: report.still_visible > 0 ? 1 : 0,
+    // A reaped key a detector still returns, or a read-back that failed to
+    // prove the key is gone, is a failed repair. An empty set from a failed
+    // detector is not that proof.
+    exitCode: report.still_visible > 0 || report.read_back_unproven > 0 ? 1 : 0,
   };
 }

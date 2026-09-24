@@ -20,7 +20,11 @@ import { describe, expect, test } from "bun:test";
 import { fakeNode, type FakeNode } from "./fake-node.ts";
 import type { Config } from "../src/config.ts";
 import type { QueryFilter } from "../src/client.ts";
-import { boardCardsReapColumnOnlyResult } from "../src/commands/board_cards_reap_column_only.ts";
+import {
+  boardCardsReapColumnOnlyCmd,
+  boardCardsReapColumnOnlyResult,
+  type BoardCardsReapColumnOnlyReport,
+} from "../src/commands/board_cards_reap_column_only.ts";
 import { boardCardsHealResult } from "../src/commands/board_cards_heal.ts";
 import {
   boardToFields,
@@ -192,6 +196,45 @@ function boardCardSks(node: FakeNode): string[] {
   return node.rowsOf("boardcardshash").map((r) => r.rangeKey ?? "").sort();
 }
 
+type ReadReq = { schemaHash: string; fields: string[]; filter?: QueryFilter };
+
+/**
+ * The delete runs, then the residue is put back, and later reads that
+ * `fail` matches throw. The plan reads happen before the delete, so they
+ * still see the residue. The read-back does not.
+ */
+function failReadBackAfterDelete(f: Fixture, fail: (req: ReadReq) => boolean): void {
+  let applyStarted = false;
+  const realQuery = f.node.queryAll.bind(f.node);
+  const realDelete = f.node.deleteRecords?.bind(f.node);
+  if (!realDelete) throw new Error("fake node has no deleteRecords");
+  f.node.deleteRecords = async (rows) => {
+    applyStarted = true;
+    await realDelete(rows);
+    for (const sk of f.residue) {
+      const slug = sk.split("#").at(-1)!;
+      f.node.seed({ schemaHash: "boardcardshash", keyHash: BOARD, rangeKey: sk, fields: { slug } });
+    }
+  };
+  f.node.queryAll = async (req) => {
+    if (applyStarted && fail(req)) throw new Error("read-back detector failed");
+    return realQuery(req);
+  };
+}
+
+function isBoardLead(req: ReadReq): boolean {
+  const filter = req.filter as Record<string, unknown> | undefined;
+  return req.schemaHash === "boardcardshash"
+    && req.fields.length === 1
+    && req.fields[0] === "board"
+    && typeof filter?.HashKey === "string";
+}
+
+function isColumnProbe(req: ReadReq): boolean {
+  const filter = req.filter as Record<string, unknown> | undefined;
+  return req.schemaHash === "boardcardshash" && filter?.HashRangePrefix != null;
+}
+
 describe("groom board-cards-reap-column-only", () => {
   test("fixture reproduces the live divergence: residue is column-only", async () => {
     const f = fixture();
@@ -239,6 +282,7 @@ describe("groom board-cards-reap-column-only", () => {
     expect(report.dryRun).toBe(false);
     expect(report.deleted).toBe(f.residue.length);
     expect(report.still_visible).toBe(0);
+    expect(report.read_back_unproven).toBe(0);
     const deletes = f.node.writes.filter((w) => w.op === "delete");
     expect(deletes.map((w) => w.rangeKey).sort()).toEqual([...f.residue].sort());
     for (const w of deletes) {
@@ -272,6 +316,30 @@ describe("groom board-cards-reap-column-only", () => {
     expect(report.deleted).toBe(0);
     expect(report.boards[0]!.kept.every((k) => k.reason === "truth-read-failed")).toBe(true);
     expect(f.node.writes.filter((w) => w.op === "delete")).toEqual([]);
+  });
+
+  test("a failed column read-back is not proof the reaped key is gone", async () => {
+    const f = fixture();
+    failReadBackAfterDelete(f, isColumnProbe);
+    const { output, exitCode } = await boardCardsReapColumnOnlyCmd({
+      cfg,
+      node: f.node,
+      board: BOARD,
+      apply: true,
+      json: true,
+      readBackSleep: async () => {},
+    });
+    const report = JSON.parse(output) as BoardCardsReapColumnOnlyReport;
+    expect(exitCode).toBe(1);
+    expect(report.deleted).toBe(f.residue.length);
+    // The key-spine diff succeeds and stays empty on this node. That empty
+    // set, plus the failed column detector's empty set, must not exit 0
+    // while the residue is still stored.
+    expect(report.still_visible).toBe(0);
+    expect(report.read_back_unproven).toBe(f.residue.length);
+    expect(report.boards[0]!.read_back_unproven?.sort()).toEqual([...f.residue].sort());
+    expect(report.boards[0]!.read_back_failed ?? "").toContain("read-back detector failed");
+    for (const sk of f.residue) expect(boardCardSks(f.node)).toContain(sk);
   });
 });
 
@@ -311,6 +379,7 @@ describe("groom board-cards-reap-column-only under fold #2175", () => {
     });
     expect(report.deleted).toBe(f.residue.length);
     expect(report.still_visible).toBe(0);
+    expect(report.read_back_unproven).toBe(0);
     const deletes = f.node.writes.filter((w) => w.op === "delete");
     expect(deletes.map((w) => w.rangeKey).sort()).toEqual([...f.residue].sort());
     const after = boardCardSks(f.node);
@@ -319,6 +388,43 @@ describe("groom board-cards-reap-column-only under fold #2175", () => {
     const again = await boardCardsReapColumnOnlyResult({ cfg, node: f.node, board: BOARD });
     expect(again.report.would_delete).toBe(0);
     expect(again.report.boards[0]!.missing_key).toBe(2);
+  });
+
+  test("a failed key-spine read-back is not proof the reaped key is gone", async () => {
+    const f = fixture("merge");
+    failReadBackAfterDelete(f, isBoardLead);
+    const { output, exitCode } = await boardCardsReapColumnOnlyCmd({
+      cfg,
+      node: f.node,
+      board: BOARD,
+      apply: true,
+      json: true,
+      readBackSleep: async () => {},
+    });
+    const report = JSON.parse(output) as BoardCardsReapColumnOnlyReport;
+    expect(exitCode).toBe(1);
+    expect(report.deleted).toBe(f.residue.length);
+    // Fold #2175: the column-only set stays empty while the residue remains.
+    // The failed key-spine diff must not become that same empty set.
+    expect(report.boards[0]!.column_only).toBe(0);
+    expect(report.still_visible).toBe(0);
+    expect(report.read_back_unproven).toBe(f.residue.length);
+    expect(report.boards[0]!.read_back_unproven?.sort()).toEqual([...f.residue].sort());
+    expect(report.boards[0]!.read_back_failed ?? "").toContain("key-spine diff");
+    for (const sk of f.residue) expect(boardCardSks(f.node)).toContain(sk);
+
+    const shown = fixture("merge");
+    failReadBackAfterDelete(shown, isBoardLead);
+    const { text } = await boardCardsReapColumnOnlyResult({
+      cfg,
+      node: shown.node,
+      board: BOARD,
+      apply: true,
+      readBackSleep: async () => {},
+    });
+    expect(text).toContain(`${shown.residue.length} unproven after a failed read-back`);
+    expect(text).toContain("read-back unproven, repair not confirmed");
+    for (const sk of shown.residue) expect(text).toContain(`read-back-unproven board=${BOARD} sk=${sk}`);
   });
 });
 
