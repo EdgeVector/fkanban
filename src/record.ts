@@ -1096,6 +1096,47 @@ export function bodyDeclaredHumanGate(body: string): string | null {
   return null;
 }
 
+// Body lines that say "this card's code already merged; only a post-merge
+// END STATE check is left". Each is written by a real producer:
+//   CLOSED-ON-MERGE ...                      last-stack-card-closeout end-state audit
+//   PROOF[reopened-end-state-unmet]: ...     the validate lane reopening that close
+//   VALIDATE-ONLY: ...                       explicit marker (last-stack-card-reopen-validate)
+// A later `REWORK:` line cancels them: an operator who wants a new
+// implementation PR on the same card says so after the last marker.
+const VALIDATE_ONLY_LINE_RE =
+  /^(?:[-*]\s+)?(?:CLOSED-ON-MERGE\b|PROOF\[reopened-end-state-unmet\]\s*:|VALIDATE-ONLY\s*:)/i;
+const REWORK_LINE_RE = /^(?:[-*]\s+)?REWORK\s*:/i;
+
+/**
+ * The body says the card's code already merged and only validation is left,
+ * or null. Such a card is VALIDATE work: an IMPLEMENT walk on it has nothing
+ * to change and fails on "agent produced no commit". On 2026-09-24 a validate
+ * run reopened a CLOSED-ON-MERGE card to backlog, a later promote moved it to
+ * todo (which clears `pr_url`), and a Loom land-card walk claimed it — the
+ * only merged-code signal left on the card was these body lines.
+ * Latest line wins, so a `REWORK:` after the marker re-admits the card.
+ */
+export function bodyDeclaredValidateOnly(body: string): string | null {
+  if (!body) return null;
+  let marker: string | null = null;
+  let inFence = false;
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("```")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (VALIDATE_ONLY_LINE_RE.test(line)) {
+      marker = line.replace(/^[-*]\s+/, "").split(/[\s:]/, 1)[0] ?? line;
+    } else if (REWORK_LINE_RE.test(line)) {
+      marker = null;
+    }
+  }
+  if (!marker) return null;
+  return `validate-only: merged code awaits a post-merge END STATE (${marker}); the validate lane owns it`;
+}
+
 /**
  * Why a freshly point-read card must not be claimed, or null. The last check
  * before a claim write: a hold set after the candidate list was read, or a
@@ -1107,7 +1148,7 @@ export function claimHoldReason(card: Pick<Card, "block_status" | "body">): stri
     return `intentional hold: ${blockStatus}`;
   }
   if (blockStatus === "deferred") return "deferred hold";
-  return bodyDeclaredHumanGate(card.body ?? "");
+  return bodyDeclaredHumanGate(card.body ?? "") ?? bodyDeclaredValidateOnly(card.body ?? "");
 }
 
 // Read a `Name: value` header from a card body, used to backfill the structured

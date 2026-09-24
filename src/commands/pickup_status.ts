@@ -1,6 +1,14 @@
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { CARD_LIST_FIELDS, listBoards, listCards, listCardsByColumn } from "../record.ts";
+import {
+  bodyDeclaredValidateOnly,
+  CARD_LIST_FIELDS,
+  hydrateCardBodies,
+  listBoards,
+  listCards,
+  listCardsByColumn,
+  type Card,
+} from "../record.ts";
 import {
   buildPickupStatusReportWithSituations,
   renderPickupStatus,
@@ -33,6 +41,7 @@ export async function pickupStatusResult(opts: PickupStatusOptions): Promise<{
     cfg: opts.cfg,
     node: opts.node,
   });
+  await demoteValidateOnlyReady(opts, cards, report);
   return { text: renderPickupStatus(report), report };
 }
 
@@ -88,6 +97,47 @@ export type PickupReadyReport = PickupStatusReport & {
   fenced?: Array<{ slug: string; peers: string[] }>;
 };
 
+/**
+ * Read the body of each READY card only, and park the ones whose body says the
+ * code already merged (`bodyDeclaredValidateOnly`). The todo list read is
+ * body-free, so without this the gate counted a reopened, merged card as WORK
+ * and a Loom land-card walk was dispatched at it (2026-09-24). Cost: one point
+ * read per ready card — never per todo card, never a forge call. A failed read
+ * leaves the verdict as it was; `claimCard` re-checks the full record anyway.
+ */
+async function demoteValidateOnlyReady(
+  opts: { node: NodeClient; cfg: Config },
+  cards: Card[],
+  report: PickupStatusReport,
+): Promise<void> {
+  if (report.ready === 0) return;
+  const readySlugs = new Set(report.cards.filter((c) => c.ready).map((c) => c.slug));
+  let hydrated: Card[];
+  try {
+    hydrated = await hydrateCardBodies(
+      opts.node,
+      opts.cfg,
+      cards.filter((card) => readySlugs.has(card.slug)),
+    );
+  } catch {
+    return;
+  }
+  const bodyBySlug = new Map(hydrated.map((card) => [card.slug, card.body]));
+  for (const row of report.cards) {
+    if (!row.ready) continue;
+    const reason = bodyDeclaredValidateOnly(bodyBySlug.get(row.slug) ?? "");
+    if (!reason) continue;
+    row.ready = false;
+    row.category = "parked/non-work";
+    row.reason = reason;
+    row.suggestion =
+      "Keep the card in doing with its merged pr_url for the validate lane; add a `REWORK:` line only when new implementation work is wanted.";
+    report.ready -= 1;
+    report.counts["pickup-ready"] -= 1;
+    report.counts["parked/non-work"] += 1;
+  }
+}
+
 export async function pickupReadyResult(opts: PickupReadyOptions): Promise<{
   text: string;
   report: PickupReadyReport;
@@ -98,6 +148,7 @@ export async function pickupReadyResult(opts: PickupReadyOptions): Promise<{
     cfg: opts.cfg,
     node: opts.node,
   });
+  await demoteValidateOnlyReady(opts, todoCards, report);
   if (report.ready > 0) {
     try {
       const doing = await hydrateOverlapPeers(

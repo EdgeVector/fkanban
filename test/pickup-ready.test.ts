@@ -211,6 +211,26 @@ describe("pickup ready (cheap gate path) agrees with pickup status (full report)
     expect(readySlugs(cheap.report.cards)).toEqual(["ready-one", "ready-two"]);
   });
 
+  test("a merged card reopened for validation is not ready, in the gate or the full report", async () => {
+    const body =
+      "Repo: EdgeVector/last-stack\n\n## GOAL\nx\n" +
+      "PROOF[reopened-end-state-unmet]: reopened from CLOSED-ON-MERGE: live --list omits it\n";
+    await seedCard(node, card({ slug: "reopened", column: "todo", body }));
+    await seedCard(node, card({ slug: "real-work", column: "todo", position: "2" }));
+
+    const full = await pickupStatusResult({ cfg, node });
+    const cheap = await pickupReadyResult({ cfg, node, board: "default" });
+
+    expect(cheap.report.ready).toBe(1);
+    expect(full.report.ready).toBe(1);
+    expect(readySlugs(cheap.report.cards)).toEqual(["real-work"]);
+    expect(readySlugs(full.report.cards)).toEqual(["real-work"]);
+    const row = cheap.report.cards.find((c) => c.slug === "reopened");
+    expect(row?.category).toBe("parked/non-work");
+    expect(row?.reason).toContain("validate-only");
+    expect(cheap.report.counts["pickup-ready"]).toBe(1);
+  });
+
   test("a dependency satisfied only outside the todo partition still reads ready", async () => {
     await seedCard(node, card({ slug: "done-elsewhere", column: "done" }));
     await seedCard(node, card({ slug: "dependent", column: "todo", deps: ["done-elsewhere"] }));

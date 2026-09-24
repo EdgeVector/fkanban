@@ -7,6 +7,8 @@ import {
   type DependencyStatuses,
 } from "../pickup_v2.ts";
 import {
+  claimHoldReason,
+  findCard,
   listCardsByColumn,
   listDependencyStatusesForCards,
   TERMINAL_COLUMN,
@@ -151,6 +153,17 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
     }
 
     if (opts.dryRun) {
+      // Same last check the real claim runs in `claimCard`: the todo read is
+      // body-free, so a body-only hold (a human gate, or merged code that only
+      // awaits validation) is visible only on the point read. Without it the
+      // dry-run said "claimed" for a card the real claim would drop.
+      const full = await findCard(opts.node, opts.cfg, candidate.slug);
+      const hold = full ? claimHoldReason(full) : null;
+      if (hold) {
+        droppedAtClaim.push({ slug: candidate.slug, reason: hold });
+        todo = todo.filter((card) => card.slug !== candidate.slug);
+        continue;
+      }
       return {
         result: "claimed",
         card: candidate,

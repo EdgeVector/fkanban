@@ -5,6 +5,7 @@ import {
   assertBodyLoaded,
   assertLivePrMilestone,
   bodyDeclaredHumanGate,
+  bodyDeclaredValidateOnly,
   captureFkanbanError,
   depStatus,
   hasPrWorkBrief,
@@ -325,6 +326,16 @@ export function classifyPickupCard(
         "human-gated",
         bodyGate,
         "The brief declares a human/interactive actor. Keep it out of default/todo, or remove the header when an unattended worker may take it.",
+      );
+    }
+  }
+  {
+    const validateOnly = isBodyOmitted(card) ? null : bodyDeclaredValidateOnly(card.body);
+    if (validateOnly) {
+      return out(
+        "parked/non-work",
+        validateOnly,
+        "Keep the card in doing with its merged pr_url for the validate lane (`last-stack-card-reopen-validate`); add a `REWORK:` line only when new implementation work is wanted.",
       );
     }
   }
