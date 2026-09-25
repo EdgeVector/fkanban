@@ -440,6 +440,60 @@ describe("pickup-status", () => {
     expect((await findCard(node, cfg, "body-only-write"))?.column).toBe("todo");
   });
 
+  // Live 2026-09-25 21:14Z: a repo pause blocked claim-card and pickup for
+  // EdgeVector/fold, and pickup claimed a fold card anyway because the fence
+  // asked only the fold_db_node actions.
+  test("fences any repo card whose repo Situation blocks claim-card", async () => {
+    const checked: string[] = [];
+    const repoPause: SituationPreflight = async ({ action, repo }) => {
+      checked.push(`${action}:${repo}`);
+      if (action === "claim-card" && repo === "EdgeVector/fold") {
+        return {
+          ok: false,
+          blocks: [{
+            situation: { slug: "pc-gaming-pause-fold-work", links_brain: [], allowed_actions: [] },
+            action: "claim-card",
+            message: "Fold work is paused.",
+          }],
+        };
+      }
+      return { ok: true, checked: { action } };
+    };
+    await seedCard(node, card({ slug: "fold-plain", repo: "EdgeVector/fold", base: "main", tags: [] }));
+    await seedCard(node, card({ slug: "stack-plain", repo: "EdgeVector/last-stack", base: "main", tags: [] }));
+
+    const { report } = await pickupStatusResult({ cfg, node, situationPreflight: repoPause });
+    const bySlug = new Map(report.cards.map((c) => [c.slug, c]));
+
+    expect(bySlug.get("fold-plain")?.category).toBe("situation-fenced");
+    expect(bySlug.get("fold-plain")?.reason).toContain("pc-gaming-pause-fold-work");
+    expect(bySlug.get("fold-plain")?.details).toContain("action: claim-card");
+    expect(bySlug.get("stack-plain")?.category).toBe("pickup-ready");
+    expect(checked).toContain("claim-card:EdgeVector/last-stack");
+    expect(checked).toContain("pickup:EdgeVector/last-stack");
+  });
+
+  test("a repo-level preflight that cannot run does not fence the card", async () => {
+    const broken: SituationPreflight = async () => {
+      throw new Error("fsituations: command not found");
+    };
+    await seedCard(node, card({ slug: "stack-no-cli", repo: "EdgeVector/last-stack", base: "main", tags: [] }));
+
+    const { report } = await pickupStatusResult({ cfg, node, situationPreflight: broken });
+    expect(report.cards.find((c) => c.slug === "stack-no-cli")?.category).toBe("pickup-ready");
+  });
+
+  test("the write path refuses doing for a repo-paused card", async () => {
+    await seedCard(node, card({ slug: "fold-paused-move", repo: "EdgeVector/fold", base: "main", tags: [] }));
+    const pauseAll: SituationPreflight = async ({ action }) =>
+      action === "claim-card"
+        ? { ok: false, blocks: [{ situation: { slug: "repo-pause", links_brain: [], allowed_actions: [] }, action, message: "paused" }] }
+        : { ok: true, checked: { action } };
+
+    await expect(moveCmd({ cfg, node, slug: "fold-paused-move", column: "doing", situationPreflight: pauseAll }))
+      .rejects.toMatchObject({ code: "situation_fenced" });
+  });
+
   test("refuses moving a Situation-fenced candidate to doing without writing", async () => {
     await seedCard(node, card({
       slug: "org-invite",
