@@ -45,6 +45,8 @@ export type MoveOptions = {
   slug: string;
   column: string;
   expectColumn?: string;
+  /** Atomic owner guard; column remains a point-read check. */
+  expectAssignee?: string;
   position?: number;
   // Override the dependency soft-block when moving into a working column.
   force?: boolean;
@@ -63,6 +65,7 @@ export type MoveOptions = {
 };
 
 export type MoveResult = {
+  membership_cleanup?: "deferred";
   slug: string;
   from: string;
   to: string;
@@ -286,6 +289,19 @@ async function promoteUnblockedBacklogDependents(opts: {
 
 export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
+  if (opts.expectAssignee !== undefined) {
+    if (!opts.expectAssignee.trim() || opts.force ||
+        !opts.expectColumn || !['backlog','doing'].includes(opts.expectColumn) ||
+        !['backlog','doing'].includes(opts.column)) {
+      throw new FkanbanError({code:'guarded_move_scope',message:'Guarded recovery requires a nonempty owner, --from backlog|doing, destination backlog|doing, and no --force.'});
+    }
+    if (card.assignee !== opts.expectAssignee) {
+      throw new FkanbanError({ code: "owner_conflict", message: `Card "${opts.slug}" no longer has the expected assignee.` });
+    }
+    if (opts.worker !== undefined || opts.assignee !== undefined || opts.allowUnclaimed) {
+      throw new FkanbanError({ code: "guarded_owner_change", message: "An owner-guarded move must preserve the current assignee; omit worker, assignee and allow-unclaimed." });
+    }
+  }
   assertDbLocatorMatchesCard(card, opts.dbLocator, "move");
   const board = await ensureBoardRecord(opts.node, opts.cfg, card.board);
   const columns = board.columns;
@@ -295,7 +311,8 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   if (opts.expectColumn !== undefined && from !== opts.expectColumn) {
     throw new ClaimConflictError({ slug: opts.slug, expected: opts.expectColumn, current: from });
   }
-  const position = opts.position !== undefined ? String(opts.position) : appendPosition();
+  const position = opts.position !== undefined ? String(opts.position)
+    : opts.expectAssignee !== undefined && from === opts.column ? card.position : appendPosition();
   const now = nowIso();
 
   // Claim contract: entering `doing` without durable ownership is how sweeps
@@ -373,13 +390,15 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     await updateCardRecord(
       claimWrite ? { ...opts, node: withDurableWrites(opts.node) } : opts,
       updated,
-      opts.expectColumn !== undefined
+      opts.expectAssignee !== undefined
+        ? { type: "value", field: "assignee", value: opts.expectAssignee }
+        : opts.expectColumn !== undefined
         ? { type: "value", field: "column", value: opts.expectColumn }
         : undefined,
       card,
     );
   } catch (err) {
-    if (err instanceof FkanbanError && err.code === "cas_conflict" && opts.expectColumn !== undefined) {
+    if (err instanceof FkanbanError && err.code === "cas_conflict" && opts.expectColumn !== undefined && opts.expectAssignee === undefined) {
       const cause = err.cause;
       const actual = typeof cause === "object" && cause !== null
         ? (cause as { actual?: unknown }).actual
@@ -391,6 +410,9 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
       });
     }
     throw err;
+  }
+  if (opts.expectAssignee !== undefined) {
+    return { slug: card.slug, from, to: opts.column, ...claimMeta, membership_cleanup: "deferred" };
   }
   // A move states where this card belongs, so it is also the repair for a card
   // that reads as belonging in two places at once.

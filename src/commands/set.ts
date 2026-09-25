@@ -22,6 +22,8 @@ export type SetOptions = {
   slug: string;
   title?: string;
   assignee?: string;
+  /** Atomic owner guard. Does not identify a Loom execution. */
+  expectAssignee?: string;
   tags?: string[];
   priority?: PriorityTier;
   repo?: string;
@@ -64,6 +66,13 @@ function hasAnyField(opts: SetOptions): boolean {
  * `body`. Requires the card to already exist (no create path).
  */
 export async function setCmd(opts: SetOptions): Promise<AddResult> {
+  if (opts.expectAssignee !== undefined) {
+    const otherFields = [opts.title, opts.assignee, opts.tags, opts.priority, opts.repo,
+      opts.base, opts.kind, opts.northStar, opts.milestone, opts.prUrl, opts.branch, opts.surfaces, opts.dbLocator];
+    if (!opts.expectAssignee.trim() || otherFields.some(v => v !== undefined) || opts.force) {
+      throw new FkanbanError({code:"guarded_set_scope",message:"Owner-guarded set accepts only block-status and block-reason and requires a nonempty owner."});
+    }
+  }
   if (!hasAnyField(opts)) {
     throw new FkanbanError({
       code: "set_no_fields",
@@ -87,6 +96,7 @@ export async function setCmd(opts: SetOptions): Promise<AddResult> {
     slug: opts.slug,
     title: opts.title,
     assignee: opts.assignee,
+    expectAssignee: opts.expectAssignee,
     tags: opts.tags,
     priority: opts.priority,
     repo: opts.repo,
