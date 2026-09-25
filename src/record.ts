@@ -1,3 +1,4 @@
+import { guardedCardUpdate } from "./guarded-card-update.ts";
 // Domain helpers: turn fold_db query rows into typed Card / Board records,
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
@@ -5575,6 +5576,11 @@ export async function updateCardRecord(
    */
   previous?: Card,
 ): Promise<void> {
+  if (expected?.type === "value" && expected.field === "assignee") {
+    assertBodyLoaded(card, `guarded update of card "${card.slug}"`);
+    await guardedCardUpdate(opts, card, expected);
+    return; // Source memberships remain until a separate safe reconciliation.
+  }
   const written = await writeCardRecordWithOptionalFieldFallback(
     opts,
     card,

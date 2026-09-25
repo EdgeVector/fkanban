@@ -78,6 +78,10 @@ const server = Bun.serve({
     const url = new URL(req.url);
     const body = req.method === "POST" ? await req.json() : undefined;
     seen.push({ path: url.pathname, body, headers: req.headers });
+    if (url.pathname.endsWith('/api/mutations/batch')) {
+      return Response.json({ok:true,durability:url.pathname.startsWith('/queued-batch')?'queued':'durable'});
+    }
+
     if (url.pathname === "/slow/api/query") {
       await new Promise((r) => setTimeout(r, 5_000));
       return Response.json({ ok: true, results: [] });
@@ -1172,5 +1176,24 @@ describe("transient busy-503 backpressure retry", () => {
     expect(fe.hint).toContain("kanban init");
     // Exactly one hit — no retry for the non-transient 503.
     expect(busyHits.notProvisioned).toBe(1);
+  });
+});
+
+
+describe('guarded batch wire contract',()=>{
+  test('carries expected owner and per-operation durable mode',async()=>{
+    const node=newNodeClient({baseUrl,userHash:'test-user'});
+    await node.updateRecords!([{schemaHash:'card',keyHash:'card-one',fields:{assignee:'owner'},expected:{type:'value',field:'assignee',value:'owner'},durability:'durable'},
+      {schemaHash:'board',keyHash:'default',rangeKey:'doing#one',fields:{assignee:'owner'},durability:'durable'}]);
+    const rows=seen.at(-1)!.body as any[];
+    expect(rows[0].expected).toEqual({type:'value',field:'assignee',value:'owner'});
+    expect(rows.map(r=>r.durability)).toEqual(['durable','durable']);
+    expect(rows.map(r=>r.mutation_type)).toEqual(['update','update']);
+  });
+  test('queued acknowledgement refuses without fallback or retry',async()=>{
+    const node=newNodeClient({baseUrl:`${baseUrl}/queued-batch`,userHash:'test-user'});
+    const before=seen.filter(r=>r.path.endsWith('/api/mutations/batch')).length;
+    await expect(node.updateRecords!([{schemaHash:'card',keyHash:'one',fields:{assignee:'owner'},durability:'durable'}])).rejects.toMatchObject({code:'durability_not_confirmed'});
+    expect(seen.filter(r=>r.path.endsWith('/api/mutations/batch')).length-before).toBe(1);
   });
 });

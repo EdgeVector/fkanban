@@ -380,6 +380,7 @@ Options (at least one required):
   --branch <name>       worktree/feature branch
   --surfaces a,b        path globs / subsystem names this card expects to touch
   --force               operator override for dependency / pickup-readiness gates
+  --expect-assignee OWNER  recovery only: hold fields only, durable owner-guarded batch; no force
   --json                echo the write result as JSON
 
 Example:
@@ -393,6 +394,8 @@ Usage:
 Options:
   --from <col>          claim guard: only move if the card is currently in col
   --expect <col>        alias for --from
+  --expect-assignee OWNER  recovery only: preserve owner; requires --from backlog|doing; destination backlog|doing; no force
+                       uses a durable atomic batch on a proved node build; source cleanup is deferred
   --position <N>        insert at position N within the column
   --assignee <id>       when moving into doing: stamp claim owner
   --worker <id>         alias for --assignee (same stamp as pickup claim)
@@ -672,6 +675,7 @@ Usage:
   fkanban show <slug> [options]
 
 Options:
+  --canonical           exact Card state; skip the claim-placement overlay
   --json                machine-readable output
   --board <slug>        accepted as a compatibility no-op; card slugs are global
 
@@ -1221,7 +1225,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // replace. Grooming scripts that stamp NS/MS/tags must use this so they
   // cannot clobber a brief via accidental body/stdin.
   set: new Set([
-    "title", "assignee", "tags", "surfaces", "priority", "force",
+    "title", "assignee", "expect-assignee", "tags", "surfaces", "priority", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
   ]),
   // reconcile repairs MilestoneCards as it reads; --dry-run classifies without
@@ -1230,7 +1234,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert", "json-array"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
-  move: new Set(["from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
+  move: new Set(["expect-assignee", "from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone", "json-array"]),
   rank: new Set(["board", "column", "mode"]),
   search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body", "json-array", "semantic"]),
@@ -1238,7 +1242,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
-  show: new Set(["board"]),
+  show: new Set(["board", "canonical"]),
   // board's subcommands read title/columns/body (create) and force (rm).
   // --json-array is the legacy bare-array escape for board list.
   board: new Set(["title", "columns", "body", "force", "json-array"]),
@@ -1389,6 +1393,8 @@ async function main(argv: string[]): Promise<number> {
         column: { type: "string" },
         tag: { type: "string" },
         assignee: { type: "string" },
+        "expect-assignee": { type: "string" },
+        canonical: { type: "boolean" },
         "created-by": { type: "string" },
         tags: { type: "string" },
         deps: { type: "string" },
@@ -1917,6 +1923,7 @@ async function dispatch(
           slug,
           title: values.title as string | undefined,
           assignee: values.assignee as string | undefined,
+          expectAssignee: values["expect-assignee"] as string | undefined,
           tags: parseTags(values.tags as string | undefined),
           surfaces: parseTags(values.surfaces as string | undefined),
           priority,
@@ -1984,6 +1991,7 @@ async function dispatch(
           slug,
           column,
           expectColumn: from ?? expect,
+          expectAssignee: values["expect-assignee"] as string | undefined,
           position,
           force: values.force as boolean | undefined,
           dbLocator: ambientDbLocator(values),
@@ -2668,6 +2676,7 @@ async function dispatch(
         slug,
         dbLocator: ambientDbLocator(values),
         json: values.json as boolean | undefined,
+        canonical: values.canonical as boolean | undefined,
       });
       console.log(out);
       return 0;

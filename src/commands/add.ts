@@ -68,6 +68,8 @@ export type AddOptions = {
   board?: string;
   column?: string;
   assignee?: string;
+  /** Internal set-only owner guard; no create or reassignment. */
+  expectAssignee?: string;
   // Immutable creator provenance. Honored on create; a conflicting explicit
   // value on update is rejected so an upsert cannot rewrite history.
   createdBy?: string;
@@ -235,7 +237,7 @@ function applyPriority(tags: string[], priority?: PriorityTier): string[] {
   return priority ? withPriorityTag(tags, priority) : tags;
 }
 
-export type AddResult = { slug: string; action: "created" | "updated"; board: string; column: string };
+export type AddResult = { membership_cleanup?: "deferred"; slug: string; action: "created" | "updated"; board: string; column: string };
 
 function suppressDefaultTodoWarning(card: Pick<Card, "board" | "column">, force?: boolean): boolean {
   return !force && card.board === "default" && card.column === "todo";
@@ -445,6 +447,14 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   // card's existing board when no explicit `--board` is given. An explicit
   // `--board` still moves the card; only the implicit default would be wrong.
   const existing = await readExistingForWrite(opts);
+  if (opts.expectAssignee !== undefined) {
+    if (!existing || existing.assignee !== opts.expectAssignee) {
+      throw new FkanbanError({ code: "owner_conflict", message: `Card "${opts.slug}" no longer has the expected assignee.` });
+    }
+    if (opts.assignee !== undefined && opts.assignee !== opts.expectAssignee) {
+      throw new FkanbanError({ code: "guarded_owner_change", message: "An owner-guarded update cannot reassign the card." });
+    }
+  }
   const boardSlug = placementOrAbsent(opts.board) ?? placementOrAbsent(existing?.board) ?? "default";
   const milestoneSlug = opts.milestone ?? existing?.milestone ?? "";
   let resolvedMilestoneState = "";
@@ -622,7 +632,12 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     if (!placementUnchanged || !sameDeps(existing.deps, updated.deps)) {
       await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
     }
-    await updateCardRecord(opts, updated, undefined, existing);
+    await updateCardRecord(opts, updated, opts.expectAssignee !== undefined
+      ? { type: "value", field: "assignee", value: opts.expectAssignee } : undefined, existing);
+    if (opts.expectAssignee !== undefined) {
+      return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column, membership_cleanup: "deferred" };
+    }
+
     // AFTER the write — see the note on the create path below.
     await checkpointCardCompletion({
       cfg: opts.cfg,

@@ -486,6 +486,8 @@ export type NodeClient = {
     fields: Record<string, unknown>;
     keyHash: string;
     rangeKey?: string | null;
+    expected?: CasExpectation;
+    durability?: "durable";
   }>): Promise<void>;
   /**
    * Delete many rows in one request — the retirement half of {@link updateRecords}.
@@ -1221,6 +1223,8 @@ export function newNodeClient(opts: {
       rangeKey?: string | null;
       fields: Record<string, unknown>;
       mutationType: "update" | "delete";
+      expected?: CasExpectation;
+      durability?: "durable";
     }>,
   ): Promise<void> => {
     if (rows.length === 0) return;
@@ -1233,10 +1237,16 @@ export function newNodeClient(opts: {
         range: row.rangeKey === undefined ? null : row.rangeKey,
       },
       mutation_type: row.mutationType,
+      ...(row.expected !== undefined ? { expected: row.expected } : {}),
+      ...(row.durability !== undefined ? { durability: row.durability } : {}),
     }));
     const res = await rawCallImpl("POST", "/api/mutations/batch", ops);
     if (res.status !== 200) {
       throw mapNodeError(res.status, res.json ?? res.body, "/api/mutations/batch");
+    }
+    if (rows.some(row => row.durability === "durable") &&
+        (res.json as { durability?: string } | undefined)?.durability !== "durable") {
+      throw new FkanbanError({code:"durability_not_confirmed",message:"The batch response did not confirm durable acknowledgement. Do not retry unguarded."});
     }
   };
 
@@ -1392,6 +1402,8 @@ export function newNodeClient(opts: {
         keyHash: row.keyHash,
         rangeKey: row.rangeKey,
         fields: row.fields,
+        expected: row.expected,
+        durability: row.durability,
         mutationType: "update" as const,
       })));
     },
