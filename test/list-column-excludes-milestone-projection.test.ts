@@ -176,4 +176,57 @@ describe("column-scoped reads exclude milestone from projection", () => {
     expect(result).not.toBeNull();
     expect(result!.map((c) => c.slug)).toContain("no-milestone");
   });
+
+  test("pickup partition (todo column) includes cards with and without milestone atoms", async () => {
+    const node = fakeNode();
+    const brd = board();
+    node.seed({
+      schemaHash: BOARD,
+      keyHash: brd.slug,
+      fields: boardToFields(brd),
+    });
+
+    // Create cards with mixed milestone states in the todo column
+    const cards = [
+      card({ slug: "with-milestone", column: "todo", position: "1", milestone: "v1.0" }),
+      card({ slug: "no-milestone-1", column: "todo", position: "2", milestone: "" }),
+      card({ slug: "no-milestone-2", column: "todo", position: "3", milestone: "" }),
+      card({ slug: "doing-card", column: "doing", position: "1", milestone: "" }),
+    ];
+
+    for (const c of cards) {
+      node.seed({
+        schemaHash: CARD,
+        keyHash: c.slug,
+        fields: cardToFields(c),
+      });
+      const fields = boardCardFieldsFromCard(c);
+      node.seed({
+        schemaHash: BC,
+        keyHash: c.board,
+        rangeKey: boardCardSk(c.column, c.position, c.slug),
+        fields,
+      });
+    }
+
+    // Read the pickup partition: todo column of default board
+    // This is the exact read path used by `kanban pickup ready`
+    const pickupCards = await listCardsByColumn(
+      node,
+      cfg,
+      "todo",
+      ["slug", "column", "milestone"],
+      "default",
+    );
+
+    // Should see all 3 todo cards, including those without milestone atoms
+    const pickupSlugs = pickupCards.map((c) => c.slug).sort();
+    expect(pickupSlugs).toEqual(["no-milestone-1", "no-milestone-2", "with-milestone"]);
+
+    // Verify each card is in the todo column
+    expect(pickupCards.every((c) => c.column === "todo")).toBe(true);
+
+    // Should NOT include the doing column card
+    expect(pickupSlugs).not.toContain("doing-card");
+  });
 });
