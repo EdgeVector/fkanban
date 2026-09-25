@@ -238,6 +238,28 @@ export const BOARD_CARDS_LIST_FIELDS = [
   "branch",
 ] as const;
 
+/**
+ * Column-scoped list projection: BOARD_CARDS_LIST_FIELDS excluding `milestone`.
+ *
+ * `milestone` is the catalog hash field and gates from any position, so a
+ * column read that projects it drops every row with no `milestone` atom. On the
+ * live board (2026-09-25), `kanban list --column todo` returned 0 rows while
+ * the truth was 3 rows in todo without milestones. A HashRangePrefix column
+ * read needs the same carving-out that search visibility uses
+ * ({@link BOARD_CARDS_SEARCH_FIELDS}), not the wide list shape.
+ *
+ * Measured on the live `default` partition 2026-09-25:
+ * - `kanban list --column todo` with BOARD_CARDS_LIST_FIELDS: 0 rows
+ * - same call excluding `milestone`: 3 rows (the truth)
+ *
+ * This is the carving for column-scoped reads. Display and full-partition reads
+ * keep the wide shape because they either iterate all rows per column anyway
+ * (display) or need the milestone field for group-by semantics.
+ */
+export const BOARD_CARDS_COLUMN_FIELDS = BOARD_CARDS_LIST_FIELDS.filter(
+  (field) => field !== "milestone",
+) as unknown as typeof BOARD_CARDS_LIST_FIELDS;
+
 const BOARD_CARDS_FIELD_SET = new Set<string>(BOARD_CARDS_FIELDS);
 
 /**
@@ -1707,7 +1729,12 @@ export async function listBoardCardsPartition(
   // every row of ~1000-row partitions while list consumers never render them.
   // Measured BoardCards hydrate avg ~607ms on HashKey pages of rows≈1000
   // (lastdb ops 2026-08-15); prefer LIST width unless the caller opts in.
-  const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
+  //
+  // Column-scoped reads (HashRangePrefix) exclude `milestone` because it is the
+  // hash field and gates from any position — including it drops every row with
+  // no `milestone` atom (see {@link BOARD_CARDS_COLUMN_FIELDS}). Whole-partition
+  // and excludeColumn reads keep the wide shape.
+  const projection = opts?.fields ?? (column && column.length > 0 ? BOARD_CARDS_COLUMN_FIELDS : BOARD_CARDS_LIST_FIELDS);
   const wireFields = boardCardsWireProjection([...projection]);
   // The list projection leads with `board`, so a returned row that omits it
   // has no `board` atom. Fold #2175 can merge such a row into a scoped read.
