@@ -66,13 +66,32 @@ function textMentionsFoldDbNodeWork(card: Card): boolean {
  */
 const FENCED_REPO = "EdgeVector/fold";
 
-export function inferSituationPreflightActions(card: Card): string[] {
+/**
+ * Repo-level actions every Situation can block for any repo.
+ *
+ * The fence used to ask only the two fold_db_node actions, so a Situation
+ * scoped to a repo with `blocked_actions: [claim-card, pickup]` never reached
+ * pickup. Live 2026-09-25 21:14Z: `pc-gaming-pause-fold-work-until-20260925t2200z`
+ * blocked both for EdgeVector/fold, `fsituations preflight --action claim-card
+ * --repo EdgeVector/fold` answered BLOCKED, and `pickup explain` still said
+ * `situation-fence — allowed`; a Loom worker claimed a fold card inside the pause.
+ */
+export const REPO_FENCE_ACTIONS = ["claim-card", "pickup"] as const;
+
+function inferFoldDbNodeActions(card: Card): string[] {
   const repo = resolvePickupRepo(card);
   if (!repo.ok) return [];
   if (repo.repo === FENCED_REPO && textMentionsFoldDbNodeWork(card)) {
     return ["file-fold-db-node-feature-card", "modify-fold-db-node"];
   }
   return [];
+}
+
+/** fold_db_node actions first (fail closed), then the repo-level actions (fail open). */
+export function inferSituationPreflightActions(card: Card): string[] {
+  const repo = resolvePickupRepo(card);
+  if (!repo.ok) return [];
+  return [...inferFoldDbNodeActions(card), ...REPO_FENCE_ACTIONS];
 }
 
 /**
@@ -109,7 +128,9 @@ export function inferSituationPreflightActions(card: Card): string[] {
  */
 export function situationFenceNeedsBody(card: Card): boolean {
   if (!isBodyOmitted(card)) return false;
-  if (inferSituationPreflightActions(card).length > 0) return false;
+  // Only the fold_db_node inference reads the body; the repo-level actions
+  // apply to every card and must not stop the body fetch.
+  if (inferFoldDbNodeActions(card).length > 0) return false;
   const repo = resolvePickupRepo(card);
   return repo.ok && repo.repo === FENCED_REPO;
 }
@@ -157,7 +178,29 @@ async function runJsonCommand(argv: string[]): Promise<{ code: number; stdout: s
   return { code, stdout, stderr };
 }
 
+// One pickup pass fences every ready card, and the repo-level actions repeat
+// the same (action, repo) pair across all cards of a repo. A short-lived memo
+// keeps that at one spawn per pair; the TTL bounds staleness in the long-lived
+// MCP server.
+const PREFLIGHT_TTL_MS = 15_000;
+const preflightMemo = new Map<string, { at: number; result: Promise<SituationPreflightResponse> }>();
+
+export function clearSituationPreflightMemo(): void {
+  preflightMemo.clear();
+}
+
 export async function fsituationsPreflight(opts: { action: string; repo: string }): Promise<SituationPreflightResponse> {
+  const key = `${opts.action}\u0000${opts.repo}`;
+  const now = Date.now();
+  const hit = preflightMemo.get(key);
+  if (hit && now - hit.at < PREFLIGHT_TTL_MS) return hit.result;
+  const result = fsituationsPreflightUncached(opts);
+  preflightMemo.set(key, { at: now, result });
+  result.catch(() => preflightMemo.delete(key));
+  return result;
+}
+
+async function fsituationsPreflightUncached(opts: { action: string; repo: string }): Promise<SituationPreflightResponse> {
   const suffix = ["--action", opts.action, "--repo", opts.repo];
   const errors: string[] = [];
   for (const base of commandCandidates()) {
@@ -179,7 +222,14 @@ export async function checkSituationFence(
   card: Card,
   preflight: SituationPreflight = fsituationsPreflight,
 ): Promise<SituationFenceResult> {
-  const actions = inferSituationPreflightActions(card);
+  // The default spawner reads the host's live Situations. Under `bun test` a
+  // card that names a real repo must not depend on them, so the repo-level
+  // actions run there only with an injected preflight.
+  const repoLevel = preflight !== fsituationsPreflight || process.env.NODE_ENV !== "test";
+  const repoActions: readonly string[] = REPO_FENCE_ACTIONS;
+  const actions = inferSituationPreflightActions(card).filter(
+    (action) => repoLevel || !repoActions.includes(action),
+  );
   if (actions.length === 0) {
     return { allowed: true, reason: "no Situation preflight action inferred", suggestion: "", details: [] };
   }
@@ -190,7 +240,15 @@ export async function checkSituationFence(
 
   try {
     for (const action of actions) {
-      const result = await preflight({ action, repo: repo.repo });
+      let result: SituationPreflightResponse;
+      try {
+        result = await preflight({ action, repo: repo.repo });
+      } catch (err) {
+        // A host without the Situations CLI has no repo-level Situations to
+        // honour; only the fold_db_node fence fails closed.
+        if (repoActions.includes(action)) continue;
+        throw err;
+      }
       if (result.ok || situationAllowsNorthStar(result, card) || situationAllowsCardAction(result, card)) {
         continue;
       }
