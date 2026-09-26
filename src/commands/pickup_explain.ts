@@ -20,6 +20,7 @@ import {
   type PickupClassification,
 } from "../pickup.ts";
 import { laneOf, type LaneId } from "../pickup_lanes.ts";
+import { effectiveSurfaces, surfacesOverlap } from "../pickup_v2.ts";
 import {
   hydrateOverlapPeers,
   overlapAgainstCards,
@@ -69,6 +70,12 @@ export type PickupExplainReport = {
     verdict: OverlapVerdict;
     /** Peers in `doing` reached but not comparable (undeclared / unread). */
     unevaluated_peers: string[];
+    /**
+     * The doing card that claim-v2 skips this card for, by the claim's own
+     * rule (`surfacesOverlap`): a card with no Surfaces reserves its whole
+     * repo. `null` when claim-v2 would not skip it for overlap.
+     */
+    claim_v2_blocked_by: string | null;
   };
   situation: { allowed: boolean; reason?: string; details?: string[] };
   eligible_for_claim: boolean;
@@ -167,6 +174,8 @@ function gatesFrom(
   situationAllowed: boolean,
   situationReason: string,
   prLiveness: PrLiveness,
+  claimV2Peer: Card | null,
+  card: Card,
 ): { name: string; ok: boolean; note: string; status?: "unknown" }[] {
   return [
     {
@@ -186,6 +195,22 @@ function gatesFrom(
     // todo cards declare no surfaces) the second one was almost never the
     // first. Advisory only: `would_skip` below still keys off `conflicts`.
     surfaceOverlapGate(overlap),
+    // The advisory gate above and claim-v2 answered different questions: the
+    // advisory gate said UNK for a card with no Surfaces while claim-v2 read
+    // the empty list as "**" and skipped the card. Explain said "Pick this card
+    // up next" for hours while every pickup worker claimed nothing
+    // (2026-09-26, cloud-sync-resume-evidence-provenance-20260924). This gate
+    // is the claim's own rule, so explain and claim cannot disagree.
+    {
+      name: "claim-v2 overlap (repo reservation)",
+      ok: claimV2Peer === null,
+      note: claimV2Peer === null
+        ? "claim-v2 would not skip for overlap"
+        : `claim-v2 skips: surface overlap with doing card ${claimV2Peer.slug}` +
+          (card.surfaces.length === 0 || claimV2Peer.surfaces.length === 0
+            ? ` (${card.surfaces.length === 0 ? card.slug : claimV2Peer.slug} declares no Surfaces, so it reserves all of ${card.repo}; set Surfaces: to run in parallel)`
+            : ` (${effectiveSurfaces(card).join(",")} vs ${effectiveSurfaces(claimV2Peer).join(",")})`),
+    },
     {
       name: "situation-fence",
       ok: situationAllowed,
@@ -270,7 +295,15 @@ export async function pickupExplainResult(opts: {
   const writeGuard = writeGuardFor(card, { enforceLivePrMilestone, milestoneState });
   const lane = laneOf(card);
   const overlap = overlapAgainstCards(card, cards);
-  const wouldSkipOverlap = overlap.conflicts.length > 0;
+  const claimV2Peer =
+    cards.find(
+      (p) =>
+        p.slug !== card.slug &&
+        p.board === card.board &&
+        p.column === "doing" &&
+        surfacesOverlap(card, p),
+    ) ?? null;
+  const wouldSkipOverlap = overlap.conflicts.length > 0 || claimV2Peer !== null;
 
   // write_guard is part of eligibility: "eligible_for_claim: YES" next to a
   // FAIL write-guard gate was a live contradiction (the claim would reject
@@ -290,6 +323,8 @@ export async function pickupExplainResult(opts: {
     fence.allowed,
     fence.reason ?? "",
     prLiveness,
+    claimV2Peer,
+    card,
   );
 
   return {
@@ -318,6 +353,7 @@ export async function pickupExplainResult(opts: {
       would_skip: wouldSkipOverlap,
       verdict: overlapVerdict(overlap),
       unevaluated_peers: overlap.unevaluatedPeers,
+      claim_v2_blocked_by: claimV2Peer?.slug ?? null,
     },
     situation: {
       allowed: fence.allowed,
@@ -360,9 +396,11 @@ export function renderPickupExplain(report: PickupExplainReport): string {
     lines.push(`  blockedBy: ${report.blockedBy.join(", ")}`);
   }
   if (report.surface_overlap.would_skip) {
-    lines.push(
-      `  surface-overlap skip: ${report.surface_overlap.conflicts.map((c) => c.slug).join(", ")}`,
-    );
+    const skipPeers = new Set(report.surface_overlap.conflicts.map((c) => c.slug));
+    if (report.surface_overlap.claim_v2_blocked_by) {
+      skipPeers.add(report.surface_overlap.claim_v2_blocked_by);
+    }
+    lines.push(`  surface-overlap skip: ${[...skipPeers].join(", ")}`);
   }
   return lines.join("\n");
 }
