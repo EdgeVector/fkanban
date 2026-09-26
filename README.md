@@ -288,8 +288,11 @@ Milestones are driven and proven while cards remain the atomic pickup work.
 Transitions are explicit and proof-gated. Entering `proving` requires a live
 proof card linked back to the same milestone and board. Entering `complete`
 also requires that card to be in the board's terminal column, milestone
-`proof_status` to be `passing`, and the card body to contain an exact
-`PROOF: PASS` or `RESULT: PASS` line. Finishing implementation cards alone
+`proof_status` to be `passing`, and the LAST verdict line in the card body
+to be a PASS. A verdict line is `PROOF:` or `RESULT:` with an optional `[tag]`
+(`PROOF: PASS`, `PROOF: passed — …`, `PROOF[failed-…]: …`); a later FAIL
+withdraws an earlier PASS. The rules match the last-stack milestone driver's
+`_proof_verdict()`. Finishing implementation cards alone
 never completes the milestone. A failed proof returns to `active` with
 `--proof-status failing` for fix-forward work. `milestone reconcile` exposes
 the next ready card frontier and warnings without making the milestone pickup

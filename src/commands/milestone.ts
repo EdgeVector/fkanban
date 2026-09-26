@@ -467,7 +467,7 @@ async function proofGate(
     throw new FkanbanError({
       code: "milestone_proof_not_passing",
       message: `Milestone "${milestone.slug}" has no machine-readable passing proof.`,
-      hint: "Set --proof-status passing and add an exact `PROOF: PASS` or `RESULT: PASS` line to the terminal proof card.",
+      hint: "Set --proof-status passing and make the LAST verdict line on the terminal proof card a PASS (`PROOF: PASS`, `PROOF: passed — …`, `RESULT: PASS`, or `PROOF[pass…]: …`). A later FAIL line withdraws an earlier PASS.",
     });
   }
 }
@@ -1275,7 +1275,7 @@ export function milestoneReconcileFromSnapshot(
     warnings.push({
       code: "implementation-done-proof-pending",
       message: "Implementation is done but terminal passing proof is still pending.",
-      hint: "Run the proof, record `PROOF: PASS`, mark its status passing, then complete the milestone — or complete with --proof-status not_required when no harness exists.",
+      hint: "Run the proof, record a PASS verdict line (`PROOF: PASS` / `PROOF: passed — …`), mark its status passing, then complete the milestone — or complete with --proof-status not_required when no harness exists.",
     });
   }
   if (milestone.state === "complete" && childStatuses.some((child) => child.column !== terminalCol)) warnings.push({ code: "complete-has-active-cards", message: "Complete milestone still has non-terminal child cards.", hint: "Reopen the milestone or finish/abandon the remaining cards." });
@@ -1719,12 +1719,31 @@ export type MilestoneGapReport = {
   action_counts: Record<MilestoneGapAction, number>;
   milestones: MilestoneGapEntry[];
   /** Ordered work queue for the driver: promote first, then decompose. */
-  work_queue: Array<{
-    slug: string;
-    action: "promote" | "decompose" | "complete_proof";
-    promoteable: string[];
-  }>;
+  work_queue: MilestoneGapWorkItem[];
 };
+
+/**
+ * One driver work item. `status`, `next_slice` and `activate_first` are copied
+ * from the item's `milestones[]` row: a driver that reads only `work_queue`
+ * must still tell a first decomposition from a next slice, and must know the
+ * planned → active hop will happen
+ * (papercut-fkanban-gap-report-work-queue-drops-next-slice-flag-20260926).
+ */
+export type MilestoneGapWorkItem = {
+  slug: string;
+  action: "promote" | "decompose" | "complete_proof";
+  promoteable: string[];
+  status: MilestoneGapStatus;
+  next_slice?: boolean;
+  activate_first?: boolean;
+};
+
+function gapWorkItem(entry: MilestoneGapEntry, action: MilestoneGapWorkItem["action"], promoteable: string[]): MilestoneGapWorkItem {
+  const item: MilestoneGapWorkItem = { slug: entry.slug, action, promoteable, status: entry.status };
+  if (entry.next_slice) item.next_slice = true;
+  if (entry.activate_first) item.activate_first = true;
+  return item;
+}
 
 const BODY_STOP_RE = /STOPPED by Tom|resume only by explicit direction|resume only after explicit/i;
 
@@ -1863,7 +1882,21 @@ export function classifyMilestoneGap(
       action: "skip",
       reason: `live Kind:pr in todo=${pr_todo} doing=${pr_doing}`,
     };
-  } else if (pr_live === 0 && pr_done > 0 && !proof_passing) {
+  } else if (pr_live === 0 && proof_passing) {
+    // The linked proof card's LAST verdict line is PASS and no Kind:pr is
+    // live: the acceptance is proven, so complete it. Before this branch a
+    // proof that FAILED and then re-ran PASS (proof_status still `failing`)
+    // fell through every `!proof_passing` test to the final `idle_empty` →
+    // `decompose`, and the driver filed new slices for a proven milestone
+    // (papercut-fkanban-gap-report-proof-passing-scored-idle-empty-decompose-20260926).
+    // `in_flight` above still wins: a live PR means the proof may be stale.
+    classified = {
+      ...base,
+      status: "proof_ready",
+      action: "complete_proof",
+      reason: `linked proof card ${milestone.proof_card} last verdict is PASS; no live Kind:pr — complete the milestone`,
+    };
+  } else if (pr_live === 0 && pr_done > 0) {
     // No live todo/doing PRs.
     if (proof?.passingEvidence) {
       classified = { ...base, status: "proof_ready", action: "complete_proof", reason: "implementation done; proof body has PASS evidence" };
@@ -1987,14 +2020,14 @@ export function buildMilestoneGapReport(
   // Work queue: promote → decompose → complete_proof; stable order = portfolio order
   const work_queue: MilestoneGapReport["work_queue"] = [];
   for (const entry of milestones) {
-    if (entry.action === "promote") work_queue.push({ slug: entry.slug, action: "promote", promoteable: entry.promoteable });
+    if (entry.action === "promote") work_queue.push(gapWorkItem(entry, "promote", entry.promoteable));
   }
   for (const entry of milestones) {
-    if (entry.action === "decompose") work_queue.push({ slug: entry.slug, action: "decompose", promoteable: [] });
+    if (entry.action === "decompose") work_queue.push(gapWorkItem(entry, "decompose", []));
   }
   for (const entry of milestones) {
     if (entry.action === "complete_proof") {
-      work_queue.push({ slug: entry.slug, action: "complete_proof", promoteable: [] });
+      work_queue.push(gapWorkItem(entry, "complete_proof", []));
     }
   }
 

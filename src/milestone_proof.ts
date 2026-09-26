@@ -149,16 +149,73 @@ export function proofVerdictNote(milestone: ProofVerdictMilestone, result: Miles
 }
 
 /**
+ * One proof verdict parser for every fkanban read of proof evidence.
+ *
+ * The rules match `_proof_verdict()` in last-stack
+ * `bin/last-stack-milestone-driver-snapshot` exactly, so the driver and the
+ * board can never disagree about one proof card body:
+ *
+ * - A verdict line is `PROOF:` or `RESULT:` (case-insensitive) with an
+ *   optional `[tag]`, e.g. `PROOF[failed-isolated-copy-contract]: ...`.
+ * - A tag that starts with `fail` or `reopened`, or contains `unmet`, is FAIL.
+ *   A tag that starts with `pass` is PASS. A classifying tag wins over the word.
+ * - Otherwise the first word after the colon decides, with surrounding
+ *   punctuation stripped: `fail`/`failed`/`fails`/`failure`/`failing` is FAIL,
+ *   `pass`/`passed`/`passes`/`passing` is PASS.
+ * - A line that states neither (`PROOF: fix-card filing failed`) is skipped.
+ * - The LAST verdict line wins: a later FAIL withdraws an earlier PASS, and a
+ *   later PASS supersedes an earlier FAIL.
+ *
+ * The old test accepted only an exact `PROOF: PASS` line, so the live
+ * validate-lane shape `PROOF: passed — ...` never counted, and an earlier
+ * exact PASS kept counting after a later FAIL.
+ */
+export type ProofLineVerdict = "pass" | "fail";
+
+const PROOF_LINE_RE = /^[ \t]*(?:PROOF|RESULT)(?:\[([^\]\n]*)\])?:[ \t]*(\S*)/gim;
+const FAIL_TAG_RE = /^(?:fail|reopened)|unmet/i;
+const PASS_TAG_RE = /^pass/i;
+const FAIL_WORD_RE = /^fail(?:ed|s|ure|ing)?$/i;
+const PASS_WORD_RE = /^pass(?:ed|es|ing)?$/i;
+// Python `str.strip('.,;:!-\u2014\u2013')` — both ends, this character set only.
+const WORD_EDGE_RE = /^[.,;:!\-\u2014\u2013]+|[.,;:!\-\u2014\u2013]+$/g;
+
+/** `pass`, `fail`, or null for one PROOF/RESULT line's tag and first word. */
+export function proofLineVerdict(tag: string | undefined, word: string | undefined): ProofLineVerdict | null {
+  const t = (tag ?? "").trim();
+  if (t && FAIL_TAG_RE.test(t)) return "fail";
+  if (t && PASS_TAG_RE.test(t)) return "pass";
+  const w = (word ?? "").trim().replace(WORD_EDGE_RE, "");
+  if (FAIL_WORD_RE.test(w)) return "fail";
+  if (PASS_WORD_RE.test(w)) return "pass";
+  return null;
+}
+
+/** The LAST PROOF/RESULT verdict in a proof card body, or null when no line states one. */
+export function proofVerdict(body: string | null | undefined): ProofLineVerdict | null {
+  if (typeof body !== "string") return null;
+  let verdict: ProofLineVerdict | null = null;
+  for (const match of body.matchAll(PROOF_LINE_RE)) {
+    const line = proofLineVerdict(match[1], match[2]);
+    if (line) verdict = line;
+  }
+  return verdict;
+}
+
+/**
  * Terminal proof evidence for milestone completion.
  *
- * Accepts either:
- * - an exact body line `PROOF: PASS` / `RESULT: PASS`, or
- * - a satisfied `DONE-WHEN: file <path> matches /regex/` when the file exists
- *   and the first line (or full content) matches (covers PASS / PASS-OFFLINE
- *   North Star proof reports without requiring a second PROOF: line).
+ * - The LAST PROOF/RESULT verdict line decides ({@link proofVerdict}): PASS is
+ *   evidence, FAIL is not — even when an earlier line said PASS.
+ * - With no verdict line at all, a satisfied `DONE-WHEN: file <path> matches
+ *   /regex/` (the file exists and its first line or full content matches) is
+ *   evidence. This covers PASS / PASS-OFFLINE North Star proof reports that
+ *   carry no PROOF: line.
  */
 export function hasPassingProofEvidence(body: string): boolean {
-  if (/^[ \t]*(?:PROOF|RESULT):[ \t]*PASS[ \t]*$/im.test(body)) return true;
+  const verdict = proofVerdict(body);
+  if (verdict === "pass") return true;
+  if (verdict === "fail") return false;
   return doneWhenFileProofSatisfied(body);
 }
 
