@@ -1599,6 +1599,10 @@ async function dispatch(
       if (action === "list") {
         const extra = rejectExtraPositionals(positionals, 2, "milestone list");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone list --help\` to see this command's flags.`);
+          return 2;
+        }
         const result = await milestoneListResult({
           cfg: ctx.cfg,
           node: ctx.node,
@@ -1622,6 +1626,10 @@ async function dispatch(
         const slug = requirePositional(positionals[2], "milestone show <slug>");
         const extra = rejectExtraPositionals(positionals, 3, "milestone show <slug>");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone show --help\` to see this command's flags.`);
+          return 2;
+        }
         const result = await milestoneShowResult({ cfg: ctx.cfg, node: ctx.node, slug });
         // The derived verdict rides in the SAME object as the stored claim. A
         // consumer that reads `proof_status` and stops has no way to learn the
@@ -1637,6 +1645,10 @@ async function dispatch(
         const state = requirePositional(positionals[3], "milestone state <slug> <state>");
         const extra = rejectExtraPositionals(positionals, 4, "milestone state <slug> <state>");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone state --help\` to see this command's flags.`);
+          return 2;
+        }
         const result = await milestoneStateCmd({ cfg: ctx.cfg, node: ctx.node, slug, state, proofStatus: values["proof-status"] as string | undefined });
         console.log(formatMilestoneState(result, Boolean(values.json)));
         return 0;
@@ -1645,6 +1657,10 @@ async function dispatch(
         const slug = requirePositional(positionals[2], "milestone reconcile <slug>");
         const extra = rejectExtraPositionals(positionals, 3, "milestone reconcile <slug>");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone reconcile --help\` to see this command's flags.`);
+          return 2;
+        }
         // `unlimited` opts out of the budget explicitly, the same word
         // `lastgit --max-concurrency` uses. `--max-repairs 0` classifies
         // without writing, which is `--dry-run` reached from the other side.
@@ -1671,6 +1687,10 @@ async function dispatch(
       if (action === "portfolio") {
         const extra = rejectExtraPositionals(positionals, 2, "milestone portfolio");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone portfolio --help\` to see this command's flags.`);
+          return 2;
+        }
         const result = await milestonePortfolioResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
         // Same completeness envelope as `milestone list --json` — see above.
         console.log(values.json
@@ -1686,6 +1706,10 @@ async function dispatch(
         const slug = requirePositional(positionals[2], "milestone detail <slug>");
         const extra = rejectExtraPositionals(positionals, 3, "milestone detail <slug>");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone detail --help\` to see this command's flags.`);
+          return 2;
+        }
         const result = await milestoneDetailResult({ cfg: ctx.cfg, node: ctx.node, slug });
         console.log(values.json ? JSON.stringify({ ...result.detail, repairs: result.repairs }, null, 2) : result.text);
         return 0;
@@ -1693,6 +1717,10 @@ async function dispatch(
       if (action === "groom") {
         const extra = rejectExtraPositionals(positionals, 2, "milestone groom");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone groom --help\` to see this command's flags.`);
+          return 2;
+        }
         const result = await milestoneGroomResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
         if (values.json || values["json-array"]) {
           const issues = result.issues;
@@ -1707,6 +1735,10 @@ async function dispatch(
       if (action === "gap-report" || action === "gap") {
         const extra = rejectExtraPositionals(positionals, 2, "milestone gap-report");
         if (extra !== undefined) return extra;
+        if (values["north-star"] !== undefined) {
+          console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone gap-report --help\` to see this command's flags.`);
+          return 2;
+        }
         const result = await milestoneGapReportResult({ cfg: ctx.cfg, node: ctx.node, board: values.board as string | undefined });
         console.log(values.json ? JSON.stringify(result.report, null, 2) : result.text);
         return 0;

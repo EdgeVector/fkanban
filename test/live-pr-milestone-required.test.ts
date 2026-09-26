@@ -196,7 +196,7 @@ describe("assertLivePrMilestone", () => {
       message: 'Kind:pr card "gate-pr" cannot enter todo without a milestone.',
     });
     expect((moveErr as { hint?: string }).hint).toContain("kanban set gate-pr --milestone");
-    expect((moveErr as { hint?: string }).hint).toContain("--north-star");
+    expect((moveErr as { hint?: string }).hint).not.toContain("--north-star");
 
     const before = await pickupExplainResult({ cfg, node, slug: "gate-pr" });
     expect(before.write_guard.ok).toBe(false);
