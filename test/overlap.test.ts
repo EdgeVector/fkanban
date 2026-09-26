@@ -87,6 +87,15 @@ describe("surface overlap scoring", () => {
     expect(surfacesMayOverlap("docs/**", "src/mcp/server.ts")).toBe(false);
     expect(surfacesMayOverlap("src/cli.ts", "src/mcp/server.ts")).toBe(false);
   });
+
+  test("a mid-segment wildcard keeps its literal stem, not just the directory", () => {
+    expect(surfacesMayOverlap("tests/last-stack-board-closeout-*.sh", "tests/last-stack-milestone-driver-gate.sh")).toBe(false);
+    expect(surfacesMayOverlap("tests/last-stack-board-closeout-*.sh", "tests/last-stack-disk-reclaim-*.sh")).toBe(false);
+    expect(surfacesMayOverlap("tests/last-stack-board-closeout-*.sh", "tests/last-stack-board-closeout-sweep.sh")).toBe(true);
+    expect(surfacesMayOverlap("tests/last-stack-board-*", "tests/last-stack-board-closeout-*.sh")).toBe(true);
+    expect(surfacesMayOverlap("tests", "tests/last-stack-board-closeout-*.sh")).toBe(true);
+    expect(surfacesMayOverlap("*.sh", "tests/last-stack-board-closeout-sweep.sh")).toBe(true);
+  });
 });
 
 describe("overlapResult", () => {

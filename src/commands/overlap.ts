@@ -162,14 +162,15 @@ function cleanPattern(pattern: string): string {
   return pattern.trim().replace(/^\.\//, "").replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
+// Every path a glob matches starts with the text before its first wildcard, so
+// that text is a sound prefix. Cutting it back to the last "/" made
+// `tests/board-closeout-*.sh` claim every file under `tests/` and fenced
+// unrelated cards in the same repo out of pickup.
 function literalPrefix(pattern: string): string {
   const p = cleanPattern(pattern);
   const wildcard = p.search(/[*?[]/);
   if (wildcard < 0) return p;
-  const raw = p.slice(0, wildcard);
-  const slash = raw.lastIndexOf("/");
-  if (slash >= 0) return raw.slice(0, slash + 1);
-  return raw;
+  return p.slice(0, wildcard);
 }
 
 function bareSubsystemMatches(bare: string, other: string): boolean {
