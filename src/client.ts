@@ -1953,7 +1953,8 @@ function routeSocketPathFor(method: string, path: string, socketPath: string): s
   return legacyFullSurfaceSocketPath(socketPath);
 }
 
-async function verboseFetch(opts: {
+// Exported for the deadline tests only; product callers go through the clients.
+export async function verboseFetch(opts: {
   baseUrl: string;
   path: string;
   method: string;
@@ -2108,6 +2109,14 @@ async function verboseFetch(opts: {
       const text = await res.text();
       done = true;
       clearTimeout(timer);
+      // Bun (1.3.x) does NOT reject `text()` when the signal aborted after the
+      // headers arrived but BEFORE the body read began: it resolves with ""
+      // (or whatever was buffered). Under load the event loop can easily lose
+      // that race, and the empty string then parses to `null` — a 200 with no
+      // rows — so a deadline miss silently reads as "the node answered
+      // nothing". The signal is the source of truth: if it fired, this read
+      // did not complete, whatever `text()` handed back.
+      if (controller.signal.aborted) throw controller.signal.reason;
       if (readOpts?.asText) return text;
       return parseBody(text);
     } catch (err) {

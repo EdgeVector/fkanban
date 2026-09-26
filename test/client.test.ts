@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FkanbanError, newNodeClient, type NodeClient } from "../src/client.ts";
+import { FkanbanError, newNodeClient, verboseFetch, type NodeClient } from "../src/client.ts";
 import { findCard } from "../src/record.ts";
 import type { Config } from "../src/config.ts";
 import { addCmd } from "../src/commands/add.ts";
@@ -1081,6 +1081,31 @@ describe("request deadline", () => {
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("service_timeout");
     expect((err as FkanbanError).hint).toContain("re-running the command is safe");
+  });
+
+  // The race the test above loses on a loaded CI host (fkanban main d885acc):
+  // the deadline fires AFTER the headers arrive but BEFORE the body read
+  // starts. Bun then resolves `text()` with "" instead of rejecting, which
+  // parsed to `null` and let the read return as if the node answered with no
+  // rows. Forcing the gap makes the race deterministic.
+  test("a deadline that expires between the headers and the body read is still a timeout, not an empty reply", async () => {
+    const { res, readBody } = await verboseFetch({
+      baseUrl: `${baseUrl}/headers-then-stall`,
+      path: "/api/query",
+      method: "POST",
+      body: { schema: "cardhash", fields: ["slug"] },
+      verbose: () => {},
+      service: "node",
+      headers: {},
+      timeoutMs: 100,
+    });
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 250));
+    const err = await readBody()
+      .then((v) => ({ resolved: v }))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FkanbanError);
+    expect((err as FkanbanError).code).toBe("service_timeout");
   });
 });
 
