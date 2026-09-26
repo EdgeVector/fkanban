@@ -62,6 +62,7 @@ describe("pickup explain render", () => {
         would_skip: false,
         verdict: "clear",
         unevaluated_peers: [],
+        claim_v2_blocked_by: null,
       },
       situation: { allowed: true, reason: "no Situation preflight action inferred" },
       eligible_for_claim: true,

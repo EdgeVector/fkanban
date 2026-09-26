@@ -236,6 +236,7 @@ describe("gate rendering — UNK is neither OK nor FAIL", () => {
         would_skip: false,
         verdict: "unknown",
         unevaluated_peers: [],
+        claim_v2_blocked_by: null,
       },
       situation: { allowed: true },
       eligible_for_claim: true,
