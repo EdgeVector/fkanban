@@ -661,6 +661,22 @@ export async function milestoneStateCmd(opts: { cfg: Config; node: NodeClient; s
   validateState(opts.state);
   if (opts.proofStatus) validateProofStatus(opts.proofStatus);
   const existing = await requireMilestone(opts.node, opts.cfg, opts.slug);
+  // planned → complete in one guarded call. Nothing used to move a milestone
+  // planned → active, so a planned milestone whose Kind:pr work all merged
+  // could never close (brain
+  // `papercut-milestone-complete-proof-skipped-state-planned-20260924`).
+  // The hop is taken ONLY when `complete` is legal from `active` with the
+  // effective proof status — today that is `not_required`, whose proof gate is
+  // a no-op — so the intermediate `active` write can never strand a milestone
+  // that the `complete` write then refuses. Any other planned → complete still
+  // fails with the ordinary invalid_milestone_transition error.
+  const effectiveProofStatus = opts.proofStatus ?? existing.proof_status;
+  const hopViaActive = existing.state === "planned"
+    && opts.state === "complete"
+    && canMilestoneTransition("active", "complete", effectiveProofStatus);
+  if (hopViaActive) {
+    await milestoneAddCmd({ cfg: opts.cfg, node: opts.node, slug: opts.slug, state: "active", proofStatus: opts.proofStatus });
+  }
   const written = await milestoneAddCmd({ cfg: opts.cfg, node: opts.node, slug: opts.slug, state: opts.state, proofStatus: opts.proofStatus });
   const updated = await requireMilestone(opts.node, opts.cfg, opts.slug);
   // `proof_status_from` comes from the pre-write read, so a transition whose
@@ -673,6 +689,7 @@ export async function milestoneStateCmd(opts: { cfg: Config; node: NodeClient; s
     to: updated.state,
     proof_status: updated.proof_status,
     proof_status_from: existing.proof_status,
+    ...(hopViaActive ? { via: "active" } : {}),
     ...(written.driverHealed ? { driverHealed: written.driverHealed } : {}),
   };
 }
@@ -1624,7 +1641,8 @@ export type MilestoneGapStatus =
   | "idle_ns_evidence"
   | "idle_blocked"
   | "proof_pending"
-  | "proof_ready";
+  | "proof_ready"
+  | "needs_next_slice";
 
 export type MilestoneGapAction =
   | "skip"
@@ -1646,7 +1664,10 @@ export function isMilestoneGapActionLegal(
   if (action === "skip") return true;
   if (state === "complete" || state === "abandoned") return false;
   if (action === "complete_proof") {
-    return canMilestoneTransition(state, "complete", "not_required");
+    // `milestone state <slug> complete --proof-status not_required` hops a
+    // planned milestone through active in one guarded call (milestoneStateCmd).
+    const from = state === "planned" ? "active" : state;
+    return canMilestoneTransition(from, "complete", "not_required");
   }
   return true;
 }
@@ -1676,6 +1697,18 @@ export type MilestoneGapEntry = {
   ns_only_done: string[];
   has_proof_card: boolean;
   proof_passing: boolean;
+  /**
+   * The milestone is `planned` and the action implies work has started. The
+   * driver needs no extra call: card claims move a planned milestone to active,
+   * and `milestone state <slug> complete --proof-status not_required` hops
+   * planned → active → complete itself. The flag says the hop will happen.
+   */
+  activate_first?: boolean;
+  /**
+   * `decompose` because implementation slices merged but the acceptance is not
+   * proven — file the NEXT slice or the proof card, not a first decomposition.
+   */
+  next_slice?: boolean;
   reason: string;
 };
 
@@ -1696,7 +1729,11 @@ export type MilestoneGapReport = {
 const BODY_STOP_RE = /STOPPED by Tom|resume only by explicit direction|resume only after explicit/i;
 
 function legalizeGapEntry(milestone: Milestone, entry: MilestoneGapEntry): MilestoneGapEntry {
-  if (isMilestoneGapActionLegal(milestone.state, entry.action)) return entry;
+  if (isMilestoneGapActionLegal(milestone.state, entry.action)) {
+    return milestone.state === "planned" && entry.action !== "skip" && entry.pr_done > 0
+      ? { ...entry, activate_first: true }
+      : entry;
+  }
   return {
     ...entry,
     action: "skip",
@@ -1830,17 +1867,30 @@ export function classifyMilestoneGap(
     // No live todo/doing PRs.
     if (proof?.passingEvidence) {
       classified = { ...base, status: "proof_ready", action: "complete_proof", reason: "implementation done; proof body has PASS evidence" };
-    } else if (milestone.proof_status === "not_required" || !String(milestone.proof_card ?? "").trim()) {
-      // Prefer closing with not_required over hanging forever or minting hollow
-      // validation shells (last-stack-milestone-driver contract).
+    } else if (milestone.proof_status === "not_required") {
+      // The operator declared there is no harness: close without one rather
+      // than hang forever or mint a hollow validation shell
+      // (last-stack-milestone-driver contract).
       classified = {
         ...base,
         status: "proof_ready",
         action: "complete_proof",
-        reason:
-          milestone.proof_status === "not_required"
-            ? "implementation Kind:pr done; proof_status=not_required — complete without harness"
-            : "implementation Kind:pr done; no proof card — complete with not_required (no theater shell)",
+        reason: "implementation Kind:pr done; proof_status=not_required — complete without harness",
+      };
+    } else if (!String(milestone.proof_card ?? "").trim()) {
+      // Merged slices are not met acceptance. This branch used to close the
+      // milestone as `not_required` whenever no proof card was linked, so a
+      // milestone with 2 of 3 PR units merged and a pending proof
+      // (lastdb-codec-reseal-safety-20260923) was queued for completion. The
+      // action stays `decompose`: the milestone-driver guard authorizes Kind:pr
+      // filings by matching action=decompose. `next_slice` says it is not a
+      // first decomposition.
+      classified = {
+        ...base,
+        status: "needs_next_slice",
+        action: "decompose",
+        next_slice: true,
+        reason: `implementation slices done so far: ${pr_done}; acceptance not proven — file the next slice or the proof card`,
       };
     } else {
       classified = { ...base, status: "proof_pending", action: "await_proof", reason: "implementation Kind:pr done; terminal proof still pending" };
@@ -1909,6 +1959,7 @@ export function buildMilestoneGapReport(
     idle_blocked: 0,
     proof_pending: 0,
     proof_ready: 0,
+    needs_next_slice: 0,
   });
   const emptyActions = (): Record<MilestoneGapAction, number> => ({
     skip: 0,
@@ -1969,7 +2020,7 @@ export async function milestoneGapReportResult(opts: {
   const report = buildMilestoneGapReport(snapshot.reconciled, snapshot.board_cards, { board: opts.board });
   const lines = [
     `Milestone gap-report  (generated ${report.generated_at})`,
-    `counts: in_flight=${report.counts.in_flight} idle_promoteable=${report.counts.idle_promoteable} idle_empty=${report.counts.idle_empty} idle_ns_evidence=${report.counts.idle_ns_evidence} idle_blocked=${report.counts.idle_blocked} proof_pending=${report.counts.proof_pending} proof_ready=${report.counts.proof_ready} complete=${report.counts.complete} no_north_star=${report.counts.no_north_star} blocked=${report.counts.blocked}`,
+    `counts: in_flight=${report.counts.in_flight} idle_promoteable=${report.counts.idle_promoteable} idle_empty=${report.counts.idle_empty} idle_ns_evidence=${report.counts.idle_ns_evidence} idle_blocked=${report.counts.idle_blocked} proof_pending=${report.counts.proof_pending} proof_ready=${report.counts.proof_ready} needs_next_slice=${report.counts.needs_next_slice} complete=${report.counts.complete} no_north_star=${report.counts.no_north_star} blocked=${report.counts.blocked}`,
     `actions: promote=${report.action_counts.promote} decompose=${report.action_counts.decompose} await_proof=${report.action_counts.await_proof} complete_proof=${report.action_counts.complete_proof} skip=${report.action_counts.skip}`,
     `work_queue (${report.work_queue.length}):`,
     ...(report.work_queue.length

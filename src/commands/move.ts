@@ -38,6 +38,7 @@ import { assertSituationPreflightAllowed, type SituationPreflight } from "../sit
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 import { planDoingClaim } from "../doing-claim.ts";
 import { purgeOtherColumnRowsForSlug } from "../board-cards.ts";
+import { activatePlannedMilestoneForDoing, type MilestoneActivationOutcome } from "../milestone_activation.ts";
 
 export type MoveOptions = {
   cfg: Config;
@@ -73,7 +74,7 @@ export type MoveResult = {
   /** Assignee after a claim stamp into doing (if any). */
   assignee?: string;
   claim?: "stamped" | "kept" | "unclaimed";
-};
+} & MilestoneActivationOutcome;
 
 export class ClaimConflictError extends FkanbanError {
   readonly current: string;
@@ -111,7 +112,7 @@ export type AtomicClaimResult = {
   from: "todo";
   to: "doing";
   worker: string;
-};
+} & MilestoneActivationOutcome;
 
 /**
  * Claim one admitted todo card without lifecycle policy or board repair.
@@ -199,12 +200,17 @@ export async function claimCard(opts: {
     claimBoard.columns,
   );
 
+  // The milestone follows its cards: a claim is the first sign of work, so a
+  // `planned` milestone becomes `active` here. Best effort — never fails the claim.
+  const activation = await activatePlannedMilestoneForDoing(opts, updated);
+
   return {
     result: "claimed",
     card: updated,
     from: "todo",
     to: "doing",
     worker,
+    ...activation,
   };
 }
 
@@ -363,10 +369,14 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     previousPrUrl: card.pr_url,
   });
   let milestoneState = "";
+  let milestoneFound = false;
   const msSlug = (updated.milestone ?? "").trim();
   if (msSlug) {
     const ms = await findMilestone(opts.node, opts.cfg, msSlug);
-    if (ms) milestoneState = ms.state;
+    if (ms) {
+      milestoneState = ms.state;
+      milestoneFound = true;
+    }
   }
   assertDefaultTodoWriteGuard(updated, opts.force, rawBody, {
     milestoneState,
@@ -411,8 +421,15 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     }
     throw err;
   }
+  // The milestone follows its cards: entering `doing` is the first sign of
+  // work, so a `planned` milestone becomes `active`. After the card write and
+  // best effort — a failure is a warning, never a failed move.
+  const activation: MilestoneActivationOutcome =
+    opts.column === "doing" && from !== "doing" && milestoneFound
+      ? await activatePlannedMilestoneForDoing(opts, updated, milestoneState)
+      : {};
   if (opts.expectAssignee !== undefined) {
-    return { slug: card.slug, from, to: opts.column, ...claimMeta, membership_cleanup: "deferred" };
+    return { slug: card.slug, from, to: opts.column, ...claimMeta, ...activation, membership_cleanup: "deferred" };
   }
   // A move states where this card belongs, so it is also the repair for a card
   // that reads as belonging in two places at once.
@@ -489,5 +506,6 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     to: opts.column,
     ...(promotedDependents.length > 0 ? { promotedDependents } : {}),
     ...claimMeta,
+    ...activation,
   };
 }
