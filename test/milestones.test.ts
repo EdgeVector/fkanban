@@ -411,6 +411,96 @@ describe("first-class milestones", () => {
     expect(report.work_queue.filter((w) => w.action === "decompose").map((w) => w.slug)).toContain("ms-done-noproof");
   });
 
+  test("complete --proof-status passing accepts the live `PROOF: passed — …` shape and refuses PASS-then-FAIL", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({ cfg, node, slug: "ms-passed", title: "Passed", state: "active", driver: "driver" });
+    await addCmd({
+      cfg, node, slug: "ms-passed-proof", title: "Proof",
+      body: "PROOF: PASS\nPROOF: FAIL — re-run found a regression", milestone: "ms-passed", kind: "validation", column: "done",
+    });
+    await milestoneAddCmd({ cfg, node, slug: "ms-passed", proofCard: "ms-passed-proof" });
+    await milestoneStateCmd({ cfg, node, slug: "ms-passed", state: "proving" });
+    // A FAIL after a PASS withdraws the PASS.
+    await expect(milestoneStateCmd({ cfg, node, slug: "ms-passed", state: "complete", proofStatus: "passing" }))
+      .rejects.toMatchObject({ code: "milestone_proof_not_passing" });
+    await addCmd({
+      cfg, node, slug: "ms-passed-proof",
+      body: "PROOF: PASS\nPROOF: FAIL — regression\nPROOF: passed — offline north-star report PASS",
+      milestone: "ms-passed", kind: "validation", column: "done",
+    });
+    expect(await milestoneStateCmd({ cfg, node, slug: "ms-passed", state: "complete", proofStatus: "passing" }))
+      .toMatchObject({ to: "complete", proof_status: "passing" });
+  });
+
+  test("gap-report: a proof that FAILED then re-ran PASS is complete_proof, not idle_empty/decompose", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    const prBody = "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n";
+    // proof_status stays `failing` from the failed run; the proof card's LAST verdict is PASS.
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-rerun-pass", title: "Re-run PASS", state: "active",
+      northStar: "ns-r", driver: "driver", proofStatus: "failing",
+    });
+    await addCmd({
+      cfg, node, slug: "ms-rerun-proof", title: "Proof", milestone: "ms-rerun-pass", northStar: "ns-r",
+      kind: "validation", column: "done",
+      body: "PROOF[failed-isolated-copy-contract]: FAIL\nPROOF: passed — re-run offline report PASS\n",
+    });
+    await milestoneAddCmd({ cfg, node, slug: "ms-rerun-pass", proofCard: "ms-rerun-proof" });
+    await addCmd({
+      cfg, node, slug: "ms-rerun-impl", title: "Impl", milestone: "ms-rerun-pass", northStar: "ns-r",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done", body: prBody,
+    });
+    // Same shape, but the LAST verdict is FAIL: not proven, never complete_proof.
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-pass-then-fail", title: "PASS then FAIL", state: "active",
+      northStar: "ns-f", driver: "driver", proofStatus: "failing",
+    });
+    await addCmd({
+      cfg, node, slug: "ms-ptf-proof", title: "Proof", milestone: "ms-pass-then-fail", northStar: "ns-f",
+      kind: "validation", column: "done", body: "PROOF: PASS\nPROOF: FAIL\n",
+    });
+    await milestoneAddCmd({ cfg, node, slug: "ms-pass-then-fail", proofCard: "ms-ptf-proof" });
+    await addCmd({
+      cfg, node, slug: "ms-ptf-impl", title: "Impl", milestone: "ms-pass-then-fail", northStar: "ns-f",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done", body: prBody,
+    });
+
+    const { report } = await milestoneGapReportResult({ cfg, node });
+    const bySlug = Object.fromEntries(report.milestones.map((m) => [m.slug, m]));
+    expect(bySlug["ms-rerun-pass"]).toMatchObject({ status: "proof_ready", action: "complete_proof", proof_passing: true });
+    expect(bySlug["ms-pass-then-fail"]?.proof_passing).toBe(false);
+    expect(bySlug["ms-pass-then-fail"]?.action).not.toBe("complete_proof");
+    expect(report.work_queue.filter((w) => w.action === "complete_proof").map((w) => w.slug)).toEqual(["ms-rerun-pass"]);
+    expect(report.work_queue.find((w) => w.slug === "ms-rerun-pass")).toEqual({
+      slug: "ms-rerun-pass", action: "complete_proof", promoteable: [], status: "proof_ready",
+    });
+  });
+
+  test("gap-report: work_queue entries carry next_slice, activate_first and status from their milestones[] row", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({
+      cfg, node, slug: "ms-next", title: "Next slice", state: "planned",
+      northStar: "ns-n", driver: "driver", proofStatus: "pending",
+    });
+    await addCmd({
+      cfg, node, slug: "ms-next-done", title: "Done PR", milestone: "ms-next", northStar: "ns-n",
+      repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+    });
+    const { report } = await milestoneGapReportResult({ cfg, node });
+    const row = report.milestones.find((m) => m.slug === "ms-next");
+    expect(row).toMatchObject({ status: "needs_next_slice", action: "decompose", next_slice: true });
+    const item = report.work_queue.find((w) => w.slug === "ms-next");
+    expect(item).toEqual({
+      slug: "ms-next", action: "decompose", promoteable: [], status: "needs_next_slice",
+      next_slice: true, ...(row?.activate_first ? { activate_first: true } : {}),
+    });
+    expect(item?.activate_first).toBe(row?.activate_first);
+  });
+
   test("a card entering doing moves its planned milestone to active (move and claim)", async () => {
     const node = fakeNode();
     await seedBoard(node);
