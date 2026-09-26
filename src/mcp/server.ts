@@ -798,6 +798,7 @@ export function createFkanbanMcpServer(
         to: z.string(),
         proof_status: z.string(),
         proof_status_from: z.string(),
+        via: z.literal("active").optional(),
         driverHealed: z.object({ from: z.string(), to: z.string() }).optional(),
       },
     },
@@ -1165,6 +1166,9 @@ export function createFkanbanMcpServer(
         // Move into doing is a claim: stamp/keep/unclaimed surface for agents.
         assignee: z.string().optional(),
         claim: z.enum(["stamped", "kept", "unclaimed"]).optional(),
+        // Entering doing moves a `planned` milestone to `active` (best effort).
+        milestoneActivated: z.string().optional(),
+        milestoneActivationWarning: z.string().optional(),
       },
     },
     async (args) => {

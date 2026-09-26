@@ -29,6 +29,10 @@ export interface MoveResult {
   /** Assignee after a claim stamp into doing (if any). */
   assignee?: string;
   claim?: "stamped" | "kept" | "unclaimed";
+  /** Milestone moved planned → active because this card entered doing. */
+  milestoneActivated?: string;
+  /** The activation above failed; the move itself still stands. */
+  milestoneActivationWarning?: string;
 }
 
 export interface DepResult {
@@ -126,6 +130,12 @@ export interface MilestoneStateResult {
    * so its confirmation is the one that most needs to be able to say what moved.
    */
   proof_status_from: string;
+  /**
+   * Set to `active` when a planned → complete call hopped through active
+   * (allowed only when active → complete is legal with the effective proof
+   * status, i.e. `not_required`).
+   */
+  via?: "active";
   /** As {@link MilestoneAddResult.driverHealed} — a transition writes the record too. */
   driverHealed?: { from: string; to: string };
 }
@@ -197,6 +207,8 @@ export function formatMove(res: MoveResult, json?: boolean): string {
   if (res.claim === "stamped" && res.assignee) parts.push(`claimed @${res.assignee}`);
   else if (res.claim === "unclaimed") parts.push("unclaimed");
   if (promoted.length > 0) parts.push(`promoted ${promoted.join(", ")} to todo`);
+  if (res.milestoneActivated) parts.push(`milestone ${res.milestoneActivated}: planned → active`);
+  if (res.milestoneActivationWarning) parts.push(`WARNING ${res.milestoneActivationWarning}`);
   const suffix = parts.length > 0 ? `; ${parts.join("; ")}` : "";
   return emit(res, `moved ${res.slug}: ${res.from} → ${res.to}${suffix}`, json);
 }
@@ -259,7 +271,7 @@ export function formatMilestoneState(res: MilestoneStateResult, json?: boolean):
     : "";
   return emit(
     res,
-    `milestone ${res.slug}: ${res.from} → ${res.to}${proof}${driverHealedClause(res.driverHealed)}`,
+    `milestone ${res.slug}: ${res.from} → ${res.via ? `${res.via} → ` : ""}${res.to}${proof}${driverHealedClause(res.driverHealed)}`,
     json,
   );
 }

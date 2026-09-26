@@ -5,6 +5,7 @@ import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/cl
 import type { Config } from "../src/config.ts";
 import { classifyMilestoneGap, milestoneAddCmd, milestoneDetailResult, milestoneGapReportResult, milestoneGroomResult, milestoneListResult, milestonePortfolioResult, milestoneReconcileResult, milestoneShowResult, milestoneStateCmd } from "../src/commands/milestone.ts";
 import { addCmd } from "../src/commands/add.ts";
+import { claimCard, moveCmd } from "../src/commands/move.ts";
 import { listCmd } from "../src/commands/list.ts";
 import {
   boardToFields,
@@ -344,7 +345,7 @@ describe("first-class milestones", () => {
     expect(hollow.promoteable).toEqual([]);
   });
 
-  test("gap-report complete_proof when impl done and not_required or no proof card", async () => {
+  test("gap-report: not_required completes, no proof card + pending proof needs the next slice, proof card awaits", async () => {
     const node = fakeNode();
     await seedBoard(node);
 
@@ -359,7 +360,8 @@ describe("first-class milestones", () => {
       body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
     });
 
-    // All PR done + empty proof_card + pending → still complete_proof (prefer not_required)
+    // All PR done + empty proof_card + pending → needs_next_slice / decompose.
+    // Merged slices are not met acceptance (lastdb-codec-reseal-safety-20260923).
     await milestoneAddCmd({
       cfg, node, slug: "ms-done-noproof", title: "Done no card", state: "active",
       northStar: "ns-b", driver: "driver", proofStatus: "pending",
@@ -394,14 +396,90 @@ describe("first-class milestones", () => {
 
     expect(bySlug["ms-done-nr"]?.status).toBe("proof_ready");
     expect(bySlug["ms-done-nr"]?.action).toBe("complete_proof");
-    expect(bySlug["ms-done-noproof"]?.status).toBe("proof_ready");
-    expect(bySlug["ms-done-noproof"]?.action).toBe("complete_proof");
+    expect(bySlug["ms-done-nr"]?.next_slice).toBeUndefined();
+    expect(bySlug["ms-done-noproof"]?.status).toBe("needs_next_slice");
+    expect(bySlug["ms-done-noproof"]?.action).toBe("decompose");
+    expect(bySlug["ms-done-noproof"]?.next_slice).toBe(true);
+    expect(bySlug["ms-done-noproof"]?.reason).toContain("implementation slices done so far: 1");
+    expect(report.counts.needs_next_slice).toBe(1);
     expect(bySlug["ms-await"]?.status).toBe("proof_pending");
     expect(bySlug["ms-await"]?.action).toBe("await_proof");
 
     const completeSlugs = report.work_queue.filter((w) => w.action === "complete_proof").map((w) => w.slug);
-    expect(completeSlugs).toEqual(expect.arrayContaining(["ms-done-nr", "ms-done-noproof"]));
+    expect(completeSlugs).toEqual(["ms-done-nr"]);
     expect(completeSlugs).not.toContain("ms-await");
+    expect(report.work_queue.filter((w) => w.action === "decompose").map((w) => w.slug)).toContain("ms-done-noproof");
+  });
+
+  test("a card entering doing moves its planned milestone to active (move and claim)", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    const body = "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n";
+
+    // moveCmd path (kanban move / MCP move / pickup claim v1)
+    await milestoneAddCmd({ cfg, node, slug: "ms-move", title: "M", state: "planned", northStar: "ns-a", driver: "driver" });
+    await addCmd({ cfg, node, slug: "move-pr", title: "PR", milestone: "ms-move", northStar: "ns-a", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo", body });
+    const moved = await moveCmd({ cfg, node, slug: "move-pr", column: "doing", worker: "agent-1" });
+    expect(moved.milestoneActivated).toBe("ms-move");
+    expect((await milestoneShowResult({ cfg, node, slug: "ms-move" })).milestone.state).toBe("active");
+
+    // claimCard path (pickup claim v2)
+    await milestoneAddCmd({ cfg, node, slug: "ms-claim", title: "M", state: "planned", northStar: "ns-b", driver: "driver" });
+    await addCmd({ cfg, node, slug: "claim-pr", title: "PR", milestone: "ms-claim", northStar: "ns-b", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo", body });
+    const claimed = await claimCard({ cfg, node, slug: "claim-pr", worker: "agent-2" });
+    expect(claimed.milestoneActivated).toBe("ms-claim");
+    expect((await milestoneShowResult({ cfg, node, slug: "ms-claim" })).milestone.state).toBe("active");
+
+    // An already-active milestone is left alone; no second write, no flag.
+    await addCmd({ cfg, node, slug: "move-pr-2", title: "PR2", milestone: "ms-move", northStar: "ns-a", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo", body });
+    const again = await moveCmd({ cfg, node, slug: "move-pr-2", column: "doing", worker: "agent-1" });
+    expect(again.milestoneActivated).toBeUndefined();
+    expect(again.milestoneActivationWarning).toBeUndefined();
+  });
+
+  test("a failed milestone activation warns and does not fail the card move", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    const body = "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n";
+    await milestoneAddCmd({ cfg, node, slug: "ms-fail", title: "M", state: "planned", northStar: "ns-a", driver: "driver" });
+    await addCmd({ cfg, node, slug: "fail-pr", title: "PR", milestone: "ms-fail", northStar: "ns-a", repo: "EdgeVector/fkanban", base: "main", kind: "pr", column: "todo", body });
+    // Refuse every Milestone write from here on; Card writes still land.
+    const realUpdate = node.updateRecord.bind(node);
+    const realCreate = node.createRecord.bind(node);
+    const refuseMilestone = (hash: string) => {
+      if (hash === cfg.schemaHashes.milestone) throw new Error("injected milestone write failure");
+    };
+    node.updateRecord = async (args) => { refuseMilestone(args.schemaHash); return realUpdate(args); };
+    node.createRecord = async (args) => { refuseMilestone(args.schemaHash); return realCreate(args); };
+    const origError = console.error;
+    const errors: string[] = [];
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(" ")); };
+    try {
+      const moved = await moveCmd({ cfg, node, slug: "fail-pr", column: "doing", worker: "agent-1" });
+      expect(moved.to).toBe("doing");
+      expect(moved.milestoneActivated).toBeUndefined();
+      expect(moved.milestoneActivationWarning).toContain("ms-fail");
+      expect(errors.some((e) => e.includes("could not move planned → active"))).toBe(true);
+    } finally {
+      console.error = origError;
+    }
+    expect((await findCard(node, cfg, "fail-pr"))?.column).toBe("doing");
+    expect((await milestoneShowResult({ cfg, node, slug: "ms-fail" })).milestone.state).toBe("planned");
+  });
+
+  test("milestone state complete from planned hops via active only with not_required", async () => {
+    const node = fakeNode();
+    await seedBoard(node);
+    await milestoneAddCmd({ cfg, node, slug: "ms-hop", title: "M", state: "planned", northStar: "ns-a", driver: "driver" });
+    const res = await milestoneStateCmd({ cfg, node, slug: "ms-hop", state: "complete", proofStatus: "not_required" });
+    expect(res.from).toBe("planned");
+    expect(res.via).toBe("active");
+    expect(res.to).toBe("complete");
+
+    // Without not_required the hop is refused and nothing is written.
+    await milestoneAddCmd({ cfg, node, slug: "ms-nohop", title: "M", state: "planned", northStar: "ns-a", driver: "driver" });
+    await expect(milestoneStateCmd({ cfg, node, slug: "ms-nohop", state: "complete" })).rejects.toThrow(/cannot transition planned → complete/);
+    expect((await milestoneShowResult({ cfg, node, slug: "ms-nohop" })).milestone.state).toBe("planned");
   });
 
   test("milestone complete with proof_status not_required skips proof card gate", async () => {

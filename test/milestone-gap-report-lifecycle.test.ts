@@ -140,52 +140,67 @@ function seedBoardCard(node: FakeNode, partial: Record<string, unknown>): void {
 }
 
 describe("gap-report lifecycle legality", () => {
-  test("complete_proof is illegal from planned and legal from active with not_required", () => {
-    expect(isMilestoneGapActionLegal("planned", "complete_proof")).toBe(false);
+  test("complete_proof is legal from planned (state CLI hops via active) and from active with not_required", () => {
+    // papercut-milestone-complete-proof-skipped-state-planned-20260924:
+    // `milestone state complete --proof-status not_required` hops planned →
+    // active → complete, so the gap-report must not skip a planned milestone.
+    expect(isMilestoneGapActionLegal("planned", "complete_proof")).toBe(true);
+    expect(isMilestoneGapActionLegal("blocked", "complete_proof")).toBe(false);
     expect(isMilestoneGapActionLegal("active", "complete_proof")).toBe(true);
     expect(isMilestoneGapActionLegal("proving", "complete_proof")).toBe(true);
     expect(isMilestoneGapActionLegal("complete", "decompose")).toBe(false);
     expect(isMilestoneGapActionLegal("planned", "decompose")).toBe(true);
   });
 
-  test("classifier skips complete_proof for a planned milestone with done PRs", () => {
-    const milestone = ms({ slug: "ms-planned", state: "planned" });
-    const entry = classifyMilestoneGap(
-      milestone,
-      [{
-        slug: "done-pr",
-        title: "Done",
-        body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
-        board: "default",
-        column: "done",
-        position: "1",
-        assignee: "",
-        tags: [],
-        deps: [],
-        surfaces: [],
-        created_at: nowIso(),
-        created_by: "",
-        updated_at: nowIso(),
-        done_at: nowIso(),
-        first_doing_at: "",
-        db: "",
-        repo: "EdgeVector/fkanban",
-        base: "main",
-        kind: "pr",
-        block_status: "none",
-        block_reason: "",
-        north_star: "ns-x",
-        milestone: "ms-planned",
-        pr_url: "",
-        branch: "",
-      }],
-      [{ slug: "done-pr", title: "Done", column: "done", blocked: false, blockedBy: [] }],
-      null,
-    );
-    expect(entry.state).toBe("planned");
-    expect(entry.action).not.toBe("complete_proof");
-    expect(entry.action).toBe("skip");
-    expect(entry.reason).toContain("not legal from state=planned");
+  test("a planned milestone with done PRs is no longer skipped", () => {
+    const donePr = {
+      slug: "done-pr",
+      title: "Done",
+      body: "Repo: EdgeVector/fkanban\nBase: main\n\n## GOAL\nWork.\n\n## END STATE\nDone.\n",
+      board: "default",
+      column: "done",
+      position: "1",
+      assignee: "",
+      tags: [],
+      deps: [],
+      surfaces: [],
+      created_at: nowIso(),
+      created_by: "",
+      updated_at: nowIso(),
+      done_at: nowIso(),
+      first_doing_at: "",
+      db: "",
+      repo: "EdgeVector/fkanban",
+      base: "main",
+      kind: "pr",
+      block_status: "none",
+      block_reason: "",
+      north_star: "ns-x",
+      milestone: "ms-planned",
+      pr_url: "",
+      branch: "",
+    };
+    const children = [{ slug: "done-pr", title: "Done", column: "done", blocked: false, blockedBy: [] }];
+
+    // not_required: the same complete_proof an active milestone gets, flagged.
+    const nr = classifyMilestoneGap(ms({ slug: "ms-planned", state: "planned", proof_status: "not_required" }), [donePr], children, null);
+    expect(nr.state).toBe("planned");
+    expect(nr.status).toBe("proof_ready");
+    expect(nr.action).toBe("complete_proof");
+    expect(nr.activate_first).toBe(true);
+    expect(nr.reason).not.toContain("skipped");
+
+    // pending proof, no proof card: the next slice, not a skip and not a close.
+    const pending = classifyMilestoneGap(ms({ slug: "ms-planned", state: "planned" }), [donePr], children, null);
+    expect(pending.status).toBe("needs_next_slice");
+    expect(pending.action).toBe("decompose");
+    expect(pending.next_slice).toBe(true);
+    expect(pending.activate_first).toBe(true);
+
+    // An active milestone never carries the flag.
+    const active = classifyMilestoneGap(ms({ slug: "ms-planned", state: "active", proof_status: "not_required" }), [donePr], children, null);
+    expect(active.action).toBe("complete_proof");
+    expect(active.activate_first).toBeUndefined();
   });
 
   test("classifier skips decompose for a complete milestone with no children", () => {
@@ -265,12 +280,16 @@ describe("gap-report and portfolio hydrate from HashKey show source", () => {
     expect(bySlug["ms-complete"]?.state).toBe("complete");
     expect(bySlug["ms-complete"]?.north_star).toBe("ns-complete");
     expect(bySlug["ms-complete"]?.action).toBe("skip");
-    expect(bySlug["ms-planned"]?.action).not.toBe("complete_proof");
+    // Planned, one done PR, proof pending, no proof card: the next slice.
+    expect(bySlug["ms-planned"]?.action).toBe("decompose");
+    expect(bySlug["ms-planned"]?.status).toBe("needs_next_slice");
+    expect(bySlug["ms-planned"]?.activate_first).toBe(true);
     expect(bySlug["ms-active"]?.action).toBe("decompose");
+    expect(report.counts.needs_next_slice).toBe(1);
 
     expect(report.work_queue.some((w) => w.slug === "ms-complete")).toBe(false);
     expect(report.work_queue.some((w) => w.action === "complete_proof" && w.slug === "ms-planned")).toBe(false);
-    expect(report.work_queue.filter((w) => w.action === "decompose").map((w) => w.slug)).toEqual(["ms-active"]);
+    expect(report.work_queue.filter((w) => w.action === "decompose").map((w) => w.slug)).toEqual(["ms-planned", "ms-active"]);
   });
 });
 
