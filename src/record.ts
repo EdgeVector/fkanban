@@ -1740,7 +1740,7 @@ function livePrMilestoneGate(
 /** Remedy for a missing live-PR milestone. `kanban move` has no --milestone flag. */
 export function livePrMilestoneRequiredHint(slug: string): string {
   return (
-    `Use \`kanban set ${slug} --milestone <ms>\` or \`kanban set ${slug} --north-star <ns>\` ` +
+    `Use \`kanban set ${slug} --milestone <ms>\` ` +
     "to attach a real outcome, then retry. `kanban move` does not take --milestone. " +
     "Pass --force only for an intentional Unassigned/Operational exception." +
     FORCE_IS_UNSCOPED
@@ -1750,8 +1750,8 @@ export function livePrMilestoneRequiredHint(slug: string): string {
 /** Remedy for an abandoned live-PR milestone. Same verb as the missing-milestone case. */
 export function livePrMilestoneAbandonedHint(): string {
   return (
-    "Pick an active/planned milestone with `kanban set <slug> --milestone <ms>` " +
-    "(or `--north-star`), reopen the outcome, or pass --force for an intentional exception." +
+    "Pick an active/planned milestone with `kanban set <slug> --milestone <ms>`, " +
+    "reopen the outcome, or pass --force for an intentional exception." +
     FORCE_IS_UNSCOPED
   );
 }
