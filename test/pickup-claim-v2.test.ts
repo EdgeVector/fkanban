@@ -50,6 +50,7 @@ function fakeNode(opts: {
   conflictSlug?: string;
   failColumnRead?: "todo" | "doing";
   failCardUpdate?: string;
+  failFeatureFlowUpdate?: boolean;
 } = {}): NodeClient & {
   queries: QueryLog[];
   mutations: MutationLog[];
@@ -118,6 +119,12 @@ function fakeNode(opts: {
     async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
       const table = tableFor(schemaHash);
       const key = storeKey(keyHash, rangeKey);
+      if (schemaHash === "featureflowhash" && opts.failFeatureFlowUpdate) {
+        throw new FkanbanError({
+          code: "service_timeout",
+          message: "Injected feature-flow update timeout.",
+        });
+      }
       if (schemaHash === "cardhash" && keyHash === opts.failCardUpdate) {
         throw new FkanbanError({
           code: "service_timeout",
@@ -314,6 +321,29 @@ describe("pickup claim v2 LastDB adapter", () => {
     expect(result).toMatchObject({ result: "claimed", card: { slug: "second" } });
   });
 
+  test("an old todo membership row cannot claim a Card that is already doing", async () => {
+    const node = fakeNode();
+    const current = card({ slug: "stale", column: "doing", assignee: "other-worker" });
+    await seedCard(node, current, false);
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.board_cards!,
+      keyHash: current.board,
+      rangeKey: boardCardSk("todo", current.position, current.slug),
+      fields: boardCardFieldsFromCard({ ...current, column: "todo", assignee: "" }),
+    });
+
+    await expect(pickupClaimV2Result({ cfg, node, worker: "worker-a" })).resolves.toEqual({
+      result: "none",
+      dry_run: false,
+      scanned: 1,
+      skipped: [{ slug: "stale", reason: "claim conflict (current=doing)" }],
+    });
+    expect(await findCard(node, cfg, "stale")).toMatchObject({
+      column: "doing",
+      assignee: "other-worker",
+    });
+  });
+
   test("the atomic primitive rejects an empty worker", async () => {
     const node = fakeNode();
     await seedCard(node, card({ slug: "candidate" }));
@@ -353,6 +383,29 @@ describe("pickup claim v2 LastDB adapter", () => {
     expect(await findCard(node, cfg, "candidate")).toMatchObject({
       column: "todo",
       assignee: "",
+    });
+  });
+
+  test("a post-claim failure marks the claimed card for recovery", async () => {
+    const node = fakeNode({ failFeatureFlowUpdate: true });
+    const flowCfg: Config = {
+      ...cfg,
+      schemaHashes: { ...cfg.schemaHashes, feature_flow_events: "featureflowhash" },
+    };
+    await seedCard(node, card({
+      slug: "candidate",
+      north_star: "north-star-delivery",
+      milestone: "milestone-delivery",
+    }));
+
+    await expect(pickupClaimV2Result({ cfg: flowCfg, node, worker: "worker-a" })).rejects.toMatchObject({
+      code: "claim_post_commit_failed",
+    });
+    expect(await findCard(node, flowCfg, "candidate")).toMatchObject({
+      column: "doing",
+      assignee: "worker-a",
+      block_status: "needs_human",
+      block_reason: expect.stringContaining("claim post-commit failure"),
     });
   });
 

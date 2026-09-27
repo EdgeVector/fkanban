@@ -5,7 +5,7 @@
 // unblocked and pass the normal default/todo pickup policy are promoted to todo.
 
 import { FkanbanError, type NodeClient, withDurableWrites } from "../client.ts";
-import { type Config } from "../config.ts";
+import { schemaHashFor, type Config } from "../config.ts";
 import { checkpointCardCompletion } from "../brain_checkpoint.ts";
 import { recordFeatureFlowMutation } from "../flow-ledger.ts";
 import {
@@ -106,6 +106,22 @@ export class ClaimHeldError extends FkanbanError {
   }
 }
 
+/**
+ * The claim Card write landed, but a later claim side effect failed. The Card
+ * carries a durable needs_human marker before this error reaches the caller.
+ */
+export class ClaimPostCommitError extends FkanbanError {
+  constructor(opts: { slug: string; cause: unknown }) {
+    super({
+      code: "claim_post_commit_failed",
+      message:
+        `claim_post_commit_failed: Card "${opts.slug}" entered doing, but a later claim step failed. ` +
+        "The card is marked needs_human for recovery.",
+      cause: opts.cause,
+    });
+  }
+}
+
 export type AtomicClaimResult = {
   result: "claimed";
   card: Card;
@@ -113,6 +129,46 @@ export type AtomicClaimResult = {
   to: "doing";
   worker: string;
 } & MilestoneActivationOutcome;
+
+function claimFailureReason(cause: unknown): string {
+  if (cause instanceof FkanbanError) return `${cause.code}: ${cause.message}`;
+  if (cause instanceof Error) return cause.message;
+  return String(cause);
+}
+
+/**
+ * Mark an already-claimed card without replaying the index work that may have
+ * failed. The Card record is what `kanban show` reads, so this durable patch
+ * makes an orphan visible even while a membership index needs repair.
+ */
+async function markClaimPostCommitFailure(opts: {
+  cfg: Config;
+  node: NodeClient;
+  slug: string;
+  worker: string;
+  cause: unknown;
+}): Promise<boolean> {
+  try {
+    const claimed = await findCard(opts.node, opts.cfg, opts.slug);
+    if (!claimed || claimed.column !== "doing" || claimed.assignee !== opts.worker) return false;
+    await withDurableWrites(opts.node).updateRecord({
+      schemaHash: schemaHashFor("card", opts.cfg),
+      keyHash: opts.slug,
+      // The node evaluates this CAS field from the write payload. Carry the
+      // expected owner so we never mark a card a later worker reclaimed.
+      fields: {
+        assignee: opts.worker,
+        block_status: "needs_human",
+        block_reason: `claim post-commit failure: ${claimFailureReason(opts.cause)}`,
+        updated_at: nowIso(),
+      },
+      expected: { type: "value", field: "assignee", value: opts.worker },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Claim one admitted todo card without lifecycle policy or board repair.
@@ -162,14 +218,38 @@ export async function claimCard(opts: {
   };
 
   try {
-    // Durable: the claim is the pickup lease (see withDurableWrites).
+    // Durable: the claim is the pickup lease (see withDurableWrites). The
+    // point read above is the final authority check before this CAS write;
+    // BoardCards may still show an old column after a move.
     await updateCardRecord(
       { cfg: opts.cfg, node: withDurableWrites(opts.node) },
       updated,
       { type: "value", field: "column", value: expectedColumn },
       card,
     );
+
+    await recordFeatureFlowMutation({
+      cfg: opts.cfg,
+      node: opts.node,
+      previous: card,
+      next: updated,
+    });
+    const claimBoard = await ensureBoardRecord(opts.node, opts.cfg, updated.board);
+    await purgeOtherColumnRowsForSlug(
+      opts.node,
+      opts.cfg,
+      updated.board,
+      updated.slug,
+      updated.column,
+      claimBoard.columns,
+    );
   } catch (err) {
+    // A Card mutation can fail after it persists, for example while its
+    // membership or flow-ledger side effects run. First try the owner-guarded
+    // marker; its CAS proves this worker's claim actually landed.
+    if (await markClaimPostCommitFailure({ ...opts, worker, cause: err })) {
+      throw new ClaimPostCommitError({ slug: card.slug, cause: err });
+    }
     if (err instanceof FkanbanError && err.code === "cas_conflict") {
       const cause = err.cause;
       const actual = typeof cause === "object" && cause !== null
@@ -183,22 +263,6 @@ export async function claimCard(opts: {
     }
     throw err;
   }
-
-  await recordFeatureFlowMutation({
-    cfg: opts.cfg,
-    node: opts.node,
-    previous: card,
-    next: updated,
-  });
-  const claimBoard = await ensureBoardRecord(opts.node, opts.cfg, updated.board);
-  await purgeOtherColumnRowsForSlug(
-    opts.node,
-    opts.cfg,
-    updated.board,
-    updated.slug,
-    updated.column,
-    claimBoard.columns,
-  );
 
   // The milestone follows its cards: a claim is the first sign of work, so a
   // `planned` milestone becomes `active` here. Best effort — never fails the claim.
