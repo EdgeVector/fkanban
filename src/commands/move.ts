@@ -122,6 +122,23 @@ export class ClaimPostCommitError extends FkanbanError {
   }
 }
 
+/**
+ * The claim Card write landed, but fkanban could not durably mark its later
+ * failure after bounded recovery attempts. The caller must treat the card as
+ * an orphan that needs direct inspection.
+ */
+export class ClaimPostCommitMarkerError extends FkanbanError {
+  constructor(opts: { slug: string; cause: unknown }) {
+    super({
+      code: "claim_post_commit_marker_failed",
+      message:
+        `claim_post_commit_marker_failed: Card "${opts.slug}" entered doing, but fkanban could not mark ` +
+        "the post-commit failure after 3 attempts. Inspect the card before recovery.",
+      cause: opts.cause,
+    });
+  }
+}
+
 export type AtomicClaimResult = {
   result: "claimed";
   card: Card;
@@ -141,33 +158,44 @@ function claimFailureReason(cause: unknown): string {
  * failed. The Card record is what `kanban show` reads, so this durable patch
  * makes an orphan visible even while a membership index needs repair.
  */
+const CLAIM_FAILURE_MARK_ATTEMPTS = 3;
+
 async function markClaimPostCommitFailure(opts: {
   cfg: Config;
   node: NodeClient;
   slug: string;
   worker: string;
   cause: unknown;
-}): Promise<boolean> {
-  try {
-    const claimed = await findCard(opts.node, opts.cfg, opts.slug);
-    if (!claimed || claimed.column !== "doing" || claimed.assignee !== opts.worker) return false;
-    await withDurableWrites(opts.node).updateRecord({
-      schemaHash: schemaHashFor("card", opts.cfg),
-      keyHash: opts.slug,
-      // The node evaluates this CAS field from the write payload. Carry the
-      // expected owner so we never mark a card a later worker reclaimed.
-      fields: {
-        assignee: opts.worker,
-        block_status: "needs_human",
-        block_reason: `claim post-commit failure: ${claimFailureReason(opts.cause)}`,
-        updated_at: nowIso(),
-      },
-      expected: { type: "value", field: "assignee", value: opts.worker },
-    });
-    return true;
-  } catch {
-    return false;
+}): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= CLAIM_FAILURE_MARK_ATTEMPTS; attempt += 1) {
+    try {
+      const claimed = await findCard(opts.node, opts.cfg, opts.slug);
+      if (!claimed || claimed.column !== "doing" || claimed.assignee !== opts.worker) {
+        throw new FkanbanError({
+          code: "claim_post_commit_marker_verification_failed",
+          message: `Cannot verify that worker "${opts.worker}" still owns doing card "${opts.slug}".`,
+        });
+      }
+      await withDurableWrites(opts.node).updateRecord({
+        schemaHash: schemaHashFor("card", opts.cfg),
+        keyHash: opts.slug,
+        // The node evaluates this CAS field from the write payload. Carry the
+        // expected owner so we never mark a card a later worker reclaimed.
+        fields: {
+          assignee: opts.worker,
+          block_status: "needs_human",
+          block_reason: `claim post-commit failure: ${claimFailureReason(opts.cause)}`,
+          updated_at: nowIso(),
+        },
+        expected: { type: "value", field: "assignee", value: opts.worker },
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+    }
   }
+  throw new ClaimPostCommitMarkerError({ slug: opts.slug, cause: lastError });
 }
 
 /**
@@ -228,6 +256,24 @@ export async function claimCard(opts: {
       card,
     );
 
+  } catch (err) {
+    // This CAS belongs to the claim write itself. Do not attempt an orphan
+    // marker: another invocation can have won the same worker's claim first.
+    if (err instanceof FkanbanError && err.code === "cas_conflict") {
+      const cause = err.cause;
+      const actual = typeof cause === "object" && cause !== null
+        ? (cause as { actual?: unknown }).actual
+        : undefined;
+      throw new ClaimConflictError({
+        slug: card.slug,
+        expected: expectedColumn,
+        current: typeof actual === "string" ? actual : "unknown",
+      });
+    }
+    throw err;
+  }
+
+  try {
     await recordFeatureFlowMutation({
       cfg: opts.cfg,
       node: opts.node,
@@ -245,23 +291,10 @@ export async function claimCard(opts: {
     );
   } catch (err) {
     // A Card mutation can fail after it persists, for example while its
-    // membership or flow-ledger side effects run. First try the owner-guarded
-    // marker; its CAS proves this worker's claim actually landed.
-    if (await markClaimPostCommitFailure({ ...opts, worker, cause: err })) {
-      throw new ClaimPostCommitError({ slug: card.slug, cause: err });
-    }
-    if (err instanceof FkanbanError && err.code === "cas_conflict") {
-      const cause = err.cause;
-      const actual = typeof cause === "object" && cause !== null
-        ? (cause as { actual?: unknown }).actual
-        : undefined;
-      throw new ClaimConflictError({
-        slug: card.slug,
-        expected: expectedColumn,
-        current: typeof actual === "string" ? actual : "unknown",
-      });
-    }
-    throw err;
+    // membership or flow-ledger side effects run. The durable claim write
+    // completed above, so a retry of the owner-guarded marker is safe.
+    await markClaimPostCommitFailure({ ...opts, worker, cause: err });
+    throw new ClaimPostCommitError({ slug: card.slug, cause: err });
   }
 
   // The milestone follows its cards: a claim is the first sign of work, so a

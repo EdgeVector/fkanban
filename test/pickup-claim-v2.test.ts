@@ -51,6 +51,7 @@ function fakeNode(opts: {
   failColumnRead?: "todo" | "doing";
   failCardUpdate?: string;
   failFeatureFlowUpdate?: boolean;
+  failClaimMarkerUpdates?: number;
 } = {}): NodeClient & {
   queries: QueryLog[];
   mutations: MutationLog[];
@@ -59,6 +60,7 @@ function fakeNode(opts: {
   const queries: QueryLog[] = [];
   const mutations: MutationLog[] = [];
   let injectedConflict = false;
+  let remainingMarkerUpdateFailures = opts.failClaimMarkerUpdates ?? 0;
   const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
   const tableFor = (schemaHash: string) => {
     let table = store.get(schemaHash);
@@ -131,9 +133,24 @@ function fakeNode(opts: {
           message: "Injected Card update timeout.",
         });
       }
+      if (
+        schemaHash === "cardhash" &&
+        fields.block_status === "needs_human" &&
+        remainingMarkerUpdateFailures > 0
+      ) {
+        remainingMarkerUpdateFailures -= 1;
+        throw new FkanbanError({
+          code: "service_timeout",
+          message: "Injected claim marker update timeout.",
+        });
+      }
       if (!injectedConflict && schemaHash === "cardhash" && keyHash === opts.conflictSlug) {
         const previous = table.get(key);
-        if (previous) previous.fields = { ...previous.fields, column: "doing" };
+        if (previous) previous.fields = {
+          ...previous.fields,
+          column: "doing",
+          assignee: fields.assignee,
+        };
         injectedConflict = true;
       }
       checkExpected(table.get(key)?.fields ?? {}, expected);
@@ -319,6 +336,11 @@ describe("pickup claim v2 LastDB adapter", () => {
     const result = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
 
     expect(result).toMatchObject({ result: "claimed", card: { slug: "second" } });
+    expect(await findCard(node, cfg, "first")).toMatchObject({
+      column: "doing",
+      assignee: "worker-a",
+      block_status: "",
+    });
   });
 
   test("an old todo membership row cannot claim a Card that is already doing", async () => {
@@ -406,6 +428,48 @@ describe("pickup claim v2 LastDB adapter", () => {
       assignee: "worker-a",
       block_status: "needs_human",
       block_reason: expect.stringContaining("claim post-commit failure"),
+    });
+  });
+
+  test("retries the post-claim marker before reporting the recovered failure", async () => {
+    const node = fakeNode({ failFeatureFlowUpdate: true, failClaimMarkerUpdates: 2 });
+    const flowCfg: Config = {
+      ...cfg,
+      schemaHashes: { ...cfg.schemaHashes, feature_flow_events: "featureflowhash" },
+    };
+    await seedCard(node, card({
+      slug: "candidate",
+      north_star: "north-star-delivery",
+      milestone: "milestone-delivery",
+    }));
+
+    await expect(pickupClaimV2Result({ cfg: flowCfg, node, worker: "worker-a" })).rejects.toMatchObject({
+      code: "claim_post_commit_failed",
+    });
+    expect(await findCard(node, flowCfg, "candidate")).toMatchObject({
+      block_status: "needs_human",
+    });
+  });
+
+  test("surfaces an explicit error when the post-claim marker cannot be written", async () => {
+    const node = fakeNode({ failFeatureFlowUpdate: true, failClaimMarkerUpdates: 3 });
+    const flowCfg: Config = {
+      ...cfg,
+      schemaHashes: { ...cfg.schemaHashes, feature_flow_events: "featureflowhash" },
+    };
+    await seedCard(node, card({
+      slug: "candidate",
+      north_star: "north-star-delivery",
+      milestone: "milestone-delivery",
+    }));
+
+    await expect(pickupClaimV2Result({ cfg: flowCfg, node, worker: "worker-a" })).rejects.toMatchObject({
+      code: "claim_post_commit_marker_failed",
+    });
+    expect(await findCard(node, flowCfg, "candidate")).toMatchObject({
+      column: "doing",
+      assignee: "worker-a",
+      block_status: "",
     });
   });
 
