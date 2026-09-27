@@ -5,7 +5,7 @@ import { boardCardFieldsFromCard, boardCardsWriteHashes } from "./board-cards.ts
 
 // A git-describe count is not a compatibility promise. Expand only after the
 // cross-schema race/durability proof passes for that exact node build.
-export const GUARDED_CARD_BATCH_BUILDS = ["0.23.3-2328-g369ad6cd6"] as const;
+export const GUARDED_CARD_BATCH_BUILDS = ["0.23.3-2328-g369ad6cd6", "0.23.3-2375-ga7bac36f1"] as const;
 
 /** One update-only atomic batch. No secondary publication or erasure follows it. */
 export async function guardedCardUpdate(
