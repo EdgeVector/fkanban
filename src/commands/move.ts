@@ -122,23 +122,6 @@ export class ClaimPostCommitError extends FkanbanError {
   }
 }
 
-/**
- * The claim Card write landed, but fkanban could not durably mark its later
- * failure after bounded recovery attempts. The caller must treat the card as
- * an orphan that needs direct inspection.
- */
-export class ClaimPostCommitMarkerError extends FkanbanError {
-  constructor(opts: { slug: string; cause: unknown }) {
-    super({
-      code: "claim_post_commit_marker_failed",
-      message:
-        `claim_post_commit_marker_failed: Card "${opts.slug}" entered doing, but fkanban could not mark ` +
-        "the post-commit failure after 3 attempts. Inspect the card before recovery.",
-      cause: opts.cause,
-    });
-  }
-}
-
 export type AtomicClaimResult = {
   result: "claimed";
   card: Card;
@@ -160,6 +143,10 @@ function claimFailureReason(cause: unknown): string {
  */
 const CLAIM_FAILURE_MARK_ATTEMPTS = 3;
 
+function claimRecoveryPendingReason(worker: string): string {
+  return `claim recovery pending for worker "${worker}": do not work this card until the claim completes`;
+}
+
 async function markClaimPostCommitFailure(opts: {
   cfg: Config;
   node: NodeClient;
@@ -167,7 +154,9 @@ async function markClaimPostCommitFailure(opts: {
   worker: string;
   cause: unknown;
 }): Promise<void> {
-  let lastError: unknown;
+  // The original CAS claim already stored a needs_human recovery hold. These
+  // writes add the cause when the node is available, but failure to enrich the
+  // hold must never erase the durable signal that an operator must inspect it.
   for (let attempt = 1; attempt <= CLAIM_FAILURE_MARK_ATTEMPTS; attempt += 1) {
     try {
       const claimed = await findCard(opts.node, opts.cfg, opts.slug);
@@ -191,11 +180,32 @@ async function markClaimPostCommitFailure(opts: {
         expected: { type: "value", field: "assignee", value: opts.worker },
       });
       return;
-    } catch (err) {
-      lastError = err;
+    } catch {
+      // The initial atomic hold remains the fallback marker.
     }
   }
-  throw new ClaimPostCommitMarkerError({ slug: opts.slug, cause: lastError });
+}
+
+async function clearClaimRecoveryHold(opts: {
+  cfg: Config;
+  node: NodeClient;
+  slug: string;
+  worker: string;
+}): Promise<void> {
+  // This is a Card-only guarded patch. Do not use updateCardRecord here: its
+  // membership writes can fail after the Card hold is cleared and recreate the
+  // same orphan window this protocol closes.
+  await withDurableWrites(opts.node).updateRecord({
+    schemaHash: schemaHashFor("card", opts.cfg),
+    keyHash: opts.slug,
+    fields: {
+      assignee: opts.worker,
+      block_status: "none",
+      block_reason: "",
+      updated_at: nowIso(),
+    },
+    expected: { type: "value", field: "assignee", value: opts.worker },
+  });
 }
 
 /**
@@ -239,6 +249,11 @@ export async function claimCard(opts: {
     assignee: worker,
     updated_at: claimedAt,
     done_at: "",
+    // Store the recovery signal in the same durable CAS mutation as the
+    // column and owner. If any post-claim work fails, even a total failure of
+    // the later failure-marker writes leaves this Card visibly held.
+    block_status: "needs_human",
+    block_reason: claimRecoveryPendingReason(worker),
     // KEEPS an earlier stamp. A claim is not proof of fresh work: pickup claims
     // a card back after every watch re-dispatch, and that is exactly the case
     // the stall clock must see through.
@@ -297,13 +312,22 @@ export async function claimCard(opts: {
     throw new ClaimPostCommitError({ slug: card.slug, cause: err });
   }
 
+  try {
+    await clearClaimRecoveryHold({ ...opts, worker });
+  } catch (err) {
+    // The initial CAS claim leaves needs_human in place until this final,
+    // Card-only acknowledgement succeeds. Therefore an acknowledgement error
+    // cannot return a card that appears healthy.
+    throw new ClaimPostCommitError({ slug: card.slug, cause: err });
+  }
+
   // The milestone follows its cards: a claim is the first sign of work, so a
   // `planned` milestone becomes `active` here. Best effort — never fails the claim.
   const activation = await activatePlannedMilestoneForDoing(opts, updated);
 
   return {
     result: "claimed",
-    card: updated,
+    card: { ...updated, block_status: "none", block_reason: "" },
     from: "todo",
     to: "doing",
     worker,

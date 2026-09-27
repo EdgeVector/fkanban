@@ -136,6 +136,7 @@ function fakeNode(opts: {
       if (
         schemaHash === "cardhash" &&
         fields.block_status === "needs_human" &&
+        !("column" in fields) &&
         remainingMarkerUpdateFailures > 0
       ) {
         remainingMarkerUpdateFailures -= 1;
@@ -258,11 +259,21 @@ describe("pickup claim v2 LastDB adapter", () => {
       card: { slug: "candidate", column: "doing", assignee: "worker-a" },
     });
     const cardWrites = node.mutations.filter((mutation) => mutation.schemaHash === "cardhash");
-    expect(cardWrites).toHaveLength(1);
+    expect(cardWrites).toHaveLength(2);
     expect(cardWrites[0]).toMatchObject({
       keyHash: "candidate",
-      fields: { column: "doing", assignee: "worker-a" },
+      fields: {
+        column: "doing",
+        assignee: "worker-a",
+        block_status: "needs_human",
+        block_reason: expect.stringContaining("claim recovery pending"),
+      },
       expected: { type: "value", field: "column", value: "todo" },
+    });
+    expect(cardWrites[1]).toMatchObject({
+      keyHash: "candidate",
+      fields: { assignee: "worker-a", block_status: "none", block_reason: "" },
+      expected: { type: "value", field: "assignee", value: "worker-a" },
     });
     expect(await findCard(node, cfg, "candidate")).toMatchObject({
       column: "doing",
@@ -451,7 +462,7 @@ describe("pickup claim v2 LastDB adapter", () => {
     });
   });
 
-  test("surfaces an explicit error when the post-claim marker cannot be written", async () => {
+  test("keeps the atomic recovery hold when all post-claim marker writes fail", async () => {
     const node = fakeNode({ failFeatureFlowUpdate: true, failClaimMarkerUpdates: 3 });
     const flowCfg: Config = {
       ...cfg,
@@ -464,12 +475,13 @@ describe("pickup claim v2 LastDB adapter", () => {
     }));
 
     await expect(pickupClaimV2Result({ cfg: flowCfg, node, worker: "worker-a" })).rejects.toMatchObject({
-      code: "claim_post_commit_marker_failed",
+      code: "claim_post_commit_failed",
     });
     expect(await findCard(node, flowCfg, "candidate")).toMatchObject({
       column: "doing",
       assignee: "worker-a",
-      block_status: "",
+      block_status: "needs_human",
+      block_reason: expect.stringContaining("claim recovery pending"),
     });
   });
 
