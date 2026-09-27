@@ -26,8 +26,9 @@ and each configured BoardCards write. Every operation requests durable mode.
 All shared field values agree. The Card body is absent from the payload, so a
 concurrent execution marker or progress line survives.
 
-The client requires the exact proved node build `0.23.3-2328-g369ad6cd6` and a
-successful handshake. It checks declared payload fields and key layouts before
+The client requires one of the proved node builds
+(`0.23.3-2328-g369ad6cd6`, `0.23.3-2375-ga7bac36f1`) and a successful
+handshake. It checks declared payload fields and key layouts before
 any mutation. The response must confirm durable acknowledgement. Unsupported
 builds, incompatible schemas, conflicts, and uncertain acknowledgement fail
 without an unguarded retry. A failed acknowledgement can still mean the batch
@@ -80,3 +81,24 @@ Run `scripts/probe-recovery-batch.ts` with an explicit synthetic configuration a
 Run it again with `--verify-restart` after a restart of that synthetic node only.
 Keep the evidence file between invocations. Never use the default primary-clone
 helper or a primary socket for this proof.
+
+## Evidence, 2026-09-27
+
+Build `0.23.3-2328-g369ad6cd6` aged out of the fleet. Tom's primary node runs
+build `0.23.3-2375-ga7bac36f1`, 45 commits ahead, and every guarded batch call
+against it failed with `guarded_batch_unsupported` — the allowlist had never
+been re-proved for a later build. This blocked Loom's PARK retry path on a
+live card and stalled the `lastgit-era-3-primary-migration` North Star.
+
+Re-ran the full 2026-09-25 recipe against build `0.23.3-2375-ga7bac36f1` on a
+fresh synthetic node (a new `--data-dir`, the primary's exact `lastdbd`
+binary, no clone, no primary socket). The proof passed unchanged: 12 cases,
+10 persisted Card states, at least one batch committed before a concurrent
+foreign takeover, all foreign owner/tags/body/column/hold values survived
+takeover, the one foreign-owner rejection left its destination absent. A
+SIGKILL and restart of that same synthetic node, then `--verify-restart`,
+confirmed all 10 persisted states unchanged. `bun test` passed 2301 tests
+(0 failures) and `bun run typecheck` passed. Added the build to
+`GUARDED_CARD_BATCH_BUILDS` alongside the 2026-09-25 entry rather than
+replacing it, since the comment on that constant only requires each listed
+build to carry its own proof, not that the list stay a single element.
