@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LastGit merge gate for fkanban (public OSS dual-home).
+# Merge gate for fkanban (GitHub `ci-required`, job `test`; also runnable locally).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 shopt -s nullglob 2>/dev/null || true
@@ -30,7 +30,10 @@ bun run typecheck
 echo "== artifact build =="
 bun run build
 
+echo "== artifact smoke =="
+bash scripts/artifact-smoke.sh
+
 echo "== tests =="
 bun test
 
-echo "lastgit ci gate PASSED"
+echo "ci gate PASSED"

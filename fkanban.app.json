@@ -13,8 +13,8 @@
       "fkanban-mcp",
       "kanban-host-track-refresh"
     ],
-    "gate": "lastgit",
-    "gate_main": "lastdb:///fkanban#main",
+    "gate": "github",
+    "gate_main": "https://github.com/EdgeVector/fkanban.git#main",
     "artifact_app": "fkanban",
     "artifact_channel": "stable",
     "artifact_root": "$HOME/.lastgit/artifacts",
@@ -37,6 +37,6 @@
         "target": "$HOME/.local/bin/fkanban-mcp"
       }
     ],
-    "notes": "Verified LastGit artifact install; PATH links point into the immutable Host Track artifact bundle."
+    "notes": "Verified artifact install from the GitHub `publish` job; PATH links point into the immutable Host Track artifact bundle."
   }
 }
