@@ -84,16 +84,15 @@ bun run src/cli.ts init --node-socket-path /tmp/fkanban-test.sock \
 
 ## Review workflow
 
-This repo is homed in LastGit. GitHub is a public read-only mirror for
-clone/browse only; do not open or merge GitHub PRs for repo policy changes.
-Use LastGit CRs against `lastdb:///fkanban` and the committed `.lastgit/ci.sh`
-gate.
+This repo is homed on GitHub (`EdgeVector/fkanban`, since 2026-09-30). The gate
+of record is the `ci-required` check (`.github/workflows/ci-required.yml`,
+which runs the committed `.lastgit/ci.sh`). LastGit and Forgejo copies are
+frozen; do not push there.
 
 ```bash
-git remote add lastgit lastdb:///fkanban   # once per checkout
-git push lastgit HEAD
-lastgit cr create fkanban --head <branch> --base main \
-  --auto-merge --require-status ci-required
+git push origin HEAD:refs/heads/<branch>
+gh pr create --base main --head <branch> --title ... --body-file body.md
+gh pr merge <n> --squash --auto --delete-branch
 ```
 
 Keep PRs atomic. README has the full command catalog.

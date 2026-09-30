@@ -6,9 +6,9 @@ of the LastDB/FoldDB node (`/api/mutation` + `/api/query`) using Mini's
 Schema Service-backed app-schema declaration for its private-visibility record
 shapes.
 
-Development source of truth is LastGit `lastdb:///fkanban`; GitHub
-`EdgeVector/fkanban` is a public read-only mirror for clone/browse. See
-`.lastgit/README.md` before opening review artifacts.
+Development source of truth is GitHub `EdgeVector/fkanban`: PRs, the
+`ci-required` check and auto-merge run there. See `.lastgit/README.md` for the
+gate and the host-track artifact path.
 
 Schemas, registered under the `fkanban/*` app namespace (so they never collide
 with `fbrain/*` or any other app on a shared daemon):

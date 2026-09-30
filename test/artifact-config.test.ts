@@ -4,13 +4,13 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 
-describe("LastGit artifact producer config", () => {
+describe("host-track artifact producer config", () => {
   test("publishes the compiled F-Kanban artifact bundle", () => {
     const config = JSON.parse(readFileSync(resolve(root, ".lastgit/artifacts.json"), "utf8")) as {
-      artifacts?: Array<{ app?: string; paths?: string[] }>;
+      artifacts?: Array<{ app?: string; platform?: string; paths?: string[] }>;
     };
 
-    expect(config.artifacts).toEqual([{ app: "fkanban", paths: ["dist"] }]);
+    expect(config.artifacts).toEqual([{ app: "fkanban", platform: "darwin-arm64", paths: ["dist"] }]);
   });
 
   test("build script creates executable CLI and MCP aliases under dist", () => {
@@ -25,6 +25,15 @@ describe("LastGit artifact producer config", () => {
       expect(script).toContain(`dist/${name}`);
     }
     expect(statSync(resolve(root, "scripts/build-artifact.sh")).mode & 0o111).not.toBe(0);
+  });
+
+  test("GitHub ci-required workflow gates and publishes the artifact", () => {
+    const wf = readFileSync(resolve(root, ".github/workflows/ci-required.yml"), "utf8");
+    expect(wf).toContain("name: ci-required");
+    expect(wf).toContain("bash .lastgit/ci.sh");
+    expect(wf).toContain("EdgeVector/last-stack/.github/workflows/host-track-artifact.yml@main");
+    expect(wf).toContain("scripts/artifact-smoke.sh");
+    expect(statSync(resolve(root, "scripts/artifact-smoke.sh")).mode & 0o111).not.toBe(0);
   });
 
   test("host-track metadata describes verified artifact installation", () => {
