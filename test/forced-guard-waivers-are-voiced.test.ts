@@ -37,7 +37,10 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { FkanbanError, type NodeClient } from "../src/client.ts";
 import { fakeNode } from "./fake-node.ts";
@@ -56,7 +59,42 @@ import {
 } from "../src/record.ts";
 import { DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { addCmd } from "../src/commands/add.ts";
-import { assertLifecycleMoveAllowed } from "../src/pipeline_status.ts";
+import {
+  CI_STATUS_SCHEMA,
+  CR_SCHEMA,
+  REF_SCHEMA,
+  assertLifecycleMoveAllowed,
+  clearLastgitSchemaHashCache,
+} from "../src/pipeline_status.ts";
+
+// Schema resolution reads the lastgit schema map. Without an explicit map the
+// gated-card read depends on the host's ~/.lastgit/schema-map.json, so this
+// file failed on a clean CI runner. Pin an identity map.
+let schemaMapDir = "";
+const prevSchemaMapEnv = process.env.LASTGIT_SCHEMA_MAP;
+beforeEach(() => {
+  clearLastgitSchemaHashCache();
+  schemaMapDir = mkdtempSync(join(tmpdir(), "kanban-forced-waiver-map-"));
+  const mapPath = join(schemaMapDir, "schema-map.json");
+  writeFileSync(
+    mapPath,
+    JSON.stringify({
+      schemas: {
+        LastgitCiStatus: CI_STATUS_SCHEMA,
+        LastgitRef: REF_SCHEMA,
+        LastgitChangeRequest: CR_SCHEMA,
+      },
+    }),
+  );
+  process.env.LASTGIT_SCHEMA_MAP = mapPath;
+});
+afterEach(() => {
+  clearLastgitSchemaHashCache();
+  if (prevSchemaMapEnv === undefined) delete process.env.LASTGIT_SCHEMA_MAP;
+  else process.env.LASTGIT_SCHEMA_MAP = prevSchemaMapEnv;
+  if (schemaMapDir) rmSync(schemaMapDir, { recursive: true, force: true });
+  schemaMapDir = "";
+});
 
 /** Capture stderr warnings for the duration of one action. */
 async function captureWarnings<T>(fn: () => T | Promise<T>): Promise<{ result: T; warnings: string[] }> {
