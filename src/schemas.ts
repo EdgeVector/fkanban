@@ -539,6 +539,101 @@ export const milestoneCardsSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * Packed list-summary expansion. Phase 1 only.
+ *
+ * Same `board` + `sk` as BoardCards, with the list payload in one field `s`.
+ * The version lives inside that JSON. There is no separate `v` field and no
+ * `body`. A second schema uses hash `milestone` so a protein bind can fold `s`
+ * without a write onto the live MilestoneCards schema. CardSummary is a point
+ * read by slug. It is not the protein pair: it shares only `s`.
+ *
+ * `descriptive_name` stays free of BoardCards / hashrange vocabulary. Mini's
+ * declare resolver embeds that name and reuses the nearest catalog schema
+ * (the 2026-07-23 BoardMilestones collapse).
+ *
+ * These schemas are NOT in `EXTRA_SCHEMAS`. `kanban init` must not register
+ * them, and list / pickup / move / write must not read them, until a later
+ * card says the probe is green.
+ */
+export const PACKED_SUMMARY_S_DESCRIPTION =
+  "packed list summary JSON; version lives inside the JSON; body is absent";
+
+export const PACKED_SUMMARY_SHARED_FIELD_DESCRIPTIONS: Record<string, string> = {
+  board: CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS.board!,
+  sk: CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS.sk!,
+  milestone: CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS.milestone!,
+  s: PACKED_SUMMARY_S_DESCRIPTION,
+};
+
+export const BOARD_CARDS_PACKED_SUMMARY_FIELDS = ["board", "sk", "milestone", "s"] as const;
+export const MILESTONE_CARDS_PACKED_SUMMARY_FIELDS = ["milestone", "sk", "board", "s"] as const;
+export const CARD_SUMMARY_FIELDS = ["slug", "s"] as const;
+
+export const boardCardsPackedSummarySchema: AddSchemaRequest = {
+  schema: {
+    name: "BoardCardsPackedSummary",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "FkanbanPackedListSummaryByBoardV1",
+    purpose_statement:
+      "Same-key packed list summary for one board partition; version lives inside field s and body is absent",
+    schema_type: "HashRange",
+    key: { hash_field: "board", range_field: "sk" },
+    fields: [...BOARD_CARDS_PACKED_SUMMARY_FIELDS],
+    field_types: defaultStringFieldTypes(BOARD_CARDS_PACKED_SUMMARY_FIELDS, []),
+    field_descriptions: { ...PACKED_SUMMARY_SHARED_FIELD_DESCRIPTIONS },
+    field_classifications: {},
+    field_data_classifications: generalDataClassifications(BOARD_CARDS_PACKED_SUMMARY_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
+export const milestoneCardsPackedSummarySchema: AddSchemaRequest = {
+  schema: {
+    name: "MilestoneCardsPackedSummary",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "FkanbanPackedListSummaryByMilestoneV1",
+    purpose_statement:
+      "Protein sibling of the board packed list summary; hash is milestone and field s matches the board schema",
+    schema_type: "HashRange",
+    key: { hash_field: "milestone", range_field: "sk" },
+    fields: [...MILESTONE_CARDS_PACKED_SUMMARY_FIELDS],
+    field_types: defaultStringFieldTypes(MILESTONE_CARDS_PACKED_SUMMARY_FIELDS, []),
+    field_descriptions: { ...PACKED_SUMMARY_SHARED_FIELD_DESCRIPTIONS },
+    field_classifications: {},
+    field_data_classifications: generalDataClassifications(MILESTONE_CARDS_PACKED_SUMMARY_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
+export const cardSummarySchema: AddSchemaRequest = {
+  schema: {
+    name: "CardSummary",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "FkanbanPackedListSummaryBySlugV1",
+    purpose_statement:
+      "Point-get packed list summary by card slug; not the protein sibling of the board packed summary",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [...CARD_SUMMARY_FIELDS],
+    field_types: defaultStringFieldTypes(CARD_SUMMARY_FIELDS, []),
+    field_descriptions: {
+      slug: CARD_THIN_SHARED_FIELD_DESCRIPTIONS.slug!,
+      s: PACKED_SUMMARY_S_DESCRIPTION,
+    },
+    field_classifications: {},
+    field_data_classifications: generalDataClassifications(CARD_SUMMARY_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
+/** Expansion only. Do not concatenate into EXTRA_SCHEMAS or allPinnedSchemas(). */
+export const SUMMARY_EXPANSION_SCHEMAS: Array<{ key: string; schema: AddSchemaRequest }> = [
+  { key: "board_cards_packed_summary", schema: boardCardsPackedSummarySchema },
+  { key: "milestone_cards_packed_summary", schema: milestoneCardsPackedSummarySchema },
+  { key: "card_summary", schema: cardSummarySchema },
+];
+
 // Keyed feature-delivery history: partition = milestone, range = card event.
 // One milestone read answers its complete flow report. One exact range key
 // makes each transition idempotent. No board or Card enumeration is needed.

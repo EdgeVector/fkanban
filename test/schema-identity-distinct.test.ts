@@ -8,6 +8,9 @@ import {
   boardCardsSchema,
   boardMilestonesSchema,
   milestoneCardsSchema,
+  boardCardsPackedSummarySchema,
+  milestoneCardsPackedSummarySchema,
+  cardSummarySchema,
   CARD_MEMBERSHIP_SHARED_FIELD_DESCRIPTIONS,
   type AddSchemaRequest,
 } from "../src/schemas.ts";
@@ -41,6 +44,9 @@ const ALL: Array<[string, AddSchemaRequest]> = [
   ["board_cards", boardCardsSchema],
   ["board_milestones", boardMilestonesSchema],
   ["milestone_cards", milestoneCardsSchema],
+  ["board_cards_packed_summary", boardCardsPackedSummarySchema],
+  ["milestone_cards_packed_summary", milestoneCardsPackedSummarySchema],
+  ["card_summary", cardSummarySchema],
 ];
 
 describe("fkanban schema identity distinctness", () => {
