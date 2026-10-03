@@ -80,19 +80,58 @@ export async function sweepBoardCardJanitor(node: NodeClient): Promise<number> {
           })),
         );
       } catch {
-        for (const t of chunk) {
-          try {
-            await node.deleteRecord({
-              schemaHash: t.schemaHash,
-              keyHash: t.board,
-              rangeKey: t.sk,
-            });
-          } catch {
-            // best-effort: stale sk may already be gone
-          }
-        }
+        for (const t of chunk) await deleteOneWithRetry(node, t);
       }
     }
   }
   return attempted;
+}
+
+/**
+ * Pauses before each re-send of a failed per-row delete.
+ *
+ * This catch used to be empty ("best-effort: stale sk may already be gone").
+ * A delete of an absent row succeeds, so a THROWN delete is not that case — on
+ * the live primary it was a `service_timeout` under load, and the swallowed
+ * failure left the source row in its old column for good: the queue is
+ * process-local, so nothing re-tried it after the CLI exited. Measured
+ * 2026-10-02T23:20Z: a claim moved `logical-resident-set-point-admission` to
+ * doing while `kanban list --column todo` kept listing it (papercut
+ * papercut-fkanban-janitor-swallows-boardcards-delete-failure-20261003).
+ *
+ * A delete is idempotent, so re-sending one after a deadline expiry cannot
+ * double-apply — unlike the generic write path in client.ts, which must not
+ * re-send a mutation it cannot prove was refused.
+ */
+let janitorRetryDelaysMs: readonly number[] = [500, 2000];
+
+export function setBoardCardJanitorRetryDelaysForTests(delays: readonly number[]): void {
+  janitorRetryDelaysMs = delays;
+}
+
+async function deleteOneWithRetry(node: NodeClient, t: BoardCardJanitorTarget): Promise<boolean> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await node.deleteRecord({
+        schemaHash: t.schemaHash,
+        keyHash: t.board,
+        rangeKey: t.sk,
+      });
+      return true;
+    } catch (err) {
+      const wait = janitorRetryDelaysMs[attempt];
+      if (wait === undefined) {
+        // Loud, not silent: the row stays listed in its old column until
+        // `kanban groom board-cards-heal` reaps it, and an operator reading
+        // a wrong list needs to know why.
+        console.error(
+          `kanban: BoardCards delete failed for ${t.board} ${t.sk} after ` +
+            `${attempt + 1} attempt(s): ${err instanceof Error ? err.message : String(err)}. ` +
+            "The row stays listed until `kanban groom board-cards-heal` runs.",
+        );
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
 }

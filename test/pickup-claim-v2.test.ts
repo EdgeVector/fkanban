@@ -5,7 +5,8 @@ import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, t
 import type { Config } from "../src/config.ts";
 import { pickupClaimV2Result } from "../src/commands/pickup_claim_v2.ts";
 import { claimCard } from "../src/commands/move.ts";
-import { cardToFields, emptyStructuredFields, findCard, type Card } from "../src/record.ts";
+import { cardToFields, emptyStructuredFields, findCard, setMembershipRetryDelaysForTests, type Card } from "../src/record.ts";
+import { setBoardCardJanitorRetryDelaysForTests } from "../src/board-card-janitor.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -52,7 +53,11 @@ function fakeNode(opts: {
   failCardUpdate?: string;
   failFeatureFlowUpdate?: boolean;
   failClaimMarkerUpdates?: number;
+  /** Throw service_timeout on this many row deletes, then succeed. */
+  failDeletes?: number;
 } = {}): NodeClient & {
+  /** Throw service_timeout on the next `n` BoardCards row writes (armed after seeding). */
+  failNextBoardCardsWrites(n: number): void;
   queries: QueryLog[];
   mutations: MutationLog[];
 } {
@@ -61,6 +66,13 @@ function fakeNode(opts: {
   const mutations: MutationLog[] = [];
   let injectedConflict = false;
   let remainingMarkerUpdateFailures = opts.failClaimMarkerUpdates ?? 0;
+  let remainingBoardCardsWriteFailures = 0;
+  let remainingDeleteFailures = opts.failDeletes ?? 0;
+  const maybeFailBoardCardsWrite = (schemaHash: string) => {
+    if (schemaHash !== "boardcardshash" || remainingBoardCardsWriteFailures <= 0) return;
+    remainingBoardCardsWriteFailures -= 1;
+    throw new FkanbanError({ code: "service_timeout", message: "Injected BoardCards write timeout." });
+  };
   const storeKey = (keyHash: string, rangeKey?: string | null) => `${keyHash}\0${rangeKey ?? ""}`;
   const tableFor = (schemaHash: string) => {
     let table = store.get(schemaHash);
@@ -108,17 +120,22 @@ function fakeNode(opts: {
     userHash: cfg.userHash,
     queries,
     mutations,
+    failNextBoardCardsWrites(n: number) {
+      remainingBoardCardsWriteFailures = n;
+    },
     autoIdentity: notImplemented("autoIdentity"),
     bootstrap: notImplemented("bootstrap"),
     loadSchemas: notImplemented("loadSchemas"),
     listSchemas: notImplemented("listSchemas"),
     async createRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
+      maybeFailBoardCardsWrite(schemaHash);
       const table = tableFor(schemaHash);
       const key = storeKey(keyHash, rangeKey);
       checkExpected(table.get(key)?.fields ?? {}, expected);
       table.set(key, { keyHash, rangeKey: rangeKey ?? null, fields });
     },
     async updateRecord({ schemaHash, fields, keyHash, rangeKey, expected }) {
+      maybeFailBoardCardsWrite(schemaHash);
       const table = tableFor(schemaHash);
       const key = storeKey(keyHash, rangeKey);
       if (schemaHash === "featureflowhash" && opts.failFeatureFlowUpdate) {
@@ -163,6 +180,10 @@ function fakeNode(opts: {
       });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      if (remainingDeleteFailures > 0) {
+        remainingDeleteFailures -= 1;
+        throw new FkanbanError({ code: "service_timeout", message: "Injected delete timeout." });
+      }
       tableFor(schemaHash).delete(storeKey(keyHash, rangeKey));
     },
     async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
@@ -519,5 +540,107 @@ describe("pickup claim v2 LastDB adapter", () => {
     const winners = results.flatMap((result) => result.result === "claimed" ? [result.card.slug] : []);
     expect(winners.sort()).toEqual(["first", "second"]);
     expect(new Set(winners).size).toBe(2);
+  });
+
+  test("a phantom doing row does not block an overlapping todo card, and is retired", async () => {
+    const node = fakeNode();
+    // `shipped` is done on its Card, but its doing row was never retired.
+    await seedCard(node, card({ slug: "shipped", column: "done", surfaces: ["src/a.ts"] }), false);
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.board_cards!,
+      keyHash: "default",
+      rangeKey: boardCardSk("doing", "5", "shipped"),
+      fields: boardCardFieldsFromCard(card({ slug: "shipped", column: "doing", position: "5", surfaces: ["src/a.ts"] })),
+    });
+    await seedCard(node, card({ slug: "next", surfaces: ["src/a.ts"] }));
+
+    const result = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
+
+    expect(result).toMatchObject({ result: "claimed", card: { slug: "next" } });
+    const doingRows = await node.queryAll({
+      schemaHash: "boardcardshash",
+      fields: ["slug"],
+      filter: { HashRangePrefix: { hash: "default", prefix: "doing#" } } as unknown as QueryFilter,
+    });
+    expect(doingRows.results.map((row) => row.fields.slug)).toEqual(["next"]);
+  });
+
+  test("a live doing card still blocks an overlapping todo card", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "busy", column: "doing", position: "5", surfaces: ["src/a.ts"] }));
+    await seedCard(node, card({ slug: "next", surfaces: ["src/a.ts"] }));
+
+    const result = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
+
+    expect(result.result).toBe("none");
+  });
+
+  test("a stale todo row for a card already in doing is retired after the conflict", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "gone", column: "doing", position: "9", surfaces: ["src/z.ts"] }), false);
+    await node.createRecord({
+      schemaHash: cfg.schemaHashes.board_cards!,
+      keyHash: "default",
+      rangeKey: boardCardSk("todo", "1", "gone"),
+      fields: boardCardFieldsFromCard(card({ slug: "gone", column: "todo", position: "1", surfaces: ["src/z.ts"] })),
+    });
+
+    const result = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
+
+    expect(result.result).toBe("none");
+    const todoRows = await node.queryAll({
+      schemaHash: "boardcardshash",
+      fields: ["slug"],
+      filter: { HashRangePrefix: { hash: "default", prefix: "todo#" } } as unknown as QueryFilter,
+    });
+    expect(todoRows.results).toHaveLength(0);
+  });
+
+  test("a claim survives a BoardCards write timeout and leaves the card listed in doing", async () => {
+    setMembershipRetryDelaysForTests([0, 0]);
+    try {
+      const node = fakeNode();
+      await seedCard(node, card({ slug: "candidate" }));
+      // Two: upsertBoardCardOnHash already falls back from update to create once.
+      node.failNextBoardCardsWrites(2);
+
+      const result = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
+
+      expect(result).toMatchObject({ result: "claimed", card: { slug: "candidate" } });
+      const doingRows = await node.queryAll({
+        schemaHash: "boardcardshash",
+        fields: ["slug"],
+        filter: { HashRangePrefix: { hash: "default", prefix: "doing#" } } as unknown as QueryFilter,
+      });
+      expect(doingRows.results.map((row) => row.fields.slug)).toEqual(["candidate"]);
+      const todoRows = await node.queryAll({
+        schemaHash: "boardcardshash",
+        fields: ["slug"],
+        filter: { HashRangePrefix: { hash: "default", prefix: "todo#" } } as unknown as QueryFilter,
+      });
+      expect(todoRows.results).toHaveLength(0);
+    } finally {
+      setMembershipRetryDelaysForTests([1000, 3000]);
+    }
+  });
+
+  test("a delete timeout on the source row is re-sent, so the todo row does not survive the claim", async () => {
+    setBoardCardJanitorRetryDelaysForTests([0, 0]);
+    try {
+      const node = fakeNode({ failDeletes: 2 });
+      await seedCard(node, card({ slug: "candidate" }));
+
+      const result = await pickupClaimV2Result({ cfg, node, worker: "worker-a" });
+
+      expect(result).toMatchObject({ result: "claimed" });
+      const todoRows = await node.queryAll({
+        schemaHash: "boardcardshash",
+        fields: ["slug"],
+        filter: { HashRangePrefix: { hash: "default", prefix: "todo#" } } as unknown as QueryFilter,
+      });
+      expect(todoRows.results).toHaveLength(0);
+    } finally {
+      setBoardCardJanitorRetryDelaysForTests([500, 2000]);
+    }
   });
 });
