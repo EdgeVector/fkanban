@@ -5554,11 +5554,48 @@ async function writeCardMembership(
   previous: Card | null,
   writeOpts: BoardCardWriteOptions = {},
 ): Promise<void> {
-  await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
-  await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
-  // Janitor is process-local. Sweep in this same request so the previous SK
-  // delete is not lost when the CLI exits.
-  await sweepBoardCardJanitor(opts.node);
+  // Every caller has ALREADY written the Card record, so a failure from here
+  // on leaves the card's column (Card, read by `show` and the claim) and its
+  // board row (BoardCards, read by `list` and pickup) disagreeing. That is
+  // the "card in todo that pickup cannot see" state measured 2026-10-02T23:14Z
+  // (papercut-kanban-live-todo-card-absent-from-pickup-partition-20260924):
+  // one service_timeout here and the card sat off the queue until a manual
+  // backlog->todo bounce rewrote the row.
+  //
+  // So re-send the membership step on backpressure. Each part is an upsert to
+  // an exact key or a delete, so a re-send after a deadline expiry cannot
+  // double-apply — the reason client.ts refuses to re-send a generic write
+  // does not hold here. Any other error, and the last backpressure error,
+  // still propagates.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
+      await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
+      // Janitor is process-local. Sweep in this same request so the previous SK
+      // delete is not lost when the CLI exits.
+      await sweepBoardCardJanitor(opts.node);
+      return;
+    } catch (err) {
+      const wait = membershipRetryDelaysMs[attempt];
+      if (wait === undefined || !isMembershipBackpressure(err)) throw err;
+      console.error(
+        `kanban: board row write for "${card.slug}" hit node backpressure ` +
+          `(${(err as FkanbanError).code}); retry ${attempt + 1}/${membershipRetryDelaysMs.length} in ${wait}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
+let membershipRetryDelaysMs: readonly number[] = [1000, 3000];
+
+export function setMembershipRetryDelaysForTests(delays: readonly number[]): void {
+  membershipRetryDelaysMs = delays;
+}
+
+function isMembershipBackpressure(err: unknown): boolean {
+  return err instanceof FkanbanError &&
+    (err.code === "service_timeout" || err.code === "node_overloaded");
 }
 
 export async function updateCardRecord(

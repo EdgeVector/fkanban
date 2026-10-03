@@ -15,6 +15,13 @@ import {
   type Card,
 } from "../record.ts";
 import { claimCard, ClaimConflictError, ClaimHeldError } from "./move.ts";
+import {
+  boardCardSk,
+  boardCardsHash,
+  enqueueBoardCardJanitor,
+  sweepBoardCardJanitor,
+} from "../board-cards.ts";
+import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "../concurrency.ts";
 
 // `PICKUP_V2_ELIGIBILITY_FIELDS` is spread in, not retyped: the projection and
 // the predicate that reads it must not drift. `test/pickup-v2-eligibility.test.ts`
@@ -34,6 +41,8 @@ export const TODO_FIELDS = [
 const DOING_FIELDS = [
   "slug",
   "column",
+  // Needed to address a phantom doing row for deletion (see verifyDoingRows).
+  "position",
   "repo",
   "surfaces",
 ] as const;
@@ -118,7 +127,7 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
     board,
     { projection: [...TODO_FIELDS] },
   );
-  const doing = await listCardsByColumn(
+  const doingRows = await listCardsByColumn(
     opts.node,
     opts.cfg,
     "doing",
@@ -126,6 +135,7 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
     board,
     { projection: [...DOING_FIELDS] },
   );
+  const doing = await verifyDoingRows(opts, board, doingRows);
   const knownStatuses = await listDependencyStatusesForCards(
     opts.node,
     opts.cfg,
@@ -190,10 +200,84 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
       }
       if (!(err instanceof ClaimConflictError)) throw err;
       droppedAtClaim.push({ slug: candidate.slug, reason: `claim conflict (current=${err.current})` });
+      // The claim point-read says the card left todo, so its todo row is stale.
+      // Retire it now; otherwise every later pickup re-reads it, re-tries the
+      // claim, and conflicts again until a heal runs.
+      if (err.current !== "todo" && err.current !== "unknown") {
+        await retireStaleRows(opts, board, [{ slug: candidate.slug, column: "todo", position: candidate.position }]);
+      }
       todo = todo.filter((card) => card.slug !== candidate.slug);
       if (err.current === "doing" || err.current === "unknown") {
         liveDoing.push({ ...candidate, column: "doing" });
       }
+    }
+  }
+}
+
+/**
+ * Keep only the doing rows whose Card point read still says `doing`.
+ *
+ * The doing partition is a second copy of each card's column, written by a
+ * separate mutation after the Card write, and the two drift on a busy node
+ * (papercut-kanban-live-todo-card-absent-from-pickup-partition-20260924). A
+ * phantom doing row is not harmless: `firstEligible` treats it as live work,
+ * so every todo card whose surfaces overlap it is skipped — a whole serial
+ * chain on one surface stops behind a card that is already done.
+ *
+ * Doing is small (single digits on the live board), and a Card point read is
+ * O(1) and read-your-write, so this costs a handful of point gets. A point read
+ * that fails keeps its row: unproven is not phantom.
+ */
+async function verifyDoingRows(
+  opts: PickupClaimV2Options,
+  board: string,
+  rows: Card[],
+): Promise<Card[]> {
+  const verdicts = await mapWithConcurrency(rows, async (row) => {
+    try {
+      const truth = await findCard(opts.node, opts.cfg, row.slug);
+      return truth?.column === "doing" ? "live" : "phantom";
+    } catch {
+      return "live";
+    }
+  }, POINT_READ_CONCURRENCY);
+  const phantoms = rows.filter((_, i) => verdicts[i] === "phantom");
+  if (phantoms.length > 0) {
+    await retireStaleRows(
+      opts,
+      board,
+      phantoms.map((row) => ({ slug: row.slug, column: "doing", position: row.position })),
+    );
+  }
+  return rows.filter((_, i) => verdicts[i] === "live");
+}
+
+/**
+ * Delete board rows a point read proved stale. Best effort and never in a dry
+ * run: the claim decision already excludes these rows, so a failed delete only
+ * leaves the list wrong for longer (the janitor logs it), not the claim.
+ *
+ * Each row is re-checked by point read immediately before its delete. A card
+ * can move back to the same address (`kanban move <slug> todo --position 0`
+ * after a claim) between the first read and this one, and deleting its live
+ * row would hide it from pickup — the worse of the two drift directions.
+ */
+async function retireStaleRows(
+  opts: PickupClaimV2Options,
+  board: string,
+  rows: Array<{ slug: string; column: string; position: string }>,
+): Promise<void> {
+  const schemaHash = boardCardsHash(opts.cfg);
+  if (opts.dryRun || !schemaHash) return;
+  for (const row of rows) {
+    if (!row.slug || !row.position) continue;
+    try {
+      const truth = await findCard(opts.node, opts.cfg, row.slug);
+      if (truth && truth.column === row.column && truth.position === row.position) continue;
+      enqueueBoardCardJanitor([{ schemaHash, board, sk: boardCardSk(row.column, row.position, row.slug) }]);
+      await sweepBoardCardJanitor(opts.node);
+    } catch {
+      // Logged per row by the janitor; the claim result does not depend on it.
     }
   }
 }
