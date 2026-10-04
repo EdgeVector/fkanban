@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { rmCmd } from "../src/commands/rm.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
-import { cardToFields, emptyStructuredFields, type Card } from "../src/record.ts";
+import { cardToFields, emptyStructuredFields, listDependentsOf, type Card } from "../src/record.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -59,6 +59,8 @@ type Delete = { schemaHash: string; keyHash: string };
 function fakeNode(opts: {
   cards: Card[];
   deletes: Delete[];
+  /** Records the `fields` of every Card-schema query. */
+  scanFields?: string[][];
   milestones?: Array<{ slug: string; proofCard: string }>;
 }): NodeClient {
   const cardRows = opts.cards.map((c) => ({ fields: cardToFields(c), key: { hash: c.slug, range: null } }));
@@ -87,6 +89,7 @@ function fakeNode(opts: {
       let rows =
         q.schemaHash === "cardhash" ? cardRows : q.schemaHash === "milestonehash" ? milestoneRows : [];
       if (q.filter?.HashKey) rows = rows.filter((r) => r.key.hash === q.filter!.HashKey);
+      if (q.schemaHash === "cardhash") opts.scanFields?.push([...q.fields]);
       return { ok: true, results: rows };
     },
   };
@@ -168,5 +171,44 @@ describe("rm native delete", () => {
     expect(err).toBeInstanceOf(FkanbanError);
     expect((err as FkanbanError).code).toBe("card_not_found");
     expect(deletes).toHaveLength(0);
+  });
+
+  /**
+   * The dependents check reads every card on every board, and `rm` pays it on
+   * every delete. It only needs `slug`, `deps` and `tags` (tombstones), so it
+   * must not ask for `kind`, `created_at`, `column`, `position` or `board` too.
+   */
+  test("the dependents scan requests only slug, tags and deps", async () => {
+    const scanFields: string[][] = [];
+    const node = fakeNode({
+      cards: [card({ slug: "api" }), card({ slug: "ui", deps: ["api"] }), card({ slug: "docs" })],
+      deletes: [],
+      scanFields,
+    });
+
+    const dependents = await listDependentsOf(node, cfg, "api");
+
+    expect(dependents).toEqual(["ui"]);
+    expect(scanFields.length).toBeGreaterThan(0);
+    const allowed = new Set(["slug", "tags", "deps"]);
+    for (const fields of scanFields) {
+      for (const f of fields) expect(allowed.has(f)).toBe(true);
+    }
+  });
+
+  test("a tombstoned card that names the target as a dep does not block the delete", async () => {
+    const deletes: Delete[] = [];
+    const node = fakeNode({
+      cards: [
+        card({ slug: "api" }),
+        card({ slug: "gone", deps: ["api"], tags: ["__fkanban_deleted__"] }),
+      ],
+      deletes,
+    });
+
+    const res = await rmCmd({ cfg, node, slug: "api" }).catch((e: unknown) => e);
+
+    expect(res).not.toBeInstanceOf(FkanbanError);
+    expect(deletes).toEqual([{ schemaHash: "cardhash", keyHash: "api" }]);
   });
 });

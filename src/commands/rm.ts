@@ -10,7 +10,7 @@ import {
   findCard,
   findMilestone,
   isMilestoneState,
-  listCardStatuses,
+  listDependentsOf,
   requireCard,
 } from "../record.ts";
 import { proofHoldReason, readProofCardRefs } from "../proof_card_refs.ts";
@@ -33,10 +33,7 @@ export async function rmCmd(opts: {
   // Before deleting, scan live cards for dependents. A deleted dep becomes
   // unresolvable to normal reads, so refuse the delete instead of creating a
   // missing dependency slug that later board readers have to repair.
-  const all = await listCardStatuses(opts.node, opts.cfg);
-  const dependents = all
-    .filter((c) => c.slug !== opts.slug && c.deps.includes(opts.slug))
-    .map((c) => c.slug);
+  const dependents = await listDependentsOf(opts.node, opts.cfg, opts.slug);
   if (dependents.length > 0) {
     throw new FkanbanError({
       code: "card_has_dependents",
