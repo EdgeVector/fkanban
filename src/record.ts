@@ -4257,6 +4257,28 @@ export async function listCardStatuses(node: NodeClient, cfg: Config): Promise<C
   return listCardsWithFields(node, cfg, CARD_STATUS_FIELDS);
 }
 
+// What a "who depends on this card?" scan reads: the slug (carried by the key),
+// `deps` (the edges themselves) and `tags` (so `isHiddenCard` still drops
+// tombstones and write probes exactly as `listCardStatuses` did). Everything else
+// in CARD_STATUS_FIELDS — `kind`, `created_at`, and the column/position spine — is
+// not consulted by a dependents check. BoardCards cost is per field and uneven
+// (see boardCardsWireProjection), and `rm` pays this scan on every delete.
+export const CARD_DEPENDENT_SCAN_FIELDS = ["slug", "tags", "deps"];
+
+// Slugs of every live card, on any board, whose `deps` name `slug`. Cross-board
+// edges count, so this still reads every board; it only reads fewer fields per
+// row. Goes through `listCardsWithFields`, so a missing/empty BoardCards index
+// still falls back exactly as the wide read did — a narrow read is never allowed
+// to turn "could not read" into "no dependents".
+export async function listDependentsOf(
+  node: NodeClient,
+  cfg: Config,
+  slug: string,
+): Promise<string[]> {
+  const cards = await listCardsWithFields(node, cfg, CARD_DEPENDENT_SCAN_FIELDS);
+  return cards.filter((c) => c.slug !== slug && c.deps.includes(slug)).map((c) => c.slug);
+}
+
 async function findCardWithFields(
   node: NodeClient,
   cfg: Config,
