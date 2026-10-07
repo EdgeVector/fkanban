@@ -4480,6 +4480,32 @@ export async function findCard(node: NodeClient, cfg: Config, slug: string): Pro
   return findCardWithFields(node, cfg, slug, fieldsFor("card"));
 }
 
+// One keyed read for the slugs this call names. An empty list reads nothing.
+// A missing slug stays null. The result follows the caller's order.
+export async function findCards(
+  node: NodeClient,
+  cfg: Config,
+  slugs: readonly string[],
+): Promise<Array<Card | null>> {
+  return findCardsWithFields(node, cfg, slugs, fieldsFor("card"));
+}
+
+export async function findCardsWithFields(
+  node: NodeClient,
+  cfg: Config,
+  slugs: readonly string[],
+  fields: string[],
+): Promise<Array<Card | null>> {
+  if (slugs.length === 0) return [];
+  // QueryFilter's values are strings. HashRangeKeys is the multi-key query
+  // the node accepts, so the array crosses that type at this one call.
+  const cards = await listCardsWithFields(node, cfg, fields, {
+    HashRangeKeys: slugs.map((slug) => [slug, ""]),
+  } as unknown as QueryFilter);
+  const bySlug = new Map(cards.map((card) => [card.slug, card]));
+  return slugs.map((slug) => bySlug.get(slug) ?? null);
+}
+
 /**
  * Fields a milestone proof-card verdict actually reads: `body` for the
  * `PROOF: PASS` / `DONE-WHEN` evidence, `column`+`board` for terminality,

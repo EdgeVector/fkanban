@@ -8,7 +8,7 @@ import {
   blockedSlugSet,
   CARD_SEARCH_DISPLAY_FIELDS,
   ensureColumn,
-  findCard,
+  findCards,
   listDependencyStatusesForCards,
   listCardsByFilter,
   listCardsWithBodies,
@@ -22,7 +22,6 @@ import {
 import { capFlat, DEFAULT_SEARCH_LIMIT, previewCardBodies, renderSearchResults, resolveLimits } from "../board.ts";
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
-import { mapWithConcurrency } from "../concurrency.ts";
 import { querySearchPlane } from "../search-plane.ts";
 import { type WarnSink, renderJsonPage, warnIfTruncated } from "../truncation_notice.ts";
 
@@ -267,9 +266,7 @@ async function semanticSearchCards(
   // Plane order IS the ranking, so hydrate in it and keep it. `sortCards` is
   // deliberately not applied: it would re-order by board position and throw
   // away the only thing this mode is for.
-  const hydrated = await mapWithConcurrency(native?.slugs ?? [], (slug) =>
-    findCard(opts.node, opts.cfg, slug),
-  );
+  const hydrated = await findCards(opts.node, opts.cfg, native?.slugs ?? []);
   const matches: Card[] = [];
   const seen = new Set<string>();
   for (const card of hydrated) {
@@ -349,9 +346,7 @@ async function indexedSearchCards(
     } catch {
       native = null;
     }
-    const hydrated = await mapWithConcurrency(native?.slugs ?? [], (slug) =>
-      findCard(opts.node, opts.cfg, slug),
-    );
+    const hydrated = await findCards(opts.node, opts.cfg, native?.slugs ?? []);
     for (const card of hydrated) {
       if (!card || !inScope(card)) continue;
       if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
