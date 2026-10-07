@@ -256,6 +256,24 @@ function assertFilterShape(filter: QueryFilter): void {
 
   for (const key of keys) {
     const value = f[key];
+    if (key === "HashRangeKeys") {
+      if (keys.length > 1) {
+        bad(`key-shaped filter ${JSON.stringify(key)} must be the only key, got ${JSON.stringify(keys)}`);
+      }
+      if (!Array.isArray(value)) bad("HashRangeKeys takes an array of [hash, range] pairs");
+      const pairs = value as unknown[];
+      for (const pair of pairs) {
+        if (
+          !Array.isArray(pair) ||
+          pair.length !== 2 ||
+          typeof pair[0] !== "string" ||
+          typeof pair[1] !== "string"
+        ) {
+          bad("HashRangeKeys pair must be [hash, range]");
+        }
+      }
+      continue;
+    }
     const members = KEY_SHAPES[key];
 
     if (members === undefined) {
@@ -303,6 +321,18 @@ function matchesFilter(rec: StoredRecord, filter?: QueryFilter): boolean {
   const f = filter as Record<string, unknown>;
 
   if (typeof f.HashKey === "string") return rec.keyHash === f.HashKey;
+
+  if (Array.isArray(f.HashRangeKeys)) {
+    return f.HashRangeKeys.some((pair) => {
+      if (!Array.isArray(pair) || typeof pair[0] !== "string" || typeof pair[1] !== "string") {
+        return false;
+      }
+      if (rec.keyHash !== pair[0]) return false;
+      // An empty range is the hash-only slot. The range is not part of the key.
+      if (pair[1] === "") return true;
+      return (rec.rangeKey ?? "") === pair[1];
+    });
+  }
 
   const prefix = f.HashRangePrefix as { hash: string; prefix: string } | undefined;
   if (prefix) {
