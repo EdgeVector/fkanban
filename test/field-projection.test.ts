@@ -218,7 +218,14 @@ describe("--field projection", () => {
         if (q.schemaHash === "boardhash") {
           return { ok: true, results: [board()].map((b) => ({ key: { hash: b.slug, range: null }, fields: boardToFields(b) })) };
         }
-        if (q.schemaHash === "cardhash" && (q.filter as { HashKey?: string } | undefined)?.HashKey === "probe") {
+        // A HashKey or HashRangeKeys read of probe is a keyed read.
+        // A Card query with no key still throws.
+        const cardFilter = q.filter as { HashKey?: string; HashRangeKeys?: unknown } | undefined;
+        const keyedProbe =
+          cardFilter?.HashKey === "probe" ||
+          (Array.isArray(cardFilter?.HashRangeKeys) &&
+            cardFilter.HashRangeKeys.some((pair) => Array.isArray(pair) && pair[0] === "probe"));
+        if (q.schemaHash === "cardhash" && keyedProbe) {
           return { ok: true, results: [{ key: { hash: "probe", range: null }, fields: cardToFields(probe) }] };
         }
         if (q.schemaHash === "cardhash") {
