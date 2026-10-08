@@ -642,11 +642,12 @@ export function createFkanbanMcpServer(
     {
       title: "Claim by deterministic board order",
       description:
-        "Deterministic pickup v2. Read keyed todo and doing ranges, require terminal dependencies, treat missing surfaces as the complete repository, and CAS-claim the first eligible board-position card. No lanes, cursors, repair, fair-share, capacity, Loom, State Machine, or LLM.",
+        "Deterministic pickup v2. Read keyed todo and doing ranges, require terminal dependencies, treat missing surfaces as the complete repository, and CAS-claim the first eligible board-position card. With card_slug, claim only that exact card and never select another card after a refusal. No lanes, cursors, repair, fair-share, capacity, Loom, State Machine, or LLM.",
       annotations: { title: "Claim by deterministic board order", openWorldHint: false },
       inputSchema: {
         worker: z.string().optional().describe("Worker id. Required unless dry_run is true."),
         dry_run: z.boolean().optional().describe("Select one card without a write."),
+        card_slug: z.string().optional().describe("Claim only this exact card. A supplied slug must be non-empty."),
       },
       outputSchema: {
         result: z.enum(["claimed", "none", "error"]),
@@ -666,6 +667,7 @@ export function createFkanbanMcpServer(
           node,
           worker: args.worker,
           dryRun: args.dry_run,
+          onlyCard: args.card_slug,
         });
         return toolResult(formatPickupClaimV2(result), pickupClaimV2Payload(result));
       } catch (err) {

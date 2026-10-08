@@ -36,7 +36,7 @@ import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { showCmd } from "../src/commands/show.ts";
 import { boardListCmd } from "../src/commands/board.ts";
 import { DEFAULT_SEARCH_LIMIT } from "../src/board.ts";
-import { formatPickupClaimV2, pickupClaimV2Result } from "../src/commands/pickup_claim_v2.ts";
+import { formatPickupClaimV2, pickupClaimV2Error, pickupClaimV2Result } from "../src/commands/pickup_claim_v2.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -569,6 +569,107 @@ describe("MCP write tools return structuredContent", () => {
       "fkanban_board_create",
     ]) {
       expect(byName.get(name)?.outputSchema, `${name} should declare an outputSchema`).toBeDefined();
+    }
+  });
+});
+
+describe("MCP exact-card pickup", () => {
+  const unrelatedSlug = "mcp-unrelated-earlier";
+  const authorizedSlug = "mcp-authorized-repair";
+  let node: NodeClient;
+  let client: Client;
+  let writes: string[];
+
+  beforeEach(async () => {
+    const fixtureNode = fakeNode();
+    writes = [];
+    node = {
+      ...fixtureNode,
+      async createRecord(args) {
+        writes.push("createRecord");
+        return fixtureNode.createRecord(args);
+      },
+      async updateRecord(args) {
+        writes.push("updateRecord");
+        return fixtureNode.updateRecord(args);
+      },
+      async deleteRecord(args) {
+        writes.push("deleteRecord");
+        return fixtureNode.deleteRecord(args);
+      },
+    };
+    await seedDefaultBoard(node);
+    client = await connectedClient(node);
+    for (const [slug, surface, position] of [
+      [unrelatedSlug, "src/unrelated.ts", "1"],
+      [authorizedSlug, "src/repair.ts", "9"],
+    ]) {
+      const added = await client.callTool({
+        name: "fkanban_add",
+        arguments: { slug, position, column: "todo", body: validPickupBody(), surfaces: [surface] },
+      });
+      expect(added.isError).not.toBe(true);
+    }
+    writes.length = 0;
+  });
+
+  test("exact-card dry-run has command API and MCP parity", async () => {
+    const defaultResult = await pickupClaimV2Result({ cfg, node, dryRun: true });
+    expect(defaultResult).toMatchObject({ result: "claimed", card: { slug: unrelatedSlug } });
+    const defaultMcp = await client.callTool({
+      name: "fkanban_pickup_claim_v2",
+      arguments: { dry_run: true },
+    });
+    expect(defaultMcp.structuredContent).toEqual(JSON.parse(formatPickupClaimV2(defaultResult, true)));
+
+    const commandResult = await pickupClaimV2Result({ cfg, node, dryRun: true, onlyCard: authorizedSlug });
+    expect(commandResult).toMatchObject({ result: "claimed", card: { slug: authorizedSlug } });
+    const mcpResult = await client.callTool({
+      name: "fkanban_pickup_claim_v2",
+      arguments: { dry_run: true, card_slug: authorizedSlug },
+    });
+    expect(mcpResult.structuredContent, "MCP exact-card selection maps card_slug")
+      .toEqual(JSON.parse(formatPickupClaimV2(commandResult, true)));
+    expect((mcpResult.content as Array<{ type: string; text: string }>)[0]?.text)
+      .toBe(formatPickupClaimV2(commandResult));
+    expect(writes, "MCP exact-card dry-run makes no write").toEqual([]);
+  });
+
+  test("exact-card claim leaves the earlier eligible card untouched", async () => {
+    const earlierCard = await findCard(node, cfg, unrelatedSlug);
+    const result = await client.callTool({
+      name: "fkanban_pickup_claim_v2",
+      arguments: { worker: "mcp-exact", card_slug: authorizedSlug },
+    });
+    expect(result.structuredContent, "MCP exact-card claim selects the authorized card").toMatchObject({
+      result: "claimed",
+      card: { slug: authorizedSlug, column: "doing", assignee: "mcp-exact" },
+      worker: "mcp-exact",
+      dry_run: false,
+    });
+    expect(await findCard(node, cfg, unrelatedSlug), "MCP exact-card claim leaves the earlier card untouched")
+      .toEqual(earlierCard);
+    expect(await findCard(node, cfg, authorizedSlug)).toMatchObject({ column: "doing", assignee: "mcp-exact" });
+  });
+
+  test("empty exact-card selectors reject with command API and MCP parity and no writes", async () => {
+    for (const selector of ["", "  ", "\n\t"]) {
+      let commandError: unknown;
+      try {
+        await pickupClaimV2Result({ cfg, node, worker: "mcp-exact", onlyCard: selector });
+      } catch (err) {
+        commandError = err;
+      }
+      const commandResult = pickupClaimV2Error(commandError);
+      expect(commandResult, "command API rejects an empty exact-card selector")
+        .toEqual({ result: "error", code: "invalid_only_card" });
+      const mcpResult = await client.callTool({
+        name: "fkanban_pickup_claim_v2",
+        arguments: { worker: "mcp-exact", card_slug: selector },
+      });
+      expect(mcpResult.isError, "MCP rejects an empty exact-card selector").toBe(true);
+      expect(mcpResult.structuredContent, "MCP empty-selector error matches the command API").toEqual(commandResult);
+      expect(writes, "MCP empty exact-card selector makes no write").toEqual([]);
     }
   });
 });

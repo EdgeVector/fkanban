@@ -243,7 +243,7 @@ DONE  (0)
 | `kanban overlap <slug>` | compare a candidate card's surfaces against doing cards in the same repo (exit 2 on declared conflict) |
 | `kanban pickup status` | classify active cards by pickup eligibility and explain why non-ready cards are skipped (`--json`) |
 | `kanban pickup claim` | atomic next-card claim: priority order + surface-overlap skip + CAS `todo→doing` (`--worker --prefer-repo --exclude-repo --max-doing --dry-run --json`) |
-| `kanban pickup claim-v2` | deterministic board-order claim: terminal deps + effective surfaces + CAS (`--worker --dry-run --json`) |
+| `kanban pickup claim-v2` | deterministic board-order claim: terminal deps + effective surfaces + CAS (`--only-card <slug> --worker --dry-run --json`) |
 | `kanban groom stale-blockers` | dry-run/apply cleanup for stale generated blocker metadata (`--apply --json`) |
 | `kanban hygiene orphan-bun` | dry-run/apply a path-scoped PPID-1 Bun helper reaper for kanban/gstack (`--apply --min-age-hours N --pileup-threshold N --json`) |
 | `kanban rank` | reorder work cards by priority so pickup works urgent cards first (`--board --column`, default `todo`; grouping kinds are skipped) |
@@ -694,6 +694,15 @@ its schemas, but registration with Schema Service is still mandatory.
   or `p0`..`p3` tag) does nothing on its own; `kanban rank` is what turns it into
   the `position` field pickup/list/sort already order by. Keeps priority
   republish-free (rides on `tags`) and keeps one ordering primitive (`position`).
-`pickup claim-v2` reads only the keyed `todo` and `doing` column ranges. It
+Without `--only-card`, `pickup claim-v2` reads the keyed `todo` and `doing`
+column ranges. It
 uses board position order. Every dependency must be terminal. Missing surfaces
 reserve the complete repository. The command has no lane or repair policy.
+
+`pickup claim-v2 --only-card <slug>` considers one exact Card record. An absent
+or ineligible card, a hold, or a claim conflict returns `none`. The command
+never selects another card. It checks current peer and dependency records in
+one native multi-key read. A missing or sparse peer record retains its known surface hold.
+Peer checks do not repair or delete board records.
+The MCP `fkanban_pickup_claim_v2` tool accepts the same selector as `card_slug`.
+This option does not grant a policy exception or reserve a factory slot.
