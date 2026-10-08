@@ -602,7 +602,53 @@ async function deleteBoardCardSk(
       rangeKey: sk,
     });
   } catch {
-    // best-effort: stale sk may already be gone
+    // best-effort: stale sk may already be gone. Safe only for a row this
+    // module has already decided is a superseded duplicate/orphan (the
+    // batched-delete fallback below) — losing the race there just leaves a
+    // stale row for a later heal. Do NOT reuse this for a card's OWN
+    // membership tip; see {@link deleteBoardCardSkPrimary}.
+  }
+}
+
+/** Pauses before each re-send of a failed PRIMARY BoardCards tip delete. */
+let boardCardPrimaryDeleteRetryDelaysMs: readonly number[] = [500, 2000];
+
+export function setBoardCardPrimaryDeleteRetryDelaysForTests(delays: readonly number[]): void {
+  boardCardPrimaryDeleteRetryDelaysMs = delays;
+}
+
+/**
+ * Delete the ONE BoardCards row that is a card's own membership tip —
+ * the row {@link removeBoardCard} exists to remove, as opposed to a stale
+ * duplicate/orphan sk.
+ *
+ * Unlike {@link deleteBoardCardSk}'s swallow-catch, a thrown delete here is
+ * retried and, on exhaustion, RE-THROWN. A delete of an absent row succeeds
+ * in LastDB, so a throw is never "already gone" — it is a genuine failure
+ * (measured on the primary: `service_timeout` under load, the same failure
+ * {@link ../board-card-janitor.ts}'s `deleteOneWithRetry` was built to stop
+ * swallowing). `deleteCardRecord` deletes the Card atom; if this tip delete
+ * is swallowed instead of retried/thrown, the atom is gone and the tip
+ * survives pointing at nothing — a dangling tip that degrades every read of
+ * its partition until an operator runs a repair tool, with nothing having
+ * ever retried it.
+ * (papercut-kanban-card-delete-leaves-boardcards-tip-without-atom-root-cause-20260924)
+ */
+async function deleteBoardCardSkPrimary(
+  node: NodeClient,
+  schemaHash: string,
+  board: string,
+  sk: string,
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await node.deleteRecord({ schemaHash, keyHash: board, rangeKey: sk });
+      return;
+    } catch (err) {
+      const wait = boardCardPrimaryDeleteRetryDelaysMs[attempt];
+      if (wait === undefined) throw err;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
   }
 }
 
@@ -1659,7 +1705,7 @@ export async function removeBoardCard(
   const sk = boardCardSk(card.column, card.position, card.slug);
   for (const schemaHash of boardCardsWriteHashes(cfg)) {
     const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
-    await deleteBoardCardSk(node, schemaHash, board, sk);
+    await deleteBoardCardSkPrimary(node, schemaHash, board, sk);
     // Also purge any orphan sks for the same slug (stale column membership).
     if (card.slug && !opts.skipOrphanPurge) {
       await purgeOtherBoardCardRows(node, oneHashCfg, board, card.slug, null);

@@ -5770,12 +5770,20 @@ export async function deleteCardRecord(
 ): Promise<void> {
   const hash = schemaHashFor("card", opts.cfg);
   const truth = await readCardMembershipKeys(opts.node, opts.cfg, card);
-  await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
+  // Membership rows FIRST, the Card atom LAST. `removeBoardCard`'s primary
+  // tip delete now retries then THROWS on a genuine failure (it used to
+  // swallow one) — so a throw here must still find the Card atom intact:
+  // a surviving Card is a clean, re-runnable `kanban rm <slug>`, while a
+  // surviving BoardCards/MilestoneCards tip after the atom is already gone
+  // is a dangling tip that degrades every read of its partition until an
+  // operator runs a repair tool.
+  // (papercut-kanban-card-delete-leaves-boardcards-tip-without-atom-root-cause-20260924)
   await patchCardListIndex(opts.node, opts.cfg, card, "remove");
   await removeBoardCard(opts.node, opts.cfg, truth);
   for (const milestone of membershipPartitionsToRetire(card, truth)) {
     await removeMilestoneCard(opts.node, opts.cfg, { ...truth, milestone });
   }
+  await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
 }
 
 /** Every MilestoneCards partition that could hold a row for this slug. */
