@@ -4,6 +4,7 @@ import { rmCmd } from "../src/commands/rm.ts";
 import { FkanbanError, type NodeClient, type QueryFilter, type QueryResponse } from "../src/client.ts";
 import type { Config } from "../src/config.ts";
 import { cardToFields, emptyStructuredFields, listDependentsOf, type Card } from "../src/record.ts";
+import { setBoardCardPrimaryDeleteRetryDelaysForTests } from "../src/board-cards.ts";
 
 const cfg: Config = {
   configVersion: 1,
@@ -210,5 +211,74 @@ describe("rm native delete", () => {
 
     expect(res).not.toBeInstanceOf(FkanbanError);
     expect(deletes).toEqual([{ schemaHash: "cardhash", keyHash: "api" }]);
+  });
+
+  /**
+   * Root cause of papercut-kanban-card-delete-leaves-boardcards-tip-without-atom-root-cause-20260924:
+   * the old `deleteBoardCardSk` swallowed a genuine delete failure as
+   * "best-effort: stale sk may already be gone", and `deleteCardRecord`
+   * deleted the Card atom BEFORE removing the BoardCards tip. Together that
+   * left a tip pointing at a missing atom, forever, with no error raised.
+   * A thrown tip delete, with retries exhausted, must now (a) propagate
+   * instead of being swallowed, and (b) find the Card atom still intact
+   * because the atom is deleted LAST.
+   */
+  test("a BoardCards tip delete that fails after retries does not delete the Card atom", async () => {
+    setBoardCardPrimaryDeleteRetryDelaysForTests([]);
+    try {
+      const deletes: Delete[] = [];
+      const cfgWithBoardCards: Config = {
+        ...cfg,
+        schemaHashes: { ...cfg.schemaHashes, board_cards: "boardcardshash" },
+      };
+      const base = fakeNode({ cards: [card({ slug: "api" })], deletes });
+      const node: NodeClient = {
+        ...base,
+        async deleteRecord(d) {
+          if (d.schemaHash === "boardcardshash") throw new Error("service_timeout");
+          return base.deleteRecord(d);
+        },
+      };
+
+      const err = await rmCmd({ cfg: cfgWithBoardCards, node, slug: "api" }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(deletes).toHaveLength(0);
+    } finally {
+      setBoardCardPrimaryDeleteRetryDelaysForTests([500, 2000]);
+    }
+  });
+
+  /** The healing half: a transient tip-delete failure that recovers on retry still completes the whole delete. */
+  test("a BoardCards tip delete that fails once then succeeds completes the delete", async () => {
+    setBoardCardPrimaryDeleteRetryDelaysForTests([0]);
+    try {
+      const deletes: Delete[] = [];
+      const cfgWithBoardCards: Config = {
+        ...cfg,
+        schemaHashes: { ...cfg.schemaHashes, board_cards: "boardcardshash" },
+      };
+      const base = fakeNode({ cards: [card({ slug: "api" })], deletes });
+      let boardCardAttempts = 0;
+      const node: NodeClient = {
+        ...base,
+        async deleteRecord(d) {
+          if (d.schemaHash === "boardcardshash") {
+            boardCardAttempts += 1;
+            if (boardCardAttempts === 1) throw new Error("service_timeout");
+            return;
+          }
+          return base.deleteRecord(d);
+        },
+      };
+
+      const res = await rmCmd({ cfg: cfgWithBoardCards, node, slug: "api" });
+
+      expect(res.slug).toBe("api");
+      expect(boardCardAttempts).toBe(2);
+      expect(deletes).toEqual([{ schemaHash: "cardhash", keyHash: "api" }]);
+    } finally {
+      setBoardCardPrimaryDeleteRetryDelaysForTests([500, 2000]);
+    }
   });
 });
