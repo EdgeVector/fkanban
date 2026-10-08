@@ -5,7 +5,11 @@ import { boardCardFieldsFromCard, boardCardsWriteHashes } from "./board-cards.ts
 
 // A git-describe count is not a compatibility promise. Expand only after the
 // cross-schema race/durability proof passes for that exact node build.
-export const GUARDED_CARD_BATCH_BUILDS = ["0.23.3-2328-g369ad6cd6", "0.23.3-2375-ga7bac36f1"] as const;
+export const GUARDED_CARD_BATCH_BUILDS = [
+  "0.23.3-2328-g369ad6cd6",
+  "0.23.3-2375-ga7bac36f1",
+  "0.23.3-2588-g24334db75",
+] as const;
 
 /** One update-only atomic batch. No secondary publication or erasure follows it. */
 export async function guardedCardUpdate(
@@ -48,8 +52,9 @@ export async function guardedCardUpdate(
     { hash: cardHash, fields: cardFields, hashField: "slug", rangeField: null },
     ...hashes.map(hash => ({ hash, fields, hashField: "board", rangeField: "sk" })),
   ];
-  for (const payload of payloads) {
-    const schema = await opts.node.getSchema(payload.hash);
+  const schemas = await Promise.all(payloads.map(payload => opts.node.getSchema!(payload.hash)));
+  for (const [index, payload] of payloads.entries()) {
+    const schema = schemas[index]!;
     if (schema.key.hash_field !== payload.hashField || schema.key.range_field !== payload.rangeField ||
       Object.keys(payload.fields).some(field => !schema.fields.includes(field))) {
       throw new FkanbanError({
