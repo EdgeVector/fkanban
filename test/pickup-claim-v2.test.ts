@@ -50,6 +50,8 @@ function casError(actual: unknown): FkanbanError {
 function fakeNode(opts: {
   conflictSlug?: string;
   failColumnRead?: "todo" | "doing";
+  failMultiRead?: boolean;
+  holdAtClaimSlug?: string;
   failCardUpdate?: string;
   failFeatureFlowUpdate?: boolean;
   failClaimMarkerUpdates?: number;
@@ -60,11 +62,14 @@ function fakeNode(opts: {
   failNextBoardCardsWrites(n: number): void;
   queries: QueryLog[];
   mutations: MutationLog[];
+  deletions: Array<{ schemaHash: string; keyHash: string; rangeKey?: string | null }>;
 } {
   const store = new Map<string, Map<string, StoredRecord>>();
   const queries: QueryLog[] = [];
   const mutations: MutationLog[] = [];
+  const deletions: Array<{ schemaHash: string; keyHash: string; rangeKey?: string | null }> = [];
   let injectedConflict = false;
+  let targetReads = 0;
   let remainingMarkerUpdateFailures = opts.failClaimMarkerUpdates ?? 0;
   let remainingBoardCardsWriteFailures = 0;
   let remainingDeleteFailures = opts.failDeletes ?? 0;
@@ -85,8 +90,12 @@ function fakeNode(opts: {
   const rowsFor = (schemaHash: string, filter?: QueryFilter): QueryRow[] => {
     const table = tableFor(schemaHash);
     const prefix = (filter as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)?.HashRangePrefix;
+    const keys = (filter as { HashRangeKeys?: Array<[string, string]> } | undefined)?.HashRangeKeys;
     let records: StoredRecord[];
-    if (prefix?.hash && prefix.prefix !== undefined) {
+    if (keys) {
+      const wanted = new Set(keys.map(([hash, range]) => storeKey(hash, range)));
+      records = [...table.values()].filter((record) => wanted.has(storeKey(record.keyHash, record.rangeKey)));
+    } else if (prefix?.hash && prefix.prefix !== undefined) {
       records = [...table.values()].filter((record) =>
         record.keyHash === prefix.hash &&
         typeof record.rangeKey === "string" &&
@@ -120,6 +129,7 @@ function fakeNode(opts: {
     userHash: cfg.userHash,
     queries,
     mutations,
+    deletions,
     failNextBoardCardsWrites(n: number) {
       remainingBoardCardsWriteFailures = n;
     },
@@ -180,6 +190,7 @@ function fakeNode(opts: {
       });
     },
     async deleteRecord({ schemaHash, keyHash, rangeKey }) {
+      deletions.push({ schemaHash, keyHash, rangeKey });
       if (remainingDeleteFailures > 0) {
         remainingDeleteFailures -= 1;
         throw new FkanbanError({ code: "service_timeout", message: "Injected delete timeout." });
@@ -188,6 +199,16 @@ function fakeNode(opts: {
     },
     async queryAll({ schemaHash, fields, filter }): Promise<QueryResponse> {
       queries.push({ schemaHash, fields, filter });
+      if (schemaHash === "cardhash" && opts.holdAtClaimSlug && filter?.HashKey === opts.holdAtClaimSlug) {
+        targetReads += 1;
+        if (targetReads === 2) {
+          const record = tableFor(schemaHash).get(storeKey(opts.holdAtClaimSlug));
+          if (record) record.fields.body = "VALIDATE-ONLY: awaiting host-track";
+        }
+      }
+      if (opts.failMultiRead && filter && "HashRangeKeys" in filter) {
+        throw new FkanbanError({ code: "service_timeout", message: "Injected multi-key read timeout." });
+      }
       const prefix = (filter as { HashRangePrefix?: { prefix?: string } } | undefined)?.HashRangePrefix?.prefix;
       if (schemaHash === "boardcardshash" && prefix === `${opts.failColumnRead}#`) {
         throw new FkanbanError({
@@ -642,5 +663,195 @@ describe("pickup claim v2 LastDB adapter", () => {
     } finally {
       setBoardCardJanitorRetryDelaysForTests([500, 2000]);
     }
+  });
+});
+
+
+describe("exact-card pickup", () => {
+  test("exact-card: selects only the requested card after an earlier eligible card", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "earlier", position: "1" }));
+    await seedCard(node, card({ slug: "authorized", position: "9", surfaces: ["src/b.ts"] }));
+    expect(await pickupClaimV2Result({ cfg, node, onlyCard: "  authorized  ", dryRun: true })).toMatchObject({ result: "claimed", card: { slug: "authorized" } });
+    expect(node.queries.filter((q) => q.schemaHash === "boardcardshash").map(prefixOf)).toEqual(["doing#"]);
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
+    expect(result).toMatchObject({ result: "claimed", card: { slug: "authorized", assignee: "repair-worker" } });
+    expect(await findCard(node, cfg, "earlier")).toMatchObject({ column: "todo", assignee: "" });
+  });
+
+  test("exact-card: an absent target never falls back", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "earlier" }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "absent", worker: "repair-worker" });
+    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "absent", reason: "card not found" }] });
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: a blank selector rejects before any node read", async () => {
+    const node = fakeNode();
+    await expect(pickupClaimV2Result({ cfg, node, onlyCard: "  ", dryRun: true })).rejects.toMatchObject({ code: "invalid_only_card" });
+    expect(node.queries).toHaveLength(0);
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: a target on another board refuses without fallback", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized", board: "other" }));
+    await seedCard(node, card({ slug: "earlier" }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true });
+    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "not on board default (board=other)" }] });
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: a target outside todo refuses without fallback", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized", column: "done" }));
+    await seedCard(node, card({ slug: "earlier" }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true });
+    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "not in todo (column=done)" }] });
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: a stored hold remains a refusal", async () => {
+    // Both eligibility and claimHoldReason protect a stored hold. The mutation
+    // probe removes both checks; removing eligibility alone remains safe.
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized", block_status: "deferred" }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true });
+    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "deferred hold" }] });
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: a body-only validation hold remains a refusal", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized", body: "## GOAL\nrepair\nVALIDATE-ONLY: awaiting host-track\n" }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true });
+    expect(result.result).toBe("none");
+    if (result.result !== "none") return;
+    expect(result.skipped[0]?.reason).toContain("validate-only");
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: an unfinished dependency remains a refusal", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized", deps: ["missing-dep"] }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true });
+    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "unfinished deps: missing-dep" }] });
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: peer overlap uses the current Card surfaces", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized", surfaces: ["src/a.ts"] }));
+    const peer = card({ slug: "peer", column: "doing", surfaces: ["src/a.ts"] });
+    await seedCard(node, peer, false);
+    await node.createRecord({ schemaHash: cfg.schemaHashes.board_cards!, keyHash: "default", rangeKey: boardCardSk("doing", peer.position, peer.slug), fields: boardCardFieldsFromCard({ ...peer, surfaces: ["src/b.ts"] }) });
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true });
+    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "surface overlap with doing card peer" }] });
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: stale peer rows remain untouched during a real claim", async () => {
+    // The adapter and overlap predicate both exclude a terminal peer. The
+    // column probe removes both checks to reach this negative fixture.
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized" }));
+    const stale = card({ slug: "stale-peer", column: "done" });
+    await seedCard(node, stale, false);
+    await node.createRecord({ schemaHash: cfg.schemaHashes.board_cards!, keyHash: "default", rangeKey: boardCardSk("doing", stale.position, stale.slug), fields: boardCardFieldsFromCard({ ...stale, column: "doing" }) });
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
+    expect(result).toMatchObject({ result: "claimed", card: { slug: "authorized" } });
+    expect(node.deletions.some((d) => d.rangeKey?.includes("peer"))).toBe(false);
+    expect(node.mutations.some((m) => m.keyHash.includes("peer"))).toBe(false);
+  });
+
+  test("exact-card: a missing canonical peer retains its known surface hold", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized" }));
+    const peer = card({ slug: "missing-peer", column: "doing" });
+    await node.createRecord({ schemaHash: cfg.schemaHashes.board_cards!, keyHash: "default", rangeKey: boardCardSk("doing", peer.position, peer.slug), fields: boardCardFieldsFromCard(peer) });
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
+    expect(result, "missing canonical peer keeps its surface hold").toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "surface overlap with doing card missing-peer" }] });
+    expect(node.mutations).toHaveLength(0);
+    expect(node.deletions).toHaveLength(0);
+  });
+
+  for (const field of ["column", "board", "repo"] as const) {
+    test(`exact-card: a sparse peer with absent ${field} retains its known surface hold`, async () => {
+      const node = fakeNode();
+      await seedCard(node, card({ slug: "authorized" }));
+      const peer = card({ slug: "sparse-peer", column: "doing" });
+      const fields = cardToFields(peer);
+      delete fields[field];
+      await node.createRecord({ schemaHash: cfg.schemaHashes.card!, keyHash: peer.slug, fields });
+      await node.createRecord({ schemaHash: cfg.schemaHashes.board_cards!, keyHash: "default", rangeKey: boardCardSk("doing", peer.position, peer.slug), fields: boardCardFieldsFromCard(peer) });
+      const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
+      expect(result, `sparse peer without ${field} keeps its surface hold`).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "surface overlap with doing card sparse-peer" }] });
+      expect(node.mutations).toHaveLength(0);
+      expect(node.deletions).toHaveLength(0);
+    });
+  }
+
+  test("exact-card: a stale peer from another board does not block", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized" }));
+    const peer = card({ slug: "peer", board: "other", column: "doing" });
+    await seedCard(node, peer, false);
+    await node.createRecord({ schemaHash: cfg.schemaHashes.board_cards!, keyHash: "default", rangeKey: boardCardSk("doing", peer.position, peer.slug), fields: boardCardFieldsFromCard({ ...peer, board: "default" }) });
+    expect(await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true })).toMatchObject({ result: "claimed", card: { slug: "authorized" } });
+    expect(node.deletions).toHaveLength(0);
+  });
+
+  test("exact-card: peer and dependency keys share one native batch", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized", deps: ["done-dep", "peer", "done-dep"], surfaces: ["src/a.ts"] }));
+    await seedCard(node, card({ slug: "done-dep", column: "done" }), false);
+    await seedCard(node, card({ slug: "peer", column: "doing", surfaces: ["src/b.ts"] }));
+    await seedCard(node, card({ slug: "unrelated", column: "done" }), false);
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", dryRun: true });
+    expect(result).toMatchObject({ result: "none", skipped: [{ reason: "unfinished deps: peer" }] });
+    const reads = node.queries.filter((q) => q.schemaHash === "cardhash");
+    expect(reads).toHaveLength(2);
+    expect(reads[0]?.filter).toEqual({ HashKey: "authorized" });
+    expect(reads[1]?.filter as unknown).toEqual({ HashRangeKeys: [["peer", ""], ["done-dep", ""]] });
+    expect(reads[1]?.fields).toEqual(["slug", "board", "column", "repo", "surfaces"]);
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: a peer batch error fails closed", async () => {
+    const node = fakeNode({ failMultiRead: true });
+    await seedCard(node, card({ slug: "authorized" }));
+    await seedCard(node, card({ slug: "peer", column: "doing", surfaces: ["src/b.ts"] }));
+    await expect(pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" })).rejects.toMatchObject({ code: "service_timeout" });
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: a CAS conflict never claims the next card", async () => {
+    const node = fakeNode({ conflictSlug: "authorized" });
+    await seedCard(node, card({ slug: "authorized", surfaces: ["src/a.ts"] }));
+    await seedCard(node, card({ slug: "earlier", position: "0", surfaces: ["src/b.ts"] }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
+    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "claim conflict (current=doing)" }] });
+    expect(await findCard(node, cfg, "earlier")).toMatchObject({ column: "todo", assignee: "" });
+    expect(node.deletions).toHaveLength(0);
+  });
+
+  test("exact-card: a hold added at claim time never selects another card", async () => {
+    const node = fakeNode({ holdAtClaimSlug: "authorized" });
+    await seedCard(node, card({ slug: "authorized", surfaces: ["src/a.ts"] }));
+    await seedCard(node, card({ slug: "earlier", position: "0", surfaces: ["src/b.ts"] }));
+    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
+    expect(result.result).toBe("none");
+    if (result.result !== "none") return;
+    expect(result.skipped[0]?.reason).toContain("validate-only");
+    expect(node.mutations).toHaveLength(0);
+  });
+
+  test("exact-card: concurrent workers retain one CAS winner", async () => {
+    const node = fakeNode();
+    await seedCard(node, card({ slug: "authorized" }));
+    const results = await Promise.all(Array.from({ length: 20 }, (_, n) => pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: `worker-${n}` })));
+    expect(results.filter((r) => r.result === "claimed")).toHaveLength(1);
+    expect(node.mutations.filter((m) => m.schemaHash === "cardhash" && m.fields.column === "doing")).toHaveLength(1);
   });
 });

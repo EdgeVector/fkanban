@@ -9,6 +9,7 @@ import {
 import {
   claimHoldReason,
   findCard,
+  findCardsWithFields,
   listCardsByColumn,
   listDependencyStatusesForCards,
   TERMINAL_COLUMN,
@@ -53,6 +54,8 @@ export type PickupClaimV2Options = {
   worker?: string;
   dryRun?: boolean;
   board?: string;
+  /** Claim only this exact card; a refusal never selects another card. */
+  onlyCard?: string;
 };
 
 export type PickupClaimV2Result =
@@ -67,7 +70,7 @@ export type PickupClaimV2Result =
   | {
       result: "none";
       dry_run: boolean;
-      /** Todo cards scanned on the board. */
+      /** Candidates considered: todo range size, or one exact card key. */
       scanned: number;
       /** Why each scanned card was passed over (first 20, board order). */
       skipped: Array<{ slug: string; reason: string }>;
@@ -118,6 +121,16 @@ function dependencyStatuses(todo: readonly Card[], statuses: readonly Card[]): D
 
 /** Keyed LastDB adapter for deterministic pickup v2. */
 export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<PickupClaimV2Result> {
+  if (opts.onlyCard !== undefined) {
+    const slug = opts.onlyCard.trim();
+    if (!slug) {
+      throw new FkanbanError({
+        code: "invalid_only_card",
+        message: "--only-card requires a non-empty card slug.",
+      });
+    }
+    return pickupClaimV2OnlyCard(opts, slug);
+  }
   const board = opts.board ?? "default";
   let todo = await listCardsByColumn(
     opts.node,
@@ -211,6 +224,72 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
         liveDoing.push({ ...candidate, column: "doing" });
       }
     }
+  }
+}
+
+/** Exact-card mode never repairs peers or falls back to the global todo range. */
+async function pickupClaimV2OnlyCard(
+  opts: PickupClaimV2Options,
+  slug: string,
+): Promise<PickupClaimV2Result> {
+  const board = opts.board ?? "default";
+  const none = (reason: string): PickupClaimV2Result => ({
+    result: "none",
+    dry_run: opts.dryRun === true,
+    scanned: 1,
+    skipped: [{ slug, reason }],
+  });
+  const [candidate, doingRows] = await Promise.all([
+    findCard(opts.node, opts.cfg, slug),
+    listCardsByColumn(opts.node, opts.cfg, "doing", [...DOING_FIELDS], board, {
+      projection: [...DOING_FIELDS],
+    }),
+  ]);
+  if (!candidate) return none("card not found");
+  if (candidate.board !== board) return none(`not on board ${board} (board=${candidate.board})`);
+
+  // Collect every peer/dependency key before one native multi-key read. Peer
+  // verification is read-only; this narrow claim must not run the board janitor.
+  const keys = [...new Set([...doingRows.map((row) => row.slug), ...candidate.deps])]
+    .filter((key) => key !== candidate.slug);
+  const cards = await findCardsWithFields(opts.node, opts.cfg, keys, [
+    "slug", "board", "column", "repo", "surfaces",
+  ]);
+  const bySlug = new Map(cards.flatMap((card) => card ? [[card.slug, card] as const] : []));
+  bySlug.set(candidate.slug, candidate);
+  const doing = doingRows.flatMap((row) => {
+    const truth = bySlug.get(row.slug);
+    // Missing membership fields cannot prove that this peer left doing.
+    if (!truth || !truth.column.trim() || !truth.board.trim()) return [row];
+    if (truth.column !== "doing" || truth.board !== board) return [];
+    // A missing repo cannot free the known repo's surfaces. Empty canonical
+    // surfaces already reserve that complete repo through effectiveSurfaces.
+    return [{ ...truth, repo: truth.repo.trim() ? truth.repo : row.repo }];
+  });
+  const statuses = dependencyStatuses([candidate], [...bySlug.values()]);
+  const reason = pickupV2IneligibleReason(candidate, doing, statuses, {
+    enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
+  }) ?? claimHoldReason(candidate);
+  if (reason) return none(reason);
+  if (opts.dryRun) {
+    return {
+      result: "claimed",
+      card: candidate,
+      from: "todo",
+      to: "doing",
+      worker: opts.worker?.trim() ?? "",
+      dry_run: true,
+    };
+  }
+  try {
+    const claimed = await claimCard({
+      cfg: opts.cfg, node: opts.node, slug, worker: opts.worker ?? "",
+    });
+    return { ...claimed, dry_run: false };
+  } catch (err) {
+    if (err instanceof ClaimHeldError) return none(err.holdReason);
+    if (err instanceof ClaimConflictError) return none(`claim conflict (current=${err.current})`);
+    throw err;
   }
 }
 

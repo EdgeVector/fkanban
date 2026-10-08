@@ -506,7 +506,7 @@ Usage:
   fkanban pickup work-policy <slug> [--json]
   fkanban pickup lanes [--json] [--board <slug>]
   fkanban pickup claim [options]
-  fkanban pickup claim-v2 [--worker <id>] [--dry-run] [--json]
+  fkanban pickup claim-v2 [--only-card <slug>] [--worker <id>] [--dry-run] [--json]
 
 status — Classifies every active (non-terminal) card as pickup-ready,
 blocked-on-dependency, human-gated, malformed-routing, unattached-outcome,
@@ -568,6 +568,7 @@ claim options:
   --json                machine-readable claim result
 
 claim-v2 options:
+  --only-card <slug>     consider only this exact card; never fall back to another card
   --worker <id>         worker identity; required unless --dry-run
   --dry-run             select one card without a write
   --json                result is claimed, none, or error
@@ -1251,7 +1252,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   migrate: new Set(["dry-run", "slug"]),
   groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "max-removals", "cutoff-hours", "max", "force-milestone-card-payload-upsert", "reap-stale-milestone-positions"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
-  pickup: new Set(["board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
+  pickup: new Set(["only-card", "board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
 };
 
@@ -1444,6 +1445,7 @@ async function main(argv: string[]): Promise<number> {
         "declare-link": { type: "boolean" },
         name: { type: "string" },
         worker: { type: "string" },
+        "only-card": { type: "string" },
         "prefer-repo": { type: "string" },
         "exclude-repo": { type: "string" },
         "max-doing": { type: "string" },
@@ -2278,6 +2280,14 @@ async function dispatch(
       const extra = rejectExtraPositionals(positionals, maxPos, usage);
       if (extra !== undefined) return extra;
 
+      if (values["only-card"] !== undefined && sub !== "claim-v2") {
+        console.error(`kanban: --only-card does not apply to pickup ${sub}.`);
+        return 2;
+      }
+      if (values["only-card"] !== undefined && !(values["only-card"] as string).trim()) {
+        console.error("kanban: --only-card requires a non-empty card slug.");
+        return 2;
+      }
       const ctx = loadCtx({ verbose });
       if (sub === "status") {
         console.log(await pickupStatusCmd({
@@ -2347,6 +2357,7 @@ async function dispatch(
             node: ctx.node,
             worker: values.worker as string | undefined,
             dryRun: values["dry-run"] as boolean | undefined,
+            onlyCard: values["only-card"] as string | undefined,
           });
           console.log(formatPickupClaimV2(result, values.json as boolean | undefined));
           return 0;
