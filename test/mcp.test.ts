@@ -603,14 +603,44 @@ describe("MCP exact-card pickup", () => {
     for (const [slug, surface, position] of [
       [unrelatedSlug, "src/unrelated.ts", "1"],
       [authorizedSlug, "src/repair.ts", "9"],
-    ]) {
+    ] as const) {
       const added = await client.callTool({
         name: "fkanban_add",
-        arguments: { slug, position, column: "todo", body: validPickupBody(), surfaces: [surface] },
+        arguments: { slug, column: "todo", body: validPickupBody(), surfaces: [surface] },
       });
       expect(added.isError).not.toBe(true);
+      // MCP add does not expose position. Seed BOTH stored records explicitly:
+      // millisecond add timestamps can tie and select the authorized slug first.
+      const card = await findCard(node, cfg, slug);
+      expect(card).not.toBeNull();
+      const positionedCard = { ...card!, position, created_at: "2026-10-08T00:00:00.000Z" };
+      await node.updateRecord({
+        schemaHash: cfg.schemaHashes.card!,
+        keyHash: slug,
+        fields: cardToFields(positionedCard),
+      });
+      await upsertBoardCard(node, cfg, positionedCard, card);
     }
     writes.length = 0;
+  });
+
+  test("exact-card fixture stores canonical positions without a clock dependency", async () => {
+    expect((await findCard(node, cfg, unrelatedSlug))?.position, "earlier canonical Card position").toBe("1");
+    expect((await findCard(node, cfg, authorizedSlug))?.position, "authorized canonical Card position").toBe("9");
+  });
+
+  test("exact-card fixture stores BoardCards positions without a clock dependency", async () => {
+    const stored = await node.queryAll({
+      schemaHash: cfg.schemaHashes.board_cards!,
+      fields: ["slug", "position"],
+      filter: { HashKey: "default" },
+    });
+    expect(stored.results.map(({ fields }) => ({ slug: fields.slug, position: fields.position }))
+      .sort((a, b) => String(a.slug).localeCompare(String(b.slug))), "explicit BoardCards positions")
+      .toEqual([
+        { slug: authorizedSlug, position: "9" },
+        { slug: unrelatedSlug, position: "1" },
+      ]);
   });
 
   test("exact-card dry-run has command API and MCP parity", async () => {

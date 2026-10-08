@@ -27,7 +27,8 @@ All shared field values agree. The Card body is absent from the payload, so a
 concurrent execution marker or progress line survives.
 
 The client requires one of the proved node builds
-(`0.23.3-2328-g369ad6cd6`, `0.23.3-2375-ga7bac36f1`) and a successful
+(`0.23.3-2328-g369ad6cd6`, `0.23.3-2375-ga7bac36f1`,
+`0.23.3-2588-g24334db75`) and a successful
 handshake. It checks declared payload fields and key layouts before
 any mutation. The response must confirm durable acknowledgement. Unsupported
 builds, incompatible schemas, conflicts, and uncertain acknowledgement fail
@@ -50,7 +51,7 @@ hook. The result states `membership_cleanup: "deferred"`.
 - A future node build needs the same proof before allowlist expansion. The node
   does not yet advertise this specific batch capability.
 - A normal one-BoardCards mutation adds one version handshake, two schema metadata
-  reads, and one durable batch request. The client can cache its handshake.
+  reads in parallel, and one durable batch request. The client can cache its handshake.
   Existing command preflight reads remain. List/search read budgets stay unchanged.
 
 Follow-up records remain open:
@@ -102,3 +103,20 @@ confirmed all 10 persisted states unchanged. `bun test` passed 2301 tests
 `GUARDED_CARD_BATCH_BUILDS` alongside the 2026-09-25 entry rather than
 replacing it, since the comment on that constant only requires each listed
 build to carry its own proof, not that the list stay a single element.
+
+
+## Evidence, 2026-10-08
+
+Build `0.23.3-2588-g24334db75` passed the official production wrapper on a fresh
+synthetic home. The proof used the exact installed binary, three checked published
+schemas, and a synthetic default Board. It used no primary copy or primary socket.
+The wrapper passed 12 cases. Seven batches committed before a foreign takeover.
+The foreign owner, tags, body, column, and hold survived each takeover. A refused
+batch left the destination absent. A concurrent same-owner body mark survived.
+
+An argv check restricted the SIGKILL and restart to that synthetic node. A new
+node instance returned all ten expected Card states. The final argv check and
+SIGTERM stopped the synthetic node. These results support the exact build entry.
+The client still refuses unproved builds, failed handshakes, incompatible schemas,
+and uncertain durable acknowledgements. Schema metadata reads run in parallel;
+the client checks every result before the batch.

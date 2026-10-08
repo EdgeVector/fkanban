@@ -10,14 +10,14 @@ import { boardCardFieldsFromCard } from '../src/board-cards.ts';
 import { DEFAULT_COLUMNS } from '../src/schemas.ts';
 import { GUARDED_CARD_BATCH_BUILDS } from '../src/guarded-card-update.ts';
 
-async function fixture() {
+async function fixture(build: string = GUARDED_CARD_BATCH_BUILDS[0]) {
   const cfg: Config = {configVersion:1,nodeUrl:'http://unused.invalid',schemaServiceUrl:'http://unused.invalid',userHash:'synthetic',schemaHashes:{card:'card',board:'board'}};
   const node=fakeNode();
   node.seed({schemaHash:'board',keyHash:'default',fields:boardToFields({slug:'default',title:'test',body:'',columns:[...DEFAULT_COLUMNS],created_at:nowIso(),updated_at:nowIso()})});
   await addCmd({cfg,node,slug:'guard',column:'backlog',kind:'meta',assignee:'loom:original',body:'## END STATE\nSynthetic owner survives.'});
   const card=await requireCard(node,cfg,'guard');
   cfg.schemaHashes.board_cards='board_cards';
-  node.nodeVersion=async()=>({handshake:true,build:GUARDED_CARD_BATCH_BUILDS[0]} as any);
+  node.nodeVersion=async()=>({handshake:true,build} as any);
   node.getSchema=async hash=>({name:hash,descriptive_name:'',owner_app_id:'',schema_type:'',key:{hash_field:hash==='card'?'slug':'board',range_field:hash==='card'?null:'sk'},fields:Object.keys(hash==='card'?cardToFields(card):boardCardFieldsFromCard(card))});
   let race: Record<string,unknown>|undefined;
   const batches: Parameters<NonNullable<typeof node.updateRecords>>[0][]=[];
@@ -81,5 +81,92 @@ describe('atomic recovery owner guard',()=>{
     await expect(moveCmd({cfg,node,slug:'guard',column:'doing',expectColumn:'backlog',expectAssignee:'loom:original',worker:'foreign'})).rejects.toMatchObject({code:'guarded_owner_change'});
     await expect(setCmd({cfg,node,slug:'guard',title:'new',expectAssignee:'loom:original'})).rejects.toMatchObject({code:'guarded_set_scope'});
     expect(batches).toHaveLength(0);expect(node.writes).toHaveLength(0);
+  });
+});
+
+
+describe('guarded current-build compatibility', () => {
+  const currentBuild = '0.23.3-2588-g24334db75';
+
+  test('current build accepts guarded quarantine and preserves the owner hold and body', async () => {
+    const { node, cfg, batches, race } = await fixture(currentBuild);
+    const hold = 'claim recovery pending for worker "loom:original": do not work this card until the claim completes';
+    node.seed({ schemaHash: 'card', keyHash: 'guard', fields: {
+      ...node.rowAt('card', 'guard')!.fields, column: 'doing',
+      block_status: 'needs_human', block_reason: hold,
+    } });
+    race({ body: 'Concurrent CLAIM execution=same-owner' });
+    const result = await moveCmd({ cfg, node, slug: 'guard', column: 'backlog',
+      expectColumn: 'doing', expectAssignee: 'loom:original' });
+    expect(result.membership_cleanup, 'current build accepts guarded quarantine').toBe('deferred');
+    expect(node.rowAt('card', 'guard')!.fields.body, 'guarded quarantine preserves the concurrent body')
+      .toBe('Concurrent CLAIM execution=same-owner');
+    expect(node.rowAt('card', 'guard')!.fields).toMatchObject({
+      column: 'backlog', assignee: 'loom:original', block_status: 'needs_human',
+      block_reason: hold, body: 'Concurrent CLAIM execution=same-owner',
+    });
+    expect(batches).toHaveLength(1);
+    expect(batches[0]![0]!.fields, 'guarded quarantine omits the execution body').not.toHaveProperty('body');
+    expect(batches[0]![0]!.expected, 'guarded quarantine retains the atomic owner comparison')
+      .toEqual({ type: 'value', field: 'assignee', value: 'loom:original' });
+    expect(batches[0]!.every(row => row.durability === 'durable'),
+      'all current-build recovery operations request durable receipts').toBe(true);
+    expect(node.writes).toHaveLength(0);
+  });
+
+  test('a nearby unproved build refuses before any batch', async () => {
+    const { node, cfg, batches } = await fixture('0.23.3-2589-g24334db75');
+    await expect(setCmd({ cfg, node, slug: 'guard', blockStatus: 'none', expectAssignee: 'loom:original' }),
+      'an unproved exact build refuses').rejects.toMatchObject({ code: 'guarded_batch_unsupported' });
+    expect(batches).toHaveLength(0);
+    expect(node.writes).toHaveLength(0);
+  });
+
+  test('the current build requires a successful handshake', async () => {
+    const { node, cfg, batches } = await fixture(currentBuild);
+    node.nodeVersion = async () => ({ handshake: false, build: currentBuild } as any);
+    await expect(setCmd({ cfg, node, slug: 'guard', blockStatus: 'none', expectAssignee: 'loom:original' }),
+      'the current build requires a successful handshake').rejects.toMatchObject({ code: 'guarded_batch_unsupported' });
+    expect(batches).toHaveLength(0);
+    expect(node.writes).toHaveLength(0);
+  });
+
+  test('all schema metadata reads start together before the durable batch', async () => {
+    const { node, cfg, batches } = await fixture(currentBuild);
+    const get = node.getSchema!;
+    const reads: string[] = [];
+    let firstRead!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { firstRead = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    node.getSchema = async hash => {
+      reads.push(hash);
+      firstRead();
+      await gate;
+      return get(hash);
+    };
+    const recovery = setCmd({ cfg, node, slug: 'guard', blockStatus: 'none', expectAssignee: 'loom:original' });
+    await started;
+    try {
+      expect(reads, 'all recovery schema reads start before the first result').toEqual(['card', 'board_cards']);
+      expect(batches, 'no recovery batch precedes schema metadata').toHaveLength(0);
+    } finally {
+      release();
+      await recovery;
+    }
+    expect(batches).toHaveLength(1);
+  });
+
+  test('a schema metadata error refuses before any batch', async () => {
+    const { node, cfg, batches } = await fixture(currentBuild);
+    const get = node.getSchema!;
+    node.getSchema = async hash => {
+      if (hash === 'board_cards') throw new FkanbanError({ code: 'service_timeout', message: 'Synthetic schema timeout.' });
+      return get(hash);
+    };
+    await expect(setCmd({ cfg, node, slug: 'guard', blockStatus: 'none', expectAssignee: 'loom:original' }),
+      'schema metadata failure refuses the recovery batch').rejects.toMatchObject({ code: 'service_timeout' });
+    expect(batches).toHaveLength(0);
+    expect(node.writes).toHaveLength(0);
   });
 });
