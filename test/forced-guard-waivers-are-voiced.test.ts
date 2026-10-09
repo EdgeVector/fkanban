@@ -622,7 +622,7 @@ describe("every --force-waived guard announces itself", () => {
   // so a gate written into an unlisted file is invisible no matter how good the
   // pattern is. Adding a force-clearable gate elsewhere means adding it here.
   // The guarded writer uses only force:false. Scan it to expose a later silent waiver.
-  const GATE_FILES = ["src/record.ts", "src/pipeline_status.ts", "src/commands/add.ts", "src/guarded-factory.ts"];
+  const GATE_FILES = ["src/record.ts", "src/pipeline_status.ts", "src/commands/add.ts", "src/guarded-factory.ts", "src/create-only-card.ts"];
 
   test("the pattern this test hunts for can actually match", () => {
     // Guard against the guard: a regex that matches nothing would let this

@@ -11,7 +11,7 @@ import type { Config } from "../src/config.ts";
 import { CARD_FIELDS, DEFAULT_COLUMNS } from "../src/schemas.ts";
 import { boardToFields, cardToFields, emptyStructuredFields, type Card } from "../src/record.ts";
 import { boardCardFieldsFromCard } from "../src/board-cards.ts";
-import { captureSnapshot, captureSnapshots, COMPOUND_CARD_BUILD, parseSnapshot, serializeSnapshot, sha256, snapshotFileOptions, type GuardedReceipt } from "../src/guarded-snapshot.ts";
+import { captureSnapshot, captureSnapshots, COMPOUND_CARD_BUILD, COMPOUND_CARD_BUILDS, parseSnapshot, serializeSnapshot, sha256, snapshotFileOptions, type GuardedReceipt } from "../src/guarded-snapshot.ts";
 import { markCmd } from "../src/commands/mark.ts";
 import { setCmd } from "../src/commands/set.ts";
 import { moveCmd } from "../src/commands/move.ts";
@@ -174,7 +174,7 @@ test("FIFO snapshot file refuses within a bounded time",async()=>{
   const timeout=setTimeout(()=>proc.kill(),1500);try{expect(await proc.exited).toBe(0);}finally{clearTimeout(timeout);}
 },3000);
 test("symlink and oversized snapshot files refuse",async()=>{const dir=mkdtempSync(join(tmpdir(),"fkanban-file-fixture-"));const path=dir+"/file";writeFileSync(path,"{}\n");symlinkSync(path,dir+"/link");await expect(snapshotFileOptions(dir+"/link",sha256("{}\n"))).rejects.toBeInstanceOf(Error);writeFileSync(path,"a".repeat(1048577));await expect(snapshotFileOptions(path,"0".repeat(64))).rejects.toMatchObject({code:"invalid_guard_snapshot"});});
-test("guarded contract succeeds before unavailable config",async()=>{const proc=Bun.spawn([process.execPath,new URL("../src/cli.ts",import.meta.url).pathname,"guarded-contract","--json"],{env:{...process.env,KANBAN_CONFIG:"/not-a-config",FKANBAN_CONFIG:"/not-a-config"},stdout:"pipe",stderr:"pipe"});const out=await new Response(proc.stdout).text();expect(await proc.exited).toBe(0);expect(JSON.parse(out)).toMatchObject({name:"fkanban-raw23-guarded-card",compound_builds:[COMPOUND_CARD_BUILD]});},10000);
+test("guarded contract succeeds before unavailable config",async()=>{const proc=Bun.spawn([process.execPath,new URL("../src/cli.ts",import.meta.url).pathname,"guarded-contract","--json"],{env:{...process.env,KANBAN_CONFIG:"/not-a-config",FKANBAN_CONFIG:"/not-a-config"},stdout:"pipe",stderr:"pipe"});const out=await new Response(proc.stdout).text();expect(await proc.exited).toBe(0);expect(JSON.parse(out)).toMatchObject({name:"fkanban-raw23-guarded-card",compound_builds:[...COMPOUND_CARD_BUILDS]});},10000);
 test("MCP exact snapshot and guarded closeout preserve declared receipts",async()=>{
   const f=fixture();const [ct,st]=InMemoryTransport.createLinkedPair();const server=createFkanbanMcpServer({cfg:f.cfg,node:f.node});const client=new Client({name:"guarded-test",version:"1"});await Promise.all([client.connect(ct),server.connect(st)]);
   try {const raw=await client.callTool({name:"fkanban_guarded_snapshot",arguments:{slug:"guard"}});const s=raw.structuredContent as any;expect(s.snapshot_sha256).toBe(sha256(s.snapshot_json));

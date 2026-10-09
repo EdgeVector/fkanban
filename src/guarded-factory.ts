@@ -13,7 +13,7 @@ import { assertSituationPreflightAllowed, type SituationPreflight } from "./situ
 import { surfacesOverlap } from "./pickup_v2.ts";
 import { assertLifecycleMoveAllowed } from "./pipeline_status.ts";
 import {
-  boundSnapshot, captureSnapshot, COMPOUND_CARD_BUILD, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256,
+  boundSnapshot, captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256,
   guardError, rawEqual, serializeSnapshot, sha256, snapshotByteSha, snapshotCard, validateRawFields,
   type GuardOptions, type GuardSnapshot, type GuardedReceipt, type RawFields,
 } from "./guarded-snapshot.ts";
@@ -60,7 +60,7 @@ export async function compoundUpdate(opts: Context, witness: GuardSnapshot, inte
     guardError("guarded_delta_scope", `The finite operation cannot change ${field}.`);
   }
   const version = await opts.node.nodeVersion?.();
-  if (!version?.handshake || version.build !== COMPOUND_CARD_BUILD || !opts.node.updateRecords || !opts.node.getSchema) {
+  if (!version?.handshake || typeof version.build !== "string" || !COMPOUND_CARD_BUILDS.includes(version.build) || !opts.node.updateRecords || !opts.node.getSchema) {
     guardError("guarded_batch_unsupported", "The exact proved compound build and atomic durable batch are required.");
   }
   const hashes = boardCardsWriteHashes(opts.cfg);

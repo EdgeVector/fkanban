@@ -33,6 +33,7 @@ import {
   ensureBoardRecord,
   ensureColumn,
   findCard,
+  findBoard,
   findMilestone,
   isBlockStatus,
   isCardKind,
@@ -55,6 +56,7 @@ import {
 } from "../record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { resolveCurrentClaim } from "../current_claim.ts";
+import { assertCreateOnlyScope, createOnlyCard, type CreateOnlyReceipt } from "../create-only-card.ts";
 
 export type AddOptions = {
   cfg: Config;
@@ -70,6 +72,8 @@ export type AddOptions = {
   assignee?: string;
   /** Internal set-only owner guard; no create or reassignment. */
   expectAssignee?: string;
+  /** Atomic absent-Card creation. Never updates or retries an existing key. */
+  createOnly?: boolean;
   // Immutable creator provenance. Honored on create; a conflicting explicit
   // value on update is rejected so an upsert cannot rewrite history.
   createdBy?: string;
@@ -239,7 +243,7 @@ function applyPriority(tags: string[], priority?: PriorityTier): string[] {
 
 import type { GuardedReceipt } from "../guarded-snapshot.ts";
 
-export type AddResult = Partial<GuardedReceipt> & { membership_cleanup?: "deferred"; slug: string; action: "created" | "updated"; board: string; column: string };
+export type AddResult = Partial<GuardedReceipt> & Partial<CreateOnlyReceipt> & { membership_cleanup?: "deferred"; slug: string; action: "created" | "updated"; board: string; column: string };
 
 function suppressDefaultTodoWarning(card: Pick<Card, "board" | "column">, force?: boolean): boolean {
   return !force && card.board === "default" && card.column === "todo";
@@ -448,7 +452,13 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   // Resolve the card BEFORE the board context: on update we must honor the
   // card's existing board when no explicit `--board` is given. An explicit
   // `--board` still moves the card; only the implicit default would be wrong.
+  if (opts.createOnly && (opts.force || opts.expectAssignee !== undefined)) {
+    throw new FkanbanError({code:"create_only_scope",message:"Create-only cannot use force or an update owner guard."});
+  }
   const existing = await readExistingForWrite(opts);
+  if (opts.createOnly && existing) {
+    throw new FkanbanError({code:"card_exists",message:`Card "${opts.slug}" already exists. Create-only sent no mutation.`});
+  }
   if (opts.expectAssignee !== undefined) {
     if (!existing || existing.assignee !== opts.expectAssignee) {
       throw new FkanbanError({ code: "owner_conflict", message: `Card "${opts.slug}" no longer has the expected assignee.` });
@@ -487,7 +497,9 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     }
   }
   if (existing) assertMetadataWriteHasPlacement(opts, existing);
-  const board = await ensureBoardRecord(opts.node, opts.cfg, boardSlug);
+  const board = opts.createOnly ? await findBoard(opts.node, opts.cfg, boardSlug)
+    : await ensureBoardRecord(opts.node, opts.cfg, boardSlug);
+  if (!board) throw new FkanbanError({code:"create_only_board_missing",message:"Create-only requires an existing canonical Board. No repair was sent."});
   const columns = board.columns;
   // Same rule as `boardSlug`: an empty stored column is no column at all, so it
   // must fall through to the board's first column rather than reach
@@ -723,6 +735,11 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   });
   await assertSituationPreflightAllowed(card, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, card, opts.force);
+  if (opts.createOnly) {
+    assertCreateOnlyScope(card, opts.force);
+    const receipt = await createOnlyCard(opts, card);
+    return {slug: opts.slug, action: "created", board: boardSlug, column: targetColumn, ...receipt};
+  }
   await createCardRecord(opts, card);
   // AFTER the write, never before. A completion checkpoint is a durable, one-way
   // append into Brain that nothing in this codebase retracts, so ordering it

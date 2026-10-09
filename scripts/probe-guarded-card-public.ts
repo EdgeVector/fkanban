@@ -9,11 +9,13 @@ import {StdioClientTransport} from "@modelcontextprotocol/sdk/client/stdio.js";
 import {readConfig} from "../src/config.ts";
 import {CARD_FIELDS,allPinnedSchemas,DEFAULT_COLUMNS} from "../src/schemas.ts";
 import {boardCardFieldsFromCard,boardCardSk} from "../src/board-cards.ts";
-import {sha256,COMPOUND_CARD_BUILD} from "../src/guarded-snapshot.ts";
+import {sha256,COMPOUND_CARD_BUILD,COMPOUND_CARD_BUILDS} from "../src/guarded-snapshot.ts";
 
-const {values}=parseArgs({args:process.argv.slice(2),strict:true,allowPositionals:false,options:{"artifact-root":{type:"string"},help:{type:"boolean"}}});
-if(values.help){console.log("Usage: bun scripts/probe-guarded-card-public.ts [--artifact-root PATH]");process.exit(0);}
-const source=new URL("../",import.meta.url).pathname,binary=join(homedir(),".lastdb/current/lastdbd");
+const {values}=parseArgs({args:process.argv.slice(2),strict:true,allowPositionals:false,options:{"artifact-root":{type:"string"},"mini-bin":{type:"string"},"mini-build":{type:"string"},"dedupe-mode":{type:"string",default:"off"},help:{type:"boolean"}}});
+if(values.help){console.log("Usage: bun scripts/probe-guarded-card-public.ts [--artifact-root PATH] [--mini-bin PATH] [--mini-build BUILD] [--dedupe-mode off|on]");process.exit(0);}
+const source=new URL("../",import.meta.url).pathname,binary=resolve(values["mini-bin"]??join(homedir(),".lastdb/current/lastdbd"));
+const miniBuild=values["mini-build"]??COMPOUND_CARD_BUILD;assert(COMPOUND_CARD_BUILDS.includes(miniBuild));assert(["off","on"].includes(values["dedupe-mode"]!));
+const version=Bun.spawnSync([binary,"--version"],{stdout:"pipe",stderr:"pipe"});assert.equal(version.exitCode,0);assert.equal(new TextDecoder().decode(version.stdout).trim(),"lastdbd "+miniBuild);
 const artifactRoot=realpathSync(resolve(values["artifact-root"]??join(source,"dist")))+"/";
 const root=mkdtempSync("/tmp/fkanban-public-guard-"),home=join(root,"home"),proxyDir=join(root,"proxy");
 mkdirSync(join(home,"data"),{recursive:true});mkdirSync(proxyDir);
@@ -26,7 +28,7 @@ assert.equal(sourceSha(),artifact.source_manifest_sha256);assert.equal(sha256(re
 const before=sourceSha(),pins=readConfig().schemaHashes;
 const schemaHashes={card:pins.card!,board:pins.board!,board_cards:pins.board_cards!};
 assert(Object.values(schemaHashes).every(h=>/^[0-9a-f]{64}$/.test(h)));
-const evidence:any={version:1,root,artifact_root:artifactRoot,build:COMPOUND_CARD_BUILD,started_at:new Date().toISOString(),program_sha256:sha256(readFileSync(import.meta.path)),artifact,requests:0,public_batches:[],cases:[],result:"pending",source_unchanged:false};
+const evidence:any={version:1,root,artifact_root:artifactRoot,build:miniBuild,mini_binary:binary,mini_binary_sha256:sha256(readFileSync(binary)),dedupe_mode:values["dedupe-mode"],started_at:new Date().toISOString(),program_sha256:sha256(readFileSync(import.meta.path)),artifact,requests:0,public_batches:[],cases:[],result:"pending",source_unchanged:false};
 const expected=new Map<string,any>(),destinations=new Map<string,any>(),absentDestinations=new Set<string>(),readbackPending=new Set<string>();let eventSeq=0;
 let userHash="",child:ReturnType<typeof Bun.spawn>|undefined,mcp:Client|undefined;
 const pause=(ms:number)=>new Promise(r=>setTimeout(r,ms));
@@ -37,7 +39,7 @@ async function batch(ops:any[]){assert(ops.length<=256);const r=await raw("/api/
 async function readKeys(schema:string,keys:[string,string][],fields:string[]){const r=await raw("/api/query",{schema_name:schema,filter:{HashRangeKeys:keys},fields,limit:1000,offset:0});assert.equal(r.status,200,JSON.stringify(r.json));assert.equal(r.json.ok,true);assert.equal(r.json.has_more,false);assert.equal(r.json.unresolved_rows??0,0);return r.json;}
 async function current(slug:string){return (await readKeys(schemaHashes.card,[[slug,""]],[...CARD_FIELDS])).results[0]?.fields??null;}
 function save(){evidence.source_unchanged=sourceSha()===before;writeFileSync(evidencePath,JSON.stringify(evidence,null,2)+"\n");}
-async function start(){assert(!child);const fd=openSync(join(root,"boot.log"),"a",0o600);child=Bun.spawn([binary,"--data-dir",home,"--socket-path",socket,"--full-socket-path",full],{env:{PATH:process.env.PATH??"/usr/bin:/bin",LASTDB_HOME:home,FOLDDB_HOME:home,TMPDIR:root,RUST_LOG:"warn"},stdout:fd,stderr:fd});closeSync(fd);evidence.pids??=[];evidence.pids.push(child.pid);for(let n=0;n<45;n++){if(child.exitCode!==null)throw Error("private Mini exited");if(existsSync(full)){try{const r=await raw("/api/version");if(r.status===200){assert.equal(r.json.build,COMPOUND_CARD_BUILD);evidence.instances??=[];evidence.instances.push(r.json.instance_id);return;}}catch(e){if(String(e).includes("AssertionError"))throw e;}}await pause(1000);}throw Error("private Mini readiness timeout");}
+async function start(){assert(!child);const fd=openSync(join(root,"boot.log"),"a",0o600);child=Bun.spawn([binary,"--data-dir",home,"--socket-path",socket,"--full-socket-path",full],{env:{PATH:process.env.PATH??"/usr/bin:/bin",LASTDB_HOME:home,FOLDDB_HOME:home,TMPDIR:root,RUST_LOG:"warn",LASTDB_WRITE_DEDUPE:values["dedupe-mode"]==="on"?"1":"0"},stdout:fd,stderr:fd});closeSync(fd);evidence.pids??=[];evidence.pids.push(child.pid);for(let n=0;n<45;n++){if(child.exitCode!==null)throw Error("private Mini exited");if(existsSync(full)){try{const r=await raw("/api/version");if(r.status===200){assert.equal(r.json.build,miniBuild);evidence.instances??=[];evidence.instances.push(r.json.instance_id);return;}}catch(e){if(String(e).includes("AssertionError"))throw e;}}await pause(1000);}throw Error("private Mini readiness timeout");}
 async function stop(signal:"SIGKILL"|"SIGTERM"){if(!child)return;if(child.exitCode!==null){child=undefined;return;}const p=child.pid;const ps=Bun.spawnSync(["/bin/ps","-o","command=","-p",String(p)],{stdout:"pipe",stderr:"pipe"});const argv=new TextDecoder().decode(ps.stdout);assert(argv.includes(binary)&&argv.includes("--data-dir "+home)&&argv.includes("--socket-path "+socket));assert(!argv.includes(join(homedir(),".lastdb/data")));child.kill(signal);await Promise.race([child.exited,pause(10000).then(()=>{throw Error("private Mini stop timeout");})]);child=undefined;evidence.stop_checks??=[];evidence.stop_checks.push({pid:p,signal,argv_verified:true});}
 type Arm={slug:string,stage:number,field?:string,value?:any,ack?:string,failClear?:boolean,readback?:boolean};
 let arm:Arm|undefined,stage=0,lastRead=new Map<string,number>(),readCompleteSeq=new Map<string,number>();

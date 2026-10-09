@@ -24,6 +24,7 @@ import { ConfigMissingError, ConfigInvalidError } from "./config.ts";
 import { loadAppCtx, loadCtx } from "./context.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
+import { CREATE_ONLY_CONTRACT, CREATE_ONLY_CONTRACT_SHA256 } from "./create-only-card.ts";
 import { markCmd } from "./commands/mark.ts";
 import { captureSnapshot, captureSnapshots, snapshotSlugsFile, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, serializeSnapshot, snapshotFileOptions } from "./guarded-snapshot.ts";
 import { setCmd } from "./commands/set.ts";
@@ -111,6 +112,7 @@ Global:
                        also read from env LASTDB_DB (set by org/fkanban wrappers ...)
 
 Commands:
+  create-only-contract return the immutable atomic creation contract before config access
   guarded-contract     return the immutable factory contract before config access
   guarded-snapshot     exact raw Card snapshot; <slug> or --slugs-file PATH (--json)
   init                 bootstrap a node + register schemas + seed default board
@@ -206,6 +208,14 @@ function withFooter(body: string): string {
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
+  "create-only-contract": withFooter(`fkanban create-only-contract — immutable atomic creation contract
+
+Usage:
+  fkanban create-only-contract --json
+
+Use add --create-only for an unowned, unheld backlog Card. The Board must already exist.
+The node checks all23 absent fields and publishes the Card and BoardCards in one durable batch.
+An existing or partial Card refuses creation. No force, retry or fallback is allowed.`),
   "guarded-contract": withFooter(`fkanban guarded-contract — immutable factory contract
 
 Usage:
@@ -256,6 +266,8 @@ Usage:
   fkanban add <slug> [options]            # --body also reads stdin if piped
 
 Options:
+  --create-only         atomic absent-key creation for an unowned, unheld backlog Card
+                        existing Board required; no force, update, retry or fallback
   --title <text>        card title
   --board <slug>        board to place the card on (default: default)
   --column <col>        column to place the card in (default: first column)
@@ -1238,7 +1250,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   doctor: new Set(["board", "stale-rows"]),
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name", "accept-schema-repin"]),
   add: new Set([
-    "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force",
+    "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force", "create-only",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
   ]),
   // Metadata-only: no body, no stdin, no placement (board/column), no deps list
@@ -1247,6 +1259,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   mark: new Set(["guard-snapshot", "snapshot-sha256", "expect-assignee"]),
   "guarded-snapshot": new Set(["slugs-file"]),
   "guarded-contract": new Set(),
+  "create-only-contract": new Set(),
   set: new Set(["guard-snapshot", "snapshot-sha256",
     "title", "assignee", "expect-assignee", "tags", "surfaces", "priority", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
@@ -1421,6 +1434,7 @@ async function main(argv: string[]): Promise<number> {
         "slugs-file": { type: "string" },
         "snapshot-sha256": { type: "string" },
         "claim-v2": { type: "boolean" },
+        "create-only": { type: "boolean" },
         canonical: { type: "boolean" },
         "created-by": { type: "string" },
         tags: { type: "string" },
@@ -1573,6 +1587,12 @@ async function dispatch(
   verbose: Verbose | undefined,
 ): Promise<number> {
   switch (cmd) {
+    case "create-only-contract": {
+      const extra = rejectExtraPositionals(positionals, 1, "create-only-contract");
+      if (extra !== undefined) return extra;
+      console.log(JSON.stringify({ ...CREATE_ONLY_CONTRACT, contract_sha256: CREATE_ONLY_CONTRACT_SHA256 }));
+      return 0;
+    }
     case "guarded-contract": {
       const extra = rejectExtraPositionals(positionals, 1, "guarded-contract");
       if (extra !== undefined) return extra;
@@ -1906,6 +1926,7 @@ async function dispatch(
           column: values.column as string | undefined,
           assignee: values.assignee as string | undefined,
           createdBy: values["created-by"] as string | undefined,
+          createOnly: values["create-only"] as boolean | undefined,
           tags: parseTags(values.tags as string | undefined),
           deps: parseTags(values.deps as string | undefined),
           replaceDeps: values["replace-deps"] as boolean | undefined,
