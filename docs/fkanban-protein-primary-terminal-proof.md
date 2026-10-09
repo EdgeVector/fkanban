@@ -2,6 +2,8 @@ PASS
 
 # fkanban protein-primary terminal proof
 
+Note (2026-10-09): the tests named below were deleted. This record is history.
+
 Date: 2026-08-02
 Repo: EdgeVector/fkanban
 Branch: kanban/fkanban-protein-primary-terminal-drift-fix-20260802

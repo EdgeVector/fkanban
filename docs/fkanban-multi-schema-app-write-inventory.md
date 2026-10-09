@@ -50,9 +50,9 @@ Classification:
   it. `src/card-list-index.ts:239` exits early when `cardListIndexIsSuperseded`
   is true.
 
-CI guard:
+CI guard (the tests were deleted on 2026-10-09; the rules stay as design intent):
 
-- `test/milestone-indexes.test.ts` pins `add` update, direct
+- `test/milestone-indexes.test.ts` pinned `add` update, direct
   `writeCardPatch`, `tag add`, `rank`, and `move` as hot card paths.
 - Those operations may mutate `Card` and `BoardCards`.
 - They may touch `MilestoneCards` only for direct delete-only retirement of

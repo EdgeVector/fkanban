@@ -2,9 +2,9 @@
 # Brain: decision-2026-09-29-retire-lastgit-all-repos-to-github,
 #        sop-github-artifact-app-migration.
 #
-# `ci-required` is the branch-protection check. It needs `test`, which runs
-# .lastgit/ci.sh unchanged (shell syntax, schema-sync boundary, test-timeout
-# boundary, typecheck, artifact build + smoke, bun test). `publish` runs on a
+# `ci-required` is the branch-protection check. It needs `gate`, which runs
+# .lastgit/ci.sh (shell syntax, schema-sync boundary, typecheck, artifact
+# build + smoke). The tests were deleted (Tom, 2026-10-09). `publish` runs on a
 # push to main only, after the gate is green, and uploads the host-track
 # artifact `ht-artifact-<sha>`. `host-track refresh kanban` on the Mac pulls it
 # (last-stack-github-artifact-pull), re-checks every digest, and promotes the
@@ -27,29 +27,25 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test
+  gate:
+    name: gate
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
-      # Plain text: two list-output tests compare uncolored output.
       - name: Merge gate (.lastgit/ci.sh)
-        env:
-          NO_COLOR: "1"
-          FORCE_COLOR: "0"
         run: bash .lastgit/ci.sh
 
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [test]
+    needs: [gate]
     runs-on: ubuntu-24.04
     steps:
       - name: Every needed job succeeded
         env:
-          RESULT: ${{ needs.test.result }}
+          RESULT: ${{ needs.gate.result }}
         run: test "$RESULT" = success
 
   publish:

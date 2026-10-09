@@ -10,7 +10,7 @@
 ## Workflow
 
 1. Agents open PRs on GitHub (`last-stack-pr-venue` answers `github`).
-2. `ci-required` runs `.lastgit/ci.sh` (test job); branch protection on `main` requires it; auto-merge.
+2. `ci-required` runs `.lastgit/ci.sh` (gate job); branch protection on `main` requires it; auto-merge.
 3. On push to `main`, the `publish` job builds `dist/` on a macOS arm64 runner, runs `scripts/artifact-smoke.sh`, and uploads the artifact. host-track pulls, verifies, and promotes `stable`.
 
 `.lastgit/ci.sh` and `.lastgit/artifacts.json` stay: they are the gate script and

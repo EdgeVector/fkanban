@@ -1,6 +1,6 @@
 # AGENTS.md — developing kanban itself
 
-Canonical build/test/run/PR commands for this repo. `CLAUDE.md` is a symlink to
+Canonical build/run/PR commands for this repo. `CLAUDE.md` is a symlink to
 this file (shared by Claude Code, Cursor, Codex, …). For *using* kanban
 (install, command catalog, MCP setup) see `README.md`.
 
@@ -36,16 +36,18 @@ concepts-kanban-body-free-card-projections` — `listCards` serves the board
 from body-free BoardCards partitions; judging/rewriting a body needs
 `listCardsWithBodies`/`findCard`, not `listCards`.
 
-## Build / test
+## Build / typecheck
+
+The tests are deleted (Tom, 2026-10-09). The gate runs the schema-sync boundary
+check, typecheck, the artifact build, and the artifact smoke.
 
 ```bash
 bun install            # worktrees start with NO node_modules — do this FIRST
-bun test               # bun's test runner over test/
 bun run typecheck      # tsc --noEmit
 ```
 
-CI runs the same two checks plus a `ci-required` umbrella and CodeQL (~1 min,
-`--frozen-lockfile` — keep `bun.lock` in sync).
+CI runs the same checks (`.lastgit/ci.sh`) plus a `ci-required` umbrella and
+CodeQL (~1 min, `--frozen-lockfile` — keep `bun.lock` in sync).
 
 ## Card worktrees — start WARM (APFS CoW target/)
 
