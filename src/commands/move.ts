@@ -40,7 +40,10 @@ import { planDoingClaim } from "../doing-claim.ts";
 import { purgeOtherColumnRowsForSlug } from "../board-cards.ts";
 import { activatePlannedMilestoneForDoing, type MilestoneActivationOutcome } from "../milestone_activation.ts";
 
-export type MoveOptions = {
+import { hasSnapshot, type GuardOptions } from "../guarded-snapshot.ts";
+import { guardedMove } from "../guarded-factory.ts";
+
+export type MoveOptions = GuardOptions & {
   cfg: Config;
   node: NodeClient;
   slug: string;
@@ -65,7 +68,9 @@ export type MoveOptions = {
   env?: Record<string, string | undefined>;
 };
 
-export type MoveResult = {
+import type { GuardedReceipt } from "../guarded-snapshot.ts";
+
+export type MoveResult = Partial<GuardedReceipt> & {
   membership_cleanup?: "deferred";
   slug: string;
   from: string;
@@ -415,6 +420,12 @@ async function promoteUnblockedBacklogDependents(opts: {
 }
 
 export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
+  if (hasSnapshot(opts)) {
+    if (opts.force || opts.position !== undefined || opts.assignee !== undefined || opts.worker !== undefined || opts.allowUnclaimed) {
+      throw new FkanbanError({code:"guarded_move_scope",message:"Snapshot-guarded move does not accept force, position or owner changes."});
+    }
+    return guardedMove(opts);
+  }
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
   if (opts.expectAssignee !== undefined) {
     if (!opts.expectAssignee.trim() || opts.force ||

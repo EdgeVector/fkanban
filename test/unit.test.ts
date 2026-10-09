@@ -848,7 +848,7 @@ describe("per-command help", () => {
     const cmds: string[] = [];
     for (const line of lines.slice(start + 1)) {
       if (line.trim() === "") break; // section ends at the blank line
-      const name = line.match(/^\s{2}([a-z]+)\b/)?.[1];
+      const name = line.match(/^\s{2}([a-z][a-z-]*)\b/)?.[1];
       if (name && name !== "help") cmds.push(name); // `help` is the global, not a per-command entry
     }
     return cmds;

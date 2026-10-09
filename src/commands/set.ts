@@ -16,7 +16,10 @@ import { type Config } from "../config.ts";
 import { requireCard, type PriorityTier } from "../record.ts";
 import { addCmd, type AddResult } from "./add.ts";
 
-export type SetOptions = {
+import { hasSnapshot, type GuardOptions } from "../guarded-snapshot.ts";
+import { guardedSet } from "../guarded-factory.ts";
+
+export type SetOptions = GuardOptions & {
   cfg: Config;
   node: NodeClient;
   slug: string;
@@ -39,6 +42,7 @@ export type SetOptions = {
   /** Explicit operator override for lane/dependency guards (forwarded to add). */
   force?: boolean;
   dbLocator?: string;
+  situationPreflight?: import("../situations.ts").SituationPreflight;
 };
 
 function hasAnyField(opts: SetOptions): boolean {
@@ -66,6 +70,13 @@ function hasAnyField(opts: SetOptions): boolean {
  * `body`. Requires the card to already exist (no create path).
  */
 export async function setCmd(opts: SetOptions): Promise<AddResult> {
+  if (hasSnapshot(opts)) {
+    if ([opts.title, opts.assignee, opts.tags, opts.priority, opts.repo, opts.base, opts.kind,
+      opts.blockStatus, opts.blockReason, opts.northStar, opts.milestone].some(v => v !== undefined) || opts.force) {
+      throw new FkanbanError({code:"guarded_set_scope",message:"Snapshot-guarded set accepts only the finite PR/branch or unowned surfaces delta."});
+    }
+    return guardedSet(opts);
+  }
   if (opts.expectAssignee !== undefined) {
     const otherFields = [opts.title, opts.assignee, opts.tags, opts.priority, opts.repo,
       opts.base, opts.kind, opts.northStar, opts.milestone, opts.prUrl, opts.branch, opts.surfaces, opts.dbLocator];

@@ -66,6 +66,9 @@ const NOT_EXERCISED: Record<string, string> = {
 
 /** Args for each exercised read tool. Keys must cover exactly the rest. */
 const READ_TOOL_ARGS: Record<string, Record<string, unknown>> = {
+  fkanban_guarded_contract:{},
+  fkanban_guarded_snapshot:{slug:"look-a"},
+  fkanban_guarded_snapshots:{slugs:["look-a","missing"]},
   fkanban_list: {},
   fkanban_show: { slug: "look-a" },
   fkanban_overlap: { slug: "look-a" },

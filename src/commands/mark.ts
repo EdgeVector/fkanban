@@ -7,7 +7,12 @@ import { type Config } from "../config.ts";
 import { addCmd, type AddResult } from "./add.ts";
 import { isSubstantiveCardBody, requireCard } from "../record.ts";
 
-export type MarkOptions = {
+import { hasSnapshot, type GuardOptions } from "../guarded-snapshot.ts";
+import { guardedMark } from "../guarded-factory.ts";
+
+export type MarkOptions = GuardOptions & {
+  expectAssignee?: string;
+  situationPreflight?: import("../situations.ts").SituationPreflight;
   cfg: Config;
   node: NodeClient;
   slug: string;
@@ -36,6 +41,8 @@ function hasTruncatedBodyMarker(card: { body: string; bodyTruncated?: unknown })
 }
 
 export async function markCmd(opts: MarkOptions): Promise<AddResult> {
+  if (hasSnapshot(opts)) return guardedMark(opts);
+  if (opts.expectAssignee !== undefined) throw new FkanbanError({code:"guard_snapshot_flags",message:"Guarded mark requires a snapshot and byte SHA."});
   if (opts.line.length === 0) {
     throw new FkanbanError({
       code: "invalid_mark_line",
