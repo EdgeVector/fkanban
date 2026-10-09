@@ -7,7 +7,7 @@ import { CARD_FIELDS } from "./schemas.ts";
 import { rowToCard, type Card } from "./record.ts";
 
 export const COMPOUND_CARD_BUILD = "0.23.3-2588-g24334db75";
-export const COMPOUND_CARD_BUILDS: readonly string[] = Object.freeze([COMPOUND_CARD_BUILD, "0.23.3-2693-gb70418967"]);
+export const COMPOUND_CARD_BUILDS: readonly string[] = Object.freeze([COMPOUND_CARD_BUILD, "0.23.3-2693-gb70418967", "0.23.3-2708-gc85aba73f"]);
 export const GUARDED_CONTRACT = Object.freeze({
   version: 1, name: "fkanban-raw23-guarded-card", snapshot_version: 1,
   card_fields: [...CARD_FIELDS], compound_builds: [...COMPOUND_CARD_BUILDS],
