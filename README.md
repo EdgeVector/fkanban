@@ -35,11 +35,10 @@ repair drift.
 Shared field descriptions match between the two layouts so field identity can
 align; `layout` stays distinct so partition markers never co-identity.
 
-See fold `docs/app-developers-multi-key-proteins.md` and tests
-`test/protein-primary-membership.test.ts` / `test/no-protein-reach.test.ts`.
+See fold `docs/app-developers-multi-key-proteins.md`.
 
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
-> build/test/run/dogfood + PR workflow and the non-obvious gotchas.
+> build/run/dogfood + PR workflow and the non-obvious gotchas.
 
 > **Just want to use kanban?** Skip straight to
 > [Prerequisites](#prerequisites) + [Quick start](#quick-start). `kanban init`

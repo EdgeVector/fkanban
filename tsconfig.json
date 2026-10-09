@@ -33,6 +33,6 @@
       "@lastdb/app-sdk": ["./vendor/lastdb-app-sdk"]
     }
   },
-  "include": ["src/**/*", "test/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

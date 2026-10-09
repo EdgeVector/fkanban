@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Merge gate for fkanban (GitHub `ci-required`, job `test`; also runnable locally).
+# Merge gate for fkanban (GitHub `ci-required`, job `gate`; also runnable locally).
+# The tests were deleted (Tom, 2026-10-09): this gate runs shell syntax, the
+# schema-sync boundary, typecheck, the artifact build, and the artifact smoke.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 shopt -s nullglob 2>/dev/null || true
@@ -21,9 +23,6 @@ bun install --frozen-lockfile
 echo "== schema-sync architecture boundary =="
 bun run check:schema-sync-boundary
 
-echo "== test-timeout architecture boundary =="
-bun run check:test-timeout-boundary
-
 echo "== typecheck =="
 bun run typecheck
 
@@ -32,8 +31,5 @@ bun run build
 
 echo "== artifact smoke =="
 bash scripts/artifact-smoke.sh
-
-echo "== tests =="
-bun test
 
 echo "ci gate PASSED"
