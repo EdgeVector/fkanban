@@ -1219,7 +1219,7 @@ export function createFkanbanMcpServer(
       },
       outputSchema: {
         next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
-        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.enum(["deferred", "purged"]).optional(),
         slug: z.string(),
         from: z.string(),
         to: z.string(),
