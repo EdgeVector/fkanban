@@ -38,10 +38,33 @@ committed. The caller must read canonical state before any guarded retry.
 The client sends no later projection write, Card write, or completion hook.
 After the batch commits, a guarded `move` makes one best-effort cleanup pass. It
 deletes the card's BoardCards rows at every other address, and only after a
-partition read sees the destination row. A cleanup failure prints a warning
-and does not fail the move. The result states `membership_cleanup: "purged"`
-when the pass ran delete attempts and `"deferred"` when it ran none. Guarded
-`set` and `mark` do not move the card and always state `"deferred"`.
+partition read sees the destination row. The pass never fails the move.
+
+The result states `membership_cleanup: "purged"` only when the pass found stale
+rows and the node acknowledged every delete for them. The client does not read
+the partition again to confirm: the index lags its own acknowledgement by about
+half a second, so a read right after the delete can still show a deleted row.
+In all other cases the result states `"deferred"`, and a stale row can remain.
+These cases print a warning on stderr:
+
+- A partition read failed.
+- The pass reached its deadline.
+- The node did not acknowledge one or more deletes. The warning names the rows.
+
+These cases print no warning: the card held no other row, or the destination row
+stayed invisible for the wait budget (the pass then deletes nothing).
+
+The pass has an overall deadline of 15 seconds. The Loom park and resume scripts
+run `timeout 60 kanban move`. A kill after the commit is the failure that this
+bound prevents. The CLI reads the partition with the short-deadline probe client
+(3 seconds, and one resend for a read). The MCP tool reads with the write client.
+Deletes use the write client. At the deadline the pass abandons the request in
+flight and sends no new request. The pass therefore adds at most about 15
+seconds after the commit. Without the bound, one hung read could add twice the
+HTTP deadline of the write client: 60 seconds by default, and 180 seconds when a
+routine sets `FKANBAN_HTTP_TIMEOUT_MS=90000`.
+
+Guarded `set` and `mark` do not move the card and always state `"deferred"`.
 
 ## Limits and costs
 
@@ -49,9 +72,10 @@ when the pass ran delete attempts and `"deferred"` when it ran none. Guarded
 - An owner can identify several executions. This is not a unique execution CAS.
 - A concurrent same-owner edit to a projected field can conflict with the full
   projection payload. Body edits survive because the batch omits body.
-- Guarded `move` retires old source memberships after the batch. When that pass
-  fails, or the destination row stays invisible for its wait budget, prior rows
-  remain: raw column lists show them until a repeat of the move or
+- Guarded `move` retires old source memberships after the batch. When the
+  result is `"deferred"` and the card held a stale row (a failed delete, a
+  deadline, or a destination row that stayed invisible for its wait budget),
+  prior rows remain: raw column lists show them until a repeat of the move or
   `kanban groom board-cards-heal`. Measured all-column list selects the latest
   state.
 - A stale doing row left by a failed cleanup pass can conservatively block

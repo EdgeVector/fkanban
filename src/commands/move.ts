@@ -33,7 +33,7 @@ import {
   updateCardRecord,
   type Card,
 } from "../record.ts";
-import { purgeStaleBoardCardRows } from "../board-cards.ts";
+import { retireStaleBoardCardRows, type StaleRowRetirement } from "../board-cards.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 import { planDoingClaim } from "../doing-claim.ts";
@@ -66,11 +66,44 @@ export type MoveOptions = GuardOptions & {
   allowUnclaimed?: boolean;
   /** Test seam: override process.env for claim-actor resolution. */
   env?: Record<string, string | undefined>;
+  /**
+   * The short-deadline client for the owner-guarded move's post-commit
+   * partition READS (see `searchVisibilityProbeClient`). Absent, those reads
+   * ride `node`; the overall deadline below bounds them either way.
+   */
+  probeNode?: NodeClient;
+  /**
+   * Overall bound, in ms, for the owner-guarded move's post-commit cleanup
+   * pass. Defaults to {@link GUARDED_CLEANUP_DEADLINE_MS}. A test seam, not a
+   * tuning knob.
+   */
+  cleanupDeadlineMs?: number;
 };
+
+/**
+ * How long the owner-guarded move may spend on its post-commit cleanup pass.
+ *
+ * The batch has already committed when the pass starts, so every second here is
+ * spent AFTER the work that matters, inside a caller that is on a clock: the
+ * Loom park and resume scripts run `timeout 60 kanban move ...`. A killed
+ * `kanban` after a committed move is the worst outcome on offer, because the
+ * script then reads the exit as a failed move and acts on it. Fifteen seconds
+ * covers the normal pass (one 0.2-0.7 s partition read, up to ~5.9 s of
+ * waiting for the destination row to show, one batch delete) and stops a slow
+ * or hung node from costing more than that. Expiry is a warning, not a failure.
+ */
+export const GUARDED_CLEANUP_DEADLINE_MS = 15_000;
 
 import type { GuardedReceipt } from "../guarded-snapshot.ts";
 
 export type MoveResult = Omit<Partial<GuardedReceipt>, "membership_cleanup"> & {
+  /**
+   * Owner-guarded move only. `"purged"`: the pass found stale rows and the node
+   * acknowledged every delete for them. `"deferred"`: anything else (no other
+   * row, destination row not yet visible, a delete failed, the pass timed
+   * out), so a stale row may remain for `board-cards-heal`. Failed deletes and
+   * a timeout also print a warning on stderr.
+   */
   membership_cleanup?: "deferred" | "purged";
   slug: string;
   from: string;
@@ -582,9 +615,23 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   // (`papercut-kanban-list-point-read-column-slug-inconsistency-20260925`).
   // The purge is delete-only and runs AFTER the durable batch, so the Card
   // record is never rewritten and a failure here cannot fail the guarded write.
-  let retired = 0;
+  //
+  // Only the guarded path is bounded and reads on the short-deadline client:
+  // its callers run under `timeout 60` and a kill after the commit is the
+  // failure to avoid (see GUARDED_CLEANUP_DEADLINE_MS). The plain move keeps
+  // the budget it always had.
+  const guarded = opts.expectAssignee !== undefined;
+  let retirement: StaleRowRetirement | undefined;
   try {
-    retired = await purgeStaleBoardCardRows(opts.node, opts.cfg, updated);
+    retirement = await retireStaleBoardCardRows(
+      opts.node,
+      opts.cfg,
+      updated,
+      undefined,
+      guarded
+        ? { probeNode: opts.probeNode, deadlineMs: opts.cleanupDeadlineMs ?? GUARDED_CLEANUP_DEADLINE_MS }
+        : {},
+    );
   } catch (err) {
     // The move succeeded; a failed reap leaves exactly the duplicate that
     // existed a moment ago, so it must not fail the command. It must not be
@@ -596,19 +643,38 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
         `Re-run the move, or use \`kanban groom board-cards-heal\`.`,
     );
   }
-  if (opts.expectAssignee !== undefined) {
+  // A delete that the node did not acknowledge leaves its row in the partition,
+  // and a busy node (`service_timeout`) is precisely when that happens. The
+  // delete helper swallows the throw by design, so the only place left to say
+  // so is here.
+  if (retirement !== undefined && retirement.failed.length > 0) {
+    const shown = retirement.failed.slice(0, 5).join(", ");
+    const more = retirement.failed.length > 5 ? ` and ${retirement.failed.length - 5} more` : "";
+    console.error(
+      `kanban: move wrote ${updated.slug} but could not retire ${retirement.failed.length} of its ` +
+        `stale membership rows (the node did not acknowledge the delete): ${shown}${more}. ` +
+        `Re-run the move, or use \`kanban groom board-cards-heal\`.`,
+    );
+  }
+  if (guarded) {
     // Stop here, as before: no completion checkpoint, flow-ledger write or
-    // dependent promotion after an owner-guarded move. "purged" says this call
-    // ran delete attempts for stale rows; "deferred" says it deleted nothing,
-    // either because the card held no other row or because the purge could not
-    // run (see the stderr line above), so a heal pass remains the repair.
+    // dependent promotion after an owner-guarded move. "purged" says the pass
+    // found stale rows and the node acknowledged EVERY delete for them.
+    // "deferred" is everything else: the card held no other row, the
+    // destination row stayed invisible for the wait budget, a delete failed, or
+    // the pass threw or timed out (the stderr lines above), so a stale row may
+    // remain and a heal pass is the repair.
+    const purged = retirement !== undefined &&
+      retirement.attempted > 0 &&
+      retirement.failed.length === 0 &&
+      retirement.gateUnmet === 0;
     return {
       slug: card.slug,
       from,
       to: opts.column,
       ...claimMeta,
       ...activation,
-      membership_cleanup: retired > 0 ? "purged" : "deferred",
+      membership_cleanup: purged ? "purged" : "deferred",
     };
   }
   // AFTER the write, never before. A completion checkpoint is a durable, one-way
