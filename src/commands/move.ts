@@ -70,8 +70,8 @@ export type MoveOptions = GuardOptions & {
 
 import type { GuardedReceipt } from "../guarded-snapshot.ts";
 
-export type MoveResult = Partial<GuardedReceipt> & {
-  membership_cleanup?: "deferred";
+export type MoveResult = Omit<Partial<GuardedReceipt>, "membership_cleanup"> & {
+  membership_cleanup?: "deferred" | "purged";
   slug: string;
   from: string;
   to: string;
@@ -560,9 +560,6 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     opts.column === "doing" && from !== "doing" && milestoneFound
       ? await activatePlannedMilestoneForDoing(opts, updated, milestoneState)
       : {};
-  if (opts.expectAssignee !== undefined) {
-    return { slug: card.slug, from, to: opts.column, ...claimMeta, ...activation, membership_cleanup: "deferred" };
-  }
   // A move states where this card belongs, so it is also the repair for a card
   // that reads as belonging in two places at once.
   //
@@ -577,8 +574,17 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   // Only the partition knows every row a slug holds, so the repair has to ask
   // it. Best-effort: the card is already written and already correct, and a
   // failure here leaves exactly the duplicate that existed a moment ago.
+  //
+  // The owner-guarded move runs this too. Its batch writes the destination row
+  // and, by contract, deletes nothing, so every source row it leaves behind was
+  // visible in `list --column <source>` while `show` read the new column: four
+  // quarantined cards sat in both `todo` and `doing` that way on 2026-10-09
+  // (`papercut-kanban-list-point-read-column-slug-inconsistency-20260925`).
+  // The purge is delete-only and runs AFTER the durable batch, so the Card
+  // record is never rewritten and a failure here cannot fail the guarded write.
+  let retired = 0;
   try {
-    await purgeStaleBoardCardRows(opts.node, opts.cfg, updated);
+    retired = await purgeStaleBoardCardRows(opts.node, opts.cfg, updated);
   } catch (err) {
     // The move succeeded; a failed reap leaves exactly the duplicate that
     // existed a moment ago, so it must not fail the command. It must not be
@@ -589,6 +595,21 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
         `${err instanceof Error ? err.message : String(err)}. ` +
         `Re-run the move, or use \`kanban groom board-cards-heal\`.`,
     );
+  }
+  if (opts.expectAssignee !== undefined) {
+    // Stop here, as before: no completion checkpoint, flow-ledger write or
+    // dependent promotion after an owner-guarded move. "purged" says this call
+    // ran delete attempts for stale rows; "deferred" says it deleted nothing,
+    // either because the card held no other row or because the purge could not
+    // run (see the stderr line above), so a heal pass remains the repair.
+    return {
+      slug: card.slug,
+      from,
+      to: opts.column,
+      ...claimMeta,
+      ...activation,
+      membership_cleanup: retired > 0 ? "purged" : "deferred",
+    };
   }
   // AFTER the write, never before. A completion checkpoint is a durable, one-way
   // append into Brain that nothing in this codebase retracts, so ordering it

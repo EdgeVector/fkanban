@@ -35,7 +35,7 @@ const fresh=async(label:string)=>{
 };
 const placement=await fresh('cli');
 const moved=await moveCmd({cfg,node,slug:placement.slug,column:'doing',expectColumn:'backlog',expectAssignee:'loom:original'});
-assert.equal(moved.membership_cleanup,'deferred');
+assert.match(String(moved.membership_cleanup),/^(deferred|purged)$/);
 const list=async()=>{
  const out:any={};
  for(const column of [undefined,'backlog','doing']) out[column??'all']=(await listBoardCardsPartition(node,cfg,'default',{column}))?.filter(c=>c.slug===placement.slug);

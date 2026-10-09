@@ -35,8 +35,13 @@ builds, incompatible schemas, conflicts, and uncertain acknowledgement fail
 without an unguarded retry. A failed acknowledgement can still mean the batch
 committed. The caller must read canonical state before any guarded retry.
 
-The client performs no later projection write, cleanup delete, or completion
-hook. The result states `membership_cleanup: "deferred"`.
+The client sends no later projection write, Card write, or completion hook.
+After the batch commits, a guarded `move` makes one best-effort cleanup pass. It
+deletes the card's BoardCards rows at every other address, and only after a
+partition read sees the destination row. A cleanup failure prints a warning
+and does not fail the move. The result states `membership_cleanup: "purged"`
+when the pass ran delete attempts and `"deferred"` when it ran none. Guarded
+`set` and `mark` do not move the card and always state `"deferred"`.
 
 ## Limits and costs
 
@@ -44,10 +49,14 @@ hook. The result states `membership_cleanup: "deferred"`.
 - An owner can identify several executions. This is not a unique execution CAS.
 - A concurrent same-owner edit to a projected field can conflict with the full
   projection payload. Body edits survive because the batch omits body.
-- Old source memberships remain. Measured all-column list selects the latest
-  state. Raw column lists retain prior rows.
-- A stale doing row can conservatively block pickup-v2 or direct overlap after
-  PARK. Bounded recovery retries do not bypass this block.
+- Guarded `move` retires old source memberships after the batch. When that pass
+  fails, or the destination row stays invisible for its wait budget, prior rows
+  remain: raw column lists show them until a repeat of the move or
+  `kanban groom board-cards-heal`. Measured all-column list selects the latest
+  state.
+- A stale doing row left by a failed cleanup pass can conservatively block
+  pickup-v2 or direct overlap after PARK. Bounded recovery retries do not bypass
+  this block.
 - A future node build needs the same proof before allowlist expansion. The node
   does not yet advertise this specific batch capability.
 - A normal one-BoardCards mutation adds one version handshake, two schema metadata
