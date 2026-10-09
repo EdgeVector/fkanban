@@ -18,6 +18,7 @@ export const GUARDED_CONTRACT = Object.freeze({
   snapshot_sha: "sha256-exact-utf8-bytes", next_snapshot_json: "string",
   snapshot_batch_cli_flag:"--slugs-file", snapshot_batch_mcp_tool:"fkanban_guarded_snapshots",
   accepted_held:Object.freeze({version:1,stage:"accepted-held",result:"error",resume:"supplied-snapshot-and-exact-worker",drive:false}),
+  exact_claim_success_chain:Object.freeze({version:1,field:"claim_chain",mode:"fresh",stages:Object.freeze(["accepted-held","cleared"]),guard_snapshot_sha256:"per-stage-input",resume:"single-clear-receipt"}),
   durability: "durable", membership_cleanup: "deferred",
 });
 export function sha256(bytes: string | Uint8Array): string {
@@ -30,6 +31,13 @@ export type GuardOptions = { guardSnapshotJson?: string; snapshotSha256?: string
 export type GuardedReceipt = {
   next_snapshot_json: string; next_snapshot_sha256: string; durability: "durable";
   guard_snapshot_sha256: string; contract_sha256: string; membership_cleanup: "deferred";
+};
+export type FreshClaimChain = {
+  version: 1; mode: "fresh"; initial_snapshot_sha256: string;
+  stages: [
+    { stage: "accepted-held"; receipt: GuardedReceipt },
+    { stage: "cleared"; receipt: GuardedReceipt },
+  ];
 };
 export function guardError(code: string, message: string): never {
   throw new FkanbanError({ code, message });

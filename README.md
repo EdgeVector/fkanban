@@ -705,3 +705,13 @@ one native multi-key read. A missing or sparse peer record retains its known sur
 Peer checks do not repair or delete board records.
 The MCP `fkanban_pickup_claim_v2` tool accepts the same selector as `card_slug`.
 This option does not grant a policy exception or reserve a factory slot.
+
+A successful fresh exact claim includes `claim_chain` version 1. It retains two
+actual durable receipts in order: `accepted-held`, then `cleared`. Each receipt
+contains the exact next snapshot bytes and the SHA of its own guarded input.
+The chain's `initial_snapshot_sha256` names the supplied admission bytes. The
+outer receipt remains the clear receipt, so its guard SHA names the held snapshot.
+A caller must check both SHA links and the finite Card changes before it starts work.
+An accepted-held retry returns one clear receipt against the supplied held snapshot.
+It does not create fresh claim history. `guarded-contract --json` advertises this
+capability in `exact_claim_success_chain`.

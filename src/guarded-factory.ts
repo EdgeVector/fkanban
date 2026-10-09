@@ -15,7 +15,7 @@ import { assertLifecycleMoveAllowed } from "./pipeline_status.ts";
 import {
   boundSnapshot, captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256,
   guardError, rawEqual, serializeSnapshot, sha256, snapshotByteSha, snapshotCard, validateRawFields,
-  type GuardOptions, type GuardSnapshot, type GuardedReceipt, type RawFields,
+  type FreshClaimChain, type GuardOptions, type GuardSnapshot, type GuardedReceipt, type RawFields,
 } from "./guarded-snapshot.ts";
 
 type Context = { node: NodeClient; cfg: Config; slug: string; dbLocator?: string; situationPreflight?: SituationPreflight };
@@ -191,10 +191,10 @@ async function finishExactRecovery(opts: Context & {worker:string;witness:GuardS
   if (claimHoldReason(card)) guardError("claim_held", "A body-declared human hold prevents recovery clear.");
   await Promise.all([gates(opts,card,terminalColumn(board.columns)),assertRecoveryPeers(opts,card)]);
   const receipt=await compoundUpdate(opts,witness,next,["block_status","block_reason","updated_at"]);
-  return {result:"claimed" as const,card,from:"todo" as const,to:"doing" as const,worker,...receipt};
+  return {receipt,claim:{result:"claimed" as const,card,from:"todo" as const,to:"doing" as const,worker,...receipt}};
 }
 export async function guardedExactClaim(opts: Context & { worker: string; witness: GuardSnapshot; resume?: boolean }) {
-  if (opts.resume) return finishExactRecovery(opts);
+  if (opts.resume) return (await finishExactRecovery(opts)).claim;
   const { witness } = opts, worker = opts.worker.trim();
   if (!worker) guardError("missing_worker", "Exact claim requires a worker.");
   const owner = String(witness.fields.assignee);
@@ -212,6 +212,15 @@ export async function guardedExactClaim(opts: Context & { worker: string; witnes
   const accepted = await compoundUpdate(opts, witness, held, ["column", "position", "assignee", "updated_at", "tags", "block_status", "block_reason"]);
   const recoveryWitness: GuardSnapshot = { ...witness, fields: held };
   // An error carries this accepted hold only after durable ack AND exact readback.
-  try { return await finishExactRecovery({...opts,witness:recoveryWitness}); }
+  try {
+    const cleared = await finishExactRecovery({...opts,witness:recoveryWitness});
+    // Preserve both real durable/readback receipts. The outer receipt still
+    // names the held input of the clear, not the original admission witness.
+    const claim_chain: FreshClaimChain = {
+      version:1, mode:"fresh", initial_snapshot_sha256:accepted.guard_snapshot_sha256,
+      stages:[{stage:"accepted-held",receipt:accepted},{stage:"cleared",receipt:cleared.receipt}],
+    };
+    return {...cleared.claim,claim_chain};
+  }
   catch(cause) { throw new ExactClaimRecoveryError(opts.slug,accepted,cause); }
 }

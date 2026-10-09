@@ -57,6 +57,18 @@ import { runPingStructured } from "../commands/ping.ts";
 import { CARD_KINDS, MILESTONE_PROOF_STATUSES, MILESTONE_STATES, PRIORITY_TIERS, hydrateCardBodies, type Card } from "../record.ts";
 import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
+const guardedReceiptSchema = z.object({
+  next_snapshot_json:z.string(), next_snapshot_sha256:z.string(), durability:z.literal("durable"),
+  guard_snapshot_sha256:z.string(), contract_sha256:z.string(), membership_cleanup:z.literal("deferred"),
+});
+const freshClaimChainSchema = z.object({
+  version:z.literal(1), mode:z.literal("fresh"), initial_snapshot_sha256:z.string(),
+  stages:z.tuple([
+    z.object({stage:z.literal("accepted-held"),receipt:guardedReceiptSchema}),
+    z.object({stage:z.literal("cleared"),receipt:guardedReceiptSchema}),
+  ]),
+});
+
 export const FKANBAN_MCP_NAME = "fkanban";
 export const FKANBAN_MCP_VERSION = "0.1.0";
 
@@ -678,13 +690,14 @@ export function createFkanbanMcpServer(
         next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
         guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
         result: z.enum(["claimed", "none", "error"]),
-        card: cardSchema.optional(),
+        card: cardSchema.extend({repo:z.string(),base:z.string(),kind:z.string(),block_status:z.string(),block_reason:z.string(),pr_url:z.string(),branch:z.string(),db:z.string(),north_star:z.string(),milestone:z.string()}).optional(),
         from: z.literal("todo").optional(),
         to: z.literal("doing").optional(),
         worker: z.string().optional(),
         dry_run: z.boolean().optional(),
         code: z.string().optional(), clear_code:z.string().optional(),
         accepted_held:z.object({version:z.literal(1),stage:z.literal("accepted-held"),snapshot_json:z.string(),snapshot_sha256:z.string(),durability:z.literal("durable"),contract_sha256:z.string(),guard_snapshot_sha256:z.string()}).optional(),
+        claim_chain:freshClaimChainSchema.optional(),
       },
     },
     async (args) => {

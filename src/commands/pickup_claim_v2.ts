@@ -64,7 +64,7 @@ export type PickupClaimV2Options = GuardOptions & {
   onlyCard?: string;
 };
 
-import type { GuardedReceipt } from "../guarded-snapshot.ts";
+import type { FreshClaimChain, GuardedReceipt } from "../guarded-snapshot.ts";
 
 export type PickupClaimV2Result =
   | {
@@ -74,7 +74,7 @@ export type PickupClaimV2Result =
       to: "doing";
       worker: string;
       dry_run: boolean;
-    } & Partial<GuardedReceipt>
+    } & Partial<GuardedReceipt> & { claim_chain?: FreshClaimChain }
   | {
       result: "none";
       dry_run: boolean;
