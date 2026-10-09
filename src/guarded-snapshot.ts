@@ -7,9 +7,10 @@ import { CARD_FIELDS } from "./schemas.ts";
 import { rowToCard, type Card } from "./record.ts";
 
 export const COMPOUND_CARD_BUILD = "0.23.3-2588-g24334db75";
+export const COMPOUND_CARD_BUILDS: readonly string[] = Object.freeze([COMPOUND_CARD_BUILD, "0.23.3-2693-gb70418967"]);
 export const GUARDED_CONTRACT = Object.freeze({
   version: 1, name: "fkanban-raw23-guarded-card", snapshot_version: 1,
-  card_fields: [...CARD_FIELDS], compound_builds: [COMPOUND_CARD_BUILD],
+  card_fields: [...CARD_FIELDS], compound_builds: [...COMPOUND_CARD_BUILDS],
   max_snapshot_keys:256, max_snapshot_result_bytes:8388608, snapshot_batch_shape:"ordered-items-with-explicit-missing", max_dependency_keys: 256, max_peer_dependency_keys: 512, max_snapshot_bytes: 1048576, max_marker_bytes: 16384, max_batch_operations: 26,
   cli_snapshot_flags: ["--guard-snapshot", "--snapshot-sha256"],
   cli_owner_flag: "--expect-assignee", mcp_snapshot_fields: ["guard_snapshot_json", "snapshot_sha256"],

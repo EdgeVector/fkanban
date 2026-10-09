@@ -996,6 +996,7 @@ export function createFkanbanMcpServer(
           .describe(
             "Slugs this card depends on. On create, sets the canonical deps field. On update, changing deps requires `replace_deps`; every slug must already be an existing live card. Omit this field for ordinary cleanup so existing deps are preserved. Prefer `fkanban_dep_add`/`fkanban_dep_rm` for incremental edits.",
           ),
+        create_only: z.boolean().optional().describe("Atomic create-only for an unowned, unheld backlog Card. Existing Board required; no force or update. Checks all23 absent fields in one durable batch."),
         replace_deps: z.boolean().optional().describe("Explicitly replace/clear an existing card's dep list with `deps`. Prefer `fkanban_dep_add`/`fkanban_dep_rm` for incremental edge edits."),
         surfaces: z
           .array(z.string())
@@ -1019,6 +1020,9 @@ export function createFkanbanMcpServer(
         branch: z.string().optional().describe("Worktree/feature branch."),
       },
       outputSchema: {
+        next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
+        contract_sha256:z.string().optional(), card_guarded_contract_sha256:z.string().optional(),
+        absence_guard:z.literal("all23-absent").optional(), membership_cleanup:z.literal("deferred").optional(),
         slug: z.string(),
         action: z.enum(["created", "updated"]),
         board: z.string(),
@@ -1039,6 +1043,7 @@ export function createFkanbanMcpServer(
         if (args.tags !== undefined) o.tags = args.tags;
         if (args.deps !== undefined) o.deps = args.deps;
         if (args.replace_deps !== undefined) o.replaceDeps = args.replace_deps;
+        if (args.create_only !== undefined) o.createOnly = args.create_only;
         if (args.surfaces !== undefined) o.surfaces = args.surfaces;
         if (args.priority !== undefined) o.priority = args.priority;
         if (args.force !== undefined) o.force = args.force;
