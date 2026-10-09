@@ -4,6 +4,7 @@ import {
   firstEligible,
   pickupV2IneligibleReason,
   PICKUP_V2_ELIGIBILITY_FIELDS,
+  PICKUP_V2_PEER_FIELDS,
   type DependencyStatuses,
 } from "../pickup_v2.ts";
 import {
@@ -39,14 +40,23 @@ export const TODO_FIELDS = [
   ...PICKUP_V2_ELIGIBILITY_FIELDS,
 ] as const;
 
-const DOING_FIELDS = [
+// The peer fields are spread in, not retyped, for the reason `TODO_FIELDS`
+// spreads the eligibility fields: a field this list forgets is a field
+// `doingPeerFencesCandidate` cannot see, and a peer it cannot see fences.
+export const DOING_FIELDS = [
   "slug",
-  "column",
   // Needed to address a phantom doing row for deletion (see verifyDoingRows).
   "position",
-  "repo",
-  "surfaces",
+  ...PICKUP_V2_PEER_FIELDS,
 ] as const;
+
+/**
+ * The only-card peer re-read replaces each doing row with the Card tip, so it
+ * has to carry the same peer fields as {@link DOING_FIELDS}. A short list here
+ * would overwrite `kind` and `deps` with "" and [] in the one mode that reads
+ * the tip.
+ */
+export const PEER_TRUTH_FIELDS = ["slug", "board", ...PICKUP_V2_PEER_FIELDS] as const;
 
 import { boundSnapshot, captureSnapshot, GUARDED_CONTRACT, hasSnapshot, snapshotCard, type GuardOptions } from "../guarded-snapshot.ts";
 import { ExactClaimRecoveryError, guardedExactClaim, isExactRecoveryWitness, type AcceptedHeldReceipt } from "../guarded-factory.ts";
@@ -271,9 +281,7 @@ async function pickupClaimV2OnlyCard(
   const keys = [...new Set([...doingRows.map((row) => row.slug), ...candidate.deps])]
     .filter((key) => key !== candidate.slug);
   if (keys.length > GUARDED_CONTRACT.max_peer_dependency_keys) throw new FkanbanError({code:"guarded_dependency_budget",message:"Peer/dependency key count exceeds the guarded contract cap."});
-  const cards = await findCardsWithFields(opts.node, opts.cfg, keys, [
-    "slug", "board", "column", "repo", "surfaces",
-  ]);
+  const cards = await findCardsWithFields(opts.node, opts.cfg, keys, [...PEER_TRUTH_FIELDS]);
   const bySlug = new Map(cards.flatMap((card) => card ? [[card.slug, card] as const] : []));
   bySlug.set(candidate.slug, candidate);
   const doing = doingRows.flatMap((row) => {
