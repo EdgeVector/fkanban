@@ -548,7 +548,7 @@ export type NodeClient = {
    * enumeration path requires it explicitly instead of falling back to query.
    */
   listRecordKeys?(schemaHash: string, opts?: { limit?: number; cursor?: string | null }): Promise<ListRecordKeysPage>;
-  queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter }): Promise<QueryResponse>;
+  queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; rawKeyEvidence?: boolean }): Promise<QueryResponse>;
   search?(query: string, opts?: AppSearchOptions): Promise<AppSearchHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
   // Which transport local node requests take RIGHT NOW: `socket` when an owner
@@ -1163,7 +1163,7 @@ export function newNodeClient(opts: {
   // Hoisted out of the returned object literal so sibling methods can call it.
   // `updateRecords` needs it because the vendored SDK carries no batch verb,
   // and the object cannot reference itself from inside its own literal.
-  const rawCallImpl: NodeClient["rawCall"] = async (method, path, body) => {
+  const rawCallImpl = async (method: string, path: string, body?: unknown, maxResponseBytes?: number): Promise<RawResponse> => {
     const sdkSearch = sdkSearchFromNativeIndexPath(method, path);
     if (sdkSearch !== null) {
       const hits = await appSearch(sdkSearch.query, { k: sdkSearch.k });
@@ -1182,6 +1182,7 @@ export function newNodeClient(opts: {
         headers: nodeHeaders(),
         timeoutMs,
         socketPath,
+        maxResponseBytes,
       });
     let { res, readBody } = await doFetch();
     let text = await readBody({ asText: true });
@@ -1463,8 +1464,37 @@ export function newNodeClient(opts: {
     // partition past one page — and the partition closest to that cliff is
     // BoardCards `HashKey(default)`, the board-wide list every surface uses.
     // The guard lives in one place rather than being re-derived per caller.
-    async queryAll({ schemaHash, fields, filter }) {
+    async queryAll({ schemaHash, fields, filter, rawKeyEvidence }) {
       try {
+        if (rawKeyEvidence) {
+          // Only a bounded native known-key read may bypass SDK key fallback and dedup.
+          const keys = (filter as unknown as {HashRangeKeys?:unknown})?.HashRangeKeys;
+          if (!Array.isArray(keys) || !keys.length || keys.length > 256 || keys.some(k=>!Array.isArray(k) || k.length!==2 || typeof k[0]!=="string" || !k[0] || k[1]!=="")) {
+            throw new FkanbanError({code:"guarded_read_scope",message:"Raw key evidence requires at most256 exact canonical HashRangeKeys."});
+          }
+          const res = await rawCallImpl("POST","/api/query",{schema_name:schemaHash,fields,filter,limit:1000,offset:0},8388608);
+          if(res.status!==200)throw mapNodeError(res.status,res.json ?? res.body,"/api/query");
+          if(Buffer.byteLength(res.body)>8388608)throw new FkanbanError({code:"guarded_read_budget",message:"Raw key evidence exceeds8MiB."});
+          const body=res.json as Record<string,unknown> | null;
+          if(!body || body.ok!==true || !Array.isArray(body.results) || body.has_more!==false || (body.next_cursor!==undefined && body.next_cursor!==null) ||
+            Object.entries(body).some(([k,v])=> /skip|dangling|missing_atom|unresolved/i.test(k) && v!==0)) {
+            throw new FkanbanError({code:"guarded_read_incomplete",message:"Raw key evidence is malformed, skipped, or incomplete. Missing truth is unavailable."});
+          }
+          if ((body.returned_count!==undefined && body.returned_count!==body.results.length) ||
+            (body.total_count!==undefined && body.total_count!==null && body.total_count!==body.results.length)) {
+            throw new FkanbanError({code:"guarded_read_incomplete",message:"Raw known-key count metadata is inconsistent."});
+          }
+          if(body.results.length>keys.length)throw new FkanbanError({code:"guarded_read_budget",message:"Raw known-key response exceeds its requested keys."});
+          const results:QueryRow[]=[];
+          for(const raw of body.results) {
+            const row=raw as Record<string,unknown>; const key=row?.key as Record<string,unknown>;
+            if(!row || typeof row!=="object" || !key || typeof key!=="object" || typeof key.hash!=="string" || key.range!==null || !row.fields || typeof row.fields!=="object" || Array.isArray(row.fields)) {
+              throw new FkanbanError({code:"guarded_read_malformed",message:"Raw response must preserve a structured exact canonical key and fields."});
+            }
+            results.push({key:{hash:key.hash,range:null},fields:row.fields as Record<string,unknown>});
+          }
+          return {ok:true,results,returned_count:results.length};
+        }
         return await queryAllPaged({ schemaHash, fields, filter });
       } catch (err) {
         // The ONE place every kanban read can be seen refused. A 400 here means
@@ -1963,6 +1993,7 @@ export async function verboseFetch(opts: {
   service: "node" | "schema";
   headers: Record<string, string>;
   timeoutMs?: number;
+  maxResponseBytes?: number;
   // The node's Unix-domain socket. When set AND the service is `node` AND the
   // route is served by that socket AND the socket file exists, the request goes
   // over UDS (socket-first) with a single automatic fallback to TCP `baseUrl` if
@@ -2106,7 +2137,21 @@ export async function verboseFetch(opts: {
 
   const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
     try {
-      const text = await res.text();
+      let text: string;
+      if (opts.maxResponseBytes !== undefined && res.body) {
+        const reader=res.body.getReader();const chunks:Uint8Array[]=[];let size=0;
+        for (;;) {
+          const part=await reader.read();if(part.done)break;size+=part.value.byteLength;
+          if(size>opts.maxResponseBytes) {
+            const refusal=new FkanbanError({code:"guarded_read_budget",message:"Bounded raw response exceeded its byte cap during body drain."});
+            void reader.cancel().catch(()=>{});controller.abort(refusal);
+            throw refusal;
+          }
+          chunks.push(part.value);
+        }
+        const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+        text=new TextDecoder().decode(bytes);
+      } else text = await res.text();
       done = true;
       clearTimeout(timer);
       // Bun (1.3.x) does NOT reject `text()` when the signal aborted after the
@@ -2122,6 +2167,7 @@ export async function verboseFetch(opts: {
     } catch (err) {
       done = true;
       clearTimeout(timer);
+      if (err instanceof FkanbanError) throw err;
       if (isTimeoutError(err)) {
         throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
       }

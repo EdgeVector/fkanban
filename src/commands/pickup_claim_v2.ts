@@ -48,7 +48,13 @@ const DOING_FIELDS = [
   "surfaces",
 ] as const;
 
-export type PickupClaimV2Options = {
+import { boundSnapshot, captureSnapshot, GUARDED_CONTRACT, hasSnapshot, snapshotCard, type GuardOptions } from "../guarded-snapshot.ts";
+import { ExactClaimRecoveryError, guardedExactClaim, isExactRecoveryWitness, type AcceptedHeldReceipt } from "../guarded-factory.ts";
+
+import type { SituationPreflight } from "../situations.ts";
+
+export type PickupClaimV2Options = GuardOptions & {
+  situationPreflight?: SituationPreflight;
   cfg: Config;
   node: NodeClient;
   worker?: string;
@@ -58,6 +64,8 @@ export type PickupClaimV2Options = {
   onlyCard?: string;
 };
 
+import type { GuardedReceipt } from "../guarded-snapshot.ts";
+
 export type PickupClaimV2Result =
   | {
       result: "claimed";
@@ -66,7 +74,7 @@ export type PickupClaimV2Result =
       to: "doing";
       worker: string;
       dry_run: boolean;
-    }
+    } & Partial<GuardedReceipt>
   | {
       result: "none";
       dry_run: boolean;
@@ -79,12 +87,15 @@ export type PickupClaimV2Result =
 export type PickupClaimV2Error = {
   result: "error";
   code: string;
+  clear_code?: string;
+  accepted_held?: AcceptedHeldReceipt;
 };
 
 export function pickupClaimV2Error(err: unknown): PickupClaimV2Error {
   return {
     result: "error",
     code: err instanceof FkanbanError ? err.code : "internal_error",
+    ...(err instanceof ExactClaimRecoveryError ? {clear_code:err.clearCode,accepted_held:err.acceptedHeld} : {}),
   };
 }
 
@@ -131,6 +142,7 @@ export async function pickupClaimV2Result(opts: PickupClaimV2Options): Promise<P
     }
     return pickupClaimV2OnlyCard(opts, slug);
   }
+  if (hasSnapshot(opts)) throw new FkanbanError({code:"guard_snapshot_scope",message:"A claim snapshot requires one exact only-card key."});
   const board = opts.board ?? "default";
   let todo = await listCardsByColumn(
     opts.node,
@@ -239,19 +251,26 @@ async function pickupClaimV2OnlyCard(
     scanned: 1,
     skipped: [{ slug, reason }],
   });
-  const [candidate, doingRows] = await Promise.all([
-    findCard(opts.node, opts.cfg, slug),
+  const [witness, doingRows] = await Promise.all([
+    hasSnapshot(opts) ? boundSnapshot({ ...opts, slug }) : captureSnapshot(opts.node, opts.cfg, slug).catch(err => { if (err instanceof FkanbanError && err.code === "card_not_found") return null; throw err; }),
     listCardsByColumn(opts.node, opts.cfg, "doing", [...DOING_FIELDS], board, {
       projection: [...DOING_FIELDS],
     }),
   ]);
-  if (!candidate) return none("card not found");
+  if (!witness) return none("card not found");
+  const candidate = snapshotCard(witness);
   if (candidate.board !== board) return none(`not on board ${board} (board=${candidate.board})`);
+  if (hasSnapshot(opts) && isExactRecoveryWitness(witness,opts.worker ?? "")) {
+    if (opts.dryRun) return none("accepted-held recovery requires a durable real clear");
+    const claimed=await guardedExactClaim({cfg:opts.cfg,node:opts.node,slug,worker:opts.worker ?? "",witness,resume:true,situationPreflight:opts.situationPreflight});
+    return {...claimed,dry_run:false};
+  }
 
   // Collect every peer/dependency key before one native multi-key read. Peer
   // verification is read-only; this narrow claim must not run the board janitor.
   const keys = [...new Set([...doingRows.map((row) => row.slug), ...candidate.deps])]
     .filter((key) => key !== candidate.slug);
+  if (keys.length > GUARDED_CONTRACT.max_peer_dependency_keys) throw new FkanbanError({code:"guarded_dependency_budget",message:"Peer/dependency key count exceeds the guarded contract cap."});
   const cards = await findCardsWithFields(opts.node, opts.cfg, keys, [
     "slug", "board", "column", "repo", "surfaces",
   ]);
@@ -282,8 +301,8 @@ async function pickupClaimV2OnlyCard(
     };
   }
   try {
-    const claimed = await claimCard({
-      cfg: opts.cfg, node: opts.node, slug, worker: opts.worker ?? "",
+    const claimed = await guardedExactClaim({
+      cfg: opts.cfg, node: opts.node, slug, worker: opts.worker ?? "", witness, situationPreflight: opts.situationPreflight,
     });
     return { ...claimed, dry_run: false };
   } catch (err) {

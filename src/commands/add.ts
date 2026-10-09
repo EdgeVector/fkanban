@@ -237,7 +237,9 @@ function applyPriority(tags: string[], priority?: PriorityTier): string[] {
   return priority ? withPriorityTag(tags, priority) : tags;
 }
 
-export type AddResult = { membership_cleanup?: "deferred"; slug: string; action: "created" | "updated"; board: string; column: string };
+import type { GuardedReceipt } from "../guarded-snapshot.ts";
+
+export type AddResult = Partial<GuardedReceipt> & { membership_cleanup?: "deferred"; slug: string; action: "created" | "updated"; board: string; column: string };
 
 function suppressDefaultTodoWarning(card: Pick<Card, "board" | "column">, force?: boolean): boolean {
   return !force && card.board === "default" && card.column === "todo";

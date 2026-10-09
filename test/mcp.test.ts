@@ -30,7 +30,8 @@ import type { NodeClient, QueryFilter, QueryResponse, QueryRow } from "../src/cl
 import type { Config } from "../src/config.ts";
 import { boardToFields, cardToFields, findCard, nowIso } from "../src/record.ts";
 import { upsertBoardCard } from "../src/board-cards.ts";
-import { DEFAULT_COLUMNS } from "../src/schemas.ts";
+import { DEFAULT_COLUMNS, CARD_FIELDS, BOARD_CARDS_FIELDS } from "../src/schemas.ts";
+import { COMPOUND_CARD_BUILD } from "../src/guarded-snapshot.ts";
 import { listCmd } from "../src/commands/list.ts";
 import { searchCmd, searchResult } from "../src/commands/search.ts";
 import { showCmd } from "../src/commands/show.ts";
@@ -68,7 +69,8 @@ function fakeNode(): NodeClient {
     const t = tableFor(schemaHash);
     const rangePrefix = (filter as unknown as { HashRangePrefix?: { hash?: string; prefix?: string } } | undefined)
       ?.HashRangePrefix;
-    const entries = rangePrefix?.hash && rangePrefix.prefix !== undefined
+    const requested=(filter as any)?.HashRangeKeys as Array<[string,string]>|undefined;
+    const entries = requested ? [...t.values()].filter(rec=>requested.some(([hash,range])=>rec.keyHash===hash && (rec.rangeKey??"")===range)) : rangePrefix?.hash && rangePrefix.prefix !== undefined
       ? [...t.values()].filter((rec) =>
           rec.keyHash === rangePrefix.hash &&
           rec.rangeKey !== null &&
@@ -87,6 +89,12 @@ function fakeNode(): NodeClient {
   return {
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
+    nodeVersion:async()=>({handshake:true,build:COMPOUND_CARD_BUILD} as any),
+    getSchema:async hash=>({name:hash,descriptive_name:"",owner_app_id:"",schema_type:"",key:{hash_field:hash==="cardhash"?"slug":"board",range_field:hash==="cardhash"?null:"sk"},fields:[...(hash==="cardhash"?CARD_FIELDS:BOARD_CARDS_FIELDS)]}),
+    async updateRecords(rows) {
+      for(const row of rows)if(row.expected?.type==="value" && JSON.stringify(tableFor(row.schemaHash).get(storeKey(row.keyHash,row.rangeKey))?.fields[row.expected.field])!==JSON.stringify(row.expected.value))throw new FkanbanError({code:"cas_conflict",message:"changed"});
+      for(const row of rows){const key=storeKey(row.keyHash,row.rangeKey);tableFor(row.schemaHash).set(key,{keyHash:row.keyHash,rangeKey:row.rangeKey??null,fields:{...tableFor(row.schemaHash).get(key)?.fields,...structuredClone(row.fields)}});}
+    },
     autoIdentity: notImpl("autoIdentity"),
     bootstrap: notImpl("bootstrap"),
     loadSchemas: notImpl("loadSchemas"),

@@ -11,6 +11,7 @@ import { FkanbanError, newNodeClient, type NodeClient, type Verbose } from "../c
 import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
 import { markCmd } from "../commands/mark.ts";
+import { captureSnapshot, captureSnapshots, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, serializeSnapshot, sha256 } from "../guarded-snapshot.ts";
 import { setCmd } from "../commands/set.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
@@ -67,6 +68,9 @@ export const FKANBAN_MCP_VERSION = "0.1.0";
 // tools actually registered on the server, and that every read tool carries
 // `readOnlyHint:true` while every write tool does not.
 export const FKANBAN_READ_TOOLS = [
+  "fkanban_guarded_contract",
+  "fkanban_guarded_snapshot",
+  "fkanban_guarded_snapshots",
   "fkanban_list",
   "fkanban_search",
   "fkanban_show",
@@ -637,6 +641,25 @@ export function createFkanbanMcpServer(
     },
   );
 
+  server.registerTool("fkanban_guarded_contract", {
+    title: "Read immutable guarded Card contract", description: "Return the embedded raw23 contract without config or node access.",
+    annotations: {readOnlyHint:true, openWorldHint:false}, inputSchema: {},
+  }, async () => toolResult(JSON.stringify(GUARDED_CONTRACT), { ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 }));
+  server.registerTool("fkanban_guarded_snapshots", {
+    title:"Read exact known-key Card snapshots",description:"One authenticated bounded native Card batch with explicit missing keys; malformed or incomplete reads refuse.",
+    annotations:{readOnlyHint:true,openWorldHint:false},inputSchema:{slugs:z.array(z.string()).min(1).max(256)},
+  },async args=>{try{const {cfg,node}=requireConfig();const result=await captureSnapshots(node,cfg,args.slugs);return toolResult(JSON.stringify(result),result);}catch(err){return errorResult(err);}});
+  server.registerTool("fkanban_guarded_snapshot", {
+    title: "Read exact raw Card snapshot", description: "Read all 23 canonical Card fields without defaults, alias joins, or body truncation.",
+    annotations: {readOnlyHint:true, openWorldHint:false}, inputSchema: {slug:z.string()},
+    outputSchema: { snapshot_json:z.string(), snapshot_sha256:z.string() },
+  }, async args => {
+    try {
+      const {cfg,node}=requireConfig(); const json=serializeSnapshot(await captureSnapshot(node,cfg,args.slug));
+      return toolResult(json, {snapshot_json:json,snapshot_sha256:sha256(json)});
+    } catch(err) { return errorResult(err); }
+  });
+
   server.registerTool(
     "fkanban_pickup_claim_v2",
     {
@@ -645,18 +668,23 @@ export function createFkanbanMcpServer(
         "Deterministic pickup v2. Read keyed todo and doing ranges, require terminal dependencies, treat missing surfaces as the complete repository, and CAS-claim the first eligible board-position card. With card_slug, claim only that exact card and never select another card after a refusal. No lanes, cursors, repair, fair-share, capacity, Loom, State Machine, or LLM.",
       annotations: { title: "Claim by deterministic board order", openWorldHint: false },
       inputSchema: {
+        guard_snapshot_json: z.string().optional(),
+        snapshot_sha256: z.string().optional(),
         worker: z.string().optional().describe("Worker id. Required unless dry_run is true."),
         dry_run: z.boolean().optional().describe("Select one card without a write."),
         card_slug: z.string().optional().describe("Claim only this exact card. A supplied slug must be non-empty."),
       },
       outputSchema: {
+        next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
         result: z.enum(["claimed", "none", "error"]),
         card: cardSchema.optional(),
         from: z.literal("todo").optional(),
         to: z.literal("doing").optional(),
         worker: z.string().optional(),
         dry_run: z.boolean().optional(),
-        code: z.string().optional(),
+        code: z.string().optional(), clear_code:z.string().optional(),
+        accepted_held:z.object({version:z.literal(1),stage:z.literal("accepted-held"),snapshot_json:z.string(),snapshot_sha256:z.string(),durability:z.literal("durable"),contract_sha256:z.string(),guard_snapshot_sha256:z.string()}).optional(),
       },
     },
     async (args) => {
@@ -668,6 +696,7 @@ export function createFkanbanMcpServer(
           worker: args.worker,
           dryRun: args.dry_run,
           onlyCard: args.card_slug,
+          guardSnapshotJson: args.guard_snapshot_json, snapshotSha256: args.snapshot_sha256,
         });
         return toolResult(formatPickupClaimV2(result), pickupClaimV2Payload(result));
       } catch (err) {
@@ -1038,10 +1067,15 @@ export function createFkanbanMcpServer(
         "Append ONE line to an existing card's body, without touching the rest of it. This is the safe counterpart to `fkanban_add`'s `body`, which replaces the whole brief — use this for HANDOFF/PROGRESS/reap annotations. Idempotent: a line the body already contains is a no-op. Refuses to mark a card whose body is empty, annotation-only, or truncated, because appending to one would freeze that loss into a full-body write — recover the brief first.",
       annotations: { title: "Append a line to a card body", idempotentHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
+        guard_snapshot_json: z.string().optional(),
+        snapshot_sha256: z.string().optional(),
+        expect_assignee: z.string().optional(),
         slug: z.string().optional().describe("The card to annotate."),
         line: z.string().optional().describe("The single line to append. Appending a line already present is a no-op."),
       },
       outputSchema: {
+        next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
         slug: z.string(),
         action: z.enum(["created", "updated"]),
         board: z.string(),
@@ -1053,7 +1087,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const line = requireArg(args.line, "marker line", 'Pass a non-empty `line`, e.g. "PROGRESS 2026-08-03: …".');
         const { cfg, node } = requireConfig();
-        const res = await markCmd({ cfg, node, slug, line });
+        const res = await markCmd({ cfg, node, slug, line, guardSnapshotJson:args.guard_snapshot_json, snapshotSha256:args.snapshot_sha256, expectAssignee:args.expect_assignee });
         return toolResult(formatMark(res), res);
       } catch (err) {
         return errorResult(err);
@@ -1074,6 +1108,9 @@ export function createFkanbanMcpServer(
         openWorldHint: false,
       },
       inputSchema: {
+        guard_snapshot_json: z.string().optional(),
+        snapshot_sha256: z.string().optional(),
+        expect_assignee: z.string().optional(),
         slug: z.string().optional().describe("Existing card slug (set does not create)."),
         title: z.string().optional().describe("Card title."),
         assignee: z.string().optional().describe("Who owns the card."),
@@ -1101,6 +1138,8 @@ export function createFkanbanMcpServer(
         branch: z.string().optional(),
       },
       outputSchema: {
+        next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
         slug: z.string(),
         action: z.enum(["created", "updated"]),
         board: z.string(),
@@ -1112,6 +1151,7 @@ export function createFkanbanMcpServer(
         const slug = requireArg(args.slug, "card slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const o: Parameters<typeof setCmd>[0] = { cfg, node, slug };
+        o.guardSnapshotJson=args.guard_snapshot_json; o.snapshotSha256=args.snapshot_sha256; o.expectAssignee=args.expect_assignee;
         if (args.title !== undefined) o.title = args.title;
         if (args.assignee !== undefined) o.assignee = args.assignee;
         if (args.tags !== undefined) o.tags = args.tags;
@@ -1143,6 +1183,9 @@ export function createFkanbanMcpServer(
         "Move a card to a different column on its board. Pass `from`/`expect` as a compare-and-swap claim guard. A card blocked by an unfinished dependency cannot move into doing/done (or its board's final column) unless `force` is set.",
       annotations: { title: "Move a card", idempotentHint: true, openWorldHint: false },
       inputSchema: {
+        guard_snapshot_json: z.string().optional(),
+        snapshot_sha256: z.string().optional(),
+        expect_assignee: z.string().optional(),
         slug: z.string().optional().describe("Card slug."),
         column: z.string().optional().describe("Target column."),
         from: z.string().optional().describe("Claim guard: only move if the card is currently in this column."),
@@ -1157,6 +1200,8 @@ export function createFkanbanMcpServer(
           .describe("Allow move into doing without stamping assignee (not recommended)."),
       },
       outputSchema: {
+        next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
         slug: z.string(),
         from: z.string(),
         to: z.string(),
@@ -1185,6 +1230,7 @@ export function createFkanbanMcpServer(
         }
         const { cfg, node } = requireConfig();
         const o: Parameters<typeof moveCmd>[0] = { cfg, node, slug, column };
+        o.guardSnapshotJson=args.guard_snapshot_json; o.snapshotSha256=args.snapshot_sha256; o.expectAssignee=args.expect_assignee;
         if (args.from !== undefined || args.expect !== undefined) o.expectColumn = args.from ?? args.expect;
         if (args.position !== undefined) o.position = args.position;
         if (args.force !== undefined) o.force = args.force;

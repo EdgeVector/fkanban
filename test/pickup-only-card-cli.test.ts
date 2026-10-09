@@ -35,7 +35,7 @@ test("CLI exact-card: forwards the selector to the isolated socket fixture", asy
   const socket = join(dir, "folddb.sock");
   writeFileSync(config, JSON.stringify({ configVersion: 1, nodeUrl: "http://unused.invalid", schemaServiceUrl: "http://unused.invalid", userHash: "fixture", schemaHashes: { card: "cardhash", board_cards: "boardcardshash" }, enforceLivePrMilestone: false }));
   const cards = [fixtureCard("earlier", "1"), fixtureCard("authorized", "9")];
-  const queries: Array<{ schema_name?: string; filter?: { HashKey?: string; HashRangePrefix?: { prefix: string } } }> = [];
+  const queries: Array<{ schema_name?: string; filter?: { HashKey?: string; HashRangeKeys?: [string,string][]; HashRangePrefix?: { prefix: string } } }> = [];
   let writes = 0;
   const server = Bun.serve({
     unix: socket,
@@ -47,7 +47,7 @@ test("CLI exact-card: forwards the selector to the isolated socket fixture", asy
         const query = await req.json() as typeof queries[number];
         queries.push(query);
         const selected = query.schema_name === "cardhash"
-          ? cards.filter((card) => card.slug === query.filter?.HashKey)
+          ? cards.filter((card) => card.slug === query.filter?.HashKey || query.filter?.HashRangeKeys?.some(([slug,range])=>slug===card.slug && range===""))
           : query.filter?.HashRangePrefix?.prefix === "todo#" ? cards : [];
         const results = selected.map((card) => ({
           fields: query.schema_name === "cardhash" ? cardToFields(card) : boardCardFieldsFromCard(card),
@@ -64,6 +64,7 @@ test("CLI exact-card: forwards the selector to the isolated socket fixture", asy
     expect(result.code, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout), "CLI exact-card selector reaches the adapter").toMatchObject({ result: "claimed", card: { slug: "authorized" }, dry_run: true });
     expect(queries.some((q) => q.filter?.HashRangePrefix?.prefix === "todo#")).toBe(false);
+    expect(queries.filter(q=>q.filter?.HashRangeKeys).map(q=>q.filter!.HashRangeKeys)).toEqual([[["authorized",""]]]);
     expect(writes).toBe(0);
   } finally {
     server.stop(true);

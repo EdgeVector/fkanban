@@ -13,3 +13,4 @@ bun build src/mcp/main.ts --compile --outfile dist/kanban-mcp
 cp dist/kanban-mcp dist/fkanban-mcp
 
 chmod 755 dist/kanban dist/fkanban dist/kanban-mcp dist/fkanban-mcp
+bun scripts/guarded-artifact-receipt.ts

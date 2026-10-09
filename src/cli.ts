@@ -25,6 +25,7 @@ import { loadAppCtx, loadCtx } from "./context.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
 import { markCmd } from "./commands/mark.ts";
+import { captureSnapshot, captureSnapshots, snapshotSlugsFile, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, serializeSnapshot, snapshotFileOptions } from "./guarded-snapshot.ts";
 import { setCmd } from "./commands/set.ts";
 import { ClaimConflictError, moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
@@ -110,6 +111,8 @@ Global:
                        also read from env LASTDB_DB (set by org/fkanban wrappers ...)
 
 Commands:
+  guarded-contract     return the immutable factory contract before config access
+  guarded-snapshot     exact raw Card snapshot; <slug> or --slugs-file PATH (--json)
   init                 bootstrap a node + register schemas + seed default board
                        (--node-url --schema-service-url --node-socket-path --name)
   add <slug>           create/update a card (--title --board --column --assignee --created-by --tags --deps --replace-deps --surfaces --priority P0-P3 --body, --force past a block)
@@ -203,6 +206,22 @@ function withFooter(body: string): string {
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
+  "guarded-contract": withFooter(`fkanban guarded-contract — immutable factory contract
+
+Usage:
+  fkanban guarded-contract --json
+
+Returns the exact supported build, finite mutation scope, caps, and contract SHA before config access.`),
+  "guarded-snapshot": withFooter(`fkanban guarded-snapshot — exact canonical Card witness
+
+Usage:
+  fkanban guarded-snapshot <slug> --json
+  fkanban guarded-snapshot --slugs-file <path> --json
+
+The single result is raw23 JSON with its final newline. The batch result preserves requested order.
+The file contains at most 256 unique slug tokens in a JSON array. Missing keys are explicit.
+Writes require --guard-snapshot PATH --snapshot-sha256 HEX and an exact expected owner.
+The next_snapshot_json string and SHA form the next witness; a fresh read cannot replace a failed witness.`),
   init: withFooter(`fkanban init — bootstrap a node + register schemas + seed the default board
 
 Usage:
@@ -1225,7 +1244,10 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // Metadata-only: no body, no stdin, no placement (board/column), no deps list
   // replace. Grooming scripts that stamp NS/MS/tags must use this so they
   // cannot clobber a brief via accidental body/stdin.
-  set: new Set([
+  mark: new Set(["guard-snapshot", "snapshot-sha256", "expect-assignee"]),
+  "guarded-snapshot": new Set(["slugs-file"]),
+  "guarded-contract": new Set(),
+  set: new Set(["guard-snapshot", "snapshot-sha256",
     "title", "assignee", "expect-assignee", "tags", "surfaces", "priority", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
   ]),
@@ -1235,7 +1257,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert", "json-array"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
-  move: new Set(["expect-assignee", "from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
+  move: new Set(["guard-snapshot", "snapshot-sha256", "expect-assignee", "from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
   list: new Set(["board", "column", "tag", "assignee", "wide", "field", "limit", "all", "full-body", "full_body", "group-by-milestone", "json-array"]),
   rank: new Set(["board", "column", "mode"]),
   search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body", "json-array", "semantic"]),
@@ -1252,7 +1274,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   migrate: new Set(["dry-run", "slug"]),
   groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "max-removals", "cutoff-hours", "max", "force-milestone-card-payload-upsert", "reap-stale-milestone-positions"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
-  pickup: new Set(["only-card", "board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
+  pickup: new Set(["claim-v2", "guard-snapshot", "snapshot-sha256", "only-card", "board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
 };
 
@@ -1395,6 +1417,10 @@ async function main(argv: string[]): Promise<number> {
         tag: { type: "string" },
         assignee: { type: "string" },
         "expect-assignee": { type: "string" },
+        "guard-snapshot": { type: "string" },
+        "slugs-file": { type: "string" },
+        "snapshot-sha256": { type: "string" },
+        "claim-v2": { type: "boolean" },
         canonical: { type: "boolean" },
         "created-by": { type: "string" },
         tags: { type: "string" },
@@ -1547,6 +1573,27 @@ async function dispatch(
   verbose: Verbose | undefined,
 ): Promise<number> {
   switch (cmd) {
+    case "guarded-contract": {
+      const extra = rejectExtraPositionals(positionals, 1, "guarded-contract");
+      if (extra !== undefined) return extra;
+      console.log(JSON.stringify({ ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 }));
+      return 0;
+    }
+    case "guarded-snapshot": {
+      if (values["slugs-file"] !== undefined) {
+        const extra = rejectExtraPositionals(positionals,1,"guarded-snapshot --slugs-file PATH");
+        if(extra!==undefined)return extra;
+        const slugs=await snapshotSlugsFile(values["slugs-file"] as string);
+        const ctx=loadCtx({verbose});console.log(JSON.stringify(await captureSnapshots(ctx.node,ctx.cfg,slugs)));return 0;
+      }
+      const slug = requirePositional(positionals[1], "guarded-snapshot <slug>");
+      const extra = rejectExtraPositionals(positionals, 2, "guarded-snapshot <slug>");
+      if (extra !== undefined) return extra;
+      const ctx = loadCtx({ verbose });
+      const snapshot = await captureSnapshot(ctx.node, ctx.cfg, slug);
+      process.stdout.write(serializeSnapshot(snapshot));
+      return 0;
+    }
     case "init": {
       const extra = rejectExtraPositionals(positionals, 1, "init");
       if (extra !== undefined) return extra;
@@ -1924,6 +1971,8 @@ async function dispatch(
           node: ctx.node,
           slug,
           line,
+          expectAssignee: values["expect-assignee"] as string | undefined,
+          ...await snapshotFileOptions(values["guard-snapshot"] as string | undefined, values["snapshot-sha256"] as string | undefined),
         });
         console.log(formatMark(res, values.json as boolean | undefined));
         return 0;
@@ -1952,6 +2001,7 @@ async function dispatch(
         const priority =
           values.priority !== undefined ? parsePriorityFlag(values.priority as string, "set") : undefined;
         const res = await setCmd({
+          ...await snapshotFileOptions(values["guard-snapshot"] as string | undefined, values["snapshot-sha256"] as string | undefined),
           cfg: ctx.cfg,
           node: ctx.node,
           slug,
@@ -2020,6 +2070,7 @@ async function dispatch(
       const ctx = loadCtx({ verbose });
       try {
         const res = await moveCmd({
+          ...await snapshotFileOptions(values["guard-snapshot"] as string | undefined, values["snapshot-sha256"] as string | undefined),
           cfg: ctx.cfg,
           node: ctx.node,
           slug,
@@ -2273,6 +2324,13 @@ async function dispatch(
         return 2;
       }
 
+      if (values["claim-v2"] !== undefined) {
+        if (sub !== "claim") { console.error("kanban: --claim-v2 applies only to pickup claim."); return 2; }
+        sub = "claim-v2";
+      }
+      if ((values["guard-snapshot"] !== undefined || values["snapshot-sha256"] !== undefined) && (sub !== "claim-v2" || values["only-card"] === undefined)) {
+        console.error("kanban: Claim snapshot flags require pickup claim-v2 --only-card."); return 2;
+      }
       const maxPos = cmd === "pickup"
         ? ((sub === "explain" || sub === "work-policy") ? 3 : (positionals[1] === undefined ? 1 : 2))
         : 1;
@@ -2353,6 +2411,7 @@ async function dispatch(
         }
         try {
           const result = await pickupClaimV2Result({
+            ...await snapshotFileOptions(values["guard-snapshot"] as string | undefined, values["snapshot-sha256"] as string | undefined),
             cfg: ctx.cfg,
             node: ctx.node,
             worker: values.worker as string | undefined,

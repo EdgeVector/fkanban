@@ -5,6 +5,8 @@ import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, t
 import type { Config } from "../src/config.ts";
 import { pickupClaimV2Result } from "../src/commands/pickup_claim_v2.ts";
 import { claimCard } from "../src/commands/move.ts";
+import { COMPOUND_CARD_BUILD } from "../src/guarded-snapshot.ts";
+import { CARD_FIELDS, BOARD_CARDS_FIELDS } from "../src/schemas.ts";
 import { cardToFields, emptyStructuredFields, findCard, setMembershipRetryDelaysForTests, type Card } from "../src/record.ts";
 import { setBoardCardJanitorRetryDelaysForTests } from "../src/board-card-janitor.ts";
 
@@ -124,7 +126,17 @@ function fakeNode(opts: {
     throw new Error(`fakeNode.${name} not implemented`);
   };
 
+  tableFor("boardhash").set(storeKey("default"), {keyHash:"default",rangeKey:null,fields:{slug:"default",title:"fixture",body:"",columns:["backlog","todo","doing","done"],created_at:"test",updated_at:"test"}});
   return {
+    nodeVersion:async()=>({handshake:true,build:COMPOUND_CARD_BUILD} as any),
+    getSchema:async hash=>({name:hash,descriptive_name:"",owner_app_id:"",schema_type:"",key:{hash_field:hash==="cardhash"?"slug":"board",range_field:hash==="cardhash"?null:"sk"},fields:[...(hash==="cardhash"?CARD_FIELDS:BOARD_CARDS_FIELDS)]}),
+    async updateRecords(rows) {
+      const final = rows.find(r=>r.schemaHash==="cardhash" && r.fields.column==="doing");
+      if(final && !injectedConflict && final.keyHash===opts.conflictSlug){const current=tableFor("cardhash").get(storeKey(final.keyHash))!;current.fields={...current.fields,column:"doing",assignee:"other"};injectedConflict=true;}
+      if(final && opts.holdAtClaimSlug===final.keyHash){const current=tableFor("cardhash").get(storeKey(final.keyHash))!;current.fields={...current.fields,body:"VALIDATE-ONLY: awaiting host-track"};}
+      for(const row of rows) if(row.expected?.type==="value" && JSON.stringify(tableFor(row.schemaHash).get(storeKey(row.keyHash,row.rangeKey))?.fields[row.expected.field])!==JSON.stringify(row.expected.value))throw casError("changed");
+      for(const row of rows){mutations.push({schemaHash:row.schemaHash,keyHash:row.keyHash,fields:row.fields,expected:row.expected});const key=storeKey(row.keyHash,row.rangeKey);tableFor(row.schemaHash).set(key,{keyHash:row.keyHash,rangeKey:row.rangeKey??null,fields:{...tableFor(row.schemaHash).get(key)?.fields,...structuredClone(row.fields)}});}
+    },
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
     queries,
@@ -812,7 +824,7 @@ describe("exact-card pickup", () => {
     expect(result).toMatchObject({ result: "none", skipped: [{ reason: "unfinished deps: peer" }] });
     const reads = node.queries.filter((q) => q.schemaHash === "cardhash");
     expect(reads).toHaveLength(2);
-    expect(reads[0]?.filter).toEqual({ HashKey: "authorized" });
+    expect(reads[0]?.filter).toEqual({ HashRangeKeys: [["authorized", ""]] } as any);
     expect(reads[1]?.filter as unknown).toEqual({ HashRangeKeys: [["peer", ""], ["done-dep", ""]] });
     expect(reads[1]?.fields).toEqual(["slug", "board", "column", "repo", "surfaces"]);
     expect(node.mutations).toHaveLength(0);
@@ -830,8 +842,7 @@ describe("exact-card pickup", () => {
     const node = fakeNode({ conflictSlug: "authorized" });
     await seedCard(node, card({ slug: "authorized", surfaces: ["src/a.ts"] }));
     await seedCard(node, card({ slug: "earlier", position: "0", surfaces: ["src/b.ts"] }));
-    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
-    expect(result).toMatchObject({ result: "none", skipped: [{ slug: "authorized", reason: "claim conflict (current=doing)" }] });
+    await expect(pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" })).rejects.toMatchObject({code:"cas_conflict"});
     expect(await findCard(node, cfg, "earlier")).toMatchObject({ column: "todo", assignee: "" });
     expect(node.deletions).toHaveLength(0);
   });
@@ -840,18 +851,15 @@ describe("exact-card pickup", () => {
     const node = fakeNode({ holdAtClaimSlug: "authorized" });
     await seedCard(node, card({ slug: "authorized", surfaces: ["src/a.ts"] }));
     await seedCard(node, card({ slug: "earlier", position: "0", surfaces: ["src/b.ts"] }));
-    const result = await pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" });
-    expect(result.result).toBe("none");
-    if (result.result !== "none") return;
-    expect(result.skipped[0]?.reason).toContain("validate-only");
+    await expect(pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: "repair-worker" })).rejects.toMatchObject({code:"cas_conflict"});
     expect(node.mutations).toHaveLength(0);
   });
 
   test("exact-card: concurrent workers retain one CAS winner", async () => {
     const node = fakeNode();
     await seedCard(node, card({ slug: "authorized" }));
-    const results = await Promise.all(Array.from({ length: 20 }, (_, n) => pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: `worker-${n}` })));
-    expect(results.filter((r) => r.result === "claimed")).toHaveLength(1);
-    expect(node.mutations.filter((m) => m.schemaHash === "cardhash" && m.fields.column === "doing")).toHaveLength(1);
+    const results = await Promise.allSettled(Array.from({ length: 20 }, (_, n) => pickupClaimV2Result({ cfg, node, onlyCard: "authorized", worker: `worker-${n}` })));
+    expect(results.filter((r) => r.status === "fulfilled" && r.value.result === "claimed")).toHaveLength(1);
+    expect(node.mutations.filter((m) => m.schemaHash === "cardhash" && m.fields.column === "doing" && m.fields.block_status === "needs_human")).toHaveLength(1);
   });
 });
