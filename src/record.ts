@@ -4291,13 +4291,22 @@ async function findCardWithFields(
 }
 
 /**
+ * Most keys one `HashRangeKeys` read carries. 256 matches the cap
+ * `queryAll`'s raw known-key read enforces (`src/client.ts`), and stays far
+ * below `QUERY_PAGE_SIZE` (1000), so a chunk is one request and never pages.
+ */
+const HASH_RANGE_KEYS_PER_READ = 256;
+
+/**
  * Resolve dep status for `cards` by merging them with optional `knownCards`
- * (e.g. the whole BoardCards board partition) and point-reading only slugs
- * still missing.
+ * (e.g. the whole BoardCards board partition) and reading only slugs still
+ * missing.
  *
  * Hot list path passes the full board partition as `knownCards` so same-board
- * deps never pay Card HashKey point-reads (measured multi-second under
- * HashGroup thrash). Cross-board / unknown deps still point-read.
+ * deps never pay a Card read (measured multi-second under HashGroup thrash).
+ * Cross-board / unknown deps are read together by key: one `HashRangeKeys`
+ * query per {@link HASH_RANGE_KEYS_PER_READ} slugs, not one query per slug
+ * (papercut-fkanban-dependency-check-hydrates-keys-one-call-each-20261008).
  */
 export async function listDependencyStatusesForCards(
   node: NodeClient,
@@ -4318,10 +4327,19 @@ export async function listDependencyStatusesForCards(
 
   // Bounded: `depSlugs` is every dep edge that points OFF the input set, so it
   // scales with the board, not with a caller-chosen page. `pickup status` passes
-  // the whole active board through here.
-  const deps = await mapWithConcurrency(depSlugs, (slug) =>
-    findCardWithFields(node, cfg, slug, CARD_STATUS_FIELDS),
-  );
+  // the whole active board through here, so the keys go in chunks. A slug with
+  // no Card row stays absent, and `depStatus` reports it as missing.
+  const deps: Array<Card | null> = [];
+  for (let i = 0; i < depSlugs.length; i += HASH_RANGE_KEYS_PER_READ) {
+    deps.push(
+      ...(await findCardsWithFields(
+        node,
+        cfg,
+        depSlugs.slice(i, i + HASH_RANGE_KEYS_PER_READ),
+        CARD_STATUS_FIELDS,
+      )),
+    );
+  }
   for (const dep of deps) {
     if (dep) bySlug.set(dep.slug, dep);
   }
@@ -4956,11 +4974,13 @@ function sortMilestones(milestones: Milestone[]): Milestone[] {
  * the index still said `state=active` for milestones whose HashKey primary was
  * `complete`, and it blanked `north_star` values `show` returned. Gap-report
  * then queued `decompose` / `complete_proof` that the state CLI correctly
- * refused. HashKey point-get is the access pattern `show` already uses; this
- * is not a Milestone product scan.
+ * refused. A keyed read of the Milestone primary is the access pattern `show`
+ * already uses; this is not a Milestone product scan. The slugs are read
+ * together ({@link findMilestones}), not one query per milestone.
  *
  * Dual leftover SK rows (state is in the range key) are collapsed to one slug
- * before the point-get so a stale `active#…` row cannot outrank a newer copy.
+ * before the keyed read so a stale `active#…` row cannot outrank a newer copy.
+ * An index row with no primary row stays as the index reported it.
  */
 export async function hydrateMilestonesFromPrimary(
   node: NodeClient,
@@ -4977,12 +4997,8 @@ export async function hydrateMilestonesFromPrimary(
     }
   }
   const listed = [...unique.values()];
-  const hydrated = await mapWithConcurrency(
-    listed,
-    async (row) => (await findMilestone(node, cfg, row.slug)) ?? row,
-    POINT_READ_CONCURRENCY,
-  );
-  return sortMilestones(hydrated);
+  const primary = await findMilestones(node, cfg, listed.map((row) => row.slug));
+  return sortMilestones(listed.map((row, i) => primary[i] ?? row));
 }
 
 /**
@@ -5076,15 +5092,11 @@ export async function listMilestones(
   }
 
   // Index UNBOUND (fresh node, pre-backfill) — enumerate Milestone keys, then
-  // HashKey point-get each live row (same hydrate contract as sparse scan).
+  // read the live rows by key, in batches (same hydrate contract as sparse scan).
   const hashes = await listAllRecordHashes(node, schemaHashFor("milestone", cfg));
-  const milestones = (
-    await mapWithConcurrency(
-      hashes,
-      (slug) => findMilestone(node, cfg, slug),
-      POINT_READ_CONCURRENCY,
-    )
-  ).filter((m): m is Milestone => m !== null);
+  const milestones = (await findMilestones(node, cfg, hashes)).filter(
+    (m): m is Milestone => m !== null,
+  );
   return sortMilestones(milestones);
 }
 
@@ -5205,6 +5217,47 @@ export async function findMilestone(node: NodeClient, cfg: Config, slug: string)
     filter: { HashKey: slug },
   });
   return res.results[0] ? rowToMilestone(res.results[0]) : null;
+}
+
+/**
+ * {@link findMilestone} for many slugs: one `HashRangeKeys` query per
+ * {@link HASH_RANGE_KEYS_PER_READ} slugs, not one HashKey query per slug.
+ *
+ * Milestone is a Hash/`slug` schema, like Card, so the key is `[slug, ""]`
+ * exactly as in {@link findCardsWithFields}. The result follows the caller's
+ * order and a slug with no row is `null`, as `findMilestone` answers. An empty
+ * list reads nothing.
+ *
+ * Measured on the live primary 2026-10-09: `milestone list` over 351 index rows
+ * took 11 s while `list --column todo` took 0-1 s, because each row paid one
+ * point read (papercut-fkanban-milestone-list-primary-hydration-fanout-20260929).
+ */
+export async function findMilestones(
+  node: NodeClient,
+  cfg: Config,
+  slugs: readonly string[],
+): Promise<Array<Milestone | null>> {
+  if (slugs.length === 0) return [];
+  const schemaHash = schemaHashFor("milestone", cfg);
+  const fields = fieldsFor("milestone");
+  const bySlug = new Map<string, Milestone>();
+  for (let i = 0; i < slugs.length; i += HASH_RANGE_KEYS_PER_READ) {
+    const res = await node.queryAll({
+      schemaHash,
+      fields,
+      // QueryFilter's values are strings. HashRangeKeys is the multi-key query
+      // the node accepts, so the array crosses that type at this one call.
+      filter: {
+        HashRangeKeys: slugs.slice(i, i + HASH_RANGE_KEYS_PER_READ).map((slug) => [slug, ""]),
+      } as unknown as QueryFilter,
+    });
+    for (const row of res.results) {
+      // The key is the row's address; `slug` is only a copy of it.
+      const key = row.key?.hash ?? stringField((row.fields ?? {}) as Record<string, unknown>, "slug");
+      if (key && !bySlug.has(key)) bySlug.set(key, rowToMilestone(row));
+    }
+  }
+  return slugs.map((slug) => bySlug.get(slug) ?? null);
 }
 
 export async function requireMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone> {
