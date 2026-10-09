@@ -64,6 +64,9 @@ The error does not report claimed or a success next snapshot.
 The controller keeps its slot and may retry only that supplied accepted-held witness with the exact worker.
 A claim without snapshot flags cannot resume a held Card.
 The resume checks current canonical doing peers and excludes its own reservation.
+A fresh claim runs the same check in its final clear, not only a resume.
+The check uses the peer rule of claim selection (`doingPeerFencesCandidate`).
+A doing peer that waits on the Card, or a meta-kind peer with no Surfaces, does not fence.
 A later overlapping peer refuses the clear and keeps the exact synthetic hold.
 A changed human hold, body, GOAL, or timestamp makes the accepted witness refuse.
 Unknown initial durability or failed initial readback does not expose an accepted-held receipt.

@@ -10,7 +10,7 @@ import {
   firstDoingAtTag, isSubstantiveCardBody, nowIso, terminalColumn, type Card,
 } from "./record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "./situations.ts";
-import { surfacesOverlap } from "./pickup_v2.ts";
+import { doingPeerFencesCandidate, PICKUP_V2_PEER_FIELDS } from "./pickup_v2.ts";
 import { assertLifecycleMoveAllowed } from "./pipeline_status.ts";
 import {
   boundSnapshot, captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256,
@@ -169,18 +169,24 @@ export function isExactRecoveryWitness(witness: GuardSnapshot, worker: string): 
   return !!worker.trim() && witness.fields.column === "doing" && witness.fields.assignee === worker.trim() &&
     witness.fields.block_status === "needs_human" && witness.fields.block_reason === `claim recovery pending for worker "${worker.trim()}": do not work this card until the claim completes`;
 }
+// The clear asks the question selection asked (`doingPeerFencesCandidate`), so a
+// peer that selection let past cannot hold the clear. Both reads carry every
+// field that rule reads; a field left out reads as ""/[] and the peer fences.
+const RECOVERY_PEER_FIELDS=["slug","board",...PICKUP_V2_PEER_FIELDS] as const;
 async function assertRecoveryPeers(opts:Context,card:Card):Promise<void> {
-  const rows=await listCardsByColumn(opts.node,opts.cfg,"doing",["slug","board","column","repo","surfaces"],card.board,{projection:["slug","board","column","repo","surfaces"]});
+  const rows=await listCardsByColumn(opts.node,opts.cfg,"doing",[...RECOVERY_PEER_FIELDS],card.board,{projection:[...RECOVERY_PEER_FIELDS]});
   const peers=rows.filter(p=>p.slug!==card.slug),keys=[...new Set(peers.map(p=>p.slug))];
   if(keys.length>GUARDED_CONTRACT.max_peer_dependency_keys)guardError("guarded_dependency_budget","Recovery peer key count exceeds its cap.");
-  const truth=await findCardsWithFields(opts.node,opts.cfg,keys,["slug","board","column","repo","surfaces"]);
+  const truth=await findCardsWithFields(opts.node,opts.cfg,keys,[...RECOVERY_PEER_FIELDS]);
   const bySlug=new Map(truth.flatMap(p=>p?[[p.slug,p] as const]:[]));
   for(const row of peers) {
     const canonical=bySlug.get(row.slug);
     if(canonical?.board && canonical.column && (canonical.board!==card.board || canonical.column!=="doing"))continue;
-    const peer=canonical?{...canonical,repo:canonical.repo.trim()?canonical.repo:row.repo}:row;
+    // This peer came from the doing list and the check above did not move it out, so it is in doing.
+    // A sparse tip can carry column "", and doingPeerFencesCandidate treats a non-doing peer as no fence.
+    const peer={...(canonical??row),column:"doing",repo:canonical?.repo.trim()?canonical.repo:row.repo};
     if(!peer.repo.trim())guardError("guarded_peer_unknown","An unresolved doing peer cannot free a recovery reservation.");
-    if(surfacesOverlap(card,peer))guardError("guarded_peer_overlap",`Recovery overlaps current doing peer "${peer.slug}". Keep the synthetic hold.`);
+    if(doingPeerFencesCandidate(card,peer))guardError("guarded_peer_overlap",`Recovery overlaps current doing peer "${peer.slug}". Keep the synthetic hold.`);
   }
 }
 async function finishExactRecovery(opts: Context & {worker:string;witness:GuardSnapshot}) {
