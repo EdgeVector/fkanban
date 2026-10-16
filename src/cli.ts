@@ -2094,6 +2094,7 @@ async function dispatch(
           ...await snapshotFileOptions(values["guard-snapshot"] as string | undefined, values["snapshot-sha256"] as string | undefined),
           cfg: ctx.cfg,
           node: ctx.node,
+          probeNode: ctx.probeNode,
           slug,
           column,
           expectColumn: from ?? expect,

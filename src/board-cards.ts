@@ -589,24 +589,31 @@ export function cardFromBoardCardRow(
   };
 }
 
+/**
+ * @returns `true` when the node acknowledged the delete, `false` when it threw.
+ *   The throw is still swallowed (see below); the flag lets a caller that
+ *   REPORTS an outcome say "unconfirmed" instead of "done".
+ */
 async function deleteBoardCardSk(
   node: NodeClient,
   schemaHash: string,
   board: string,
   sk: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await node.deleteRecord({
       schemaHash,
       keyHash: board,
       rangeKey: sk,
     });
+    return true;
   } catch {
     // best-effort: stale sk may already be gone. Safe only for a row this
     // module has already decided is a superseded duplicate/orphan (the
     // batched-delete fallback below) — losing the race there just leaves a
     // stale row for a later heal. Do NOT reuse this for a card's OWN
     // membership tip; see {@link deleteBoardCardSkPrimary}.
+    return false;
   }
 }
 
@@ -681,8 +688,39 @@ async function deleteBoardCardSksBatched(
   board: string,
   sks: readonly string[],
 ): Promise<number> {
+  return (await deleteBoardCardSksBatchedReport(node, schemaHash, board, sks)).attempted;
+}
+
+/**
+ * {@link deleteBoardCardSksBatched} with the part it hides: which sks the node
+ * did NOT acknowledge.
+ *
+ * `attempted` is the same count, with the same "attempts, not confirmed
+ * deletes" meaning, so the wrapper above keeps its contract for every
+ * long-standing caller. `failed` is the new column: an sk lands there when its
+ * delete threw (after the per-row fallback had its turn), or when `deadlineAt`
+ * passed before it was reached. A caller that REPORTS an outcome must read
+ * `failed`, because "I sent the deletes" and "the rows are gone" are different
+ * claims and a busy node (`service_timeout`) is exactly where they come apart.
+ *
+ * It does not read the partition back. The BoardCards index lags its own ack
+ * (see above), so a re-read right after the delete would call a deleted row
+ * present; the acknowledgement is the only truthful signal available here.
+ *
+ * `deadlineAt` (epoch ms) is checked between requests, never inside one. A
+ * request that is already in flight is the caller's to bound.
+ */
+async function deleteBoardCardSksBatchedReport(
+  node: NodeClient,
+  schemaHash: string,
+  board: string,
+  sks: readonly string[],
+  deadlineAt?: number,
+): Promise<{ attempted: number; failed: string[] }> {
   const targets = sks.filter((sk) => sk);
-  if (targets.length === 0) return 0;
+  const failed: string[] = [];
+  if (targets.length === 0) return { attempted: 0, failed };
+  const pastDeadline = (): boolean => deadlineAt !== undefined && Date.now() >= deadlineAt;
 
   // A client with no batch delete verb (the ad-hoc test fakes) still has to
   // reap. Per-row is what this used to do everywhere, so falling back to it is
@@ -691,16 +729,20 @@ async function deleteBoardCardSksBatched(
 
   for (let i = 0; i < targets.length; i += BOARD_CARDS_WRITE_BATCH) {
     const chunk = targets.slice(i, i + BOARD_CARDS_WRITE_BATCH);
+    if (pastDeadline()) {
+      failed.push(...chunk);
+      continue;
+    }
     try {
       if (!batch) throw new Error("node client exposes no batch delete");
       await batch(chunk.map((sk) => ({ schemaHash, keyHash: board, rangeKey: sk })));
     } catch {
       for (const sk of chunk) {
-        await deleteBoardCardSk(node, schemaHash, board, sk);
+        if (pastDeadline() || !(await deleteBoardCardSk(node, schemaHash, board, sk))) failed.push(sk);
       }
     }
   }
-  return targets.length;
+  return { attempted: targets.length, failed };
 }
 
 /**
@@ -1297,7 +1339,9 @@ export async function upsertBoardCard(
  * uses for search visibility, and gives up rather than deleting blind.
  *
  * @returns how many delete attempts ran (0 when the destination never became
- *   visible within the budget, or when the card holds no other row).
+ *   visible within the budget, or when the card holds no other row). This is
+ *   ATTEMPTS: a caller that reports an outcome wants
+ *   {@link retireStaleBoardCardRows}, which also says which deletes failed.
  */
 export async function purgeStaleBoardCardRows(
   node: NodeClient,
@@ -1305,19 +1349,78 @@ export async function purgeStaleBoardCardRows(
   card: Card | CardSummary,
   sleep: (ms: number) => Promise<void> = delay,
 ): Promise<number> {
+  return (await retireStaleBoardCardRows(node, cfg, card, sleep)).attempted;
+}
+
+/**
+ * Error code of a {@link retireStaleBoardCardRows} pass that ran out of its
+ * `deadlineMs`. Thrown, so a caller's existing best-effort catch handles it.
+ */
+export const STALE_ROW_CLEANUP_DEADLINE = "membership_cleanup_deadline";
+
+/** What one {@link retireStaleBoardCardRows} pass did, and did not, achieve. */
+export type StaleRowRetirement = {
+  /** Delete attempts: the number {@link purgeStaleBoardCardRows} returns. */
+  attempted: number;
+  /**
+   * Range keys whose delete the node did not acknowledge (the batch and the
+   * per-row fallback both failed, or the deadline passed first). Those rows
+   * may still be in the partition.
+   */
+  failed: string[];
+  /**
+   * Schema hashes where the destination row never showed in the partition
+   * within the wait budget (or the partition was unreadable), so NOTHING was
+   * deleted there and stale rows may remain.
+   */
+  gateUnmet: number;
+};
+
+/**
+ * {@link purgeStaleBoardCardRows} that reports instead of summing, and that can
+ * be bounded.
+ *
+ * `failed` and `gateUnmet` are what make "purged" a claim a caller can make
+ * honestly: it holds only when `attempted > 0`, `failed` is empty and
+ * `gateUnmet` is 0. An acknowledged delete is the evidence, not a re-read (the
+ * index lags its own ack, see {@link deleteBoardCardSksBatchedReport}).
+ *
+ * @param opts.probeNode The client for the partition READS. The owner-guarded
+ *   move passes the short-deadline probe client (see
+ *   {@link searchVisibilityProbeClient}) so a hung read fails in seconds, not
+ *   in `FKANBAN_HTTP_TIMEOUT_MS` (90 s in every routine) times the one resend
+ *   `withTimeoutRetry` gives a read. Deletes always use `node`.
+ * @param opts.deadlineMs Overall bound for the whole pass, reads, sleeps and
+ *   deletes. When it passes, the pass stops and THROWS a `FkanbanError` coded
+ *   {@link STALE_ROW_CLEANUP_DEADLINE}. A request already in flight is
+ *   abandoned, not cancelled: the CLI exits with its command, and a long-lived
+ *   caller sees its late result swallowed.
+ */
+export async function retireStaleBoardCardRows(
+  node: NodeClient,
+  cfg: Config,
+  card: Card | CardSummary,
+  sleep: (ms: number) => Promise<void> = delay,
+  opts: { probeNode?: NodeClient; deadlineMs?: number } = {},
+): Promise<StaleRowRetirement> {
+  const outcome: StaleRowRetirement = { attempted: 0, failed: [], gateUnmet: 0 };
   const slug = card.slug;
-  if (!slug) return 0;
+  if (!slug) return outcome;
   const board = card.board || "default";
   const keepSk = boardCardSk(card.column, card.position, slug);
-  if (!keepSk) return 0;
+  if (!keepSk) return outcome;
 
-  let removed = 0;
+  const readNode = opts.probeNode ?? node;
+  const deadlineAt = opts.deadlineMs === undefined ? undefined : Date.now() + opts.deadlineMs;
+  const within = <T>(work: Promise<T>): Promise<T> =>
+    deadlineAt === undefined ? work : raceCleanupDeadline(work, deadlineAt);
+
   for (const schemaHash of boardCardsWriteHashes(cfg)) {
     const oneHashCfg = boardCardsConfigForHash(cfg, schemaHash);
     let doomed: string[] | null = null;
     for (let attempt = 0; attempt < SEARCH_INDEX_VISIBLE_ATTEMPTS; attempt++) {
-      if (attempt > 0) await sleep(SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt] ?? 0);
-      const part = await listBoardCardsPartitionSpine(node, oneHashCfg, board);
+      if (attempt > 0) await within(sleep(SEARCH_INDEX_VISIBLE_BACKOFF_MS[attempt] ?? 0));
+      const part = await within(listBoardCardsPartitionSpine(readNode, oneHashCfg, board));
       if (!part) break;
       // The gate: only a page that CONTAINS the row we are keeping may decide
       // which rows to drop. A page without it is unreadable evidence, not
@@ -1328,10 +1431,48 @@ export async function purgeStaleBoardCardRows(
         .map((row) => row.sk);
       break;
     }
-    if (doomed === null) continue;
-    removed += await deleteBoardCardSksBatched(node, schemaHash, board, doomed);
+    if (doomed === null) {
+      outcome.gateUnmet += 1;
+      continue;
+    }
+    const deleted = await within(
+      deleteBoardCardSksBatchedReport(node, schemaHash, board, doomed, deadlineAt),
+    );
+    outcome.attempted += deleted.attempted;
+    outcome.failed.push(...deleted.failed);
   }
-  return removed;
+  return outcome;
+}
+
+/**
+ * Race `work` against an absolute deadline (epoch ms). The loser is not
+ * cancelled; its eventual rejection is absorbed here so it can never surface
+ * as an unhandled rejection after the caller has moved on.
+ */
+function raceCleanupDeadline<T>(work: Promise<T>, deadlineAt: number): Promise<T> {
+  const expired = (): FkanbanError =>
+    new FkanbanError({
+      code: STALE_ROW_CLEANUP_DEADLINE,
+      message: "the stale-row cleanup passed its deadline",
+    });
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) {
+    work.catch(() => {});
+    return Promise.reject(expired());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(expired()), remaining);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 /**
