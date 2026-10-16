@@ -20,7 +20,7 @@ import {
   type PickupClassification,
 } from "../pickup.ts";
 import { laneOf, type LaneId } from "../pickup_lanes.ts";
-import { effectiveSurfaces, surfacesOverlap } from "../pickup_v2.ts";
+import { doingPeerFencesCandidate, effectiveSurfaces } from "../pickup_v2.ts";
 import {
   hydrateOverlapPeers,
   overlapAgainstCards,
@@ -72,8 +72,9 @@ export type PickupExplainReport = {
     unevaluated_peers: string[];
     /**
      * The doing card that claim-v2 skips this card for, by the claim's own
-     * rule (`surfacesOverlap`): a card with no Surfaces reserves its whole
-     * repo. `null` when claim-v2 would not skip it for overlap.
+     * rule (`doingPeerFencesCandidate`): a card with no Surfaces reserves its
+     * whole repo, unless it is a meta card or waits on this card. `null` when
+     * claim-v2 would not skip it for overlap.
      */
     claim_v2_blocked_by: string | null;
   };
@@ -220,6 +221,23 @@ function gatesFrom(
   ];
 }
 
+/**
+ * The doing card that claim-v2 skips `card` for, or `null`. The peer test is
+ * {@link doingPeerFencesCandidate}, the function claim-v2 itself runs, so a
+ * doing tracker without Surfaces, or a doing card that waits on `card`, clears
+ * here exactly when it clears there.
+ */
+export function claimV2OverlapPeer(card: Card, cards: readonly Card[]): Card | null {
+  return (
+    cards.find(
+      (p) =>
+        p.slug !== card.slug &&
+        p.board === card.board &&
+        doingPeerFencesCandidate(card, p),
+    ) ?? null
+  );
+}
+
 export async function pickupExplainResult(opts: {
   cfg: Config;
   node: NodeClient;
@@ -295,14 +313,7 @@ export async function pickupExplainResult(opts: {
   const writeGuard = writeGuardFor(card, { enforceLivePrMilestone, milestoneState });
   const lane = laneOf(card);
   const overlap = overlapAgainstCards(card, cards);
-  const claimV2Peer =
-    cards.find(
-      (p) =>
-        p.slug !== card.slug &&
-        p.board === card.board &&
-        p.column === "doing" &&
-        surfacesOverlap(card, p),
-    ) ?? null;
+  const claimV2Peer = claimV2OverlapPeer(card, cards);
   const wouldSkipOverlap = overlap.conflicts.length > 0 || claimV2Peer !== null;
 
   // write_guard is part of eligibility: "eligible_for_claim: YES" next to a

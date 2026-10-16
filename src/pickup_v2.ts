@@ -1,5 +1,6 @@
 import {
   assertLivePrMilestone,
+  isMetaCardKind,
   normalizeBlockStatus,
   normalizeKind,
 } from "./record.ts";
@@ -45,6 +46,21 @@ export const PICKUP_V2_ELIGIBILITY_FIELDS = [
   "kind",
   "block_status",
   "milestone",
+] as const;
+
+/**
+ * The card fields {@link doingPeerFencesCandidate} reads off a `doing` peer.
+ * Every projection that feeds `pickup_claim_v2` a doing peer has to carry all
+ * of them: a field left out reads as "" or [], which is the conservative
+ * answer (the peer fences), so a forgotten field never fails loudly. It only
+ * puts back the repo-wide reservation this rule exists to remove.
+ */
+export const PICKUP_V2_PEER_FIELDS = [
+  "column",
+  "repo",
+  "surfaces",
+  "kind",
+  "deps",
 ] as const;
 
 export const HUMAN_BOARD_SLUG = "human";
@@ -144,6 +160,14 @@ export function effectiveSurfaces(card: Pick<PickupV2Card, "surfaces">): string[
   return surfaces.length > 0 ? surfaces : ["**"];
 }
 
+/**
+ * True when the card names at least one surface. {@link effectiveSurfaces}
+ * cannot say: an empty list and an explicit `**` both come back as `["**"]`.
+ */
+function declaresSurfaces(card: Pick<PickupV2Card, "surfaces">): boolean {
+  return card.surfaces.some((raw) => normalizeSurface(raw).length > 0);
+}
+
 function literalPrefix(pattern: string): string {
   const wildcard = pattern.search(/[*?[]/);
   if (wildcard < 0) return pattern;
@@ -184,6 +208,41 @@ export function surfacesOverlap(
   );
 }
 
+/**
+ * Does `peer` keep `candidate` out of claim-v2 because their surfaces overlap?
+ * Both claim-v2 and `pickup explain` ask this, so they cannot disagree.
+ *
+ * A `doing` card with no Surfaces reserves its whole repository
+ * ({@link effectiveSurfaces}). Two kinds of peer never work on the candidate's
+ * files, and reserving the repository for them stops every card in it:
+ *
+ * - a peer that waits on the candidate (its `deps` name the candidate). It
+ *   cannot finish before the candidate does, so fencing the candidate behind it
+ *   is a deadlock. Papercut:
+ *   papercut-ready-buffer-counts-surface-overlapped-cards-as-ready-20260926.
+ * - a meta-kind peer (tracker, validation, ...) that declares no Surfaces. It
+ *   tracks work and edits no file. On 2026-10-03 three such cards in `doing`,
+ *   none with Surfaces, each blocked every fold card until a driver set
+ *   Surfaces by hand. Papercut:
+ *   papercut-tech-debt-tracker-card-without-surfaces-reserves-fold-20261003.
+ *
+ * A meta-kind peer that does declare Surfaces still fences them: the card said
+ * which files it touches. A field that was not projected (`kind` undefined or
+ * "", `deps` empty) cannot clear the peer, so an unprojected peer fences as
+ * before. See {@link PICKUP_V2_PEER_FIELDS}.
+ *
+ * The caller excludes the candidate itself and peers on another board.
+ */
+export function doingPeerFencesCandidate(
+  candidate: Pick<PickupV2Card, "slug" | "repo" | "surfaces">,
+  peer: Pick<PickupV2Card, "column" | "repo" | "surfaces" | "deps" | "kind">,
+): boolean {
+  if (peer.column !== "doing") return false;
+  if (peer.deps.includes(candidate.slug)) return false;
+  if (isMetaCardKind(peer.kind ?? "") && !declaresSurfaces(peer)) return false;
+  return surfacesOverlap(candidate, peer);
+}
+
 function compareUnsignedIntegerStrings(left: string, right: string): number | null {
   if (!/^\d+$/.test(left) || !/^\d+$/.test(right)) return null;
   const a = left.replace(/^0+(?=\d)/, "");
@@ -221,7 +280,7 @@ export function pickupV2IneligibleReason(
   if (hold !== null) return hold;
   const openDeps = candidate.deps.filter((slug) => dependencyStatuses[slug] !== true);
   if (openDeps.length > 0) return `unfinished deps: ${openDeps.join(",")}`;
-  const peer = doing.find((p) => p.column === "doing" && surfacesOverlap(candidate, p));
+  const peer = doing.find((p) => doingPeerFencesCandidate(candidate, p));
   if (peer) return `surface overlap with doing card ${peer.slug}`;
   return null;
 }
