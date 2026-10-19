@@ -206,8 +206,12 @@ async function finishExactRecovery(opts: Context & {worker:string;witness:GuardS
 }
 export async function guardedExactClaim(opts: Context & { worker: string; witness: GuardSnapshot; resume?: boolean }) {
   if (opts.resume) {
+    const held = snapshotCard(opts.witness);
+    // Update the head before the clear. A head failure leaves the synthetic
+    // hold, so resume can run again. A head read after the clear fails a
+    // finished claim, and the next exact claim then hits owner_conflict.
+    await maintainCardHead(opts, held, { ...held, column: "todo", assignee: "" });
     const cleared = await finishExactRecovery(opts);
-    await maintainCardHead(opts, cleared.claim.card, cleared.previous);
     return cleared.claim;
   }
   const { witness } = opts, worker = opts.worker.trim();
@@ -236,9 +240,10 @@ export async function guardedExactClaim(opts: Context & { worker: string; witnes
     }
     catch(cause) { throw new ExactClaimRecoveryError(opts.slug,accepted,cause); }
   })();
-  // The clear's proved batch is also Card + BoardCards. This head update is
-  // outside the recovery wrapper: the clear already finished.
-  await maintainCardHead(opts, cleared.claim.card, cleared.previous);
+  // The doing head already has this card from the update inside the recovery
+  // try. The clear changes block_status, block_reason, and updated_at. The
+  // head does not store those fields. A second head read here can fail the
+  // finished claim.
   // Preserve both real durable/readback receipts. The outer receipt still
   // names the held input of the clear, not the original admission witness.
   const claim_chain: FreshClaimChain = {
