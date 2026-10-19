@@ -82,10 +82,16 @@ export function renderJsonPage<K extends string, T>(
   key: K,
   items: T[],
   total: number,
-  opts: { jsonArray?: boolean } = {},
+  opts: { jsonArray?: boolean; partial?: boolean } = {},
 ): string {
   if (opts.jsonArray) {
     return JSON.stringify(items, null, 2);
   }
-  return JSON.stringify(jsonPageEnvelope(key, items, total), null, 2);
+  const page = jsonPageEnvelope(key, items, total);
+  if (typeof opts.partial !== "boolean") return JSON.stringify(page, null, 2);
+  return JSON.stringify(
+    { ...page, truncated: page.truncated || opts.partial, partial: opts.partial },
+    null,
+    2,
+  );
 }

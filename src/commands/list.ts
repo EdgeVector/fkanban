@@ -1,30 +1,30 @@
 // `fkanban list` — render a board (default board unless --board) as columns
 // of cards. Broad `--json` reads default to bounded body previews.
 
-import { type NodeClient } from "../client.ts";
+import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
-  CARD_DISPLAY_FIELDS,
-  CARD_LIST_FIELDS,
+  BODY_OMITTED,
   blockedSlugSet,
-  TERMINAL_COLUMN,
   depStatus,
   ensureColumn,
   findBoard,
   hydrateCardBodies,
   listBoards,
-  listCardsByColumn,
-  listCardsForDisplay,
-  listCardsOnBoard,
   listDependencyStatusesForCards,
-  listOtherBoardCardsForFooter,
   listMilestones,
   requireBoard,
   sortCards,
   type Card,
   type Board,
 } from "../record.ts";
-import { BOARD_CARDS_DEP_SEED_FIELDS } from "../board-cards.ts";
+import {
+  headKeyId,
+  LIST_HEAD_SCHEMA_KEY,
+  readColumnHeads,
+  type HeadAtom,
+  type HeadCard,
+} from "../list-head.ts";
 import {
   capPerColumn,
   previewCardBodies,
@@ -78,6 +78,61 @@ export const DEP_SEED_POINT_READ_MAX = 12;
 // How many other-board names the multi-board footer enumerates inline before
 // collapsing the remainder to a `+K more` tail — keeps the hint a single line.
 export const OTHER_BOARDS_FOOTER_LIMIT = 5;
+
+const COLUMN_HEAD_PARTIAL_LINE =
+  "Column list is partial. This view keeps at most 20 cards in a column.";
+
+function requireHeadHash(cfg: Config): string {
+  const hash = cfg.schemaHashes[LIST_HEAD_SCHEMA_KEY];
+  if (!hash) {
+    throw new FkanbanError({
+      code: "schema_not_configured",
+      message: "Column head schema is not registered.",
+      hint: "Run kanban init.",
+    });
+  }
+  return hash;
+}
+
+function cardFromHead(board: string, column: string, card: HeadCard): Card {
+  const out: Card = {
+    slug: card.slug,
+    title: card.title,
+    body: "",
+    board,
+    column: card.column || column,
+    position: card.position,
+    assignee: card.assignee,
+    tags: card.tags,
+    deps: card.deps,
+    surfaces: [],
+    created_at: card.created_at,
+    updated_at: "",
+    done_at: "",
+    first_doing_at: "",
+    repo: "",
+    db: "",
+    base: "",
+    kind: card.kind,
+    block_status: "",
+    block_reason: "",
+    north_star: "",
+    milestone: card.milestone || undefined,
+    pr_url: "",
+    branch: "",
+  };
+  out[BODY_OMITTED] = true;
+  return out;
+}
+
+function cardsFromHeads(board: string, columns: readonly string[], heads: ReadonlyMap<string, HeadAtom>): Card[] {
+  const out: Card[] = [];
+  for (const column of columns) {
+    const atom = heads.get(headKeyId(board, column));
+    for (const card of atom?.cards ?? []) out.push(cardFromHead(board, column, card));
+  }
+  return out;
+}
 
 // One-line footer pointing a dev at OTHER boards that hold live cards, so a
 // card created on a non-default board (e.g. `add x --board roadmap`) is
@@ -192,7 +247,7 @@ export type ListOptions = {
 // unchanged (it consumes only the 🔒 marker via `blockedSlugSet`).
 export async function listResult(
   opts: ListOptions,
-): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
+): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; partial: boolean; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
   const boardSlug = opts.board ?? "default";
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently render an empty default-column board. The
@@ -216,50 +271,24 @@ export async function listResult(
   // Terminal map needs the board list; the footer needs the other boards' slugs.
   // Re-deriving either would be a second Board read for data already in hand.
   const boardsRead = listBoards(opts.node, opts.cfg);
-  // Text → CARD_DISPLAY_FIELDS (~half the BoardCards atoms). JSON / structured
-  // → CARD_LIST_FIELDS (body-free product fields). Never fieldsFor("card") —
-  // that includes body, which BoardCards does not store and which forced the
-  // wide 24-field partition projection by accident.
-  //
-  // Hoisted above the settle because the BoardCards read now joins it, and this
-  // is the only input to that read not already known from `opts`.
-  const visibleFields = opts.displayOnly ? CARD_DISPLAY_FIELDS : CARD_LIST_FIELDS;
-  // THIRD read in the same settle, not a second stage after it.
-  //
-  // The board pair above already overlaps with each other; the BoardCards read
-  // that followed was still awaited separately, so a list paid TWO serial round
-  // trips. It did not have to: every input to this read — `boardSlug`,
-  // `opts.column`, the projection — is known before any read is issued, and
-  // nothing the board resolution returns feeds it. The board results are
-  // consumed only AFTER, by `ensureColumn` (column validation) and
-  // `boardTerminalMap` (the dep-seed choice), both of which still run against
-  // the rows below exactly as before.
-  //
-  // Measured live, `probe-list-boardcards-overlap.ts`, 7 interleaved reps
-  // (median): bare `list` 552ms serial -> 291ms overlapped, **0.53x, 7/7 reps**;
-  // `list --column todo` 212ms -> 176ms, 0.83x, 5/7 reps. That is the
-  // round-trips-are-the-cost result (runs d/e/f) applied to the one stage
-  // boundary still left in the hot path.
-  //
-  // The cost of being wrong is bounded and lands only on error paths: a typo'd
-  // `--column` or a missing board now issues one BoardCards read whose rows are
-  // discarded (a prefix read on a slug that matches nothing, rows=0). The happy
-  // path — every list the fleet actually runs — saves a whole round trip.
-  const boardCardsRead = opts.column
-    ? listCardsByColumn(opts.node, opts.cfg, opts.column, visibleFields, boardSlug, {
-        healStaleRows: opts.healStaleRows === true,
-      })
-    : listCardsOnBoard(opts.node, opts.cfg, boardSlug, visibleFields);
+  // One exact key per column. A missing head is an empty column.
+  const headHash = requireHeadHash(opts.cfg);
+  const listedColumns = opts.column ? [opts.column] : [...DEFAULT_COLUMNS];
+  const headsRead = readColumnHeads(
+    opts.node,
+    headHash,
+    listedColumns.map((column) => ({ board: boardSlug, column })),
+  );
   // `allSettled`, not `all`: with `all` whichever read rejects FIRST decides the
   // error, so a flaky rollup read could mask "no such board" on a typo'd
   // `--board`. Settling all three and rethrowing in the old serial order keeps
   // the error a caller sees identical to the one they got before — including
   // the BoardCards read, which used to be issued only after both board reads
   // had already succeeded and so must still surface last.
-  const [boardSettled, boardsSettled, boardCardsSettled] = await Promise.allSettled([
+  const [boardSettled, boardsSettled, headsSettled] = await Promise.allSettled([
     boardRead,
     boardsRead,
-    boardCardsRead,
+    headsRead,
   ]);
   if (boardSettled.status === "rejected") throw boardSettled.reason;
   if (boardsSettled.status === "rejected") throw boardsSettled.reason;
@@ -281,112 +310,34 @@ export async function listResult(
   // path is unchanged.
   if (opts.column !== undefined) ensureColumn(opts.column, resolvedBoard.columns);
 
-  // Body-free fetch on the text path (`displayOnly`): the render + filters need
-  // CARD_DISPLAY_FIELDS, never `body`.
-  //
-  // Latency bar. The 2026-07-29 figures below were taken on node 0.23.1 under
-  // HashGroup thrash and are kept because they are why this path is shaped the
-  // way it is — but the third line no longer holds, and a stale number that
-  // rules out a whole read shape is worth re-timing before trusting:
-  //   - BoardCards HashRangePrefix one column ≈ 1–2s
-  //   - Full board HashKey partition ≈ 2–7s (798 rows)
-  //   - Card HashKey point-read ≈ 0.7–10s each  ← re-measured 2026-08-02: 21–34ms
-  //
-  // Hot path — **no UNBOUNDED reads on list**:
-  //   - With --column: BoardCards prefix for that column. Deps that point off
-  //     that column are then resolved by whichever seed is cheaper for the
-  //     number of them, k — see DEP_SEED_POINT_READ_MAX. k is free to compute
-  //     from rows already in hand, so the choice costs nothing to make.
-  //   - Without --column: one full board partition (all columns already present).
-  // show/move call the same listDependencyStatusesForCards for their
-  // authoritative check, so at k <= threshold list now agrees with them by
-  // construction rather than by two paths happening to concur.
-  // `visibleFields` is declared above the settle — the BoardCards read needs it.
-  //
-  // `allBoards` was read above, overlapped with the board lookup.
-  const terminalCol = TERMINAL_COLUMN;
-
-  // Rethrown here rather than beside the two board reads: a BoardCards failure
-  // used to surface only after both of those had succeeded, and `ensureColumn`
-  // ran before the read was issued at all. Keeping the throw below that check
-  // preserves both orders, so a caller with a typo'd `--column` on an unreadable
-  // board still gets the column error rather than a read failure.
-  if (boardCardsSettled.status === "rejected") throw boardCardsSettled.reason;
-
-  let boardCards: Card[];
-  let cards: Card[];
-  if (opts.column) {
-    const columnOnly = boardCardsSettled.value;
-    cards = sortCards(
-      columnOnly.filter(
-        (c) =>
-          (!opts.tag || c.tags?.includes(opts.tag)) &&
-          (!opts.assignee || c.assignee === opts.assignee),
-      ),
+  if (headsSettled.status === "rejected") throw headsSettled.reason;
+  const columns = opts.column ? [opts.column] : resolvedBoard.columns;
+  let heads = headsSettled.value;
+  const extraColumns = columns.filter((column) => !listedColumns.includes(column));
+  if (extraColumns.length > 0) {
+    const more = await readColumnHeads(
+      opts.node,
+      headHash,
+      extraColumns.map((column) => ({ board: boardSlug, column })),
     );
-    // How many dep edges actually point OFF the column we just read? That is
-    // the only thing the seed has to resolve, it is known for free here (deps
-    // are already on the rows in hand), and until now it was never asked.
-    const inColumn = new Set(columnOnly.map((c) => c.slug));
-    const offSetDeps = [...new Set(cards.flatMap((c) => c.deps ?? []))].filter(
-      (slug) => slug.length > 0 && !inColumn.has(slug),
-    );
-    if (offSetDeps.length === 0 || opts.column === terminalCol) {
-      // Nothing to resolve. Note the gate this replaced fired on "any visible
-      // card has any dep" — so a column whose deps all point WITHIN itself read
-      // the whole archive to learn what it already had.
-      boardCards = columnOnly;
-    } else if (offSetDeps.length <= DEP_SEED_POINT_READ_MAX) {
-      // Resolve exactly those slugs. `listDependencyStatusesForCards` is the
-      // same path `show`/`move` use for their authoritative check, so this makes
-      // the list agree with them rather than diverge.
-      boardCards = await listDependencyStatusesForCards(
-        opts.node,
-        opts.cfg,
-        cards,
-        columnOnly,
-      );
-    } else {
-      // Seed finished-dep columns without a full-board HashKey scan.
-      //
-      // These rows are never rendered — they exist only so `depStatus` can see
-      // that a dependency has finished. So ask for the seven fields that verdict
-      // reads, not all 24: the terminal column is an append-only archive, and at
-      // the wide projection listing an ACTIVE column cost 1299ms of archive read
-      // against 416ms here (live board, 567 `done` rows).
-      const terminalCards = await listCardsByColumn(
-        opts.node,
-        opts.cfg,
-        terminalCol,
-        visibleFields,
-        boardSlug,
-        { projection: BOARD_CARDS_DEP_SEED_FIELDS },
-      );
-      const bySlug = new Map<string, Card>();
-      for (const c of columnOnly) bySlug.set(c.slug, c);
-      for (const c of terminalCards) bySlug.set(c.slug, c);
-      boardCards = [...bySlug.values()];
-    }
-  } else {
-    // A milestone's membership row shares this partition's key shape: its
-    // "column" is the milestone state (active, planned, complete, ...), and it
-    // has no Card record (board-cards-heal reports these as
-    // skip-milestone-membership). They are not cards, and `list --column
-    // active` rejects the label, so a whole-board list must not emit them
-    // (papercut-kanban-list-emits-unreadable-legacy-columns-20260923).
-    const boardColumns = new Set(resolvedBoard.columns);
-    boardCards = boardCardsSettled.value.filter((c) => boardColumns.has(c.column));
-    cards = sortCards(
-      boardCards.filter(
-        (c) =>
-          c.board === boardSlug &&
-          (!opts.tag || c.tags?.includes(opts.tag)) &&
-          (!opts.assignee || c.assignee === opts.assignee),
-      ),
-    );
+    heads = new Map([...heads, ...more]);
   }
-  // Dep / 🔒 status from BoardCards rows only — never Card fan-out on list.
-  const allCards = boardCards;
+  const columnCards = cardsFromHeads(boardSlug, columns, heads);
+  const cards = sortCards(
+    columnCards.filter(
+      (c) =>
+        (!opts.tag || c.tags?.includes(opts.tag)) &&
+        (!opts.assignee || c.assignee === opts.assignee),
+    ),
+  );
+  // Off-list deps are exact Card keys. The list does not read the whole column.
+  const allCards = await listDependencyStatusesForCards(
+    opts.node,
+    opts.cfg,
+    cards,
+    columnCards,
+  );
+  const listPartial = columns.some((column) => heads.get(headKeyId(boardSlug, column))?.partial === true);
 
   // Resolve blocked status against ALL live cards so cross-board deps count.
   // Text render cap: an explicit `--limit` (always >= 1 after flag parsing),
@@ -415,35 +366,33 @@ export async function listResult(
   // --json / --wide / --column (wide never shows the footer; column is a
   // focused view).
   //
-  // Read only the boards the footer actually reports on. The cross-board read
-  // this replaced re-fetched the partition already on screen — 783 of the
-  // board's 829 rows, at the wide projection, discarded by the reducer's first
-  // line — and it did so on the hottest query fkanban makes. See
-  // listOtherBoardCardsForFooter. Falls back to the cross-board read if
-  // BoardCards cannot serve it, so a footer never silently disappears.
+  // Other boards' column heads. A missing head counts as empty. A failed read
+  // does not: the current board still renders, and the footer names the boards
+  // that were not read. readColumnHeads splits the keys into batches of 256.
   let footer = "";
   if (!opts.column && !opts.json && !opts.wide) {
-    const others = await listOtherBoardCardsForFooter(
-      opts.node,
-      opts.cfg,
-      boardSlug,
-      allBoards,
+    const otherBoards = allBoards.filter((board) => board.slug !== boardSlug);
+    const pairs = otherBoards.flatMap((board) =>
+      board.columns.map((column) => ({ board: board.slug, column })),
     );
-    // `null` means BoardCards cannot serve the footer read at all (unconfigured
-    // schema) — fall back to the cross-board path. A per-board FAILURE is a
-    // different thing: those slugs come back in `unreadable` and get named in
-    // the footer instead of failing the command. See
-    // listOtherBoardCardsForFooter.
-    const cross = others?.cards ??
-      (await listCardsForDisplay(opts.node, opts.cfg, { boards: allBoards }));
-    footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation(), others?.unreadable ?? []);
+    let cross: Card[] = [];
+    let unreadable: string[] = [];
+    try {
+      const otherHeads = await readColumnHeads(opts.node, headHash, pairs);
+      cross = otherBoards.flatMap((board) => cardsFromHeads(board.slug, board.columns, otherHeads));
+    } catch {
+      cross = [];
+      unreadable = otherBoards.map((board) => board.slug);
+    }
+    footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation(), unreadable);
   }
   const milestones = opts.groupByMilestone ? (await listMilestones(opts.node, opts.cfg, { boards: allBoards })).filter((milestone) => milestone.board === boardSlug) : undefined;
   const rendered = milestones
     ? renderBoardGroupedByMilestone(resolvedBoard, buildMilestoneCardGroups(cards, milestones), renderOpts)
     : renderBoard(resolvedBoard, cards, renderOpts);
-  const text = footer ? `${rendered}\n${footer}\n` : rendered;
-  return { text, cards: enriched, board: resolvedBoard, jsonLimit, milestones };
+  const partialLine = listPartial ? `${COLUMN_HEAD_PARTIAL_LINE}\n` : "";
+  const text = `${partialLine}${rendered}${footer ? `\n${footer}\n` : ""}`;
+  return { text, cards: enriched, board: resolvedBoard, jsonLimit, partial: listPartial, milestones };
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
@@ -455,10 +404,11 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     !opts.json &&
     !opts.wide &&
     (projectionFields.length === 0 || !fieldProjectionNeedsFullCards(projectionFields));
-  const { text, cards, board, jsonLimit, milestones } = await listResult({ ...opts, displayOnly });
+  const { text, cards, board, jsonLimit, partial, milestones } = await listResult({ ...opts, displayOnly });
+  const partialNote = partial ? `${COLUMN_HEAD_PARTIAL_LINE}\n` : "";
   if (projectionFields.length > 0) {
     const out = jsonLimit > 0 ? capPerColumn(board, cards, jsonLimit, opts.column) : cards;
-    return renderFieldProjection(out, projectionFields);
+    return `${partialNote}${renderFieldProjection(out, projectionFields)}`;
   }
   if (!opts.json && opts.wide) {
     const out = capPerColumn(
@@ -467,7 +417,7 @@ export async function listCmd(opts: ListOptions): Promise<string> {
       jsonLimit > 0 ? jsonLimit : Number.MAX_SAFE_INTEGER,
       opts.column,
     );
-    return renderWideTable(out);
+    return `${partialNote}${renderWideTable(out)}`;
   }
   if (!opts.json) return text;
   const broadJson = opts.column === undefined;
@@ -495,8 +445,8 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     : withBodies;
   if (opts.groupByMilestone && milestones) {
     const groups = buildMilestoneCardGroups(out, milestones);
-    if (opts.jsonArray) return JSON.stringify({ groups }, null, 2);
-    return JSON.stringify({ groups, total, truncated: out.length < total }, null, 2);
+    if (opts.jsonArray) return JSON.stringify({ groups, partial }, null, 2);
+    return JSON.stringify({ groups, total, truncated: out.length < total || partial, partial }, null, 2);
   }
-  return renderJsonPage("cards", out, total, { jsonArray: opts.jsonArray });
+  return renderJsonPage("cards", out, total, { jsonArray: opts.jsonArray, partial });
 }

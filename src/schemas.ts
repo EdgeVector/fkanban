@@ -679,6 +679,36 @@ export const featureFlowEventsSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// One exact key for one column. The range is always `__head__`. The atom
+// holds at most 20 short titles. It does not share Card or BoardCards fields,
+// so a body write does not update this molecule.
+//
+// kanban init registers it. list reads it. add, move, and delete write it.
+// A new node has no older list to keep readable.
+export const LIST_HEAD_FIELDS = ["klh_h", "klh_r", "klh_page"] as const;
+
+export const kanbanListHeadSchema: AddSchemaRequest = {
+  schema: {
+    name: "ColumnHeadAtom",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "ColumnHeadAtom_exact_key_v1",
+    purpose_statement:
+      "One exact key stores at most twenty short titles for one kanban column",
+    schema_type: "HashRange",
+    key: { hash_field: "klh_h", range_field: "klh_r" },
+    fields: [...LIST_HEAD_FIELDS],
+    field_types: defaultStringFieldTypes(LIST_HEAD_FIELDS, []),
+    field_descriptions: {
+      klh_h: "hash that names one column on one kanban board",
+      klh_r: "range marker for the single head atom of that column",
+      klh_page: "json text of at most twenty short card titles for that column",
+    },
+    field_classifications: {},
+    field_data_classifications: generalDataClassifications(LIST_HEAD_FIELDS),
+  },
+  mutation_mappers: {},
+};
+
 // One entry per schema `kanban init` must register. Binds a config-key
 // (where init writes the canonical hash) to the AddSchemaRequest.
 export const UNIQUE_SCHEMAS: Array<{ key: RecordType; schema: AddSchemaRequest }> = [
@@ -694,6 +724,7 @@ export const EXTRA_SCHEMAS: Array<{ key: string; schema: AddSchemaRequest }> = [
   { key: "board_milestones", schema: boardMilestonesSchema },
   { key: "milestone_cards", schema: milestoneCardsSchema },
   { key: "feature_flow_events", schema: featureFlowEventsSchema },
+  { key: "kanban_list_head", schema: kanbanListHeadSchema },
 ];
 
 

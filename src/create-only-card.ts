@@ -3,7 +3,7 @@ import { type NodeClient } from "./client.ts";
 import { type Config, schemaHashFor } from "./config.ts";
 import { CARD_FIELDS } from "./schemas.ts";
 import { boardCardFieldsFromCard, boardCardsWriteHashes } from "./board-cards.ts";
-import { cardToFields, claimHoldReason, type Card } from "./record.ts";
+import { cardToFields, claimHoldReason, maintainCardHead, requireListHeadHash, type Card } from "./record.ts";
 import {
   captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT_SHA256, guardError,
   rawEqual, serializeSnapshot, sha256, validateRawFields,
@@ -60,6 +60,7 @@ export async function createOnlyCard(opts: { node: NodeClient; cfg: Config }, ca
       guardError("create_only_schema", "The live schemas must declare the exact Card and BoardCards keys and fields.");
     }
   }
+  requireListHeadHash(opts.cfg);
   await opts.node.updateRecords([
     ...CARD_FIELDS.map(field => ({ schemaHash, keyHash: card.slug,
       fields: { [field]: fields[field]! },
@@ -71,6 +72,8 @@ export async function createOnlyCard(opts: { node: NodeClient; cfg: Config }, ca
   // Never retry a write with an unknown ack. A mismatch keeps the caller's intent held.
   const actual = await captureSnapshot(opts.node, opts.cfg, card.slug);
   if (!rawEqual(actual.fields, fields)) guardError("create_only_readback_conflict", "The durable create completed, but exact canonical readback differs. Keep the filing intent held.");
+  // The proved batch stays Card + BoardCards. The column head follows the readback.
+  await maintainCardHead(opts, card, null);
   const json = serializeSnapshot(witness);
   return { next_snapshot_json: json, next_snapshot_sha256: sha256(json), durability: "durable",
     contract_sha256: CREATE_ONLY_CONTRACT_SHA256, card_guarded_contract_sha256: GUARDED_CONTRACT_SHA256,

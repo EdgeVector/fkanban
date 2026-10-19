@@ -7,7 +7,8 @@ import {
   appendPosition, assertDefaultTodoWriteGuard, assertDbLocatorMatchesCard,
   claimHoldReason, depStatus, doneAtForColumnTransition, doneAtTag, ensureColumn,
   findBoard, findCardsWithFields, findMilestone, listCardsByColumn, firstDoingAtForColumnTransition,
-  firstDoingAtTag, isSubstantiveCardBody, nowIso, terminalColumn, type Card,
+  firstDoingAtTag, isSubstantiveCardBody, maintainCardHead, nowIso, requireListHeadHash,
+  terminalColumn, type Card,
 } from "./record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "./situations.ts";
 import { doingPeerFencesCandidate, PICKUP_V2_PEER_FIELDS } from "./pickup_v2.ts";
@@ -147,8 +148,11 @@ export async function guardedMove(opts: Context & GuardOptions & { expectAssigne
   }
   const next = nextFields(witness, { column: opts.column, position: appendPosition(), updated_at: now, tags });
   await gates(opts, snapshotCard({ ...witness, fields: next }), terminal);
-  return { slug: opts.slug, from: card.column, to: opts.column,
-    ...await compoundUpdate(opts, witness, next, ["column", "position", "updated_at", "tags"]) };
+  requireListHeadHash(opts.cfg);
+  const receipt = await compoundUpdate(opts, witness, next, ["column", "position", "updated_at", "tags"]);
+  // The proved batch stays Card + BoardCards. The column head follows it.
+  await maintainCardHead(opts, snapshotCard({ ...witness, fields: next }), card);
+  return { slug: opts.slug, from: card.column, to: opts.column, ...receipt };
 }
 export type AcceptedHeldReceipt = {
   version: 1; stage: "accepted-held"; snapshot_json: string; snapshot_sha256: string;
@@ -196,11 +200,16 @@ async function finishExactRecovery(opts: Context & {worker:string;witness:GuardS
   const card=snapshotCard({...witness,fields:next}), board=await exactBoard(opts,witness);
   if (claimHoldReason(card)) guardError("claim_held", "A body-declared human hold prevents recovery clear.");
   await Promise.all([gates(opts,card,terminalColumn(board.columns)),assertRecoveryPeers(opts,card)]);
+  requireListHeadHash(opts.cfg);
   const receipt=await compoundUpdate(opts,witness,next,["block_status","block_reason","updated_at"]);
-  return {receipt,claim:{result:"claimed" as const,card,from:"todo" as const,to:"doing" as const,worker,...receipt}};
+  return {receipt,claim:{result:"claimed" as const,card,from:"todo" as const,to:"doing" as const,worker,...receipt},previous:snapshotCard(witness)};
 }
 export async function guardedExactClaim(opts: Context & { worker: string; witness: GuardSnapshot; resume?: boolean }) {
-  if (opts.resume) return (await finishExactRecovery(opts)).claim;
+  if (opts.resume) {
+    const cleared = await finishExactRecovery(opts);
+    await maintainCardHead(opts, cleared.claim.card, cleared.previous);
+    return cleared.claim;
+  }
   const { witness } = opts, worker = opts.worker.trim();
   if (!worker) guardError("missing_worker", "Exact claim requires a worker.");
   const owner = String(witness.fields.assignee);
@@ -215,18 +224,26 @@ export async function guardedExactClaim(opts: Context & { worker: string; witnes
     tags, block_status: "needs_human", block_reason: reason });
   // Admission gates use the unheld admitted Card, before the recovery signal is added.
   await gates(opts, { ...snapshotCard({ ...witness, fields: held }), block_status: "none", block_reason: "" }, terminalColumn(board.columns), card);
+  requireListHeadHash(opts.cfg);
   const accepted = await compoundUpdate(opts, witness, held, ["column", "position", "assignee", "updated_at", "tags", "block_status", "block_reason"]);
   const recoveryWitness: GuardSnapshot = { ...witness, fields: held };
   // An error carries this accepted hold only after durable ack AND exact readback.
-  try {
-    const cleared = await finishExactRecovery({...opts,witness:recoveryWitness});
-    // Preserve both real durable/readback receipts. The outer receipt still
-    // names the held input of the clear, not the original admission witness.
-    const claim_chain: FreshClaimChain = {
-      version:1, mode:"fresh", initial_snapshot_sha256:accepted.guard_snapshot_sha256,
-      stages:[{stage:"accepted-held",receipt:accepted},{stage:"cleared",receipt:cleared.receipt}],
-    };
-    return {...cleared.claim,claim_chain};
-  }
-  catch(cause) { throw new ExactClaimRecoveryError(opts.slug,accepted,cause); }
+  const cleared = await (async () => {
+    try {
+      // The proved batch stays Card + BoardCards. The column head follows it.
+      await maintainCardHead(opts, snapshotCard(recoveryWitness), snapshotCard(witness));
+      return await finishExactRecovery({...opts,witness:recoveryWitness});
+    }
+    catch(cause) { throw new ExactClaimRecoveryError(opts.slug,accepted,cause); }
+  })();
+  // The clear's proved batch is also Card + BoardCards. This head update is
+  // outside the recovery wrapper: the clear already finished.
+  await maintainCardHead(opts, cleared.claim.card, cleared.previous);
+  // Preserve both real durable/readback receipts. The outer receipt still
+  // names the held input of the clear, not the original admission witness.
+  const claim_chain: FreshClaimChain = {
+    version:1, mode:"fresh", initial_snapshot_sha256:accepted.guard_snapshot_sha256,
+    stages:[{stage:"accepted-held",receipt:accepted},{stage:"cleared",receipt:cleared.receipt}],
+  };
+  return {...cleared.claim,claim_chain};
 }

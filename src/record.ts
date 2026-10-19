@@ -3,15 +3,19 @@ import { guardedCardUpdate } from "./guarded-card-update.ts";
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
+import {
+  LIST_HEAD_CAP,
+  LIST_HEAD_SCHEMA_KEY,
+  headCardFrom,
+  removeCardsFromHeads,
+  syncCardHead,
+  type HeadCard,
+} from "./list-head.ts";
 import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import {
   patchCardListIndex,
   patchCardListIndexRemoveMany,
   patchBoardListIndex,
-  readCardListIndex,
-  writeCardListIndex,
-  cardListIndexIsSuperseded,
-  toCardSummary,
   readBoardListIndex,
   writeBoardListIndex,
   type BoardSummary,
@@ -19,6 +23,7 @@ import {
 import {
   awaitBoardCardSearchVisible,
   searchVisibilityTimeoutWarning,
+  BOARD_CARDS_COLUMN_FIELDS,
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
   boardCardSk,
@@ -33,7 +38,6 @@ import {
   removeBoardCardsBatch,
   sweepBoardCardJanitor,
   upsertBoardCard,
-  upsertBoardCardsBatch,
   type BoardCardWriteOptions,
 } from "./board-cards.ts";
 import {
@@ -2978,10 +2982,8 @@ type BoardListOpt = {
    * finished card will not find one, so it does not belong on `list`, `show`,
    * `search`, or any sweep that repairs or counts the archive.
    *
-   * Best-effort by design. It applies only on the BoardCards partition path;
-   * every fallback below (CardListIndex, the admin scan) still returns the
-   * whole board, which is correct for these callers — they filter — and keeps
-   * this option from turning a degraded read into a wrong one.
+   * It applies on the BoardCards partition path. An empty partition stays
+   * empty. This path does not read an older rollup.
    */
   activeOnly?: boolean;
   /**
@@ -3001,113 +3003,11 @@ type BoardListOpt = {
    * whole-partition read, so cost tracks rows MATCHED, not partition size. On
    * the live board `doing` is 1 row: 8.8ms against 208ms.
    *
-   * Best-effort on the same terms as `activeOnly`: it applies only on the
-   * BoardCards partition path, and every fallback still returns the whole
-   * board — correct for these callers, because they filter.
+   * It applies on the BoardCards partition path, on the same terms as
+   * `activeOnly`. An empty partition stays empty.
    */
   column?: string;
 };
-
-/**
- * Rebuild BoardCards membership from Card truth, after the scan fallback in
- * {@link listCardsWithFields} found no usable index.
- *
- * ## Why this is guarded on `boardCardsThrew`
- *
- * The caller reaches its scan fallback for two very different reasons, and the
- * `catch` that used to sit around the BoardCards query erased the difference:
- *
- *   - the index is genuinely ABSENT (fresh node, pre-backfill) — seeding is the
- *     whole point, or
- *   - the partition read THREW.
- *
- * On this node the ordinary cause of the second is `service_timeout` / "too
- * many concurrent reads" — the node saying it is already shedding load. Reading
- * that as "the index must be missing, rebuild it" made a plain `kanban list`
- * answer backpressure with hundreds more operations, which is precisely
- * backwards. A failed read is not evidence of an empty index — the same rule
- * the body and board scans already follow: **only a read that SUCCEEDED may
- * establish that something is absent.**
- *
- * ## Why it is not a serial loop any more
- *
- * As written (`for (const c of cards) await upsertBoardCard(node, cfg, c)`)
- * every card paid two full round trips — the wide keyed probe, and, because no
- * `previous` was passed, a whole-partition orphan scan. Measured on the live
- * primary 2026-07-31 (`scripts/probe-seed-storm-cost.ts`): 654ms + 657ms per
- * card over 331 live cards = **~7.2 minutes and ~1000 operations**, serial,
- * inside a command the user typed as `list`, silent the entire time.
- *
- * `skipOrphanPurge` is correct here for the same reason `board-cards-heal`
- * passes it: this writes every card's current truth, so a per-card partition
- * rescan can only rediscover drift that the same loop is already overwriting.
- * Residual multi-orphan drift is `groom board-cards-heal`'s job — reads stay
- * correct meanwhile because `listAllBoardCards` dedupes by slug through
- * `preferFresherBoardCard`.
- *
- * ## Why the try/catch moved inside
- *
- * It was outside the loop, so the FIRST card that failed to write abandoned the
- * seed for every card after it — under exactly the conditions that trigger the
- * seed. It paid the storm and did not finish the repair, silently. Per-item now.
- *
- * Deduped by slug, keeping the richest row: the Card scan returns more than one
- * row for some slugs (see {@link listCardsWithBodies}), and the extra row
- * carries only `slug` — no column, no position. Seeding from it would write a
- * junk membership sk for a card that already has a real one, i.e. the repair
- * would corrupt the index it exists to rebuild.
- */
-async function seedBoardCards(
-  node: NodeClient,
-  cfg: Config,
-  cards: Card[],
-  boardCardsThrew: boolean,
-  scannedFields: string[],
-): Promise<void> {
-  if (boardCardsThrew) return;
-  // Never write a field this scan did not read.
-  //
-  // The seed states a whole membership row, but the scan above runs at the
-  // CALLER's projection, and callers are deliberately narrow: the text `list`
-  // reads `CARD_DISPLAY_FIELDS` (no repo/base/pr_url/branch/north_star/block_*/
-  // updated_at) and the pickup-area peer scan is narrower still — both by
-  // design, both correct as reads. `boardCardFieldsFromCard` then writes `""`
-  // for every field the scan never asked for, and `cardFromBoardCardFields`
-  // reads that `""` back as a value, so the rows are well-formed and wrong.
-  // Nothing downstream can tell "not read" from "not set" — the same
-  // indistinguishable-by-value hazard `BODY_OMITTED` guards for `body`, one
-  // field over. A card with no repo/base is `malformed-routing` to the pickup
-  // gate, so the symptom is a board that stops being pickupable after a READ.
-  //
-  // Declining is the conservative half and the self-correcting one: the seed is
-  // best-effort index repair, the list still returns from the scan either way,
-  // and the next read wide enough to state a row (`listCards`, `pickup status`)
-  // seeds it properly. Widening the scan instead would be the wrong trade — it
-  // would undo read narrowings that were measured and are load-bearing.
-  if (!scanCoversSeed(scannedFields)) return;
-  const bySlug = new Map<string, Card>();
-  for (const card of cards) {
-    if (!card.slug) continue;
-    const seen = bySlug.get(card.slug);
-    if (seen === undefined || cardFieldWeight(seen) < cardFieldWeight(card)) {
-      bySlug.set(card.slug, card);
-    }
-  }
-  // Batched, NOT fanned out. Every card seeded here lands in the same board
-  // partition, and the node gates a write per `(molecule, hash)` — the range
-  // half of a HashRange key is not in the lock key — so concurrent writers of
-  // one board queue rather than overlap. Measured on the live primary
-  // (`probe-boardcards-write-lock-contention.ts`), the fan-out this replaces
-  // ran at **0.91x of serial**: it was paying for concurrency and getting less
-  // than nothing back. One batch of the same 12 rows ran 2.10x, and at the
-  // seed's own chunk size the per-write cost drops 1282ms -> 160ms.
-  //
-  // The per-card best-effort contract survives: `upsertBoardCardsBatch` retries
-  // a rejected chunk one row at a time, so a single unseedable card still
-  // cannot abandon the rest of the repair — which was the whole reason the
-  // try/catch moved inside the loop in the first place.
-  await upsertBoardCardsBatch(node, cfg, [...bySlug.values()]);
-}
 
 /**
  * How much membership truth a scanned row actually carries, for picking between
@@ -3269,11 +3169,9 @@ async function listCardsWithFieldsTraced(
   // that need body must findCard/show by slug.
   // HashKey filters still go to the Card schema (point reads).
   if (filter === undefined) {
-    // Did the BoardCards read FAIL, or was the index genuinely absent? The
-    // seed below is only allowed to run for the second — see `seedBoardCards`.
-    let boardCardsThrew = false;
-    // BoardCards first: one partition query per board, thin projection.
-    try {
+    // BoardCards answers this list. A new node does not keep an older rollup
+    // or a Card key list readable.
+    {
       const boards = opts.boards ?? (await listBoards(node, cfg));
       const cardFields = fields.includes("body")
         ? fields.filter((f) => f !== "body")
@@ -3298,134 +3196,13 @@ async function listCardsWithFieldsTraced(
           servedBy: "board-cards",
         };
       }
-      // Empty partition may mean "no cards" OR "not dual-written yet".
-      // Fall through to CardListIndex when partitions are empty so dual-read
-      // still sees legacy boards until backfill.
-      //
-      // EXCEPT under `activeOnly`, where empty legitimately means "every card
-      // is finished" — a read that deliberately excluded the terminal column is
-      // no evidence at all about dual-write coverage. Without this the moment
-      // the board went all-`done` every `pickup status` would take the
-      // fall-through below: an admin full scan of Card, an index rewrite and a
-      // BoardCards reseed, i.e. a WRITE storm triggered by finishing the work.
-      // `column` carries the identical hazard, and more often: an empty `doing`
-      // is the ORDINARY state of a quiet board, not a signal about dual-write
-      // coverage. Without this guard, running `overlap` while nothing is in
-      // flight would take the fall-through below — an admin full scan of Card,
-      // an index rewrite and a BoardCards reseed — so narrowing the read would
-      // have traded 200ms for a write storm on the `pickup claim` path.
-      if (
-        partitioned !== null && partitioned.length === 0 &&
-        (opts.activeOnly === true || opts.column !== undefined)
-      ) {
-        // An empty BoardCards answer IS a BoardCards answer here — the guard
-        // above exists precisely because emptiness is legitimate under these
-        // narrowings, so reporting it as anything else would misname a healthy
-        // read as a missing index.
-        return { cards: [], servedBy: "board-cards" };
-      }
-      if (partitioned !== null && partitioned.length === 0) {
-        const indexedEmpty = await readCardListIndex(node, cfg);
-        if (indexedEmpty !== null && indexedEmpty.length === 0) {
-          return { cards: [], servedBy: "card-list-index" };
-        }
-        // indexed has data but BoardCards empty → legacy path below
-      }
-    } catch {
-      // The partition read failed. `list` still has to answer, so we fall
-      // through to the scan — but the failure is recorded, because it is NOT
-      // evidence that the index needs rebuilding.
-      boardCardsThrew = true;
-    }
-
-    const indexed = await readCardListIndex(node, cfg);
-    // A RETIRED rollup is never the answer — not when it is empty, and not when
-    // it still holds its legacy payload.
-    //
-    // This fall-through is only reached when the BoardCards query THREW or the
-    // schema is unbound, and the two cases want opposite things:
-    //
-    //   board_cards bound (superseded) — the write path has not maintained
-    //     `all_cards` since 2026-07-28 (`patchCardListIndex` returns early on
-    //     the same predicate), so whatever it holds is frozen at that date.
-    //     Serving it answers a transient shed with stale membership: measured
-    //     on the primary 2026-08-02, 721 entries of which 714 had no Card
-    //     record at all. Seed from Card truth below instead — an empty payload
-    //     is likewise absence of information, not proof of an empty board, and
-    //     agents read an empty board as "no work".
-    //
-    //   board_cards unbound (legacy) — the rollup IS the card index on this
-    //     node. Unchanged: it is served exactly as before.
-    //
-    // So the read path's trust now matches the write path's refusal. Widening
-    // this to `length === 0` only, as it was, made the guard decline the rollup
-    // precisely when it had nothing to give and accept it when it did.
-    if (indexed !== null && !cardListIndexIsSuperseded(cfg)) {
-      // CardListIndex is body-free by construction — never N+1 hydrate.
-      return {
-        cards: markBodyOmitted(
-          (indexed.filter((c) => !isHiddenCard(c as Card)) as Card[]).map((c) =>
-            Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
-          ),
-        ),
-        servedBy: "card-list-index",
-      };
-    }
-    if (opts.allowKeyListFallback === false) {
+      // A new node has no older list. An empty BoardCards answer is empty.
+      // A missing schema does not fall through to CardListIndex or a Card key list.
+      if (partitioned !== null) return { cards: [], servedBy: "board-cards" };
       return { cards: [], servedBy: "refused" };
     }
-    // Index missing: enumerate live Card keys via /api/list, then HashKey
-    // point-get each row. Prefer BoardCards after dual-write.
-    // `scannedFields` remains the caller's requested projection (or the
-    // optional-field retry subset) so seed guards still refuse to write fields
-    // this drain did not read.
-    let scannedFields = fields;
-    let cards: Card[];
-    try {
-      cards = await listCardsFromKeyList(node, cfg, fields);
-    } catch (err) {
-      if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
-      scannedFields = fields.filter(
-        (field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field),
-      );
-      cards = await listCardsFromKeyList(node, cfg, scannedFields);
-    }
-    if (!scannedFields.includes("body")) markBodyOmitted(cards);
-    // Never write a field this scan did not read — the same contract
-    // `seedBoardCards` states below, at the other index, from the same scan.
-    //
-    // A `CardSummary` states every routing field (`repo`, `base`, `pr_url`,
-    // `branch`, `north_star`, `block_status`, `block_reason`, `updated_at`), and
-    // `toCardSummary` is a spread: it copies whatever `rowToCard` produced,
-    // which is `""` for every field the caller's projection never asked for.
-    // Identical mechanism, one line apart, and this half was left unguarded
-    // when the BoardCards half was fixed.
-    //
-    // The consequence here is WORSE than a blanked BoardCards row, which is
-    // why the guard belongs at both call sites rather than only the reachable
-    // one. A blanked rollup is then SERVED: the branch above returns any
-    // non-null payload on a legacy node, so it answers every later list until
-    // something clears it, while a blanked BoardCards row is re-checked by
-    // `groom parity-check` and repaired by `board-cards-heal`. Nothing audits
-    // `all_cards` — the retirement path only clears it.
-    //
-    // Reach is narrow and stated plainly rather than assumed: the write is
-    // already refused on a modern node (`cardListIndexIsSuperseded`), and on a
-    // legacy node with a rollup present the branch above returns before the
-    // scan. So this fires only where `board_cards` is unbound AND the `all_cards`
-    // row is absent — the first list on a legacy install. That path is retired
-    // (`groom card-list-index-retire`), and the guard is cheap; a defect that
-    // survives because its path is unpopular is still a defect.
-    if (scanCoversSeed(scannedFields)) {
-      try {
-        await writeCardListIndex(node, cfg, cards.map(toCardSummary));
-      } catch {
-        // best-effort seed; list still returns
-      }
-    }
-    await seedBoardCards(node, cfg, cards, boardCardsThrew, scannedFields);
-    return { cards, servedBy: "full-scan" };
   }
+
 
   const hash = schemaHashFor("card", cfg);
   const query = (queryFields: string[]) =>
@@ -3553,29 +3330,6 @@ export const CARD_LIST_FIELDS: string[] = [
   "branch",
 ];
 
-/**
- * What a scan must have read before it is allowed to SEED a membership row.
- *
- * A WRITE contract, not a read one, and separate from every list projection for
- * that reason: a renderer may read as few fields as it likes, but a scan that
- * goes on to seed must have read at least this set — `boardCardFieldsFromCard`
- * writes `""` for an unprojected field rather than skipping it.
- *
- * This is {@link CARD_LIST_FIELDS}, i.e. everything BoardCards serves as list
- * truth. `db` is the deliberate exception: `boardCardFieldsFromCard` does write
- * it, but no list projection carries it and `show` point-reads Card for it (see
- * `BOARD_CARDS_LIST_FIELDS`), so requiring it here would refuse every seed the
- * product actually makes — including `listCards`' own — and disable the repair
- * entirely. Blanking `db` on a seeded row is pre-existing and by design; that
- * is a different question from the routing fields this guard exists for.
- */
-export const CARD_SEED_FIELDS: string[] = [...CARD_LIST_FIELDS];
-
-/** Did a scan at `fields` read enough to state a whole membership row? */
-export function scanCoversSeed(fields: string[]): boolean {
-  const got = new Set(fields);
-  return CARD_SEED_FIELDS.every((f) => got.has(f));
-}
 
 export async function listCards(
   node: NodeClient,
@@ -4078,8 +3832,8 @@ export async function findCardSummaryForReconcile(
 }
 
 /**
- * Thin cards on one board only (one BoardCards partition — no empty-board fan-out).
- * `fields` is used only on the legacy CardListIndex / Card fallback path.
+ * Thin cards on one board only (one BoardCards partition).
+ * An empty partition is an empty board. This does not read an older rollup.
  */
 export async function listCardsOnBoard(
   node: NodeClient,
@@ -4087,32 +3841,21 @@ export async function listCardsOnBoard(
   board: string,
   fields: string[] = CARD_LIST_FIELDS,
 ): Promise<Card[]> {
-  try {
-    const part = await listBoardCardsPartition(node, cfg, board, {
-      fields: boardCardsProjectionForCardFields(fields),
+  const part = await listBoardCardsPartition(node, cfg, board, {
+    fields: boardCardsProjectionForCardFields(fields),
+  });
+  if (part === null) {
+    throw new FkanbanError({
+      code: "schema_not_configured",
+      message: `BoardCards schema is not available for board "${board}".`,
+      hint: "Run kanban init. This list does not read an older card rollup.",
     });
-    if (part !== null && part.length > 0) {
-      const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
-      return reconciled
-        .filter((c) => !isHiddenCard(c))
-        .map((c) => Object.assign(c, deriveStructuredFields(c)));
-    }
-    if (part !== null && part.length === 0) {
-      // Empty board vs not dual-written: check index for this board only.
-      const indexed = await readCardListIndex(node, cfg);
-      if (indexed !== null) {
-        return (indexed.filter((c) => !isHiddenCard(c as Card) && c.board === board) as Card[]).map(
-          (c) => Object.assign({ ...c, body: "" }, deriveStructuredFields(c as Card)),
-        );
-      }
-      return [];
-    }
-  } catch {
-    // fall through
   }
-  // No BoardCards schema / query failed: field-projected multi-board list, filter client-side.
-  const all = await listCardsWithFields(node, cfg, fields);
-  return all.filter((c) => c.board === board);
+  if (part.length === 0) return [];
+  const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
+  return reconciled
+    .filter((c) => !isHiddenCard(c))
+    .map((c) => Object.assign(c, deriveStructuredFields(c)));
 }
 
 export async function listCardsByFilter(
@@ -5649,6 +5392,65 @@ export async function createCardRecord(
  * test/no-protein-reach.test.ts and test/protein-primary-membership.test.ts
  * pin this arrangement.
  */
+function listHeadHash(cfg: Config): string {
+  const hash = cfg.schemaHashes[LIST_HEAD_SCHEMA_KEY];
+  if (!hash) {
+    throw new FkanbanError({
+      code: "schema_not_configured",
+      message: "Column head schema is not registered.",
+      hint: "Run kanban init.",
+    });
+  }
+  return hash;
+}
+
+export function requireListHeadHash(cfg: Config): string {
+  return listHeadHash(cfg);
+}
+
+// Column prefix reads must not project milestone. That field drops a row that
+// has no milestone atom. A complete column (at most the head cap) then fills
+// milestone from the Card key. A longer column stays partial and keeps the
+// milestone on the card this command wrote.
+async function columnCardsForHead(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  column: string,
+  exclude: readonly string[],
+): Promise<HeadCard[]> {
+  const projection = [...BOARD_CARDS_COLUMN_FIELDS];
+  const cards = await listCardsByColumn(node, cfg, column, projection, board, { projection });
+  const live = cards
+    .filter((card) => !exclude.includes(card.slug))
+    .map((card) => headCardFrom(card));
+  if (live.length > LIST_HEAD_CAP || live.length === 0) return live;
+  const truths = await findCardsWithFields(
+    node,
+    cfg,
+    live.map((card) => card.slug),
+    ["slug", "milestone"],
+  );
+  const milestone = new Map<string, string>();
+  for (const truth of truths) {
+    if (truth) milestone.set(truth.slug, truth.milestone ?? "");
+  }
+  return live.map((card) => ({ ...card, milestone: milestone.get(card.slug) ?? card.milestone }));
+}
+
+function headRefill(opts: { node: NodeClient; cfg: Config }) {
+  return (board: string, column: string, exclude: readonly string[]) =>
+    columnCardsForHead(opts.node, opts.cfg, board, column, exclude);
+}
+
+export async function maintainCardHead(
+  opts: { node: NodeClient; cfg: Config },
+  card: Card,
+  previous: Card | null,
+): Promise<void> {
+  await syncCardHead(opts.node, listHeadHash(opts.cfg), card, previous, { refill: headRefill(opts) });
+}
+
 async function writeCardMembership(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
@@ -5672,6 +5474,7 @@ async function writeCardMembership(
     try {
       await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
       await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
+      await maintainCardHead(opts, card, previous);
       // Janitor is process-local. Sweep in this same request so the previous SK
       // delete is not lost when the CLI exits.
       await sweepBoardCardJanitor(opts.node);
@@ -5716,8 +5519,11 @@ export async function updateCardRecord(
 ): Promise<void> {
   if (expected?.type === "value" && expected.field === "assignee") {
     assertBodyLoaded(card, `guarded update of card "${card.slug}"`);
+    requireListHeadHash(opts.cfg);
     await guardedCardUpdate(opts, card, expected);
-    return; // Source memberships remain until a separate safe reconciliation.
+    // The proved batch must not gain a head write. The head update follows it.
+    await maintainCardHead(opts, card, previous ?? null);
+    return;
   }
   const written = await writeCardRecordWithOptionalFieldFallback(
     opts,
@@ -5833,6 +5639,7 @@ export async function deleteCardRecord(
   // (papercut-kanban-card-delete-leaves-boardcards-tip-without-atom-root-cause-20260924)
   await patchCardListIndex(opts.node, opts.cfg, card, "remove");
   await removeBoardCard(opts.node, opts.cfg, truth);
+  await removeCardsFromHeads(opts.node, listHeadHash(opts.cfg), [truth, card], { refill: headRefill(opts) });
   for (const milestone of membershipPartitionsToRetire(card, truth)) {
     await removeMilestoneCard(opts.node, opts.cfg, { ...truth, milestone });
   }
@@ -6180,21 +5987,19 @@ export const CARD_DELETE_BATCH = 48;
  *
  * ## Ordering
  *
- * Identical to {@link deleteCardRecord}, widened from per-card to per-batch:
- * Card records first, then `all_cards`, then BoardCards, then MilestoneCards.
+ * Same as {@link deleteCardRecord}: membership first, the Card atom last.
+ * `all_cards`, then BoardCards, then the column head, then MilestoneCards,
+ * then the Card atom. The head refill reads BoardCards, so that row is gone
+ * before the head update, and the deleted slugs are excluded from the refill.
+ * A failed head update leaves the Card atom in place. The next `kanban rm`
+ * of that slug can finish the head and the atom.
  *
  * ## Failure attribution
  *
  * The node rejects a whole batch on any item's failure and never names the
- * item, so a rejected chunk is retried ONE ROW AT A TIME — which restores
- * exactly the per-card isolation the batch gives up, and only for the chunk
- * that actually failed. `onError` sees each individually-failed card so a
- * caller keeps its own per-card accounting.
- *
- * A card whose Card record could not be deleted is EXCLUDED from the index
- * cleanup below, because that is what a throwing `deleteCardRecord` did: its
- * membership rows must outlive a Card that is still there, or `list` loses a
- * card that still exists.
+ * item, so a rejected atom chunk is retried ONE ROW AT A TIME. `onError`
+ * sees each atom that still failed. Membership is already gone by then. The
+ * Card atom remains, and a later `kanban rm` of that slug deletes it.
  */
 export async function deleteCardRecordsBatch(
   opts: { cfg: Config; node: NodeClient },
@@ -6214,9 +6019,29 @@ export async function deleteCardRecordsBatch(
     POINT_READ_CONCURRENCY,
   );
 
-  const batch = opts.node.deleteRecords?.bind(opts.node);
-  const retired: Array<{ card: Card; truth: Card }> = [];
+  await patchCardListIndexRemoveMany(opts.node, opts.cfg, cards.map((card) => card.slug));
+  await removeBoardCardsBatch(opts.node, opts.cfg, truths);
+  await removeCardsFromHeads(
+    opts.node,
+    listHeadHash(opts.cfg),
+    cards.flatMap((card, index) => [truths[index] ?? card, card]),
+    { refill: headRefill(opts) },
+  );
 
+  // Both the partition the Card names and the one the caller's object named —
+  // the same "retire both, never the better one" rule `deleteCardRecord`
+  // applies, for the same reason: a stale hint costs a no-op delete, discarding
+  // one costs a permanent orphan.
+  const milestoneRows: Card[] = [];
+  for (const [index, card] of cards.entries()) {
+    const truth = truths[index] ?? card;
+    for (const milestone of membershipPartitionsToRetire(card, truth)) {
+      milestoneRows.push({ ...truth, milestone });
+    }
+  }
+  await removeMilestoneCardsBatch(opts.node, opts.cfg, milestoneRows);
+
+  const batch = opts.node.deleteRecords?.bind(opts.node);
   for (let i = 0; i < cards.length; i += CARD_DELETE_BATCH) {
     const chunk = cards.slice(i, i + CARD_DELETE_BATCH);
     try {
@@ -6225,33 +6050,14 @@ export async function deleteCardRecordsBatch(
       // it is a loss of speed and nothing else.
       if (!batch) throw new Error("node client exposes no batch delete");
       await batch(chunk.map((card) => ({ schemaHash: hash, keyHash: card.slug })));
-      for (const [j, card] of chunk.entries()) retired.push({ card, truth: truths[i + j]! });
     } catch {
-      for (const [j, card] of chunk.entries()) {
+      for (const card of chunk) {
         try {
           await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
-          retired.push({ card, truth: truths[i + j]! });
         } catch (err) {
           onError?.(card, err);
         }
       }
     }
   }
-
-  if (retired.length === 0) return;
-
-  await patchCardListIndexRemoveMany(opts.node, opts.cfg, retired.map((r) => r.card.slug));
-  await removeBoardCardsBatch(opts.node, opts.cfg, retired.map((r) => r.truth));
-
-  // Both the partition the Card names and the one the caller's object named —
-  // the same "retire both, never the better one" rule `deleteCardRecord`
-  // applies, for the same reason: a stale hint costs a no-op delete, discarding
-  // one costs a permanent orphan.
-  const milestoneRows: Card[] = [];
-  for (const { card, truth } of retired) {
-    for (const milestone of membershipPartitionsToRetire(card, truth)) {
-      milestoneRows.push({ ...truth, milestone });
-    }
-  }
-  await removeMilestoneCardsBatch(opts.node, opts.cfg, milestoneRows);
 }

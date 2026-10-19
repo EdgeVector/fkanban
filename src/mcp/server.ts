@@ -442,7 +442,8 @@ export function createFkanbanMcpServer(
             "Matching cards, in column + position order, each with resolved dependency status (capped — see `total`/`truncated`). By default `body` is a single-line ~200-char preview and `bodyTruncated` says whether it was shortened; pass `full_body:true` for complete bodies (then `bodyTruncated` is always false). Use `fkanban_show <slug>` for one card's full body.",
           ),
         total: z.number().describe("Total matching cards before the cap."),
-        truncated: z.boolean().describe("True when the cap dropped cards — re-call with a higher `limit` or `all` for the rest."),
+        truncated: z.boolean().describe("True when the cap dropped cards or a column head is partial. Re-call with a higher `limit` or `all` for a longer page. A partial column head still stores at most 20 titles."),
+        partial: z.boolean().describe("True when a column head stores only part of that column."),
       },
     },
     async (args) => {
@@ -453,7 +454,7 @@ export function createFkanbanMcpServer(
         if (args.column) o.column = args.column;
         if (args.tag) o.tag = args.tag;
         if (args.assignee) o.assignee = args.assignee;
-        const { text, cards } = await listResult(o);
+        const { text, cards, partial } = await listResult(o);
         // Cap the agent-facing structured array (cards already in column +
         // position order, so `capFlat` slicing keeps ordering intact). The
         // human `text` is independently capped already.
@@ -462,7 +463,7 @@ export function createFkanbanMcpServer(
         // / full_body — never N over the whole board.
         const withBodies = await hydrateCardBodies(node, cfg, capped);
         const previewed = previewBodies(withBodies, args.full_body ?? false);
-        return toolResult(text, { cards: previewed, total, truncated });
+        return toolResult(text, { cards: previewed, total, truncated: truncated || partial, partial });
       } catch (err) {
         return errorResult(err);
       }
