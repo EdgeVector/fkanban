@@ -820,6 +820,8 @@ export function newNodeClient(opts: {
       "X-LastDB-Client": opsLabel,
     };
     if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
+    // Opt-in. The node returns x-lastdb-read-receipt only when this header is set.
+    if (process.env.LASTDB_READ_RECEIPT === "1") h["x-lastdb-read-receipt"] = "1";
     if (appId !== undefined && appId.length > 0) {
       h["X-App-Capability"] = appCapability && appCapability.length > 0
         ? appCapability
