@@ -5410,6 +5410,30 @@ export function requireListHeadHash(cfg: Config): string {
   return listHeadHash(cfg);
 }
 
+// findCardsWithFields drops a tombstone before the caller can see the tag.
+// A spine slug then looks missing, and one hidden card blocks every later
+// head write. This read keeps the row. A key-only delete stays a miss.
+async function findCardsKeepingHidden(
+  node: NodeClient,
+  cfg: Config,
+  slugs: readonly string[],
+  fields: string[],
+): Promise<Array<Card | null>> {
+  if (slugs.length === 0) return [];
+  const res = await node.queryAll({
+    schemaHash: schemaHashFor("card", cfg),
+    fields,
+    filter: {
+      HashRangeKeys: slugs.map((slug) => [slug, ""]),
+    } as unknown as QueryFilter,
+  });
+  const cards = res.results
+    .filter((row) => !isKeyOnlyRow(row, fields))
+    .map(rowToCard);
+  const bySlug = new Map(cards.map((card) => [card.slug, card]));
+  return slugs.map((slug) => bySlug.get(slug) ?? null);
+}
+
 // The column prefix and the column spine are different reads. A short page
 // can agree with itself. This returns false unless every spine slug is either
 // in `liveSlugs` or proven hidden / in another column. A null Card is unproven.
@@ -5441,11 +5465,12 @@ async function columnReadIsComplete(
   }
   for (let i = 0; i < missing.length; i += HASH_RANGE_KEYS_PER_READ) {
     const chunk = missing.slice(i, i + HASH_RANGE_KEYS_PER_READ);
-    const truths = await findCardsWithFields(node, cfg, chunk, ["slug", "column", "tags"]);
+    const truths = await findCardsKeepingHidden(node, cfg, chunk, ["slug", "column", "tags"]);
     for (let j = 0; j < chunk.length; j += 1) {
       const truth = truths[j];
-      if (!truth || truth.slug !== chunk[j] || !truth.column) return false;
-      if (truth.column === column && !isHiddenCard(truth)) return false;
+      if (!truth || truth.slug !== chunk[j]) return false;
+      if (isHiddenCard(truth)) continue;
+      if (!truth.column || truth.column === column) return false;
     }
   }
   return true;
