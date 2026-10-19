@@ -7,6 +7,8 @@ import {
   LIST_HEAD_CAP,
   LIST_HEAD_SCHEMA_KEY,
   headCardFrom,
+  headKeyId,
+  readColumnHeads,
   removeCardsFromHeads,
   syncCardHead,
   writeColumnHead,
@@ -5534,7 +5536,8 @@ export async function maintainCardHead(
 // One head atom after rank's position writes. Membership comes from the column
 // prefix, which does not project milestone, so a card with no milestone stays
 // in the window. `cards` only overlays the positions rank just chose. A short
-// column read leaves the previous atom.
+// read leaves the previous atom. An empty read does too: the prefix and the
+// spine can both be empty while the stored head still has titles.
 export async function syncRankedColumnHead(
   opts: { node: NodeClient; cfg: Config },
   board: string,
@@ -5546,6 +5549,19 @@ export async function syncRankedColumnHead(
     console.error(
       `kanban: rank left the column head for "${board}/${column}" unchanged because the column read was short`,
     );
+    return;
+  }
+  if (result.cards.length === 0) {
+    let keepStored = cards.some((card) => card.slug);
+    if (!keepStored) {
+      const found = await readColumnHeads(opts.node, listHeadHash(opts.cfg), [{ board, column }]);
+      keepStored = (found.get(headKeyId(board, column))?.cards.length ?? 0) > 0;
+    }
+    if (keepStored) {
+      console.error(
+        `kanban: rank left the column head for "${board}/${column}" unchanged because the column read was empty`,
+      );
+    }
     return;
   }
   const bySlug = new Map(cards.filter((card) => card.slug).map((card) => [card.slug, card]));
