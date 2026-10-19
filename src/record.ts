@@ -3,7 +3,14 @@ import { guardedCardUpdate } from "./guarded-card-update.ts";
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
-import { LIST_HEAD_SCHEMA_KEY, removeCardsFromHeads, syncCardHead } from "./list-head.ts";
+import {
+  LIST_HEAD_CAP,
+  LIST_HEAD_SCHEMA_KEY,
+  headCardFrom,
+  removeCardsFromHeads,
+  syncCardHead,
+  type HeadCard,
+} from "./list-head.ts";
 import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import {
   patchCardListIndex,
@@ -16,6 +23,7 @@ import {
 import {
   awaitBoardCardSearchVisible,
   searchVisibilityTimeoutWarning,
+  BOARD_CARDS_COLUMN_FIELDS,
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
   boardCardSk,
@@ -5396,6 +5404,53 @@ function listHeadHash(cfg: Config): string {
   return hash;
 }
 
+export function requireListHeadHash(cfg: Config): string {
+  return listHeadHash(cfg);
+}
+
+// Column prefix reads must not project milestone. That field drops a row that
+// has no milestone atom. A complete column (at most the head cap) then fills
+// milestone from the Card key. A longer column stays partial and keeps the
+// milestone on the card this command wrote.
+async function columnCardsForHead(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  column: string,
+  exclude: readonly string[],
+): Promise<HeadCard[]> {
+  const projection = [...BOARD_CARDS_COLUMN_FIELDS];
+  const cards = await listCardsByColumn(node, cfg, column, projection, board, { projection });
+  const live = cards
+    .filter((card) => !exclude.includes(card.slug))
+    .map((card) => headCardFrom(card));
+  if (live.length > LIST_HEAD_CAP || live.length === 0) return live;
+  const truths = await findCardsWithFields(
+    node,
+    cfg,
+    live.map((card) => card.slug),
+    ["slug", "milestone"],
+  );
+  const milestone = new Map<string, string>();
+  for (const truth of truths) {
+    if (truth) milestone.set(truth.slug, truth.milestone ?? "");
+  }
+  return live.map((card) => ({ ...card, milestone: milestone.get(card.slug) ?? card.milestone }));
+}
+
+function headRefill(opts: { node: NodeClient; cfg: Config }) {
+  return (board: string, column: string, exclude: readonly string[]) =>
+    columnCardsForHead(opts.node, opts.cfg, board, column, exclude);
+}
+
+export async function maintainCardHead(
+  opts: { node: NodeClient; cfg: Config },
+  card: Card,
+  previous: Card | null,
+): Promise<void> {
+  await syncCardHead(opts.node, listHeadHash(opts.cfg), card, previous, { refill: headRefill(opts) });
+}
+
 async function writeCardMembership(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
@@ -5419,7 +5474,7 @@ async function writeCardMembership(
     try {
       await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
       await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
-      await syncCardHead(opts.node, listHeadHash(opts.cfg), card, previous);
+      await maintainCardHead(opts, card, previous);
       // Janitor is process-local. Sweep in this same request so the previous SK
       // delete is not lost when the CLI exits.
       await sweepBoardCardJanitor(opts.node);
@@ -5464,10 +5519,10 @@ export async function updateCardRecord(
 ): Promise<void> {
   if (expected?.type === "value" && expected.field === "assignee") {
     assertBodyLoaded(card, `guarded update of card "${card.slug}"`);
-    const headHash = listHeadHash(opts.cfg);
+    requireListHeadHash(opts.cfg);
     await guardedCardUpdate(opts, card, expected);
     // The proved batch must not gain a head write. The head update follows it.
-    await syncCardHead(opts.node, headHash, card, previous ?? null);
+    await maintainCardHead(opts, card, previous ?? null);
     return;
   }
   const written = await writeCardRecordWithOptionalFieldFallback(
@@ -5584,7 +5639,7 @@ export async function deleteCardRecord(
   // (papercut-kanban-card-delete-leaves-boardcards-tip-without-atom-root-cause-20260924)
   await patchCardListIndex(opts.node, opts.cfg, card, "remove");
   await removeBoardCard(opts.node, opts.cfg, truth);
-  await removeCardsFromHeads(opts.node, listHeadHash(opts.cfg), [truth, card]);
+  await removeCardsFromHeads(opts.node, listHeadHash(opts.cfg), [truth, card], { refill: headRefill(opts) });
   for (const milestone of membershipPartitionsToRetire(card, truth)) {
     await removeMilestoneCard(opts.node, opts.cfg, { ...truth, milestone });
   }
@@ -5932,21 +5987,19 @@ export const CARD_DELETE_BATCH = 48;
  *
  * ## Ordering
  *
- * Identical to {@link deleteCardRecord}, widened from per-card to per-batch:
- * Card records first, then `all_cards`, then BoardCards, then MilestoneCards.
+ * Same as {@link deleteCardRecord}: membership first, the Card atom last.
+ * `all_cards`, then BoardCards, then the column head, then MilestoneCards,
+ * then the Card atom. The head refill reads BoardCards, so that row is gone
+ * before the head update, and the deleted slugs are excluded from the refill.
+ * A failed head update leaves the Card atom in place. The next `kanban rm`
+ * of that slug can finish the head and the atom.
  *
  * ## Failure attribution
  *
  * The node rejects a whole batch on any item's failure and never names the
- * item, so a rejected chunk is retried ONE ROW AT A TIME — which restores
- * exactly the per-card isolation the batch gives up, and only for the chunk
- * that actually failed. `onError` sees each individually-failed card so a
- * caller keeps its own per-card accounting.
- *
- * A card whose Card record could not be deleted is EXCLUDED from the index
- * cleanup below, because that is what a throwing `deleteCardRecord` did: its
- * membership rows must outlive a Card that is still there, or `list` loses a
- * card that still exists.
+ * item, so a rejected atom chunk is retried ONE ROW AT A TIME. `onError`
+ * sees each atom that still failed. Membership is already gone by then. The
+ * Card atom remains, and a later `kanban rm` of that slug deletes it.
  */
 export async function deleteCardRecordsBatch(
   opts: { cfg: Config; node: NodeClient },
@@ -5966,9 +6019,29 @@ export async function deleteCardRecordsBatch(
     POINT_READ_CONCURRENCY,
   );
 
-  const batch = opts.node.deleteRecords?.bind(opts.node);
-  const retired: Array<{ card: Card; truth: Card }> = [];
+  await patchCardListIndexRemoveMany(opts.node, opts.cfg, cards.map((card) => card.slug));
+  await removeBoardCardsBatch(opts.node, opts.cfg, truths);
+  await removeCardsFromHeads(
+    opts.node,
+    listHeadHash(opts.cfg),
+    cards.flatMap((card, index) => [truths[index] ?? card, card]),
+    { refill: headRefill(opts) },
+  );
 
+  // Both the partition the Card names and the one the caller's object named —
+  // the same "retire both, never the better one" rule `deleteCardRecord`
+  // applies, for the same reason: a stale hint costs a no-op delete, discarding
+  // one costs a permanent orphan.
+  const milestoneRows: Card[] = [];
+  for (const [index, card] of cards.entries()) {
+    const truth = truths[index] ?? card;
+    for (const milestone of membershipPartitionsToRetire(card, truth)) {
+      milestoneRows.push({ ...truth, milestone });
+    }
+  }
+  await removeMilestoneCardsBatch(opts.node, opts.cfg, milestoneRows);
+
+  const batch = opts.node.deleteRecords?.bind(opts.node);
   for (let i = 0; i < cards.length; i += CARD_DELETE_BATCH) {
     const chunk = cards.slice(i, i + CARD_DELETE_BATCH);
     try {
@@ -5977,38 +6050,14 @@ export async function deleteCardRecordsBatch(
       // it is a loss of speed and nothing else.
       if (!batch) throw new Error("node client exposes no batch delete");
       await batch(chunk.map((card) => ({ schemaHash: hash, keyHash: card.slug })));
-      for (const [j, card] of chunk.entries()) retired.push({ card, truth: truths[i + j]! });
     } catch {
-      for (const [j, card] of chunk.entries()) {
+      for (const card of chunk) {
         try {
           await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
-          retired.push({ card, truth: truths[i + j]! });
         } catch (err) {
           onError?.(card, err);
         }
       }
     }
   }
-
-  if (retired.length === 0) return;
-
-  await patchCardListIndexRemoveMany(opts.node, opts.cfg, retired.map((r) => r.card.slug));
-  await removeBoardCardsBatch(opts.node, opts.cfg, retired.map((r) => r.truth));
-  await removeCardsFromHeads(
-    opts.node,
-    listHeadHash(opts.cfg),
-    retired.flatMap((row) => [row.truth, row.card]),
-  );
-
-  // Both the partition the Card names and the one the caller's object named —
-  // the same "retire both, never the better one" rule `deleteCardRecord`
-  // applies, for the same reason: a stale hint costs a no-op delete, discarding
-  // one costs a permanent orphan.
-  const milestoneRows: Card[] = [];
-  for (const { card, truth } of retired) {
-    for (const milestone of membershipPartitionsToRetire(card, truth)) {
-      milestoneRows.push({ ...truth, milestone });
-    }
-  }
-  await removeMilestoneCardsBatch(opts.node, opts.cfg, milestoneRows);
 }

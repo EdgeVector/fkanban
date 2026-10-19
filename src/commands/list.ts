@@ -79,6 +79,9 @@ export const DEP_SEED_POINT_READ_MAX = 12;
 // collapsing the remainder to a `+K more` tail — keeps the hint a single line.
 export const OTHER_BOARDS_FOOTER_LIMIT = 5;
 
+const COLUMN_HEAD_PARTIAL_LINE =
+  "Column list is partial. This view keeps at most 20 cards in a column.";
+
 function requireHeadHash(cfg: Config): string {
   const hash = cfg.schemaHashes[LIST_HEAD_SCHEMA_KEY];
   if (!hash) {
@@ -103,7 +106,7 @@ function cardFromHead(board: string, column: string, card: HeadCard): Card {
     tags: card.tags,
     deps: card.deps,
     surfaces: [],
-    created_at: "",
+    created_at: card.created_at,
     updated_at: "",
     done_at: "",
     first_doing_at: "",
@@ -244,7 +247,7 @@ export type ListOptions = {
 // unchanged (it consumes only the 🔒 marker via `blockedSlugSet`).
 export async function listResult(
   opts: ListOptions,
-): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
+): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; partial: boolean; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
   const boardSlug = opts.board ?? "default";
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently render an empty default-column board. The
@@ -363,27 +366,33 @@ export async function listResult(
   // --json / --wide / --column (wide never shows the footer; column is a
   // focused view).
   //
-  // One batch of the other boards' column heads. A missing head counts as empty.
+  // Other boards' column heads. A missing head counts as empty. A failed read
+  // does not: the current board still renders, and the footer names the boards
+  // that were not read. readColumnHeads splits the keys into batches of 256.
   let footer = "";
   if (!opts.column && !opts.json && !opts.wide) {
-    const pairs = allBoards.flatMap((board) =>
-      board.slug === boardSlug ? [] : board.columns.map((column) => ({ board: board.slug, column })),
+    const otherBoards = allBoards.filter((board) => board.slug !== boardSlug);
+    const pairs = otherBoards.flatMap((board) =>
+      board.columns.map((column) => ({ board: board.slug, column })),
     );
-    const otherHeads = await readColumnHeads(opts.node, headHash, pairs);
-    const cross = allBoards.flatMap((board) =>
-      board.slug === boardSlug ? [] : cardsFromHeads(board.slug, board.columns, otherHeads),
-    );
-    footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation());
+    let cross: Card[] = [];
+    let unreadable: string[] = [];
+    try {
+      const otherHeads = await readColumnHeads(opts.node, headHash, pairs);
+      cross = otherBoards.flatMap((board) => cardsFromHeads(board.slug, board.columns, otherHeads));
+    } catch {
+      cross = [];
+      unreadable = otherBoards.map((board) => board.slug);
+    }
+    footer = otherBoardsFooter(cross, boardSlug, fkanbanInvocation(), unreadable);
   }
   const milestones = opts.groupByMilestone ? (await listMilestones(opts.node, opts.cfg, { boards: allBoards })).filter((milestone) => milestone.board === boardSlug) : undefined;
   const rendered = milestones
     ? renderBoardGroupedByMilestone(resolvedBoard, buildMilestoneCardGroups(cards, milestones), renderOpts)
     : renderBoard(resolvedBoard, cards, renderOpts);
-  const partialLine = listPartial
-    ? "Column list is partial. This view keeps at most 20 cards in a column.\n"
-    : "";
+  const partialLine = listPartial ? `${COLUMN_HEAD_PARTIAL_LINE}\n` : "";
   const text = `${partialLine}${rendered}${footer ? `\n${footer}\n` : ""}`;
-  return { text, cards: enriched, board: resolvedBoard, jsonLimit, milestones };
+  return { text, cards: enriched, board: resolvedBoard, jsonLimit, partial: listPartial, milestones };
 }
 
 export async function listCmd(opts: ListOptions): Promise<string> {
@@ -395,10 +404,11 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     !opts.json &&
     !opts.wide &&
     (projectionFields.length === 0 || !fieldProjectionNeedsFullCards(projectionFields));
-  const { text, cards, board, jsonLimit, milestones } = await listResult({ ...opts, displayOnly });
+  const { text, cards, board, jsonLimit, partial, milestones } = await listResult({ ...opts, displayOnly });
+  const partialNote = partial ? `${COLUMN_HEAD_PARTIAL_LINE}\n` : "";
   if (projectionFields.length > 0) {
     const out = jsonLimit > 0 ? capPerColumn(board, cards, jsonLimit, opts.column) : cards;
-    return renderFieldProjection(out, projectionFields);
+    return `${partialNote}${renderFieldProjection(out, projectionFields)}`;
   }
   if (!opts.json && opts.wide) {
     const out = capPerColumn(
@@ -407,7 +417,7 @@ export async function listCmd(opts: ListOptions): Promise<string> {
       jsonLimit > 0 ? jsonLimit : Number.MAX_SAFE_INTEGER,
       opts.column,
     );
-    return renderWideTable(out);
+    return `${partialNote}${renderWideTable(out)}`;
   }
   if (!opts.json) return text;
   const broadJson = opts.column === undefined;
@@ -435,8 +445,8 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     : withBodies;
   if (opts.groupByMilestone && milestones) {
     const groups = buildMilestoneCardGroups(out, milestones);
-    if (opts.jsonArray) return JSON.stringify({ groups }, null, 2);
-    return JSON.stringify({ groups, total, truncated: out.length < total }, null, 2);
+    if (opts.jsonArray) return JSON.stringify({ groups, partial }, null, 2);
+    return JSON.stringify({ groups, total, truncated: out.length < total || partial, partial }, null, 2);
   }
-  return renderJsonPage("cards", out, total, { jsonArray: opts.jsonArray });
+  return renderJsonPage("cards", out, total, { jsonArray: opts.jsonArray, partial });
 }
