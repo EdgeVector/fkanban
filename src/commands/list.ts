@@ -9,6 +9,7 @@ import {
   depStatus,
   ensureColumn,
   findBoard,
+  findCardsWithFields,
   hydrateCardBodies,
   listBoards,
   listDependencyStatusesForCards,
@@ -38,7 +39,7 @@ import {
 import { fieldProjectionNeedsFullCards, renderFieldProjection } from "../field_projection.ts";
 import { fkanbanInvocation } from "../mcp/register.ts";
 import { DEFAULT_COLUMNS } from "../schemas.ts";
-import { type WarnSink, renderJsonPage, warnIfTruncated } from "../truncation_notice.ts";
+import { type WarnSink, partialHeadNotice, renderJsonPage, warnIfTruncated } from "../truncation_notice.ts";
 import { type CardDetail } from "./show.ts";
 
 // Cards shown per column before the rest collapse to a "… N more" line.
@@ -81,6 +82,68 @@ export const OTHER_BOARDS_FOOTER_LIMIT = 5;
 
 const COLUMN_HEAD_PARTIAL_LINE =
   "Column list is partial. This view keeps at most 20 cards in a column.";
+
+// Same bound as HASH_RANGE_KEYS_PER_READ. The head shows at most 20 cards
+// per column, so one board is one batch. A longer key list still chunks.
+const HEAD_DETAIL_KEYS_PER_READ = 256;
+
+const HEAD_DETAIL_FIELDS = [
+  "slug",
+  "tags",
+  "updated_at",
+  "repo",
+  "db",
+  "base",
+  "block_status",
+  "block_reason",
+  "north_star",
+  "surfaces",
+  "milestone",
+  "pr_url",
+  "branch",
+  "created_by",
+];
+
+function mergeHeadDetail(card: Card, truth: Card): Card {
+  return {
+    ...card,
+    updated_at: truth.updated_at,
+    done_at: truth.done_at,
+    first_doing_at: truth.first_doing_at,
+    repo: truth.repo,
+    db: truth.db,
+    base: truth.base,
+    block_status: truth.block_status,
+    block_reason: truth.block_reason,
+    north_star: truth.north_star,
+    surfaces: truth.surfaces,
+    milestone: truth.milestone || card.milestone,
+    pr_url: truth.pr_url,
+    branch: truth.branch,
+    created_by: truth.created_by ?? card.created_by,
+  };
+}
+
+async function hydrateListedHeadCards(
+  node: NodeClient,
+  cfg: Config,
+  cards: Card[],
+): Promise<Card[]> {
+  if (cards.length === 0) return cards;
+  const truths: Array<Card | null> = [];
+  for (let i = 0; i < cards.length; i += HEAD_DETAIL_KEYS_PER_READ) {
+    const slugs = cards.slice(i, i + HEAD_DETAIL_KEYS_PER_READ).map((card) => card.slug);
+    truths.push(...(await findCardsWithFields(node, cfg, slugs, HEAD_DETAIL_FIELDS)));
+  }
+  const bySlug = new Map<string, Card>();
+  for (const truth of truths) {
+    if (truth) bySlug.set(truth.slug, truth);
+  }
+  return cards.map((card) => {
+    const truth = bySlug.get(card.slug);
+    return truth ? mergeHeadDetail(card, truth) : card;
+  });
+}
 
 function requireHeadHash(cfg: Config): string {
   const hash = cfg.schemaHashes[LIST_HEAD_SCHEMA_KEY];
@@ -323,13 +386,18 @@ export async function listResult(
     heads = new Map([...heads, ...more]);
   }
   const columnCards = cardsFromHeads(boardSlug, columns, heads);
-  const cards = sortCards(
+  let cards = sortCards(
     columnCards.filter(
       (c) =>
         (!opts.tag || c.tags?.includes(opts.tag)) &&
         (!opts.assignee || c.assignee === opts.assignee),
     ),
   );
+  // Plain text uses the head. JSON, wide, field projections, and MCP read the
+  // shown cards so block_status, repo, and the done clock are not blank.
+  if (opts.displayOnly !== true) {
+    cards = await hydrateListedHeadCards(opts.node, opts.cfg, cards);
+  }
   // Off-list deps are exact Card keys. The list does not read the whole column.
   const allCards = await listDependencyStatusesForCards(
     opts.node,
@@ -404,7 +472,16 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     !opts.json &&
     !opts.wide &&
     (projectionFields.length === 0 || !fieldProjectionNeedsFullCards(projectionFields));
-  const { text, cards, board, jsonLimit, partial, milestones } = await listResult({ ...opts, displayOnly });
+  // done_at and first_doing_at are display fields, and the head does not store
+  // them. A projection that names either one still reads the shown cards.
+  const projectionNeedsHeadDetail = projectionFields.some((field) => {
+    const name = field.trim();
+    return name === "done_at" || name === "first_doing_at";
+  });
+  const { text, cards, board, jsonLimit, partial, milestones } = await listResult({
+    ...opts,
+    displayOnly: displayOnly && !projectionNeedsHeadDetail,
+  });
   const partialNote = partial ? `${COLUMN_HEAD_PARTIAL_LINE}\n` : "";
   if (projectionFields.length > 0) {
     const out = jsonLimit > 0 ? capPerColumn(board, cards, jsonLimit, opts.column) : cards;
@@ -447,6 +524,10 @@ export async function listCmd(opts: ListOptions): Promise<string> {
     const groups = buildMilestoneCardGroups(out, milestones);
     if (opts.jsonArray) return JSON.stringify({ groups, partial }, null, 2);
     return JSON.stringify({ groups, total, truncated: out.length < total || partial, partial }, null, 2);
+  }
+  // The bare array has no partial field. The grouped object above already does.
+  if (opts.jsonArray && partial) {
+    (opts.warn ?? console.error)(partialHeadNotice("list"));
   }
   return renderJsonPage("cards", out, total, { jsonArray: opts.jsonArray, partial });
 }

@@ -54,6 +54,17 @@ export function warnIfTruncated(
   if (message !== undefined) warn(message);
 }
 
+// `--json-array` stays a bare array so `jq length` still counts cards.
+// A partial column head has no envelope field on that path, so the signal
+// goes to stderr, the same channel the implicit cap already uses.
+export function partialHeadNotice(command: string): string {
+  return (
+    `kanban: ${command} --json-array kept at most 20 cards in a column. ` +
+    `The column is longer. This bare array has no partial field. ` +
+    `Use --json for the partial flag.`
+  );
+}
+
 /**
  * Build the completeness envelope shared by list/search/board list/milestone
  * groom `--json` (and already used by milestone list/portfolio).

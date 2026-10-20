@@ -37,11 +37,15 @@ export type HeadAtom = { cards: HeadCard[]; partial: boolean };
 
 export type HeadKey = { board: string; column: string };
 
+// `complete` is false when the column read does not match the column spine.
+// A short page must not become a finished head.
+export type HeadRefillResult = { cards: HeadCard[]; complete: boolean };
+
 export type HeadRefill = (
   board: string,
   column: string,
   exclude: readonly string[],
-) => Promise<HeadCard[]>;
+) => Promise<HeadRefillResult>;
 
 export type HeadHooks = { refill?: HeadRefill };
 
@@ -164,9 +168,14 @@ export function encodeHead(cards: readonly HeadCard[], column: string): HeadAtom
 }
 
 export function upsertHeadCard(current: HeadAtom | null, card: HeadCard): HeadAtom {
-  const next = [...(current?.cards ?? []).filter((item) => item.slug !== card.slug), card].sort(compareHead);
+  const prior = current?.cards ?? [];
+  const wasPresent = prior.some((item) => item.slug === card.slug);
+  const next = [...prior.filter((item) => item.slug !== card.slug), card].sort(compareHead);
   if (next.length > LIST_HEAD_CAP) {
-    return { cards: takeCapped(next, card.column, card.slug), partial: true };
+    // A new slug is the card this command added or moved, so the window keeps it.
+    // A slug that was already stored is a position rewrite. Recompute the window.
+    const keep = wasPresent ? undefined : card.slug;
+    return { cards: takeCapped(next, card.column, keep), partial: true };
   }
   // Under the cap, a previous partial atom is still short. The caller refills.
   return { cards: next, partial: current?.partial === true };
@@ -341,8 +350,22 @@ async function refillShort(
   keep?: HeadCard,
 ): Promise<HeadAtom> {
   if (!atom.partial || atom.cards.length >= LIST_HEAD_CAP || !refill) return atom;
-  const live = (await refill(board, column, exclude)).filter((card) => !exclude.includes(card.slug));
+  const result = await refill(board, column, exclude);
+  const live = result.cards.filter((card) => !exclude.includes(card.slug));
   const withKeep = keep ? [...live.filter((card) => card.slug !== keep.slug), keep] : live;
+  // A short or empty read must not replace the stored titles or clear partial.
+  if (!result.complete) return atom;
+  const seen = new Set(withKeep.map((card) => card.slug));
+  for (const card of atom.cards) {
+    if (exclude.includes(card.slug) || card.slug === keep?.slug) continue;
+    if (!seen.has(card.slug)) return atom;
+  }
+  if (
+    live.length === 0 &&
+    atom.cards.some((card) => !exclude.includes(card.slug) && card.slug !== keep?.slug)
+  ) {
+    return atom;
+  }
   return capComplete(withKeep, column, keep?.slug);
 }
 

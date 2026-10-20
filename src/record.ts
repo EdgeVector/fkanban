@@ -7,9 +7,12 @@ import {
   LIST_HEAD_CAP,
   LIST_HEAD_SCHEMA_KEY,
   headCardFrom,
+  headKeyId,
+  readColumnHeads,
   removeCardsFromHeads,
   syncCardHead,
-  type HeadCard,
+  writeColumnHead,
+  type HeadRefillResult,
 } from "./list-head.ts";
 import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import {
@@ -2609,9 +2612,10 @@ export async function writeCardPatch(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   patch: Partial<Card>,
+  flags?: { skipListHead?: boolean },
 ): Promise<void> {
   const updated: Card = { ...card, ...patch, updated_at: nowIso() };
-  await updateCardRecord(opts, updated, undefined, card);
+  await updateCardRecord(opts, updated, undefined, card, flags);
 }
 
 // Would adding the edge `fromSlug → toSlug` (fromSlug depends on toSlug) close a
@@ -5408,23 +5412,98 @@ export function requireListHeadHash(cfg: Config): string {
   return listHeadHash(cfg);
 }
 
+// findCardsWithFields drops a tombstone before the caller can see the tag.
+// A spine slug then looks missing, and one hidden card blocks every later
+// head write. This read keeps the row. A key-only delete stays a miss.
+async function findCardsKeepingHidden(
+  node: NodeClient,
+  cfg: Config,
+  slugs: readonly string[],
+  fields: string[],
+): Promise<Array<Card | null>> {
+  if (slugs.length === 0) return [];
+  const res = await node.queryAll({
+    schemaHash: schemaHashFor("card", cfg),
+    fields,
+    filter: {
+      HashRangeKeys: slugs.map((slug) => [slug, ""]),
+    } as unknown as QueryFilter,
+  });
+  const cards = res.results
+    .filter((row) => !isKeyOnlyRow(row, fields))
+    .map(rowToCard);
+  const bySlug = new Map(cards.map((card) => [card.slug, card]));
+  return slugs.map((slug) => bySlug.get(slug) ?? null);
+}
+
+// The column prefix and the column spine are different reads. A short page
+// can agree with itself. This returns false unless every spine slug is either
+// in `liveSlugs` or proven hidden / in another column. A null Card is unproven.
+async function columnReadIsComplete(
+  node: NodeClient,
+  cfg: Config,
+  board: string,
+  column: string,
+  liveSlugs: ReadonlySet<string>,
+  exclude: readonly string[],
+): Promise<boolean> {
+  const spine = await listBoardCardsPartitionSpine(node, cfg, board, { column });
+  if (!spine) return false;
+  const excluded = new Set(exclude);
+  const spineSlugs = new Set<string>();
+  for (const row of spine) {
+    if (row.column && row.column !== column) continue;
+    if (excluded.has(row.slug)) continue;
+    if (!row.slug) return false;
+    spineSlugs.add(row.slug);
+  }
+  for (const slug of liveSlugs) {
+    if (!slug || excluded.has(slug)) continue;
+    if (!spineSlugs.has(slug)) return false;
+  }
+  const missing: string[] = [];
+  for (const slug of spineSlugs) {
+    if (!liveSlugs.has(slug)) missing.push(slug);
+  }
+  for (let i = 0; i < missing.length; i += HASH_RANGE_KEYS_PER_READ) {
+    const chunk = missing.slice(i, i + HASH_RANGE_KEYS_PER_READ);
+    const truths = await findCardsKeepingHidden(node, cfg, chunk, ["slug", "column", "tags"]);
+    for (let j = 0; j < chunk.length; j += 1) {
+      const truth = truths[j];
+      if (!truth || truth.slug !== chunk[j]) return false;
+      if (isHiddenCard(truth)) continue;
+      if (!truth.column || truth.column === column) return false;
+    }
+  }
+  return true;
+}
+
 // Column prefix reads must not project milestone. That field drops a row that
 // has no milestone atom. A complete column (at most the head cap) then fills
 // milestone from the Card key. A longer column stays partial and keeps the
-// milestone on the card this command wrote.
+// milestone on the card this command wrote. `complete` is false when the
+// prefix and the spine disagree, so the caller keeps the previous head.
 async function columnCardsForHead(
   node: NodeClient,
   cfg: Config,
   board: string,
   column: string,
   exclude: readonly string[],
-): Promise<HeadCard[]> {
+): Promise<HeadRefillResult> {
   const projection = [...BOARD_CARDS_COLUMN_FIELDS];
   const cards = await listCardsByColumn(node, cfg, column, projection, board, { projection });
   const live = cards
     .filter((card) => !exclude.includes(card.slug))
     .map((card) => headCardFrom(card));
-  if (live.length > LIST_HEAD_CAP || live.length === 0) return live;
+  const complete = await columnReadIsComplete(
+    node,
+    cfg,
+    board,
+    column,
+    new Set(live.map((card) => card.slug)),
+    exclude,
+  );
+  if (!complete || live.length > LIST_HEAD_CAP || live.length === 0) return { cards: live, complete };
   const truths = await findCardsWithFields(
     node,
     cfg,
@@ -5435,7 +5514,10 @@ async function columnCardsForHead(
   for (const truth of truths) {
     if (truth) milestone.set(truth.slug, truth.milestone ?? "");
   }
-  return live.map((card) => ({ ...card, milestone: milestone.get(card.slug) ?? card.milestone }));
+  return {
+    cards: live.map((card) => ({ ...card, milestone: milestone.get(card.slug) ?? card.milestone })),
+    complete,
+  };
 }
 
 function headRefill(opts: { node: NodeClient; cfg: Config }) {
@@ -5451,11 +5533,53 @@ export async function maintainCardHead(
   await syncCardHead(opts.node, listHeadHash(opts.cfg), card, previous, { refill: headRefill(opts) });
 }
 
+// One head atom after rank's position writes. Membership comes from the column
+// prefix, which does not project milestone, so a card with no milestone stays
+// in the window. `cards` only overlays the positions rank just chose. A short
+// read leaves the previous atom. An empty read does too: the prefix and the
+// spine can both be empty while the stored head still has titles.
+export async function syncRankedColumnHead(
+  opts: { node: NodeClient; cfg: Config },
+  board: string,
+  column: string,
+  cards: readonly Card[],
+): Promise<void> {
+  const result = await columnCardsForHead(opts.node, opts.cfg, board, column, []);
+  if (!result.complete) {
+    console.error(
+      `kanban: rank left the column head for "${board}/${column}" unchanged because the column read was short`,
+    );
+    return;
+  }
+  if (result.cards.length === 0) {
+    let keepStored = cards.some((card) => card.slug);
+    if (!keepStored) {
+      const found = await readColumnHeads(opts.node, listHeadHash(opts.cfg), [{ board, column }]);
+      keepStored = (found.get(headKeyId(board, column))?.cards.length ?? 0) > 0;
+    }
+    if (keepStored) {
+      console.error(
+        `kanban: rank left the column head for "${board}/${column}" unchanged because the column read was empty`,
+      );
+    }
+    return;
+  }
+  const bySlug = new Map(cards.filter((card) => card.slug).map((card) => [card.slug, card]));
+  const overlaid = result.cards.map((head) => {
+    const src = bySlug.get(head.slug);
+    if (!src) return head;
+    const next = headCardFrom({ ...src, column, position: src.position });
+    return { ...next, milestone: next.milestone || head.milestone };
+  });
+  await writeColumnHead(opts.node, listHeadHash(opts.cfg), board, column, overlaid);
+}
+
 async function writeCardMembership(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   previous: Card | null,
   writeOpts: BoardCardWriteOptions = {},
+  flags?: { skipListHead?: boolean },
 ): Promise<void> {
   // Every caller has ALREADY written the Card record, so a failure from here
   // on leaves the card's column (Card, read by `show` and the claim) and its
@@ -5474,7 +5598,7 @@ async function writeCardMembership(
     try {
       await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
       await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
-      await maintainCardHead(opts, card, previous);
+      if (!flags?.skipListHead) await maintainCardHead(opts, card, previous);
       // Janitor is process-local. Sweep in this same request so the previous SK
       // delete is not lost when the CLI exits.
       await sweepBoardCardJanitor(opts.node);
@@ -5516,13 +5640,14 @@ export async function updateCardRecord(
    * writes, with the older whole-record semantics.
    */
   previous?: Card,
+  flags?: { skipListHead?: boolean },
 ): Promise<void> {
   if (expected?.type === "value" && expected.field === "assignee") {
     assertBodyLoaded(card, `guarded update of card "${card.slug}"`);
     requireListHeadHash(opts.cfg);
     await guardedCardUpdate(opts, card, expected);
     // The proved batch must not gain a head write. The head update follows it.
-    await maintainCardHead(opts, card, previous ?? null);
+    if (!flags?.skipListHead) await maintainCardHead(opts, card, previous ?? null);
     return;
   }
   const written = await writeCardRecordWithOptionalFieldFallback(
@@ -5550,7 +5675,7 @@ export async function updateCardRecord(
   // returns null — it just stored `card` whole, so `card` IS current.
   const effective = written ? rowToCard({ fields: written, key: { hash: card.slug, range: null } }) : card;
   await patchCardListIndex(opts.node, opts.cfg, effective, "upsert");
-  await writeCardMembership(opts, effective, previous ?? null);
+  await writeCardMembership(opts, effective, previous ?? null, {}, flags);
   // Search visibility is a contract for a NEW or MOVED BoardCards address —
   // `createCardRecord` always waits, and an update waits only when the spine
   // (board/column/position) changed so search must discover a new sk.
