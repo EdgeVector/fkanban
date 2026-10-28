@@ -394,7 +394,7 @@ export function createFkanbanMcpServer(
         hint: "Run `kanban init` first.",
       });
     }
-    const node = explicitNode ?? newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
+    const node = explicitNode ?? newNodeClient({ baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
     return { cfg, node };
   };
   const server = new McpServer(
@@ -1746,7 +1746,7 @@ export async function startMcpServer(opts: { verbose?: Verbose } = {}): Promise<
   let server: McpServer;
   try {
     const cfg = readConfig();
-    const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
+    const node = newNodeClient({ baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases, userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg) });
     server = createFkanbanMcpServer({ cfg, node });
   } catch (err) {
     if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {

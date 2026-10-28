@@ -30,7 +30,7 @@ export function namespacedSchemaName(shortName: string): string {
   return `${OWNER_APP_ID}/${shortName}`;
 }
 
-export type FieldType = "String" | { Array: "String" };
+export type FieldType = "String" | "DateTime" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;

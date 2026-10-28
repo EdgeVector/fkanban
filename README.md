@@ -715,3 +715,19 @@ A caller must check both SHA links and the finite Card changes before it starts 
 An accepted-held retry returns one clear receipt against the supplied held snapshot.
 It does not create fresh claim history. `guarded-contract --json` advertises this
 capability in `exact_claim_success_chain`.
+
+## Standard canonical vocabulary
+
+`src/canonical-fields.json` defines 64 standard concepts for the active work schemas and the optional knowledge link.
+Schema publication uses these exact names, descriptions, types, and versions.
+The command interface keeps its local field names.
+An exact-schema field map translates queries, mutations, batches, and schema metadata.
+The map leaves record values, keys, cursors, and JSON payloads intact.
+
+A fresh home submits the standard vocabulary through normal schema declarations.
+The schema service checks names, definitions, types, and concept reuse for every caller.
+No special vocabulary key or operator approval path exists.
+A config without a field map retains its legacy definitions and data identities.
+Init does not move data to new identities.
+The existing identity and key-layout checks remain in force.
+Date values use `DateTime`; decimal positions and optional completion dates keep explicit text definitions.

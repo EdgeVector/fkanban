@@ -1585,7 +1585,7 @@ export function searchVisibilityProbeClient(cfg: Config): NodeClient {
   const cached = searchVisibilityProbeClients.get(cfg);
   if (cached) return cached;
   const client = newNodeClient({
-    baseUrl: cfg.nodeUrl,
+    baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
     userHash: cfg.userHash,
     socketPath: resolveSocketPath(cfg),
     timeoutMs: SEARCH_INDEX_PROBE_TIMEOUT_MS,

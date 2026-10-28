@@ -17,7 +17,7 @@ export function loadCtx(
 ): Ctx {
   const cfg = readConfig(opts.configPath);
   const node = newNodeClient({
-    baseUrl: cfg.nodeUrl,
+    baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
     userHash: cfg.userHash,
     verbose: opts.verbose,
     socketPath: resolveSocketPath(cfg),
@@ -31,7 +31,7 @@ export function loadCtx(
 export function loadAppCtx(opts: { appId: string; configPath?: string; verbose?: Verbose }): Ctx {
   const cfg = readConfig(opts.configPath);
   const node = newNodeClient({
-    baseUrl: cfg.nodeUrl,
+    baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
     userHash: cfg.userHash,
     verbose: opts.verbose,
     socketPath: resolveSocketPath(cfg),

@@ -1,3 +1,4 @@
+import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Persistent CLI config — `~/.kanban/config.json` by default, with
 // `~/.fkanban/config.json` as the compatibility fallback. Holds the canonical
 // schema hashes (NOT the descriptive names) plus the node + schema-service URLs
@@ -14,6 +15,7 @@ const PRIMARY_CONFIG_ENV = "KANBAN_CONFIG";
 const LEGACY_CONFIG_ENV = "FKANBAN_CONFIG";
 
 export type Config = {
+  schemaFieldAliases?: FieldAliasProfiles;
   configVersion: number;
   nodeUrl: string;
   schemaServiceUrl: string;
@@ -285,6 +287,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
   }
 
   return {
+    schemaFieldAliases:parseFieldAliases(r.schemaFieldAliases),
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
     schemaServiceUrl,

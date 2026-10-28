@@ -1,0 +1,763 @@
+{
+  "policy_version": 1,
+  "fields": {
+    "work_board_slug": {
+      "description": "the stable slug of a work board",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_membership_order_key": {
+      "description": "the column, zero-padded position, and card slug joined by # under one board or milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_slug": {
+      "description": "the stable slug of a work milestone; empty on a card with no assigned milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_summary_json": {
+      "description": "one JSON-encoded work card summary without its Markdown description",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_slug": {
+      "description": "the stable slug of a work card",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_title": {
+      "description": "the one-line title of a work card",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_board_column_name": {
+      "description": "the named board column that holds a work card",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_position_decimal_text": {
+      "description": "the base-10 text of the integer position of a work card within its column",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_assignee_identifier": {
+      "description": "the person or agent identifier assigned to a work card; empty when unassigned",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_tag_labels": {
+      "description": "the tag labels attached to a work card",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_dependency_slugs": {
+      "description": "the slugs of work cards that must complete before this card",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_surface_names": {
+      "description": "the product surface names affected by a work card",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_created_at": {
+      "description": "the RFC 3339 instant when a work card was created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_creator_identifier": {
+      "description": "the person or agent identifier that created a work card",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_updated_at": {
+      "description": "the RFC 3339 instant when a work card was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_database_locator": {
+      "description": "the database locator associated with a work card; empty when unspecified",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "repository_full_name": {
+      "description": "the owner/name identifier of a source repository; empty when unspecified",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "pull_request_base_branch_name": {
+      "description": "the source repository branch name against which a pull request compares its changes",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_kind": {
+      "description": "the kind of a work card, such as pr, registry, or tracker",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_block_status": {
+      "description": "the current block status of a work card",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_block_reason": {
+      "description": "the reason a work card cannot proceed; empty when no block is recorded",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "north_star_slug": {
+      "description": "the slug of the North Star that owns the outcome; empty when no North Star is assigned",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "pull_request_url": {
+      "description": "the complete URL of a pull request; empty when no pull request is assigned",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "development_branch_name": {
+      "description": "the source repository branch name for the proposed work; empty when unspecified",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_membership_layout_version": {
+      "description": "the version marker of the work membership record layout",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_membership_order_key": {
+      "description": "the state, zero-padded position, and milestone slug joined by # under one board",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_title": {
+      "description": "the one-line title of a work milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_markdown": {
+      "description": "the Markdown description of a work milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_state": {
+      "description": "the lifecycle state of a work milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_position_decimal_text": {
+      "description": "the base-10 text of the integer position of a work milestone within its state",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_driver_name": {
+      "description": "the routine or agent name responsible for the next milestone action",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_dependency_slugs": {
+      "description": "the slugs of milestones that must complete before this milestone",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_proof_card_slug": {
+      "description": "the slug of the terminal product verification card for a work milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_proof_status": {
+      "description": "the status of the terminal product verification for a work milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_block_reason": {
+      "description": "the reason a work milestone cannot proceed; empty when no block is recorded",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_created_at": {
+      "description": "the RFC 3339 instant when a work milestone was created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_updated_at": {
+      "description": "the RFC 3339 instant when a work milestone was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_completed_at_text": {
+      "description": "the RFC 3339 completion instant as text, or an empty value for an incomplete work milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_board_title": {
+      "description": "the one-line title of a work board",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_board_markdown": {
+      "description": "the Markdown description of a work board",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_board_column_names": {
+      "description": "the ordered names of the columns of a work board",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_board_created_at": {
+      "description": "the RFC 3339 instant when a work board was created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_board_updated_at": {
+      "description": "the RFC 3339 instant when a work board was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_summary_bucket_key": {
+      "description": "the all_cards key of the work card summary collection",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_summary_list_json": {
+      "description": "a JSON-encoded list of work card summaries without their Markdown descriptions",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_summary_list_updated_at": {
+      "description": "the RFC 3339 instant when the work card summary list was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_markdown": {
+      "description": "the Markdown description of a work card",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_flow_event_key": {
+      "description": "the card slug, zero-padded generation, and event kind joined by #, or the card current marker",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_flow_generation_decimal_text": {
+      "description": "the base-10 text of the work flow generation number for one card",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_flow_event_kind": {
+      "description": "the create, claim, review, done, reopen, or current event kind of a work flow",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_flow_stage": {
+      "description": "the feature stage associated with a work flow event",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_flow_event_occurred_at": {
+      "description": "the RFC 3339 instant when a work flow event occurred",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_flow_ledger_record_created_at": {
+      "description": "the RFC 3339 instant when a work flow ledger record was first created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_flow_ledger_record_updated_at": {
+      "description": "the RFC 3339 instant when a work flow ledger record was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_column_head_scope_key": {
+      "description": "the work board and column selector for one column head",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_column_head_marker": {
+      "description": "the fixed range marker of a work column head",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_column_head_summary_json": {
+      "description": "a JSON-encoded head page of at most twenty short card titles in one work board column",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_slug": {
+      "description": "the stable slug that identifies a knowledge record within its record type",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_title": {
+      "description": "the one-line title of a knowledge record",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_markdown": {
+      "description": "the Markdown text of a knowledge record",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_status": {
+      "description": "the lifecycle status of a knowledge record, interpreted by its record type",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_tag_labels": {
+      "description": "the freeform tag labels attached to a knowledge record",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_created_at": {
+      "description": "the RFC 3339 instant when a knowledge record was created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_updated_at": {
+      "description": "the RFC 3339 instant when a knowledge record was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    }
+  },
+  "schemas": {
+    "FkanbanPackedListSummaryByBoardV1": {
+      "board": "work_board_slug",
+      "sk": "work_card_membership_order_key",
+      "milestone": "work_milestone_slug",
+      "s": "work_card_summary_json"
+    },
+    "BoardCards_hashrange_v1": {
+      "board": "work_board_slug",
+      "sk": "work_card_membership_order_key",
+      "slug": "work_card_slug",
+      "title": "work_card_title",
+      "column": "work_board_column_name",
+      "position": "work_card_position_decimal_text",
+      "assignee": "work_card_assignee_identifier",
+      "tags": "work_card_tag_labels",
+      "deps": "work_card_dependency_slugs",
+      "surfaces": "work_card_surface_names",
+      "created_at": "work_card_created_at",
+      "created_by": "work_card_creator_identifier",
+      "updated_at": "work_card_updated_at",
+      "db": "work_card_database_locator",
+      "repo": "repository_full_name",
+      "base": "pull_request_base_branch_name",
+      "kind": "work_card_kind",
+      "block_status": "work_card_block_status",
+      "block_reason": "work_card_block_reason",
+      "north_star": "north_star_slug",
+      "milestone": "work_milestone_slug",
+      "pr_url": "pull_request_url",
+      "branch": "development_branch_name",
+      "layout": "work_membership_layout_version"
+    },
+    "FkanbanMilestonePortfolioByBoardIndex": {
+      "board": "work_board_slug",
+      "sk": "work_milestone_membership_order_key",
+      "slug": "work_milestone_slug",
+      "title": "work_milestone_title",
+      "body": "work_milestone_markdown",
+      "state": "work_milestone_state",
+      "position": "work_milestone_position_decimal_text",
+      "north_star": "north_star_slug",
+      "driver": "work_milestone_driver_name",
+      "deps": "work_milestone_dependency_slugs",
+      "proof_card": "work_milestone_proof_card_slug",
+      "proof_status": "work_milestone_proof_status",
+      "block_reason": "work_milestone_block_reason",
+      "created_at": "work_milestone_created_at",
+      "updated_at": "work_milestone_updated_at",
+      "completed_at": "work_milestone_completed_at_text",
+      "layout": "work_membership_layout_version"
+    },
+    "Board": {
+      "slug": "work_board_slug",
+      "title": "work_board_title",
+      "body": "work_board_markdown",
+      "columns": "work_board_column_names",
+      "created_at": "work_board_created_at",
+      "updated_at": "work_board_updated_at"
+    },
+    "CardListIndex": {
+      "key": "work_card_summary_bucket_key",
+      "payload_json": "work_card_summary_list_json",
+      "updated_at": "work_card_summary_list_updated_at"
+    },
+    "Card": {
+      "slug": "work_card_slug",
+      "title": "work_card_title",
+      "body": "work_card_markdown",
+      "board": "work_board_slug",
+      "column": "work_board_column_name",
+      "position": "work_card_position_decimal_text",
+      "assignee": "work_card_assignee_identifier",
+      "tags": "work_card_tag_labels",
+      "deps": "work_card_dependency_slugs",
+      "surfaces": "work_card_surface_names",
+      "created_at": "work_card_created_at",
+      "created_by": "work_card_creator_identifier",
+      "updated_at": "work_card_updated_at",
+      "db": "work_card_database_locator",
+      "repo": "repository_full_name",
+      "base": "pull_request_base_branch_name",
+      "kind": "work_card_kind",
+      "block_status": "work_card_block_status",
+      "block_reason": "work_card_block_reason",
+      "north_star": "north_star_slug",
+      "milestone": "work_milestone_slug",
+      "pr_url": "pull_request_url",
+      "branch": "development_branch_name"
+    },
+    "FkanbanPackedListSummaryBySlugV1": {
+      "slug": "work_card_slug",
+      "s": "work_card_summary_json"
+    },
+    "FkanbanFeatureFlowEventsByMilestone": {
+      "milestone": "work_milestone_slug",
+      "event_key": "work_flow_event_key",
+      "card_slug": "work_card_slug",
+      "north_star": "north_star_slug",
+      "generation": "work_flow_generation_decimal_text",
+      "event": "work_flow_event_kind",
+      "stage": "work_flow_stage",
+      "event_at": "work_flow_event_occurred_at",
+      "created_at": "work_flow_ledger_record_created_at",
+      "updated_at": "work_flow_ledger_record_updated_at"
+    },
+    "ColumnHeadAtom_exact_key_v1": {
+      "klh_h": "work_column_head_scope_key",
+      "klh_r": "work_column_head_marker",
+      "klh_page": "work_column_head_summary_json"
+    },
+    "FkanbanPackedListSummaryByMilestoneV1": {
+      "milestone": "work_milestone_slug",
+      "sk": "work_card_membership_order_key",
+      "board": "work_board_slug",
+      "s": "work_card_summary_json"
+    },
+    "MilestoneCards_hashrange_v1_children_20260723": {
+      "milestone": "work_milestone_slug",
+      "sk": "work_card_membership_order_key",
+      "slug": "work_card_slug",
+      "title": "work_card_title",
+      "board": "work_board_slug",
+      "column": "work_board_column_name",
+      "position": "work_card_position_decimal_text",
+      "assignee": "work_card_assignee_identifier",
+      "tags": "work_card_tag_labels",
+      "deps": "work_card_dependency_slugs",
+      "surfaces": "work_card_surface_names",
+      "created_at": "work_card_created_at",
+      "created_by": "work_card_creator_identifier",
+      "updated_at": "work_card_updated_at",
+      "db": "work_card_database_locator",
+      "repo": "repository_full_name",
+      "base": "pull_request_base_branch_name",
+      "kind": "work_card_kind",
+      "block_status": "work_card_block_status",
+      "block_reason": "work_card_block_reason",
+      "north_star": "north_star_slug",
+      "pr_url": "pull_request_url",
+      "branch": "development_branch_name",
+      "layout": "work_membership_layout_version"
+    },
+    "Milestone": {
+      "slug": "work_milestone_slug",
+      "title": "work_milestone_title",
+      "body": "work_milestone_markdown",
+      "board": "work_board_slug",
+      "state": "work_milestone_state",
+      "position": "work_milestone_position_decimal_text",
+      "north_star": "north_star_slug",
+      "driver": "work_milestone_driver_name",
+      "deps": "work_milestone_dependency_slugs",
+      "proof_card": "work_milestone_proof_card_slug",
+      "proof_status": "work_milestone_proof_status",
+      "block_reason": "work_milestone_block_reason",
+      "created_at": "work_milestone_created_at",
+      "updated_at": "work_milestone_updated_at",
+      "completed_at": "work_milestone_completed_at_text"
+    },
+    "Reference": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    }
+  }
+}
