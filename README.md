@@ -724,7 +724,9 @@ The command interface keeps its local field names.
 An exact-schema field map translates queries, mutations, batches, and schema metadata.
 The map leaves record values, keys, cursors, and JSON payloads intact.
 
-A fresh home uses the standard vocabulary after operator approval in the schema service.
+A fresh home submits the standard vocabulary through normal schema declarations.
+The schema service checks names, definitions, types, and concept reuse for every caller.
+No special vocabulary key or operator approval path exists.
 A config without a field map retains its legacy definitions and data identities.
 Init does not move data to new identities.
 The existing identity and key-layout checks remain in force.
