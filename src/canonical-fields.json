@@ -479,8 +479,8 @@
         "data_domain": "general"
       }
     },
-    "work_flow_event_created_at": {
-      "description": "the RFC 3339 instant when a work flow event was created",
+    "work_flow_ledger_record_created_at": {
+      "description": "the RFC 3339 instant when a work flow ledger record was first created",
       "field_type": "DateTime",
       "version": 1,
       "classification": {
@@ -488,8 +488,8 @@
         "data_domain": "general"
       }
     },
-    "work_flow_event_updated_at": {
-      "description": "the RFC 3339 instant when a work flow event was last updated",
+    "work_flow_ledger_record_updated_at": {
+      "description": "the RFC 3339 instant when a work flow ledger record was last updated",
       "field_type": "DateTime",
       "version": 1,
       "classification": {
@@ -693,8 +693,8 @@
       "event": "work_flow_event_kind",
       "stage": "work_flow_stage",
       "event_at": "work_flow_event_occurred_at",
-      "created_at": "work_flow_event_created_at",
-      "updated_at": "work_flow_event_updated_at"
+      "created_at": "work_flow_ledger_record_created_at",
+      "updated_at": "work_flow_ledger_record_updated_at"
     },
     "ColumnHeadAtom_exact_key_v1": {
       "klh_h": "work_column_head_scope_key",
