@@ -165,7 +165,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   // `lastdb ops` has already produced two wrong verdicts about the board's
   // write path. See nodeHeaders() in client.ts.
   const node = newNodeClient({
-    baseUrl: cfg.nodeUrl,
+    baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
     userHash: cfg.userHash,
     verbose: opts.verbose,
     socketPath,

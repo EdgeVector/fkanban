@@ -1,3 +1,4 @@
+import { profilesFor, applicationAliasProfiles } from "../canonical-vocabulary.ts";
 // `kanban init` — bring a node to the point where the CLI/MCP can read +
 // write the board:
 //
@@ -205,7 +206,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // warning if the socket is missing, so the declaration client stays quiet on
   // that front — it still raises the actionable `node_attestation_unavailable`
   // error if the owner verb 403s.
-  const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath });
+  const before = existing ? [] : await probe.listSchemas();
+  const canonicalVocabulary = existing ? Boolean(existing.schemaFieldAliases)
+    : !before.some((schema) => schema.owner_app_id === OWNER_APP_ID && schema.fields.some((field) => ["slug","board","klh_h"].includes(field)));
+  const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath,
+    schemaFieldAliases:existing?.schemaFieldAliases,canonicalVocabulary });
 
   // Step 2: ask Mini to resolve/register fkanban's schemas and return catalog
   // identities. The CLI does not bypass Mini to mint a local identity.
@@ -346,6 +351,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     schemaServiceUrl,
     userHash,
     schemaHashes,
+    schemaFieldAliases:canonicalVocabulary ? Object.assign(applicationAliasProfiles(),...allPinnedSchemas().map((entry) => profilesFor(entry.schema.schema,[schemaHashes[entry.key] ?? "",`${OWNER_APP_ID}/${entry.schema.schema.name}`]))) : undefined,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
   };
   writeConfig(config, configPath);
@@ -707,7 +713,7 @@ async function tryInitSocketOnly(args: {
   // Prove the socket data-plane is live: round-trip a board query over it. If
   // this also fails the node is genuinely down (or there's no socket) — bail so
   // the original TCP-unreachable error stands.
-  const node = newNodeClient({ baseUrl: nodeUrl, userHash: existing.userHash, verbose, socketPath });
+  const node = newNodeClient({ baseUrl: nodeUrl, userHash: existing.userHash, schemaFieldAliases:existing.schemaFieldAliases, verbose, socketPath });
   const transport = node.nodeTransport();
   if (transport.transport !== "socket") return null;
   try {

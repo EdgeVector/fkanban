@@ -5889,7 +5889,8 @@ export async function probeSchemaWritable(
     // A non-empty probe value per field exercises the write of EVERY field (an
     // all-empty write could be silently accepted by a node that drops unknown
     // empties), which is exactly the #94 failure we must catch.
-    fields[f] = typeof schema.field_types[f] === "object" ? ["probe"] : `probe`;
+    fields[f] = typeof schema.field_types[f] === "object" ? ["probe"]
+      : f.endsWith("_at") && f !== "completed_at" ? new Date().toISOString() : "probe";
   }
   // The key fields must equal the key so the record is addressable for the
   // cleanup delete — and, for a HashRange schema, so the probe row is confined

@@ -1,3 +1,6 @@
+import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { encodeFieldRequest, decodeFieldReply, localSchemaMetadata, type FieldAliasProfiles } from "./field-alias-transport.ts";
+import type { SchemaDefinition } from "./schemas.ts";
 // Typed HTTP wrappers for the LastDB node.
 //
 // Every node endpoint sends X-User-Hash (missing → 401 MISSING_USER_CONTEXT).
@@ -672,7 +675,8 @@ export async function attestOwnerSessionDetailed(
       return fail("the pairing-code exchange returned no session_token");
     }
     verbose("attest: owner session established");
-    return { ok: true, token };
+
+  return { ok: true, token };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     verbose(`attest: exchange failed (${detail}) — proceeding unattested`);
@@ -681,6 +685,8 @@ export async function attestOwnerSessionDetailed(
 }
 
 export function newNodeClient(opts: {
+  schemaFieldAliases?: FieldAliasProfiles;
+  canonicalVocabulary?: boolean;
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
@@ -709,6 +715,8 @@ export function newNodeClient(opts: {
   // it must be allowed to look at one. Every other command keeps the gate.
   skipApiVersionGate?: boolean;
 }): NodeClient {
+  const fieldProfiles: FieldAliasProfiles = {...opts.schemaFieldAliases};
+  const canonicalVocabulary = opts.canonicalVocabulary ?? Boolean(opts.schemaFieldAliases);
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
   const warn = opts.warn ?? noopWarn;
@@ -867,7 +875,7 @@ export function newNodeClient(opts: {
           baseUrl: url,
           path,
           method,
-          body: options.body,
+          body: encodeFieldRequest(path, options.body, fieldProfiles),
           verbose,
           service: "node",
           headers: { ...nodeHeaders(), ...(options.headers ?? {}) },
@@ -875,7 +883,7 @@ export function newNodeClient(opts: {
           socketPath,
         });
         const parsed = await readBody();
-        return { status: res.status, body: parsed };
+        return { status: res.status, body:decodeFieldReply(path, options.body, parsed, fieldProfiles) };
       };
       // A deadline expiry on a read is backpressure, not a verdict — re-send it
       // once. Writes are excluded: a timed-out mutation may still land.
@@ -1106,7 +1114,7 @@ export function newNodeClient(opts: {
         baseUrl: url,
         path,
         method,
-        body,
+        body:encodeFieldRequest(path,body,fieldProfiles),
         verbose,
         service: "node",
         headers: nodeHeaders(),
@@ -1114,7 +1122,7 @@ export function newNodeClient(opts: {
         socketPath,
       });
       const parsed = await readBody();
-      return { status: res.status, body: parsed };
+      return { status: res.status, body:decodeFieldReply(path,body,parsed,fieldProfiles) };
     };
     // Same policy as the SDK transport: re-send a timed-out READ once. The
     // control plane is mostly GETs (status, auto-identity, schema list), which
@@ -1178,7 +1186,7 @@ export function newNodeClient(opts: {
         baseUrl: url,
         path,
         method,
-        body,
+        body:encodeFieldRequest(path,body,fieldProfiles),
         verbose,
         service: "node",
         headers: nodeHeaders(),
@@ -1201,7 +1209,9 @@ export function newNodeClient(opts: {
     ) {
       throw attestationUnavailableError(path);
     }
-    return { status: res.status, headers: res.headers, body: text, json: parseJsonSafe(text) };
+    const original = parseJsonSafe(text);
+    const json = decodeFieldReply(path,body,original,fieldProfiles);
+    return { status: res.status, headers: res.headers, body:json === original ? text : JSON.stringify(json), json };
   };
 
   /**
@@ -1252,6 +1262,18 @@ export function newNodeClient(opts: {
       throw new FkanbanError({code:"durability_not_confirmed",message:"The batch response did not confirm durable acknowledgement. Do not retry unguarded."});
     }
   };
+
+  let canonicalReadiness: Promise<void> | undefined;
+  const requireCanonicalHome = (): Promise<void> => canonicalReadiness ??= (async () => {
+    const {status,body} = await callJson("/api/schemas","GET");
+    if (status !== 200) throw mapNodeError(status,body,"/api/schemas");
+    const catalog = body as Record<string,unknown>;
+    if (!Array.isArray(catalog.schemas)) throw new FkanbanError({code:"schema_catalog_invalid",message:"Cannot confirm the local schema format before declaration."});
+    if (catalog.schemas.some((item) => item && typeof item === "object" && item.owner_app_id === "fkanban" && Array.isArray(item.fields) && item.fields.some((field:unknown) => ["slug","board","klh_h"].includes(String(field))))) {
+      throw new FkanbanError({code:"canonical_migration_required",message:"This home uses legacy work fields. An explicit data migration is required before canonical schema publication."});
+    }
+  })();
+
 
   return {
     baseUrl: url,
@@ -1305,7 +1327,9 @@ export function newNodeClient(opts: {
       if (status !== 200) throw mapNodeError(status, body, "/api/schemas");
       const b = body as Record<string, unknown>;
       const raw = Array.isArray(b.schemas) ? (b.schemas as Record<string, unknown>[]) : [];
-      return raw.map((s) => ({
+      return raw.map((schema) => {
+        const s = localSchemaMetadata(schema,fieldProfiles);
+        return ({
         name: typeof s.name === "string" ? s.name : "",
         descriptive_name: typeof s.descriptive_name === "string" ? s.descriptive_name : "",
         owner_app_id: typeof s.owner_app_id === "string" ? s.owner_app_id : "",
@@ -1314,14 +1338,14 @@ export function newNodeClient(opts: {
           : [],
         key: readKeyLayout(s.key),
         state: typeof s.state === "string" && s.state.length > 0 ? s.state : null,
-      }));
+      }); });
     },
     async getSchema(schemaHash: string) {
       const path = `/api/schema/${encodeURIComponent(schemaHash)}`;
       const { status, body } = await callJson(path, "GET");
       if (status !== 200) throw mapNodeError(status, body, path);
       const b = body as Record<string, unknown>;
-      const s = (b.schema && typeof b.schema === "object" ? b.schema : b) as Record<string, unknown>;
+      const s = localSchemaMetadata((b.schema && typeof b.schema === "object" ? b.schema : b) as Record<string, unknown>,fieldProfiles,schemaHash);
       const keyRaw = s.key && typeof s.key === "object" ? (s.key as Record<string, unknown>) : {};
       return {
         name: typeof s.name === "string" ? s.name : schemaHash,
@@ -1338,6 +1362,11 @@ export function newNodeClient(opts: {
       };
     },
     async declareAppSchema(appId, schema) {
+      const local = schema as unknown as SchemaDefinition;
+      if (canonicalVocabulary) {
+        await requireCanonicalHome();
+        schema = canonicalSchema(local) as unknown as Record<string,unknown>;
+      }
       const { status, body } = await callJson("/api/apps/declare-schema", "POST", {
         app_id: appId,
         schema,
@@ -1356,6 +1385,7 @@ export function newNodeClient(opts: {
           hint: "Upgrade the node or inspect the app-schema declaration response. F-Kanban binds only schemas Mini accepts as app-declared catalog identities.",
         });
       }
+      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local,[canonical,schemaName]));
       return {
         app_id: typeof b.app_id === "string" ? b.app_id : appId,
         schema: schemaName,
