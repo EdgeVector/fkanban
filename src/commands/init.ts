@@ -351,7 +351,16 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     schemaServiceUrl,
     userHash,
     schemaHashes,
-    schemaFieldAliases:canonicalVocabulary ? Object.assign(applicationAliasProfiles(),...allPinnedSchemas().map((entry) => profilesFor(entry.schema.schema,[schemaHashes[entry.key] ?? "",`${OWNER_APP_ID}/${entry.schema.schema.name}`]))) : undefined,
+    schemaFieldAliases: canonicalVocabulary
+      ? Object.assign(
+          applicationAliasProfiles(),
+          ...allPinnedSchemas().map((entry) => profilesFor(entry.schema.schema, [
+            schemaHashes[entry.key] ?? "",
+            ...(entry.key === "board_cards" ? [schemaHashes[BOARD_CARDS_REKEY_TARGET] ?? ""] : []),
+            `${OWNER_APP_ID}/${entry.schema.schema.name}`,
+          ])),
+        )
+      : undefined,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
   };
   writeConfig(config, configPath);
