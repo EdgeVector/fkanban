@@ -26,6 +26,14 @@ Decision: `decision-2026-10-09-retire-all-tests-and-test-coverage`.
 - Keep product code and non-test build, format, lint, secret, and deployment checks.
 <!-- last-stack:no-tests:end -->
 
+## Protein deprecation (Tom, 2026-10-29)
+
+New designs use one schema with named alternate keys for the same records.
+Canonical field reuse supplies definitions, not shared record values.
+Preserve existing schemas until an explicit conversion. Keep record order, cursors, complete membership, and primary mutation keys.
+The first LastDB alternate layout does not cover every ordered compound key. Do not change an app's key order to fit it.
+Use CI for the app conversion and latency comparison. Source work does not authorize a primary data change.
+
 # AGENTS.md — developing kanban itself
 
 Canonical build/run/PR commands for this repo. `CLAUDE.md` is a symlink to

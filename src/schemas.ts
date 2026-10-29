@@ -1,4 +1,7 @@
 // Schema definitions for fkanban's record types.
+// Proteins are deprecated for new designs. The definitions below retain the
+// existing layout until an explicit conversion preserves its ordered keys.
+// Canonical field aliases describe fields; they do not authorize value aliases.
 //
 // Two schemas back the board:
 //
@@ -42,6 +45,13 @@ export type SchemaDefinition = {
   // (point read by a single key field).
   schema_type: "Hash" | "HashRange";
   key: { hash_field: string; range_field?: string };
+  /** Reuse canonical field definitions without sharing record values. */
+  independent_fields?: boolean;
+  alternate_keys?: Record<string, {
+    hash_field: string;
+    range_field?: string | null;
+    missing?: "reject" | "omit";
+  }>;
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
