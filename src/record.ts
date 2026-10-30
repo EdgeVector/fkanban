@@ -3084,18 +3084,23 @@ async function listAllRecordHashes(node: NodeClient, schemaHash: string): Promis
   return [...hashes];
 }
 
-/** Enumerate Card identities, then hydrate each live row by exact HashKey. */
+/** Collect Card identities, then read bounded batches of exact primary keys. */
 async function listCardsFromKeyList(
   node: NodeClient,
   cfg: Config,
   requestedFields: string[],
 ): Promise<Card[]> {
   const schemaHash = schemaHashFor("card", cfg);
-  const hashes = await listAllRecordHashes(node, schemaHash);
+  const hashes = multiKey(cfg)
+    ? (await keyRows(node, schemaHash, "all", { HashKey: "all" }, ["slug"])).map((row) => row.key.hash!)
+    : await listAllRecordHashes(node, schemaHash);
+  // Bound the number of full bodies per response.
+  const chunks = Array.from({ length: Math.ceil(hashes.length / 16) }, (_, i) => hashes.slice(i * 16, i * 16 + 16));
   const rows = await mapWithConcurrency(
-    hashes,
-    async (hash) => {
-      const res = await node.queryAll({ schemaHash, fields: requestedFields, filter: { HashKey: hash } });
+    chunks,
+    async (keys) => {
+      const res = await node.queryAll({ schemaHash, fields: requestedFields,
+        filter: { HashRangeKeys: keys.map((hash) => [hash, ""]) } as unknown as QueryFilter });
       return res.results;
     },
     POINT_READ_CONCURRENCY,
@@ -3882,7 +3887,7 @@ export async function listCardsByFilter(
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
   if (multiKey(cfg)) {
-    return (await keyRows(node, cfg, "board", "all", { HashKey: "all" }, fieldsFor("board")))
+    return (await keyRows(node, cfg.schemaHashes.board!, "all", { HashKey: "all" }, fieldsFor("board")))
       .map(rowToBoard).filter((board) => !isTombstoned(board.columns) && board.slug.length > 0);
   }
   const live = (boards: Board[]) =>

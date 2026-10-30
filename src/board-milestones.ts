@@ -294,7 +294,7 @@ export async function listBoardMilestonesPartition(
 ): Promise<Milestone[] | null> {
   if (multiKey(cfg)) {
     const fields = BOARD_MILESTONES_FIELDS.filter((field) => !["sk", "layout"].includes(field));
-    return (await keyRows(node, cfg, "milestone", "by_board", { HashKey: board }, fields)).map((row) => milestoneFromBoardMilestoneFields(row.fields));
+    return (await keyRows(node, cfg.schemaHashes.milestone!, "by_board", { HashKey: board }, fields)).map((row) => milestoneFromBoardMilestoneFields(row.fields));
   }
   const schemaHash = boardMilestonesHash(cfg);
   if (!schemaHash) return null;
@@ -362,7 +362,7 @@ export async function listBoardMilestonesPartitionSpine(
   board: string,
 ): Promise<BoardMilestoneRow[] | null> {
   if (multiKey(cfg)) {
-    return (await keyRows(node, cfg, "milestone", "by_board", { HashKey: board }, ["slug"])).map((row) => {
+    return (await keyRows(node, cfg.schemaHashes.milestone!, "by_board", { HashKey: board }, ["slug"])).map((row) => {
       const parsed = parseBoardMilestoneSk(row.matched_key.range);
       if (!parsed || parsed.slug !== row.key.hash) throw new Error("Milestone alternate key differs from its primary key");
       return { board, sk: row.matched_key.range, ...parsed };

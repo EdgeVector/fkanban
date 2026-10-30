@@ -8,7 +8,7 @@ import { capComplete, headCardFrom, headKeyId, type HeadAtom, type HeadKey } fro
 export async function namedColumnHeads(node: NodeClient, cfg: Config, keys: readonly HeadKey[]): Promise<Map<string, HeadAtom>> {
   const fields = ["slug", "title", "column", "position", "assignee", "tags", "deps", "kind", "milestone", "created_at"];
   const entries = await Promise.all(keys.map(async (key) => {
-    const rows = await keyRows(node, cfg, "card", "by_board", { HashRangePrefix: { hash: key.board, prefix: `${key.column}#` } }, fields);
+    const rows = await keyRows(node, cfg.schemaHashes.card!, "by_board", { HashRangePrefix: { hash: key.board, prefix: `${key.column}#` } }, fields);
     const cards = rows.filter((row)=>row.key.hash!==WRITE_PROBE_SLUG && !isTombstoned(Array.isArray(row.fields.tags)?row.fields.tags:[])).map((row) => headCardFrom({
       slug: String(row.key.hash), board: key.board, column: String(row.fields.column), position: String(row.fields.position),
       title: String(row.fields.title ?? ""), assignee: String(row.fields.assignee ?? ""),

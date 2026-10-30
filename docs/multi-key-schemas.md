@@ -3,7 +3,10 @@
 New installations declare independent record values. Canonical fields still reuse their definitions.
 Named keys belong to the source record schema. A mutation updates the record and its keys in one native request.
 
-Card uses board and milestone keys. Each range contains the column, the padded position, and the slug. Milestone uses a board key. Board uses an all-boards key. The normal path no longer writes membership records or cached list heads.
+Card uses board and milestone keys. Each range contains the column, the padded position, and the slug.
+An all-cards key supplies the slugs for complete body reads. The app reads those records in bounded batches.
+Milestone uses a board key. Board uses an all-boards key.
+The normal path no longer writes membership records or cached list heads.
 
 ## Existing installations
 

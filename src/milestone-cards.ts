@@ -413,7 +413,7 @@ export async function listMilestoneCardsPartition(
 ): Promise<Card[] | null> {
   if (multiKey(cfg)) {
     if (!milestone.trim()) return [];
-    const rows = await keyRows(node, cfg, "card", "by_milestone", { HashKey: milestone }, primaryProjection(MILESTONE_CARDS_PAYLOAD_FIELDS));
+    const rows = await keyRows(node, cfg.schemaHashes.card!, "by_milestone", { HashKey: milestone }, primaryProjection(MILESTONE_CARDS_PAYLOAD_FIELDS));
     return rows.map((row) => cardFromMilestoneCardFields({ ...row.fields, sk: row.matched_key.range }));
   }
   const schemaHash = milestoneCardsHash(cfg);
@@ -462,7 +462,7 @@ export async function findMilestoneCardBySk(
   sk: string,
 ): Promise<Card | null> {
   if (multiKey(cfg)) {
-    const rows = await keyRows(node, cfg, "card", "by_milestone", { HashRangeKey: { hash: milestone, range: sk } }, primaryProjection(MILESTONE_CARDS_PAYLOAD_FIELDS));
+    const rows = await keyRows(node, cfg.schemaHashes.card!, "by_milestone", { HashRangeKey: { hash: milestone, range: sk } }, primaryProjection(MILESTONE_CARDS_PAYLOAD_FIELDS));
     return rows[0] ? cardFromMilestoneCardFields({ ...rows[0].fields, milestone, sk }) : null;
   }
   const schemaHash = milestoneCardsHash(cfg);
@@ -525,7 +525,7 @@ export async function listMilestoneCardsPartitionSpine(
 ): Promise<MilestoneCardRow[] | null> {
   if (multiKey(cfg)) {
     if (!milestone.trim()) return [];
-    return (await keyRows(node, cfg, "card", "by_milestone", { HashKey: milestone }, ["slug"])).map((row) => {
+    return (await keyRows(node, cfg.schemaHashes.card!, "by_milestone", { HashKey: milestone }, ["slug"])).map((row) => {
       const parsed = parseBoardCardSk(row.matched_key.range);
       if (!parsed || parsed.slug !== row.key.hash) throw new Error("Card alternate key differs from its primary key");
       return { milestone, sk: row.matched_key.range, ...parsed };

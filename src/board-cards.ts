@@ -1911,7 +1911,7 @@ export async function listBoardCardsPartition(
   if (multiKey(cfg)) {
     const filters = opts?.column ? [{ HashRangePrefix: { hash: board, prefix: `${opts.column}#` } }]
       : opts?.excludeColumn ? excludeColumnRanges(board, opts.excludeColumn) : [{ HashKey: board }];
-    const pages = await Promise.all(filters.map((filter) => keyRows(node, cfg, "card", "by_board", filter, primaryProjection(opts?.fields ?? BOARD_CARDS_LIST_FIELDS))));
+    const pages = await Promise.all(filters.map((filter) => keyRows(node, cfg.schemaHashes.card!, "by_board", filter, primaryProjection(opts?.fields ?? BOARD_CARDS_LIST_FIELDS))));
     return pages.flat().map((row) => cardFromBoardCardFields(row.fields));
   }
   const schemaHash = boardCardsHash(cfg);
@@ -2005,7 +2005,7 @@ export async function listBoardCardsPartitionSpine(
 ): Promise<BoardCardSpineRow[] | null> {
   if (multiKey(cfg)) {
     const filter = opts?.column ? { HashRangePrefix: { hash: board, prefix: `${opts.column}#` } } : { HashKey: board };
-    return (await keyRows(node, cfg, "card", "by_board", filter, ["slug"])).map((row) => {
+    return (await keyRows(node, cfg.schemaHashes.card!, "by_board", filter, ["slug"])).map((row) => {
       const parsed = parseBoardCardSk(row.matched_key.range);
       if (!parsed || parsed.slug !== row.key.hash) throw new Error("Card alternate key differs from its primary key");
       return { board, sk: row.matched_key.range, ...parsed };
