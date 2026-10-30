@@ -3,14 +3,11 @@
 import { newNodeClient, type NodeClient, type Verbose } from "./client.ts";
 import { readConfig, resolveSocketPath, type Config } from "./config.ts";
 import { requireMultiKey } from "./multi-key.ts";
-import { searchVisibilityProbeClient } from "./board-cards.ts";
 
 export type Ctx = {
   cfg: Config;
   node: NodeClient;
-  // Short-timeout twin of `node`, for the post-write search-visibility wait's
-  // own probe reads (see `SEARCH_INDEX_PROBE_TIMEOUT_MS` in board-cards.ts).
-  probeNode: NodeClient;
+
 };
 
 export function loadCtx(
@@ -27,7 +24,7 @@ export function loadCtx(
     // Diagnostic entrypoints pass their own — see client.ts DEFAULT_OPS_LABEL.
     opsLabel: opts.opsLabel,
   });
-  return { cfg, node, probeNode: searchVisibilityProbeClient(cfg) };
+  return { cfg, node };
 }
 
 export function loadAppCtx(opts: { appId: string; configPath?: string; verbose?: Verbose }): Ctx {
@@ -41,5 +38,5 @@ export function loadAppCtx(opts: { appId: string; configPath?: string; verbose?:
     appId: opts.appId,
     appCapability: process.env.FKANBAN_APP_CAPABILITY,
   });
-  return { cfg, node, probeNode: searchVisibilityProbeClient(cfg) };
+  return { cfg, node };
 }

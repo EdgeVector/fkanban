@@ -15,8 +15,20 @@ Doctor checks the schema owner, primary key, fields, and complete named key layo
 Ordinary CLI and MCP requests require the converted config. The explicit converter can read the old config.
 Board create writes one Board record. Board removal reads the named board key and removes Card records in bounded batches.
 The default-board and external-dependency guards remain. A remaining Card record prevents removal of the Board record.
-Body reads collect primary keys first. Each batch contains at most 16 bodies.
+Card body reads collect primary keys first. Each batch contains at most 16 bodies.
 Already loaded bodies stay unchanged. Soft-deleted records do not enter the result.
+Milestone body pages contain at most 16 records. The page size does not reduce the overall record limit.
+The old membership schemas, payload copies, list rollups, packed-summary prototype, and repair queues are removed.
+The app declares Card, Board, Milestone, and flow-event records. Only the explicit converter names retired schemas.
+
+## Operational check
+
+The `groom parity-check` command reads named keys and primary values twice.
+It compares the Card all key, the board keys, and the milestone keys named by those records.
+It reports stable differences separately from concurrent changes.
+An incomplete request fails the command. An unknown board also fails.
+The report names its addressed scope. It does not claim a count of unaddressed database data.
+This check does not write data or request an old payload repair.
 
 ## Existing installations
 

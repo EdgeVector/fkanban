@@ -1,34 +1,34 @@
-// Archive cards that have sat in a board's TERMINAL column past a cutoff.
-//
-// Why this is a first-class command and not a maintenance script
-// --------------------------------------------------------------
-// The terminal column is an append-only archive that shares a partition with
-// the working set: BoardCards is HashRange(hash=board, range=column#pos#slug),
-// so `done` rows are fetched by every whole-partition read. Measured on the
-// live primary 2026-07-31, board `default`:
-//
-//   783 rows total — 581 `done` (74%), 202 active
-//   whole-partition read at the list projection   1578ms
-//   the `done` prefix alone                       1310ms  (83% of it)
-//   the three active columns together              780ms
-//
-// So bounding the terminal column is not tidiness — it is the only thing
-// keeping the cost of listing the WORKING set from scaling with everything the
-// board has ever finished. At the time this command was written, BoardCards
-// under client=kanban was the #1 consumer of node wall time system-wide
-// (`lastdb ops`: count=5293 sum=3053696ms avg=576ms).
-//
-// A daily sweep DID exist, as an unversioned script at ~/.fkanban/archive-done.ts
-// that shelled `bun run ~/code/edgevector/fkanban/src/cli.ts`. When fkanban
-// became a portal (no checkout by design) that path ceased to exist, so every
-// fire from 2026-07-23 onward logged one `SKIP: could not read board` line to a
-// log nobody reads and called `process.exit(0)` — launchd recorded success while
-// the archive grew for 8 days to a 502-card backlog, the oldest 24.4 days past
-// cutoff. Living outside the repo is exactly why it broke invisibly: no test
-// pinned the path, and no CI ran it.
-//
-// Hence: in-repo, tested, invoked through the installed CLI, dry-run by default,
-// and LOUD on failure — `read_failed` is a non-zero exit, never a quiet skip.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import type { Config } from "../config.ts";
 import type { NodeClient } from "../client.ts";
@@ -46,13 +46,7 @@ import { proofCardRefsFrom, proofHoldReason, readProofCardRefs } from "../proof_
 import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "../concurrency.ts";
 
 export const DEFAULT_ARCHIVE_CUTOFF_HOURS = 24;
-/**
- * Per-run delete ceiling. Each archive is a Card delete + a CardListIndex patch
- * + a BoardCards delete, and kanban mutations measured avg 2.4s on the live
- * primary — an uncapped first run against a months-long backlog would hold the
- * write path for the better part of an hour. The sweep is daily and idempotent,
- * so a cap costs nothing but the wait.
- */
+
 export const DEFAULT_ARCHIVE_MAX = 200;
 
 /**

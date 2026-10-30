@@ -56,23 +56,12 @@ import {
   groomStructuredRoutingCmd,
   isGroomSubcommand,
 } from "./commands/groom.ts";
-import { parityCheckCmd } from "./commands/parity_check.ts";
+import { parityCheckCmd } from "./commands/parity_named_keys.ts";
 import {
   archiveDoneResult,
   DEFAULT_ARCHIVE_CUTOFF_HOURS,
   DEFAULT_ARCHIVE_MAX,
 } from "./commands/archive_done.ts";
-import {
-  boardCardsHealCmd,
-  DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR,
-  DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO,
-} from "./commands/board_cards_heal.ts";
-import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "./commands/board_cards_heal_scheduled.ts";
-import { boardCardsReapColumnOnlyCmd } from "./commands/board_cards_reap_column_only.ts";
-import { boardCardsRekeyCmd } from "./commands/board_cards_rekey.ts";
-import { boardListHealCmd } from "./commands/board_list_heal.ts";
-
-import { cardListIndexRetireCmd } from "./commands/card_list_index_retire.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
@@ -135,14 +124,8 @@ Commands:
   groom structured-routing dry-run/apply backfill body Repo/Base into structured fields
   groom body-clobber-scan report bodies matching generated/script clobber signatures (--json)
   groom stale-blockers dry-run/apply cleanup for stale generated blocker metadata (--apply --json)
-  groom board-cards-heal dry-run/apply fix BoardCards list vs show column drift
-  groom board-cards-rekey backfill/cut over a staged board-keyed BoardCards identity
-  groom board-cards-heal-scheduled run the scheduled BoardCards repair wrapper
-  groom board-cards-reap-column-only dry-run/apply delete BoardCards residue (column-only or missing board atom)
   groom parity-check   READ-ONLY: is any row invisible to the reads the board serves? (--json)
-  groom board-list-heal dry-run/apply fix all_boards ghosts (deleted board still listed)
                        and missing boards (live board whose cards list can't see)
-  groom card-list-index-retire dry-run/apply clear the superseded all_cards rollup
   groom archive-done   dry-run/apply archive cards long finished in a terminal
                        column, so board reads stop scaling with board history
   hygiene orphan-bun   dry-run/apply PPID-1 Bun helper reaper for fkanban/gstack
@@ -212,7 +195,7 @@ Usage:
   fkanban create-only-contract --json
 
 Use add --create-only for an unowned, unheld backlog Card. The Board must already exist.
-The node checks all23 absent fields and publishes the Card and BoardCards in one durable batch.
+The node checks all 23 absent fields and publishes the Card and its named keys in one durable batch.
 An existing or partial Card refuses creation. No force, retry or fallback is allowed.`),
   "guarded-contract": withFooter(`fkanban guarded-contract — immutable factory contract
 
@@ -526,7 +509,7 @@ malformed-routing is a card nothing can route (no Repo:/Base:);
 unattached-outcome is a well-formed card one --milestone from ready.
 
 ready — The gate's cheap path: same classification as status, but reads only
-the BoardCards todo partition of one board (default: default) instead of
+the Card schema's todo key on one board (default: default) instead of
 every active card on every board. classifyPickupCard can never mark a card
 pickup-ready outside that one partition, so report.ready is identical to
 status's, at a fraction of the cost. The other category counts in the
@@ -744,10 +727,7 @@ Subcommands:
                        \`show <slug>\` renders them fine. Maps \`review\` →
                        \`doing\` (an open PR is in-flight work, not a completed
                        one) and REPORTS anything it has no mapping for rather
-                       than guessing. Run this BEFORE
-                       \`groom board-cards-heal --apply\`, which faithfully
-                       projects truth and would otherwise write index rows into
-                       a column nothing iterates.
+                       than guessing. Each primary update also changes its named column key.
 
   area-tags            re-derive the pickup \`area:*\` tags on every active
                        (non-done, non-tombstoned) card and rewrite only the
@@ -768,104 +748,29 @@ Example:
   fkanban migrate legacy-columns --dry-run   # preview the column repair
   fkanban migrate legacy-columns             # apply`),
 
-  groom: withFooter(`fkanban groom — board hygiene reports and safe repairs
+  groom: withFooter(`fkanban groom — board reports and explicit changes
 
 Usage:
   fkanban groom structured-routing [--apply] [--json]
   fkanban groom body-clobber-scan [--json]
   fkanban groom stale-blockers [--apply] [--json]
-  fkanban groom board-cards-heal [--apply] [--json] [--board SLUG] [--slug S]... [--max-removals N|unlimited]
-  fkanban groom board-cards-rekey [--apply] [--json] [--board SLUG]
-  fkanban groom board-cards-heal-scheduled [--json] [--board SLUG] [--max-drift N] [--dry-run]
-  fkanban groom board-cards-reap-column-only [--apply] [--json] [--board SLUG] [--reap-stale-milestone-positions]
-  fkanban groom parity-check [--json] [--board SLUG]
-  fkanban groom board-list-heal [--apply] [--json]
-  fkanban groom card-list-index-retire [--apply] [--json]
-  fkanban groom archive-done [--apply] [--json] [--board SLUG] [--cutoff-hours N] [--max N]
+  fkanban groom archive-done [--board SLUG] [--cutoff-hours N] [--max N] [--dry-run] [--json]
+  fkanban groom parity-check [--board SLUG] [--json]
 
-Subcommands:
-  structured-routing  backfill empty structured repo/base fields from parseable
-                       body Repo:/Base: headers on active cards. Registry cards,
-                       absent/ambiguous headers, and already-set fields are left
-                       untouched.
-  body-clobber-scan   non-mutating scan for card bodies that match the known
-                       generated/script clobber signature.
-  stale-blockers       detect stale generated pickup/blocker metadata, malformed
-                       Repo header lines, stale area-overlap holds, and
-                       human/parking candidates; --apply also parks unheld
-                       non-pr-kind cards (tracker/validation/capstone/meta)
-                       out of default/todo into backlog.
-  board-cards-heal     repair BoardCards membership (ONLY path that may delete orphans;
-                       list is read-only on Card miss) so list --column agrees with
-                       show <slug> (delete orphan column#pos rows, upsert truth).
-  board-cards-heal-scheduled
-                       scheduled wrapper for the default board: dry-run first,
-                       report drifted count, apply only when drift is non-zero
-                       and at or below --max-drift.
-  board-cards-reap-column-only
-                       delete, by exact (board, sk), BoardCards residue: a slug
-                       atom and no board atom. Two detectors, union of results —
-                       column read minus whole read (node without fold #2175),
-                       and [slug] HashKey rows absent from the [board] read
-                       (node with fold #2175). A row is deleted only when a Card
-                       point-read (and, on a milestone-state column, a Milestone
-                       point-read) finds nothing. Dry run by default; it prints
-                       every key. A stale position of a live milestone is kept
-                       unless --reap-stale-milestone-positions is set. CAUTION:
-                       set it only on a node with fold #2182; an older node
-                       also deletes the Milestone record.
-  board-list-heal      repair the CardListIndex all_boards rollup against Board truth:
-                       drop GHOSTS (entry with no Board record — a deleted board that
-                       keeps showing in board list and costs a dead partition query
-                       on every list) and add MISSING boards (record live, no entry —
-                       every card on that board is invisible to list).
-  card-list-index-retire
-                       clear the superseded CardListIndex all_cards rollup. BoardCards
-                       already holds the same body-free summary one row per card; the
-                       rollup was one unbounded document rewritten in full per mutation.
-                       --apply refuses while any card lacks a BoardCards row.
-  archive-done         archive cards that have sat in a board's TERMINAL column
-                       past --cutoff-hours. The terminal column shares the
-                       BoardCards partition with the working set, so every
-                       whole-partition read pays for it: measured 581 of 783 rows
-                       and 83% of a board read on the live default board. Cards a
-                       live non-terminal card still depends on are skipped, oldest
-                       cards go first, and a delete failure exits non-zero.
+structured-routing fills missing record fields from the current card brief.
+body-clobber-scan reports briefs that match known generated text.
+stale-blockers reports stale routing and pickup metadata. Use --apply for a change.
+archive-done removes old completed Cards and preserves dependency and proof holds.
+parity-check reads named keys and primary values twice. It reports stable differences,
+concurrent changes, and the exact scope. It never repairs or deletes records.
 
 Flags:
-  --apply              rewrite only generated boilerplate and structured fields
-                       proven stale. Omitted by default: dry-run only.
-  --json               machine-readable report
-  --board SLUG         (board-cards-heal) limit to one board partition
-  --slug S             (board-cards-heal) limit to one or more card slugs
-  --max-drift N        (board-cards-heal-scheduled) refuse to apply above this
-                       count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
-  --max-removals N     (board-cards-heal) refuse the whole change when orphan
-                       removals exceed this cap. The default is
-                       ${Math.round(DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO * 100)}% of examined records,
-                       with a floor of ${DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR}.
-  --cutoff-hours N     (archive-done) minimum age in a terminal column, default
-                       ${DEFAULT_ARCHIVE_CUTOFF_HOURS}
-  --max N              (archive-done) per-run delete ceiling, default
-                       ${DEFAULT_ARCHIVE_MAX}. Older cards are archived first, so
-                       a capped run drains the coldest end of the archive.
-
-Examples:
-  fkanban groom structured-routing
-  fkanban groom body-clobber-scan
-  fkanban groom structured-routing --apply
-  fkanban groom stale-blockers
-  fkanban groom stale-blockers --apply
-  fkanban groom board-cards-heal
-  fkanban groom board-cards-heal --apply
-  fkanban groom board-cards-heal-scheduled --json
-  fkanban groom board-cards-reap-column-only --board default
-  fkanban groom board-list-heal
-  fkanban groom board-list-heal --apply
-  fkanban groom card-list-index-retire
-  fkanban groom card-list-index-retire --apply
-  fkanban groom archive-done
-  fkanban groom archive-done --apply --max 100`),
+  --apply              write the proposed record changes
+  --dry-run            report the archive plan without a change
+  --board SLUG         board for archive-done or parity-check
+  --cutoff-hours N     minimum completion age; default ${DEFAULT_ARCHIVE_CUTOFF_HOURS}
+  --max N              archive cap; default ${DEFAULT_ARCHIVE_MAX}
+  --json               return the structured report`),
 
   hygiene: withFooter(`fkanban hygiene — local machine-hygiene helpers
 
@@ -1193,9 +1098,8 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "json-arr
 // `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   "multi-key-convert": new Set(["apply","maintenance","abort"]),
-  // Bare `rm <slug>` deletes a live card. `--board`/`--column` switch to the
-  // row-only orphan path: no Card, address the BoardCards row directly.
-  rm: new Set(["board", "column"]),
+
+  rm: new Set([]),
   doctor: new Set([]),
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
   add: new Set([
@@ -1233,7 +1137,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-removals", "cutoff-hours", "max", "reap-stale-milestone-positions"]),
+  groom: new Set(["apply", "dry-run", "board", "cutoff-hours", "max"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["claim-v2", "guard-snapshot", "snapshot-sha256", "only-card", "board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -1411,8 +1315,6 @@ async function main(argv: string[]): Promise<number> {
         abort: { type: "boolean" },
         "min-age-hours": { type: "string" },
         "pileup-threshold": { type: "string" },
-        "max-drift": { type: "string" },
-        "max-removals": { type: "string" },
         "cutoff-hours": { type: "string" },
         max: { type: "string" },
         body: { type: "string" },
@@ -1440,7 +1342,6 @@ async function main(argv: string[]): Promise<number> {
         "allow-unclaimed": { type: "boolean" },
         check: { type: "boolean" },
         "group-by-milestone": { type: "boolean" },
-        "reap-stale-milestone-positions": { type: "boolean" },
       },
     });
   } catch (err) {
@@ -1854,7 +1755,6 @@ async function dispatch(
         const res = await addCmd({
           cfg: ctx.cfg,
           node: ctx.node,
-          probeNode: ctx.probeNode,
           slug,
           title: values.title as string | undefined,
           board: values.board as string | undefined,
@@ -2414,11 +2314,11 @@ async function dispatch(
         );
         return 2;
       }
-      // Every groom subcommand is MAINTENANCE and says so on the wire. Not just
-      // the read-only sweep: a `board-cards-heal --apply` was measured emitting
-      // 686 board_cards writes at avg 9.4s under the plain `kanban` label, which
-      // is indistinguishable in `lastdb ops` from a user moving a card. See
-      // groomOpsLabel() for the measurement and the rule.
+
+
+
+
+
       const ctx = loadCtx({ verbose, opsLabel: groomOpsLabel(sub) });
       if (sub === "archive-done") {
         const extra = rejectExtraPositionals(positionals, 2, "groom archive-done");
@@ -2459,18 +2359,6 @@ async function dispatch(
         // one detector for silent row loss is unstaffed again.
         return res.ok ? 0 : 1;
       }
-
-      if (sub === "board-list-heal") {
-        const extra = rejectExtraPositionals(positionals, 2, "groom board-list-heal");
-        if (extra !== undefined) return extra;
-        console.log(await boardListHealCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          apply: values.apply as boolean | undefined,
-          json: values.json as boolean | undefined,
-        }));
-        return 0;
-      }
       if (sub === "stale-blockers") {
         const extra = rejectExtraPositionals(positionals, 2, "groom stale-blockers");
         if (extra !== undefined) return extra;
@@ -2503,84 +2391,7 @@ async function dispatch(
         }));
         return 0;
       }
-      if (sub === "card-list-index-retire") {
-        const extra = rejectExtraPositionals(positionals, 2, "groom card-list-index-retire");
-        if (extra !== undefined) return extra;
-        console.log(await cardListIndexRetireCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          apply: values.apply as boolean | undefined,
-          json: values.json as boolean | undefined,
-        }));
-        return 0;
-      }
-      if (sub === "board-cards-heal-scheduled") {
-        const extra = rejectExtraPositionals(positionals, 2, "groom board-cards-heal-scheduled");
-        if (extra !== undefined) return extra;
-        const maxDrift =
-          values["max-drift"] !== undefined
-            ? parseIntFlag(values["max-drift"] as string, "max-drift", "groom", { min: 1 })
-            : undefined;
-        console.log(await boardCardsHealScheduledCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          board: typeof values.board === "string" ? values.board : undefined,
-          maxDrift,
-          dryRunOnly: values["dry-run"] as boolean | undefined,
-          json: values.json as boolean | undefined,
-        }));
-        return 0;
-      }
-      if (sub === "board-cards-reap-column-only") {
-        const extra = rejectExtraPositionals(positionals, 2, "groom board-cards-reap-column-only");
-        if (extra !== undefined) return extra;
-        const reaped = await boardCardsReapColumnOnlyCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          apply: values.apply as boolean | undefined,
-          json: values.json as boolean | undefined,
-          board: typeof values.board === "string" ? values.board : undefined,
-          reapStaleMilestonePositions: values["reap-stale-milestone-positions"] === true,
-        });
-        console.log(reaped.output);
-        return reaped.exitCode;
-      }
-      if (sub === "board-cards-rekey") {
-        const extra = rejectExtraPositionals(positionals, 2, "groom board-cards-rekey");
-        if (extra !== undefined) return extra;
-        console.log(await boardCardsRekeyCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          apply: values.apply as boolean | undefined,
-          json: values.json as boolean | undefined,
-          board: typeof values.board === "string" ? values.board : undefined,
-        }));
-        return 0;
-      }
-      // board-cards-heal: optional extra positionals are slugs; --slug also works.
-      const slugFlag = values.slug;
-      const fromFlag = Array.isArray(slugFlag)
-        ? slugFlag.filter((s): s is string => typeof s === "string" && s.length > 0)
-        : typeof slugFlag === "string" && slugFlag.length > 0
-          ? [slugFlag]
-          : [];
-      const slugs = [...fromFlag, ...positionals.slice(2).filter((s) => s.length > 0)];
-      const rawHealMaxRemovals = values["max-removals"] as string | undefined;
-      const healMaxRemovals = rawHealMaxRemovals === undefined
-        ? undefined
-        : rawHealMaxRemovals.trim() === "unlimited"
-          ? null
-          : parseIntFlag(rawHealMaxRemovals, "max-removals", "groom", { min: 0 });
-      console.log(await boardCardsHealCmd({
-        cfg: ctx.cfg,
-        node: ctx.node,
-        apply: values.apply as boolean | undefined,
-        json: values.json as boolean | undefined,
-        board: typeof values.board === "string" ? values.board : undefined,
-        slugs: slugs.length > 0 ? slugs : undefined,
-        maxRemovals: healMaxRemovals,
-      }));
-      return 0;
+      throw new FkanbanError({ code: "unknown_groom_command", message: "The requested groom command is unavailable." });
     }
 
     case "hygiene": {
@@ -2720,8 +2531,6 @@ async function dispatch(
         cfg: ctx.cfg,
         node: ctx.node,
         slug,
-        board: values.board as string | undefined,
-        column: values.column as string | undefined,
       });
       console.log(formatRm(res, values.json as boolean | undefined));
       return 0;

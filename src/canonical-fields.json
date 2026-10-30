@@ -591,57 +591,6 @@
     }
   },
   "schemas": {
-    "FkanbanPackedListSummaryByBoardV1": {
-      "board": "work_board_slug",
-      "sk": "work_card_membership_order_key",
-      "milestone": "work_milestone_slug",
-      "s": "work_card_summary_json"
-    },
-    "BoardCards_hashrange_v1": {
-      "board": "work_board_slug",
-      "sk": "work_card_membership_order_key",
-      "slug": "work_card_slug",
-      "title": "work_card_title",
-      "column": "work_board_column_name",
-      "position": "work_card_position_decimal_text",
-      "assignee": "work_card_assignee_identifier",
-      "tags": "work_card_tag_labels",
-      "deps": "work_card_dependency_slugs",
-      "surfaces": "work_card_surface_names",
-      "created_at": "work_card_created_at",
-      "created_by": "work_card_creator_identifier",
-      "updated_at": "work_card_updated_at",
-      "db": "work_card_database_locator",
-      "repo": "repository_full_name",
-      "base": "pull_request_base_branch_name",
-      "kind": "work_card_kind",
-      "block_status": "work_card_block_status",
-      "block_reason": "work_card_block_reason",
-      "north_star": "north_star_slug",
-      "milestone": "work_milestone_slug",
-      "pr_url": "pull_request_url",
-      "branch": "development_branch_name",
-      "layout": "work_membership_layout_version"
-    },
-    "FkanbanMilestonePortfolioByBoardIndex": {
-      "board": "work_board_slug",
-      "sk": "work_milestone_membership_order_key",
-      "slug": "work_milestone_slug",
-      "title": "work_milestone_title",
-      "body": "work_milestone_markdown",
-      "state": "work_milestone_state",
-      "position": "work_milestone_position_decimal_text",
-      "north_star": "north_star_slug",
-      "driver": "work_milestone_driver_name",
-      "deps": "work_milestone_dependency_slugs",
-      "proof_card": "work_milestone_proof_card_slug",
-      "proof_status": "work_milestone_proof_status",
-      "block_reason": "work_milestone_block_reason",
-      "created_at": "work_milestone_created_at",
-      "updated_at": "work_milestone_updated_at",
-      "completed_at": "work_milestone_completed_at_text",
-      "layout": "work_membership_layout_version"
-    },
     "Board": {
       "slug": "work_board_slug",
       "title": "work_board_title",
@@ -649,11 +598,6 @@
       "columns": "work_board_column_names",
       "created_at": "work_board_created_at",
       "updated_at": "work_board_updated_at"
-    },
-    "CardListIndex": {
-      "key": "work_card_summary_bucket_key",
-      "payload_json": "work_card_summary_list_json",
-      "updated_at": "work_card_summary_list_updated_at"
     },
     "Card": {
       "slug": "work_card_slug",
@@ -680,10 +624,6 @@
       "pr_url": "pull_request_url",
       "branch": "development_branch_name"
     },
-    "FkanbanPackedListSummaryBySlugV1": {
-      "slug": "work_card_slug",
-      "s": "work_card_summary_json"
-    },
     "FkanbanFeatureFlowEventsByMilestone": {
       "milestone": "work_milestone_slug",
       "event_key": "work_flow_event_key",
@@ -695,43 +635,6 @@
       "event_at": "work_flow_event_occurred_at",
       "created_at": "work_flow_ledger_record_created_at",
       "updated_at": "work_flow_ledger_record_updated_at"
-    },
-    "ColumnHeadAtom_exact_key_v1": {
-      "klh_h": "work_column_head_scope_key",
-      "klh_r": "work_column_head_marker",
-      "klh_page": "work_column_head_summary_json"
-    },
-    "FkanbanPackedListSummaryByMilestoneV1": {
-      "milestone": "work_milestone_slug",
-      "sk": "work_card_membership_order_key",
-      "board": "work_board_slug",
-      "s": "work_card_summary_json"
-    },
-    "MilestoneCards_hashrange_v1_children_20260723": {
-      "milestone": "work_milestone_slug",
-      "sk": "work_card_membership_order_key",
-      "slug": "work_card_slug",
-      "title": "work_card_title",
-      "board": "work_board_slug",
-      "column": "work_board_column_name",
-      "position": "work_card_position_decimal_text",
-      "assignee": "work_card_assignee_identifier",
-      "tags": "work_card_tag_labels",
-      "deps": "work_card_dependency_slugs",
-      "surfaces": "work_card_surface_names",
-      "created_at": "work_card_created_at",
-      "created_by": "work_card_creator_identifier",
-      "updated_at": "work_card_updated_at",
-      "db": "work_card_database_locator",
-      "repo": "repository_full_name",
-      "base": "pull_request_base_branch_name",
-      "kind": "work_card_kind",
-      "block_status": "work_card_block_status",
-      "block_reason": "work_card_block_reason",
-      "north_star": "north_star_slug",
-      "pr_url": "pull_request_url",
-      "branch": "development_branch_name",
-      "layout": "work_membership_layout_version"
     },
     "Milestone": {
       "slug": "work_milestone_slug",
@@ -749,15 +652,6 @@
       "created_at": "work_milestone_created_at",
       "updated_at": "work_milestone_updated_at",
       "completed_at": "work_milestone_completed_at_text"
-    },
-    "Reference": {
-      "slug": "knowledge_record_slug",
-      "title": "knowledge_record_title",
-      "body": "knowledge_record_markdown",
-      "status": "knowledge_record_status",
-      "tags": "knowledge_record_tag_labels",
-      "created_at": "knowledge_record_created_at",
-      "updated_at": "knowledge_record_updated_at"
     }
   }
 }

@@ -81,9 +81,6 @@ export interface RmResult {
    * branch of `formatRm`'s unit test, which now cover nothing reachable.
    */
   orphanedDependents: string[];
-  /** Set when `--board`/`--column` deleted a BoardCards row with no Card. */
-  rowOnly?: boolean;
-  deletedRows?: number;
 }
 
 export interface MilestoneAddResult {
@@ -159,7 +156,7 @@ export interface RankResult {
   order: { slug: string; priority: string; position: number; lane?: string; hard_tier?: number }[];
   /** hard = lane+frontier (default); priority = legacy P0→P3 only */
   mode?: "hard" | "priority";
-  /** Body-free BoardCards rows whose Card primary could not be hydrated. */
+
   skipped?: { slug: string; reason: string }[];
 }
 
@@ -236,9 +233,7 @@ export function formatTag(res: TagResult, json?: boolean): string {
 }
 
 export function formatRm(res: RmResult, json?: boolean): string {
-  const text = res.rowOnly
-    ? `removed orphan BoardCards row ${res.slug} (${res.deletedRows ?? 0} row${res.deletedRows === 1 ? "" : "s"})`
-    : `removed card ${res.slug}`;
+  const text = "removed card " + res.slug;
   return emit(res, text, json);
 }
 

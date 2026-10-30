@@ -294,21 +294,21 @@ export async function listResult(
 ): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; partial: boolean; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
   requireMultiKey(opts.cfg);
   const boardSlug = opts.board ?? "default";
-  // An explicitly-passed board must exist — a typo'd name should error loudly
-  // (matching `add`), not silently render an empty default-column board. The
-  // no-`--board` path defaults to `default`, which always exists, so it stays
-  // on the cheap `findBoard` lookup with no extra read on the hot path.
-  //
-  // ISSUED WITH the board-list read below, not before it. The two answer
-  // different questions off different keys — Board truth at HashKey(boardSlug)
-  // vs the `all_boards` rollup — and neither feeds the other, so serializing
-  // them only added a round trip. On this node round trips are what a list
-  // costs: `probe-read-fanout-serial-vs-concurrent.ts` (live, 7 interleaved
-  // reps) measured this pair at 153ms serial against 119ms overlapped, 7/7
-  // reps to the overlap. Reads overlap here even though WRITES do not
-  // (`probe-boardcards-write-lock-contention.ts` measured write fan-out at
-  // 0.91x of serial) — the write gate is a per-partition lock, and a read
-  // takes none.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   const boardRead =
     opts.board !== undefined
       ? requireBoard(opts.node, opts.cfg, boardSlug)
@@ -322,12 +322,12 @@ export async function listResult(
   const headsRead = readHeads(
     listedColumns.map((column) => ({ board: boardSlug, column })),
   );
-  // `allSettled`, not `all`: with `all` whichever read rejects FIRST decides the
-  // error, so a flaky rollup read could mask "no such board" on a typo'd
-  // `--board`. Settling all three and rethrowing in the old serial order keeps
-  // the error a caller sees identical to the one they got before — including
-  // the BoardCards read, which used to be issued only after both board reads
-  // had already succeeded and so must still surface last.
+
+
+
+
+
+
   const [boardSettled, boardsSettled, headsSettled] = await Promise.allSettled([
     boardRead,
     boardsRead,
@@ -487,11 +487,11 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   if (opts.jsonArray && implicitJsonLimit > 0 && jsonLimit === 0) {
     warnIfTruncated("list", capped.length, total, opts.warn ?? console.error);
   }
-  // Bodies are never loaded for board-wide list (BoardCards thin projection).
-  // --full-body is the explicit opt-in to the expensive surface: it suppresses
-  // the implicit page cap (see `implicitJsonDefault`), so it point-gets one body
-  // per card it RETURNS — proportional to the requested data, not amplified.
-  // Callers bound it with --limit, which caps before hydration.
+
+
+
+
+
   const withBodies = opts.fullBody
     ? await hydrateCardBodies(opts.node, opts.cfg, capped)
     : capped;

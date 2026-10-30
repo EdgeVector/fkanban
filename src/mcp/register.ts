@@ -173,42 +173,6 @@ export function fkanbanInvocation(execPath: string = process.execPath): string {
   return resolveRegistration(execPath).invocation;
 }
 
-// The MCP entrypoint `claude mcp add` would target, resolved for THIS dev — the
-// file the command from `mcpAddCommand()` executes, taken from the same
-// resolution rather than derived a second time. Every shape yields a real path
-// on disk, so callers can confirm it exists.
-//
-// ## Why this must not resolve `kanban-mcp`, even when one is installed
-//
-// This used to prefer a dedicated `kanban-mcp`/`fkanban-mcp` bin over the CLI
-// shim. Nothing ever RUNS that bin: `mcpAddCommand()` emits `<shim.name> mcp`
-// in this branch and always has, so the entrypoint doctor verified and the
-// entrypoint the register line starts were two different files that only
-// happened to serve the same code. The moment they diverge, doctor certifies
-// the one nobody runs.
-//
-// They diverged. `bin/host-track-refresh` bakes an ABSOLUTE `host_track` root
-// into each shim it writes, and the shim's only self-check is `[ -f $expected ]`
-// — existence, which a stale-but-present checkout satisfies forever. When the
-// host-track layout moved to `apps/fkanban/current`, the CLI shim was rewritten
-// by last-stack's safe-upgrade installer and `kanban-mcp` was not; it still
-// pointed at the pre-migration `~/.host-track/fkanban`, a directory host-track
-// no longer tracks and `host-track refresh kanban` therefore never updates
-// (its own error message recommends exactly that no-op repair). Measured on
-// this machine 2026-08-01: `kanban` served 93efa336 while `kanban-mcp` served
-// 48418d0 — **192 commits and 10 days apart** — and doctor printed
-// `✓ MCP entrypoint resolves` for the stale one, because `existsSync` cannot
-// tell current from abandoned. That tree predates the membership fixes; its
-// `deleteCardRecord` never touches MilestoneCards at all, which is the bug
-// measured at 66 orphan rows.
-//
-// The durable repair is to stop having two answers. The entrypoint is, by
-// definition, whatever the printed register command executes — so derive it
-// from the same resolution that prints the command rather than re-resolving it
-// independently and hoping the two agree.
-//
-// Returns `string | null` for callers written against the older signature; it
-// is never null today, because every branch resolves.
 export function mcpEntrypointPath(execPath: string = process.execPath): string | null {
   return resolveRegistration(execPath).entrypoint;
 }

@@ -11,9 +11,6 @@ export type BoundaryViolation = { path: string; rule: string; detail: string };
 
 const CANONICAL_ROUTE = "/api/apps/declare-schema";
 const CANONICAL_ROUTE_OWNER = "src/client.ts";
-const MILESTONE_CARDS_REPAIR_ALLOWLIST = new Set([
-  "src/milestone-cards.ts",
-]);
 
 export function findSchemaSyncBoundaryViolations(files: SourceFile[]): BoundaryViolation[] {
   const violations: BoundaryViolation[] = [];
@@ -56,7 +53,7 @@ export function findSchemaSyncBoundaryViolations(files: SourceFile[]): BoundaryV
     const importsOrCallsMilestonePayloadUpsert =
       /\bimport\s*{[^}]*\bupsertMilestoneCard\b[^}]*}/s.test(codeOnly) ||
       /\bupsertMilestoneCard\s*\(/.test(codeOnly);
-    if (!MILESTONE_CARDS_REPAIR_ALLOWLIST.has(path) && importsOrCallsMilestonePayloadUpsert) {
+    if (importsOrCallsMilestonePayloadUpsert) {
       violations.push({
         path,
         rule: "milestone-cards-hot-path-payload-write",

@@ -107,7 +107,13 @@ export async function executeConversion(node: NodeClient, cfg: Config, path: str
       if (!current.independent_fields || !same(current.alternate_keys ?? {},request.alternate_keys)) fail("The published key layout differs.");
     }
     const schemaHashes=Object.fromEntries(plan.sources.flatMap(({entry})=>entry.keys.map((key)=>[key,cfg.schemaHashes[key]!])));
-    writeConfig({...cfg,storageModel:MULTI_KEY_MODEL,schemaHashes},path);
+    const keptAliases=new Set(plan.sources.flatMap(({source,entry})=>[
+      source.name, source.identity_hash, ...entry.keys.map(key=>cfg.schemaHashes[key]),
+      source.descriptive_name, OWNER_APP_ID+"/"+source.descriptive_name,
+    ]));
+    const schemaFieldAliases=cfg.schemaFieldAliases
+      ? Object.fromEntries(Object.entries(cfg.schemaFieldAliases).filter(([name])=>keptAliases.has(name))) : undefined;
+    writeConfig({...cfg,storageModel:MULTI_KEY_MODEL,schemaHashes,schemaFieldAliases},path);
     report=await step("app_finish");
     return report;
   } catch(error) {

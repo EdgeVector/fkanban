@@ -35,13 +35,7 @@ export const GROOM_SUBCOMMANDS = [
   "structured-routing",
   "body-clobber-scan",
   "stale-blockers",
-  "board-cards-heal",
-  "board-cards-rekey",
-  "board-cards-heal-scheduled",
-  "board-cards-reap-column-only",
-  "board-list-heal",
   "archive-done",
-  "card-list-index-retire",
   "parity-check",
 ] as const;
 

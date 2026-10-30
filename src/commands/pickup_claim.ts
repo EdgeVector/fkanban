@@ -388,25 +388,7 @@ async function selfHealTargetTodoBlockers(opts: {
   return nextCards;
 }
 
-/**
- * Re-read the winning candidate's own Card record before claiming it.
- *
- * Selection runs on the BoardCards list projection; `pickup explain` classifies
- * from the Card point read. When those two disagree — a stale or duplicated
- * membership row still listing a slug under `todo#` after the card moved on —
- * selection offers a candidate that `explain` already calls
- * `collision - card is already in doing`, and the claim reported it as won.
- * One point read of the ONE card about to be claimed settles the disagreement
- * on the authority `explain` uses, so the two commands answer
- * `eligible_for_claim` the same way.
- *
- * The check mirrors the classifier's collision rule (`pickup.ts`: a card in
- * `doing` is a collision) and stops there on purpose. A `todo` card carrying a
- * leftover `assignee` from an orphaned worker is NOT refused: `todo` is the
- * statement that nobody owns the card, and refusing it would park real work
- * forever behind a dead worker's name. `planDoingClaim` overwrites that stale
- * name with the claiming worker.
- */
+
 async function confirmCandidateClaimable(opts: {
   cfg: Config;
   node: NodeClient;
@@ -482,13 +464,13 @@ export async function pickupClaimResult(opts: PickupClaimOptions): Promise<Picku
   const skipped: PickupClaimSkip[] = [];
 
   const boards = await listBoards(opts.node, opts.cfg);
-  // Same `activeOnly` contract as `pickup status`: claim classifies active
-  // cards (todo/doing/backlog) and resolves finished deps via
-  // `listDependencyStatusesForCards` point-reads, not a whole-partition
-  // BoardCards hydrate of the append-only `done` archive. Live ops (2026-08-15)
-  // showed BoardCards HashKey pages of ~1000 rows at ~600–1800ms hydrate —
-  // most of those rows were finished work claim never classifies. Mirrors
-  // `pickup_status.ts` and `BoardListOpt.activeOnly`.
+
+
+
+
+
+
+
   const cards = await listCards(opts.node, opts.cfg, { boards, activeOnly: true });
   const cardsForSelection = await selfHealTargetTodoBlockers({
     cfg: opts.cfg,

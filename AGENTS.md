@@ -67,10 +67,8 @@ F-Brain, and create or update a matching F-Kanban card when the issue is
 actionable. Prefer dedupe/update over duplicate records. Do this
 opportunistically, unless filing it would materially derail urgent user work.
 
-Read this before touching a list path: `fbrain get
-concepts-kanban-body-free-card-projections` — `listCards` serves the board
-from body-free BoardCards partitions; judging/rewriting a body needs
-`listCardsWithBodies`/`findCard`, not `listCards`.
+List paths read schema-owned records through named keys. Fetch the body by primary key before a body change.
+Do not write back a preview or a record whose body was omitted.
 
 ## Build / typecheck
 

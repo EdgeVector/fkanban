@@ -94,6 +94,7 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_milestone_show",
   "fkanban_milestone_portfolio",
   "fkanban_milestone_detail",
+  "fkanban_milestone_reconcile",
   "fkanban_milestone_groom",
   "fkanban_doctor",
   "fkanban_ping",
@@ -123,11 +124,7 @@ export const FKANBAN_WRITE_TOOLS = [
   "fkanban_board_rm",
   "fkanban_milestone_add",
   "fkanban_milestone_state",
-  // reconcile REPAIRS the MilestoneCards index as it reads — one write per
-  // drifted row, seconds each on the shared node. It sat in the read list
-  // (and annotated readOnlyHint:true, so hosts could auto-run it) purely
-  // because its OUTPUT is a report. Pass `dry_run` for the report alone.
-  "fkanban_milestone_reconcile",
+
 ] as const;
 export const FKANBAN_TOOL_COUNT =
   FKANBAN_READ_TOOLS.length + FKANBAN_WRITE_TOOLS.length;
@@ -449,8 +446,7 @@ export function createFkanbanMcpServer(
         // position order, so `capFlat` slicing keeps ordering intact). The
         // human `text` is independently capped already.
         const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
-        // List is thin (BoardCards); hydrate ONLY the capped page for previews
-        // / full_body — never N over the whole board.
+
         const withBodies = await hydrateCardBodies(node, cfg, capped);
         const previewed = previewBodies(withBodies, args.full_body ?? false);
         return toolResult(text, { cards: previewed, total, truncated: truncated || partial, partial });

@@ -280,13 +280,7 @@ async function proofGate(
       throw new FkanbanError({
         code: "milestone_proof_card_unreadable",
         message: `Proof card "${milestone.proof_card}" exists but could not be read in full.`,
-        hint:
-          "The card is missing one or more indexed fields, so the wide read that gates this" +
-          " transition drops it. Repair it with `kanban show " +
-          milestone.proof_card +
-          "` then re-save the card, or run `kanban groom board-cards-heal --slug " +
-          milestone.proof_card +
-          " --apply`.",
+        hint: "Fetch the complete primary Card. Restore its missing fields before this transition.",
       });
     }
     throw new FkanbanError({
@@ -470,27 +464,7 @@ export async function milestoneListResult(opts: { cfg: Config; node: NodeClient;
   return { text, milestones };
 }
 
-/**
- * One milestone, with its proof claim RE-CHECKED against the card it names.
- *
- * This is the cheap single-milestone read — it deliberately does not reconcile
- * children, read the board, or touch MilestoneCards, and it must stay that way.
- * The one read it now pays for is `findProofCard` (~120ms, six fields), and only
- * when the milestone actually claims `passing`: `milestoneProofVerdict` returns
- * `not_required`/`not-claimed` without consulting the card at all, so the common
- * pending and not_required cases cost exactly what they used to.
- *
- * Paying it is not optional. `show` was the ONLY milestone read path that
- * recomputed nothing, which made it the only one that could not contradict a
- * stale `proof_status` — and it is the one an agent reaches for first, and the
- * one behind `fkanban_milestone_show`. A cheap read that answers wrong is not a
- * cheaper read.
- *
- * The key-only `cardExists` follow-up is paid only when the wide read came back
- * empty, mirroring the reconcile path: that is the sole case where "absent" and
- * "sparse" are in question, and telling them apart is the difference between
- * sending the operator to recreate a card and sending them to heal one.
- */
+
 export async function milestoneShowResult(opts: { cfg: Config; node: NodeClient; slug: string }): Promise<{
   text: string;
   milestone: Milestone;
@@ -594,10 +568,10 @@ export function milestoneReconcileFromSnapshot(
   // card that is sitting right there. Defaults false so a caller that hasn't
   // checked keeps the old, conservative "missing" wording.
   proofCardSparse = false,
-  // Done Kind:pr under the same North Star that no milestone claims — see
-  // `northStarOnlyDoneCards`. Callers pass only the milestone's own children as
-  // `boardCards`, so this evidence has to arrive separately. Defaults empty so
-  // a caller that has not looked keeps the old read.
+
+
+
+
   nsOnlyDone: Card[] = [],
 ): MilestoneReconcileResult {
   const children = boardCards.filter((card) => card.milestone === milestone.slug);
@@ -625,7 +599,7 @@ export function milestoneReconcileFromSnapshot(
         hint: "Create and link a validation card with --proof-card, or set --proof-status not_required when no harness exists.",
       });
     }
-  } else if (!proofCard && proofCardSparse) warnings.push({ code: "unreadable-proof-card", message: `Linked proof card "${milestone.proof_card}" exists but could not be read in full.`, hint: `The card is missing one or more indexed fields, so wide reads drop it. Re-save it, or run \`kanban groom board-cards-heal --slug ${milestone.proof_card} --apply\`.` });
+  } else if (!proofCard && proofCardSparse) warnings.push({ code: "unreadable-proof-card", message: `Linked proof card "${milestone.proof_card}" exists but could not be read in full.`, hint: "Fetch the complete primary Card. Restore its missing fields before the proof decision." });
   else if (!proofCard) warnings.push({ code: "missing-proof-card", message: `Linked proof card "${milestone.proof_card}" is missing.`, hint: "Repair the proof link before proving." });
   else if (proofCard.board !== milestone.board || proofCard.milestone !== milestone.slug) warnings.push({ code: "proof-card-mismatch", message: "Proof card board or milestone link does not match.", hint: "Align the proof card's --board and --milestone fields." });
   if (milestone.state === "blocked" && !milestone.block_reason) warnings.push({ code: "blocked-no-reason", message: "Blocked milestone has no reason.", hint: "Add --block-reason or return it to active." });
@@ -722,21 +696,21 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   // issue. With `--board` there is no speculation at all.
   const boards = await listBoards(opts.node, opts.cfg);
   const boardSlugs = opts.board ? [opts.board] : boards.map((board) => board.slug);
-  //
-  // POOLED, not `Promise.all`. Each of these is a whole-partition read — the
-  // heavy class — and this is the one board fan-out in the codebase that had no
-  // width at all: `listAllBoardCards` pools the identical shape at
-  // `PARTITION_READ_CONCURRENCY` precisely because Mini sheds with "too many
-  // concurrent reads". Inert at the two boards this node carries today, which is
-  // exactly why it survived; the comment above already contemplates reading
-  // "the card partition of every board", and `board-cards.ts` records this node
-  // having carried 34 Board slugs at once. A width's job is to still be right
-  // when that count grows, and here there was none.
-  //
-  // Started-not-awaited is preserved deliberately: `mapWithConcurrency` runs
-  // synchronously up to its internal `await`, so the first `width` reads are
-  // already in flight when this returns. Wrapping it in a lazy thunk would put
-  // the board read back on the critical path the comment above took it off.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   const boardCardsPending = mapWithConcurrency(
     boardSlugs,
     async (slug): Promise<[string, Card[]]> =>
@@ -1068,15 +1042,7 @@ export function northStarOnlyDoneCards(milestone: Milestone, boardCards: Card[])
     && card.column === TERMINAL_COLUMN);
 }
 
-/**
- * Pure classifier: given one milestone + its board cards + dep-resolved child
- * statuses, decide gap status. Exported for unit tests.
- *
- * `boardCards` may be the whole board (the gap-report passes it so that
- * {@link northStarOnlyDoneCards} can see cards no milestone claims) or only the
- * milestone's own children; the tallies below only ever look up the slugs in
- * `childStatuses`, so a wider set changes nothing but the NS cross-check.
- */
+
 export function classifyMilestoneGap(
   milestone: Milestone,
   boardCards: Card[],
@@ -1104,8 +1070,8 @@ export function classifyMilestoneGap(
     else if (col === "backlog") {
       pr_backlog += 1;
       const hold = normalizeBlockStatus(card.block_status) !== "none";
-      // Body-free BoardCards projections must not be treated as hollow/stopped —
-      // we have not read the brief, so "empty body" is unread, not empty.
+
+
       const hollow = isBodyOmitted(card)
         ? false
         : !isSubstantiveCardBody(card.body) || !hasPrWorkBrief(card.body);

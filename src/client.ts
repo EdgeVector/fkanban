@@ -350,15 +350,7 @@ export type LoadedSchema = {
   // Empty when the node omits `fields` (older nodes) — callers fall back to
   // descriptive_name matching + a write probe.
   fields: string[];
-  // The schema's key layout, as reported in `/api/schemas`. Fields alone CANNOT
-  // separate an entity from its own secondary index: a membership index carries
-  // the entity's fields plus its index fields, so it is a strict field superset
-  // of the entity BY CONSTRUCTION and wins any "widest superset" contest. The
-  // key layout is what actually distinguishes them — `MilestoneCards` is
-  // HashRange `milestone/sk`, the `Milestone` entity is Hash `slug` — and a
-  // schema keyed differently can never be the write target for this record type.
-  // `null` when the node omits `key` (older nodes); callers must then fall back
-  // rather than treat a missing layout as a match.
+
   key: { hash_field: string; range_field: string | null } | null;
   // Catalog lifecycle state (`Available` / `Blocked` / ...) as `/api/schemas`
   // reports it. Only an `Available` schema answers a name resolution or accepts
@@ -445,47 +437,7 @@ export type NodeClient = {
     durability?: "durable";
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string; rangeKey?: string | null }): Promise<void>;
-  /**
-   * Upsert many records in ONE request (`POST /api/mutations/batch`).
-   *
-   * ## Why this exists, and why it is not just "fewer round trips"
-   *
-   * The node takes a write gate before applying a mutation, keyed per
-   * `(molecule, hash)` — `acquire_molecule_write_locks` builds its key from
-   * `ChangedKey::disk_hash()`, so the RANGE half of a HashRange key is not in
-   * it. Every row of one BoardCards partition therefore shares one gate, and
-   * concurrent writers of that partition do not overlap: they queue.
-   *
-   * Measured on the live primary (`probe-boardcards-write-lock-contention.ts`,
-   * 12 rows, identical payload):
-   *
-   * | regime                          | vs serial |
-   * |---------------------------------|-----------|
-   * | serial, one partition           | 1.00x     |
-   * | concurrent x3, ONE partition    | **0.91x** |
-   * | concurrent x3, 12 partitions    | 2.12x     |
-   * | one batch request               | 2.10x     |
-   *
-   * The second row is the one that matters: fanning writes out across a single
-   * partition is not merely a wash, it is a small net LOSS — the concurrency
-   * buys nothing and the extra in-flight requests cost something. A batch gets
-   * the whole win without needing the rows to live on different boards, because
-   * `write_mutations_batch_async` groups by schema and takes the gate ONCE for
-   * the group.
-   *
-   * All-or-nothing: the node rejects the whole batch on any item's validation
-   * or access failure, so callers that need per-item error isolation must
-   * handle the throw and retry individually. {@link upsertBoardCardsBatch} is
-   * the BoardCards-shaped wrapper that does exactly that.
-   *
-   * Optional for the same reason `search?` and `getSchema?` are: the ad-hoc
-   * test fakes implement only the slice of `NodeClient` their subject touches,
-   * and making this required is a mechanical edit to ~28 files that buys no
-   * assertion. The SHARED fake (`test/fake-node.ts`) DOES implement it, so the
-   * batch path is exercised rather than silently fallen back over — see
-   * `test/board-cards-batch-write.test.ts`, which fails if the seed reverts to
-   * one-write-per-card.
-   */
+
   updateRecords?(rows: Array<{
     schemaHash: string;
     fields: Record<string, unknown>;
@@ -494,52 +446,7 @@ export type NodeClient = {
     expected?: CasExpectation;
     durability?: "durable";
   }>): Promise<void>;
-  /**
-   * Delete many rows in one request — the retirement half of {@link updateRecords}.
-   *
-   * ## Why this exists separately, and why it was missing
-   *
-   * `updateRecords` hard-codes `mutation_type: "update"` on every item it
-   * sends, so for a long time the batch endpoint could only be reached to
-   * WRITE. That was a property of this client, never of the node: fold's
-   * `execute_mutations_batch` builds each item through the same
-   * `MutationComponents { .., mutation_type, .. }` as the single-record route,
-   * so a delete in a batch resolves, validates and writes by exactly the path a
-   * single delete does.
-   *
-   * The cost of not having it is paid per ROW on a gate taken per BOARD. A
-   * BoardCards write gates on `(molecule, hash-half)`, so every sk retirement —
-   * the delete in every `move`, every `rank` reposition, every `groom
-   * board-cards-heal` duplicate reap — took the whole board's write gate on its
-   * own, behind every other kanban process writing that board.
-   *
-   * Measured on the live primary (`scripts/probe-boardcards-batch-delete.ts`),
-   * 48 rows, arms interleaved so a warming node cannot hand either one the win:
-   *
-   *   | per-row `deleteRecord` x48 | 110.7s / 250.9s |
-   *   | one batched request        |  42.7s /  51.4s |
-   *   | speedup                    |  2.59x / 4.88x  |
-   *
-   * with a projected partition read-back after each arm confirming the rows are
-   * actually gone — a 200 that deletes nothing would otherwise read as a win.
-   *
-   * ## The read-back caveat that probe also pinned
-   *
-   * Both per-row arms left the LAST-deleted row reading as still present, and
-   * both were empty 3s later
-   * (`scripts/probe-boardcards-batch-delete-survivor.ts`: survivor is always
-   * delete-order index N-1, gone after settle). That is the BoardCards index
-   * lagging its own ack — the same asymmetry `upsertBoardCard` documents for
-   * writes ("the INDEX lags; the record does not") — reaching deletes. It is
-   * NOT a lost delete, and a caller that re-reads a partition to confirm its own
-   * reap will see one phantom survivor. Do not build a repair decision on that
-   * read.
-   *
-   * All-or-nothing like `updateRecords`, and optional for the same reason: the
-   * ad-hoc fakes implement only what their subject touches. The SHARED fake
-   * implements it, so the batched path is exercised rather than silently
-   * fallen back over.
-   */
+
   deleteRecords?(rows: Array<{
     schemaHash: string;
     keyHash: string;
@@ -1276,7 +1183,6 @@ export function newNodeClient(opts: {
     }
   })();
 
-
   return {
     baseUrl: url,
     userHash,
@@ -1494,12 +1400,7 @@ export function newNodeClient(opts: {
         truncated: value.truncated === true,
       };
     },
-    // Both branches page through `queryAllPaged`. The vendored SDK's own
-    // `queryAll` (0.2.0) prefers a returned cursor over the offset and has no
-    // no-progress guard, so on this node it loops ~1000 requests on any
-    // partition past one page — and the partition closest to that cliff is
-    // BoardCards `HashKey(default)`, the board-wide list every surface uses.
-    // The guard lives in one place rather than being re-derived per caller.
+
     async queryAll({ schemaHash, fields, filter, rawKeyEvidence }) {
       try {
         if (rawKeyEvidence) {

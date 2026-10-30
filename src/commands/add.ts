@@ -63,7 +63,6 @@ export type AddOptions = {
   // Short-timeout twin of `node` for the post-create search-visibility wait's
   // probe reads — see `createCardRecord` (record.ts). Omit in tests to keep
   // every probe on `node`, unchanged from before this option existed.
-  probeNode?: NodeClient;
   slug: string;
   title?: string;
   board?: string;
@@ -322,30 +321,7 @@ function bodySourceGate(body: string): void {
   }
 }
 
-/**
- * A placement (`board` / `column`) with `""` read as ABSENT — never as a board
- * named "" or a column named "".
- *
- * Both fields are BoardCards key material (`board` is the partition, `column`
- * leads the range key), so a card storing "" for either is not placed anywhere:
- * it has no membership row and no list can surface it. That shape is reachable
- * without anyone asking for it — a mutation that hits the client deadline
- * mid-flight lands some of the card's fields and not others. Measured on the
- * primary 2026-07-28: `body`, `column` and `milestone` written, `title` and
- * `board` empty (papercut-kanban-write-timeout-leaves-a-partially-written-card).
- *
- * Resolving these with `??` made the empty value AUTHORITATIVE. `""` is not
- * nullish, so it beat the `"default"` / first-column fallback and was then
- * validated as if it were a real slug — `Card board "" does not match milestone
- * "x" (default)` and `"" is not a valid kanban column`. The retry the timeout
- * hint tells you to run ("writes are upserts keyed by slug, so re-running is
- * safe") is precisely the retry that could not succeed, and the escape —
- * passing `--board default` explicitly — is required by no other create.
- *
- * Applied to the caller's option as well as to the stored value: `--board ""`
- * is not a request to place a card on a board named "", and honoring it is how
- * a second damaged card would get made.
- */
+
 function placementOrAbsent(value: string | undefined): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
 }

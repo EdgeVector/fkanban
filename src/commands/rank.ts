@@ -94,11 +94,11 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
     (c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind),
   );
   const hydrated = await hydrateCardBodies(opts.node, opts.cfg, candidates);
-  // A BoardCards orphan has no Card primary to hydrate. Keep rank fail-open:
-  // the row remains visible to the explicit board-cards healer, while every
-  // real card can still be ordered. Passing the orphan through would make the
-  // first required position rewrite hit the body-loaded write guard and abort
-  // the entire pickup factory.
+
+
+
+
+
   const skipped = hydrated
     .filter(isBodyOmitted)
     .map((card) => ({ slug: card.slug, reason: "card-primary-missing" }));

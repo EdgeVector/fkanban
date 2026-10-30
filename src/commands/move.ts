@@ -265,9 +265,9 @@ export async function claimCard(opts: {
   };
 
   try {
-    // Durable: the claim is the pickup lease (see withDurableWrites). The
-    // point read above is the final authority check before this CAS write;
-    // BoardCards may still show an old column after a move.
+
+
+
     await updateCardRecord(
       { cfg: opts.cfg, node: withDurableWrites(opts.node) },
       updated,
@@ -362,13 +362,13 @@ async function promoteUnblockedBacklogDependents(opts: {
   for (const thin of candidates) {
     if (depStatus(thin, cardsWithMovedDependency).blocked) continue;
 
-    // `candidates` come from the body-free board list, and everything below
-    // this line needs the body: the pickup-readiness gate reads the brief, and
-    // the write carries the whole record. Without this hydrate the gate saw an
-    // empty body on EVERY dependent, threw `default_todo_not_pickup_ready`,
-    // and `isExpectedPromotionSkip` swallowed it — so dependency
-    // auto-promotion silently never fired on a board with BoardCards. One
-    // point-read per unblocked dependent, not per card on the board.
+
+
+
+
+
+
+
     const candidate = await findCard(opts.node, opts.cfg, thin.slug);
     if (!candidate) continue;
 

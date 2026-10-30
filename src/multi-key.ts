@@ -8,10 +8,9 @@ export function requireMultiKey(cfg: { storageModel?: string }): void {
   if (!multiKey(cfg)) throw new FkanbanError({ code: "multi_key_conversion_required",
     message: "Complete the explicit app conversion before this command." });
 }
-const RETIRED = new Set(["board_cards", "milestone_cards", "board_milestones", "card_list_index", "kanban_list_head"]);
 
 export function ownedSchemas() {
-  return [...UNIQUE_SCHEMAS, ...EXTRA_SCHEMAS.filter((entry) => !RETIRED.has(entry.key))].map((entry) => {
+  return [...UNIQUE_SCHEMAS, ...EXTRA_SCHEMAS].map((entry) => {
     const schema = structuredClone(entry.schema.schema);
     schema.independent_fields = true;
     const ordered = (hash: string, state: string): NonNullable<SchemaDefinition["alternate_keys"]>[string] => ({
@@ -52,13 +51,17 @@ export async function keyPage(
 
 export async function keyRows(
   node: NodeClient, schema: string, name: string,
-  filter: unknown, fields: readonly string[],
+  filter: unknown, fields: readonly string[], pageSize = 1000,
 ): Promise<NamedRow[]> {
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
+    throw new FkanbanError({ code: "multi_key_page_size", message: "The named-key page size must be between 1 and 1000." });
+  }
   const rows: NamedRow[] = [];
   let cursor: unknown;
   const seen = new Set<string>();
-  for (let pageNumber = 0; pageNumber < 1000; pageNumber += 1) {
-    const page = await keyPage(node, schema, name, filter, fields, 1000, cursor);
+  const maxPages = Math.ceil(1_000_000 / pageSize);
+  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+    const page = await keyPage(node, schema, name, filter, fields, pageSize, cursor);
     for (const row of page.results) {
       const id = JSON.stringify(row.key);
       if (seen.has(id)) throw new FkanbanError({ code: "multi_key_duplicate", message: "The named-key pages repeat a primary record." });
