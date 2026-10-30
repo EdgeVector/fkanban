@@ -7,6 +7,11 @@ Card uses board and milestone keys. Each range contains the column, the padded p
 An all-cards key supplies the slugs for complete body reads. The app reads those records in bounded batches.
 Milestone uses a board key. Board uses an all-boards key.
 The normal path no longer writes membership records or cached list heads.
+The column view derives its display window from the current named-key records.
+Milestone reconcile and detail read the named milestone key. They do not repair separate copies.
+The CLI and MCP return the same child status, ready frontier, and proof verdict.
+Read failures stop the command. An incomplete read cannot report an empty milestone.
+Doctor checks the schema owner, primary key, fields, and complete named key layout.
 
 ## Existing installations
 
@@ -28,11 +33,13 @@ It refuses mapped source authorities and unknown older schema shapes.
 Those states require a separate reviewed conversion.
 
 Older app declarations refuse converted schemas. A ranged mutation cannot silently address an independent hash-only record.
-The legacy code remains for an installation that does not complete the explicit cutover.
+New mutations and the column view require the explicit cutover.
+The converter remains available for an older installation.
 
 ## CI comparison
 
-The linked LastDB CI run compares the exact app revisions on the same daemon revision.
+The linked LastDB CI run compares the exact app revisions across the app and daemon cutover.
+The control release converts an old app home before the candidate daemon opens it.
 The workload uses generated data on owned CI homes.
 It checks logical record membership, order, bodies, updates, and cursors.
 Physical database size may decrease. Logical record counts must remain correct.

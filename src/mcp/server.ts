@@ -324,18 +324,6 @@ const milestoneSchema = z.object({
   completed_at: z.string(),
 });
 
-// What the MilestoneCards heal classified vs what it actually wrote. `upserts`
-// and `removals` are the drift; `issued`/`deferred` are what this call did
-// about it. A read command reports drift with issued 0 and applied false.
-const milestoneRepairsSchema = z.object({
-  applied: z.boolean(),
-  upserts: z.number(),
-  removals: z.number(),
-  issued: z.number(),
-  deferred: z.number(),
-  budget: z.number().nullable(),
-});
-
 // Required string args are declared `.optional()` (no Zod `.min(1)`) so an
 // empty OR missing value reaches the handler instead of the SDK's pre-handler
 // validation, which would dump a raw `MCP error -32602: Input validation
@@ -866,18 +854,9 @@ export function createFkanbanMcpServer(
     "fkanban_milestone_reconcile",
     {
       title: "Reconcile milestone",
-      // Named as a repair verb, because it is one: reconcile REPAIRS the
-      // MilestoneCards index as it reads. It was annotated readOnlyHint: true,
-      // which tells a host it is safe to run without approval — while it issued
-      // seconds-per-row writes to the shared node. Use `dry_run` to ask what it
-      // would repair; use fkanban_milestone_detail to only look.
-      description: "Repair a milestone's card index, then report its ready child-card frontier, proof state, and lifecycle warnings. WRITES unless dry_run.",
-      annotations: { title: "Reconcile milestone", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      inputSchema: {
-        slug: z.string().optional(),
-        dry_run: z.boolean().optional().describe("Classify index drift and report it without writing."),
-        max_repairs: z.number().int().min(0).optional().describe("Cap repair writes for this run (default 25). Reconcile is convergent, so a capped run makes strict progress and reports the remainder."),
-      },
+      description: "Read a milestone's complete child membership, ready frontier, proof state, and lifecycle warnings.",
+      annotations: { title: "Reconcile milestone", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: { slug: z.string().optional() },
       outputSchema: {
         milestone: milestoneSchema,
         children: z.array(z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) })),
@@ -892,15 +871,14 @@ export function createFkanbanMcpServer(
         // fkanban_milestone_show / _detail / _portfolio, which all declare them.
         proof_verdict: z.string().describe("The LIVE proof answer re-derived on this read — `unproven` where the stored proof_status claims passing and the evidence no longer holds."),
         proof_verdict_reason: z.string().describe("Why the verdict differs from the stored claim (e.g. missing-proof-card, no-proof-card)."),
-        repairs: milestoneRepairsSchema,
       },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
-        const result = await milestoneReconcileResult({ cfg, node, slug, apply: !args.dry_run, maxRepairs: args.max_repairs });
-        return toolResult(result.text, { ...milestoneReconcilePayload(result), repairs: result.repairs });
+        const result = await milestoneReconcileResult({ cfg, node, slug });
+        return toolResult(result.text, milestoneReconcilePayload(result));
       } catch (err) {
         return errorResult(err);
       }
@@ -943,17 +921,17 @@ export function createFkanbanMcpServer(
     "fkanban_milestone_detail",
     {
       title: "Milestone detail",
-      description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns. Read-only: reports index drift, repairs none.",
+      description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns. Read-only: uses the schema's named milestone key.",
       annotations: { title: "Milestone detail", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional() },
-      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), proof_verdict: z.string(), proof_verdict_reason: z.string(), columns: z.record(z.string(), z.array(milestoneChildSchema)), repairs: milestoneRepairsSchema },
+      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), proof_verdict: z.string(), proof_verdict_reason: z.string(), columns: z.record(z.string(), z.array(milestoneChildSchema)) },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const result = await milestoneDetailResult({ cfg, node, slug });
-        return toolResult(result.text, { ...result.detail, repairs: result.repairs });
+        return toolResult(result.text, result.detail);
       } catch (err) {
         return errorResult(err);
       }

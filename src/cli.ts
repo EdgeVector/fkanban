@@ -71,11 +71,7 @@ import { boardCardsHealScheduledCmd, DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT } from "
 import { boardCardsReapColumnOnlyCmd } from "./commands/board_cards_reap_column_only.ts";
 import { boardCardsRekeyCmd } from "./commands/board_cards_rekey.ts";
 import { boardListHealCmd } from "./commands/board_list_heal.ts";
-import {
-  milestoneIndexesHealResult,
-  DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_RATIO,
-  DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_FLOOR,
-} from "./commands/milestone_indexes_heal.ts";
+
 import { cardListIndexRetireCmd } from "./commands/card_list_index_retire.ts";
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
@@ -328,7 +324,7 @@ Usage:
   fkanban milestone list [--board <slug>] [--state <state>] [--json]
   fkanban milestone show <slug> [--json]
   fkanban milestone state <slug> <state> [--proof-status <status>] [--json]
-  fkanban milestone reconcile <slug> [--dry-run] [--max-repairs N|unlimited] [--force-milestone-card-payload-upsert] [--json]
+  fkanban milestone reconcile <slug> [--json]
   fkanban milestone portfolio [--board <slug>] [--json]
   fkanban milestone detail <slug> [--json]
   fkanban milestone groom [--board <slug>] [--json] [--json-array]
@@ -348,20 +344,8 @@ Add options:
   --proof-status <s>    pending|passing|failing|not_required
   --block-reason <text> why the milestone is blocked
 
-Reconcile options:
-  --dry-run             classify index drift and report it, writing nothing
-  --max-repairs <N>     cap repair writes for one run (default 25; "unlimited"
-                        to lift the cap, 0 to classify only). Reconcile is
-                        convergent, so a capped run makes strict progress and
-                        reports the remainder.
-  --force-milestone-card-payload-upsert
-                        emergency repair override: direct-write MilestoneCards
-                        payloads instead of requesting BoardCards protein fold
-
-reconcile repairs the MilestoneCards index as it reads by defaulting to
-BoardCards protein-fold requests; detail and portfolio never write. A direct
-payload repair costs seconds per row on the shared node and requires the force
-flag above.
+Reconcile, detail, and portfolio read current schema-owned records. They report
+child status, proof, and lifecycle warnings. They do not write data.
 
 Milestones are supervisory records, never pickup cards.
 New milestones default to driver last-stack-milestone-driver. Superseded
@@ -803,7 +787,6 @@ Usage:
   fkanban groom board-cards-reap-column-only [--apply] [--json] [--board SLUG] [--reap-stale-milestone-positions]
   fkanban groom parity-check [--json] [--board SLUG]
   fkanban groom board-list-heal [--apply] [--json]
-  fkanban groom milestone-indexes-heal [--dry-run] [--json] [--board SLUG] [--max-repairs N|unlimited] [--max-removals N|unlimited] [--force-milestone-card-payload-upsert]
   fkanban groom card-list-index-retire [--apply] [--json]
   fkanban groom archive-done [--apply] [--json] [--board SLUG] [--cutoff-hours N] [--max N]
 
@@ -843,10 +826,6 @@ Subcommands:
                        keeps showing in board list and costs a dead partition query
                        on every list) and add MISSING boards (record live, no entry —
                        every card on that board is invisible to list).
-  milestone-indexes-heal
-                       repair BoardMilestones explicitly and MilestoneCards via
-                       BoardCards protein-fold requests by default, with dry-run
-                       classification and a bounded per-run write budget.
   card-list-index-retire
                        clear the superseded CardListIndex all_cards rollup. BoardCards
                        already holds the same body-free summary one row per card; the
@@ -868,27 +847,10 @@ Flags:
   --slug S             (board-cards-heal) limit to one or more card slugs
   --max-drift N        (board-cards-heal-scheduled) refuse to apply above this
                        count, default ${DEFAULT_BOARD_CARDS_HEAL_MAX_DRIFT}
-  --max-repairs N      (milestone-indexes-heal) cap repair writes for one run,
-                       default 25; "unlimited" opts out
-  --max-removals N     (board-cards-heal, milestone-indexes-heal) refuse the
-                       whole apply when a run classifies more removals than
-                       this.
-                       On board-cards-heal it counts delete-orphan ONLY (the
-                       one action that leaves a card on no board); its default
-                       is ${Math.round(DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO * 100)}% of rows examined, floor ${DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR} — a wider
-                       ratio than the sibling below because this command's
-                       legitimate bootstrap reap was measured at 27% of the
-                       board.
-                       On milestone-indexes-heal: unlike
-                       --max-repairs, which RATIONS deletions, this REFUSES
-                       them: an index far enough from truth is more likely
-                       misclassified than genuinely orphaned. Default scales
-                       with the rows examined (${Math.round(DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_RATIO * 100)}%, floor
-                       ${DEFAULT_MILESTONE_INDEXES_HEAL_REMOVAL_FLOOR}); "unlimited" opts out. Upserts are
-                       deliberately unbounded here — a first heal of an empty
-                       index is all upserts and must not be refused.
-  --force-milestone-card-payload-upsert
-                       (milestone-indexes-heal) emergency direct payload repair
+  --max-removals N     (board-cards-heal) refuse the whole change when orphan
+                       removals exceed this cap. The default is
+                       ${Math.round(DEFAULT_BOARD_CARDS_HEAL_REMOVAL_RATIO * 100)}% of examined records,
+                       with a floor of ${DEFAULT_BOARD_CARDS_HEAL_REMOVAL_FLOOR}.
   --cutoff-hours N     (archive-done) minimum age in a terminal column, default
                        ${DEFAULT_ARCHIVE_CUTOFF_HOURS}
   --max N              (archive-done) per-run delete ceiling, default
@@ -907,8 +869,6 @@ Examples:
   fkanban groom board-cards-reap-column-only --board default
   fkanban groom board-list-heal
   fkanban groom board-list-heal --apply
-  fkanban groom milestone-indexes-heal --dry-run
-  fkanban groom milestone-indexes-heal --max-removals 3
   fkanban groom card-list-index-retire
   fkanban groom card-list-index-retire --apply
   fkanban groom archive-done
@@ -1260,10 +1220,9 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
     "title", "assignee", "expect-assignee", "tags", "surfaces", "priority", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
   ]),
-  // reconcile repairs MilestoneCards as it reads; --dry-run classifies without
-  // writing and --max-repairs bounds how much it writes in one invocation.
+  // Reconcile reads current membership; it does not issue repair mutations.
   // --json-array is the legacy bare-array escape for milestone groom.
-  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "dry-run", "max-repairs", "force-milestone-card-payload-upsert", "json-array"]),
+  milestone: new Set(["title", "body", "board", "state", "position", "north-star", "driver", "deps", "proof-card", "proof-status", "block-reason", "json-array"]),
   // move ignores --board on purpose: slugs are global, so it can't scope a
   // lookup. Leaving it out makes `move <slug> doing --board X` an exit-2 error.
   move: new Set(["guard-snapshot", "snapshot-sha256", "expect-assignee", "from", "expect", "position", "force", "assignee", "worker", "allow-unclaimed"]),
@@ -1281,7 +1240,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // migrate's one-time subcommands take --dry-run to preview without writing.
   // legacy-columns also takes repeatable --slug to migrate a named card at a time.
   migrate: new Set(["dry-run", "slug"]),
-  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-repairs", "max-removals", "cutoff-hours", "max", "force-milestone-card-payload-upsert", "reap-stale-milestone-positions"]),
+  groom: new Set(["apply", "dry-run", "board", "slug", "max-drift", "max-removals", "cutoff-hours", "max", "reap-stale-milestone-positions"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["claim-v2", "guard-snapshot", "snapshot-sha256", "only-card", "board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
   which: new Set(["check"]),
@@ -1461,7 +1420,6 @@ async function main(argv: string[]): Promise<number> {
         "min-age-hours": { type: "string" },
         "pileup-threshold": { type: "string" },
         "max-drift": { type: "string" },
-        "max-repairs": { type: "string" },
         "max-removals": { type: "string" },
         "cutoff-hours": { type: "string" },
         max: { type: "string" },
@@ -1738,27 +1696,8 @@ async function dispatch(
           console.error(`kanban: Unknown option '--north-star'. Run \`kanban milestone reconcile --help\` to see this command's flags.`);
           return 2;
         }
-        // `unlimited` opts out of the budget explicitly, the same word
-        // `lastgit --max-concurrency` uses. `--max-repairs 0` classifies
-        // without writing, which is `--dry-run` reached from the other side.
-        const rawMax = values["max-repairs"] as string | undefined;
-        const maxRepairs = rawMax === undefined
-          ? undefined
-          : rawMax.trim() === "unlimited"
-            ? null
-            : parseIntFlag(rawMax, "max-repairs", "milestone", { min: 0 });
-        const result = await milestoneReconcileResult({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          slug,
-          apply: !values["dry-run"],
-          maxRepairs,
-          directPayloadUpsert: Boolean(values["force-milestone-card-payload-upsert"]),
-        });
-        // `repairs` is a carrier of what THIS invocation did, not part of the
-        // reconcile read; the read's own fields come from the one shared
-        // projection so this payload cannot omit what `result.text` prints.
-        console.log(values.json ? JSON.stringify({ ...milestoneReconcilePayload(result), repairs: result.repairs }, null, 2) : result.text);
+        const result = await milestoneReconcileResult({ cfg: ctx.cfg, node: ctx.node, slug });
+        console.log(values.json ? JSON.stringify(milestoneReconcilePayload(result), null, 2) : result.text);
         return 0;
       }
       if (action === "portfolio") {
@@ -1788,7 +1727,7 @@ async function dispatch(
           return 2;
         }
         const result = await milestoneDetailResult({ cfg: ctx.cfg, node: ctx.node, slug });
-        console.log(values.json ? JSON.stringify({ ...result.detail, repairs: result.repairs }, null, 2) : result.text);
+        console.log(values.json ? JSON.stringify(result.detail, null, 2) : result.text);
         return 0;
       }
       if (action === "groom") {
@@ -2584,33 +2523,6 @@ async function dispatch(
           apply: values.apply as boolean | undefined,
           json: values.json as boolean | undefined,
         }));
-        return 0;
-      }
-      if (sub === "milestone-indexes-heal") {
-        const extra = rejectExtraPositionals(positionals, 2, "groom milestone-indexes-heal");
-        if (extra !== undefined) return extra;
-        const rawMax = values["max-repairs"] as string | undefined;
-        const maxRepairs = rawMax === undefined
-          ? undefined
-          : rawMax.trim() === "unlimited"
-            ? null
-            : parseIntFlag(rawMax, "max-repairs", "groom", { min: 0 });
-        const rawMaxRemovals = values["max-removals"] as string | undefined;
-        const maxRemovals = rawMaxRemovals === undefined
-          ? undefined
-          : rawMaxRemovals.trim() === "unlimited"
-            ? null
-            : parseIntFlag(rawMaxRemovals, "max-removals", "groom", { min: 0 });
-        const healed = await milestoneIndexesHealResult({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          board: typeof values.board === "string" ? values.board : undefined,
-          apply: !values["dry-run"],
-          maxRepairs,
-          maxRemovals,
-          directMilestoneCardPayloadUpsert: Boolean(values["force-milestone-card-payload-upsert"]),
-        });
-        console.log(values.json ? JSON.stringify(healed, null, 2) : healed.text);
         return 0;
       }
       if (sub === "board-cards-heal-scheduled") {
