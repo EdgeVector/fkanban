@@ -33,7 +33,7 @@ export async function syncOwnedModel(node: NodeClient, base: Config, existing: C
   if (existing && resolved.some((entry) => existing.schemaHashes[entry.key] !== entry.identity)) {
     throw new FkanbanError({ code: "schema_pin_changed", message: "An owned schema address changed. The config remains unchanged." });
   }
-  return { ...base, storageModel: MULTI_KEY_MODEL, schemaHashes,
+  return { ...existing, ...base, storageModel: MULTI_KEY_MODEL, schemaHashes,
     schemaFieldAliases: canonicalVocabulary ? Object.assign({}, ...resolved.map((entry) => profilesFor(entry.schema, [entry.identity, entry.runtime]))) : undefined,
   };
 }
