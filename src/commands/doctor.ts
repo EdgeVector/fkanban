@@ -1,1190 +1,116 @@
-// `kanban doctor` — health-check the local setup: config present, node
-// reachable + provisioned, both schemas resolved on the node, a query
-// round-trips.
-
+// Read-only health checks for schema-owned records and named alternate keys.
 import { MIN_LASTDB_API_VERSION } from "../lastdb-version.ts";
-import { multiKey, ownedSchemas } from "../multi-key.ts";
+import { requireMultiKey, ownedSchemas } from "../multi-key.ts";
+import { canonicalSchema } from "../canonical-vocabulary.ts";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
-import {
-  DOCTOR_OPS_LABEL,
-  FkanbanError,
-  isLoopbackNodeUrl,
-  newNodeClient,
-  type NodeClient,
-  type Verbose,
-} from "../client.ts";
-import { resolveSocketPath, tryReadConfig, type Config } from "../config.ts";
+import { DOCTOR_OPS_LABEL, FkanbanError, newNodeClient, type Verbose } from "../client.ts";
+import { resolveSocketPath, tryReadConfig } from "../config.ts";
 import { isOnDisk, resolveRunningBuild, shortBuild } from "../host_track.ts";
 import { readRecentRejections, rejectionsPath } from "../diagnostics.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
-import { listBoards, listCards, findCard, findBoard, probeSchemaWritable, WRITE_PROBE_SLUG, type Board, type Card } from "../record.ts";
-import {
-  MEMBERSHIP_KEY_EXPECTATIONS,
-  checkMembershipKeyLayout,
-  parityWithConfirmation,
-  projectionGateField,
-  type ProjectionParityResult,
-} from "../membership_schema_guard.ts";
-import {
-  boardCardsHash,
-  enqueueBoardCardJanitor,
-  listBoardCardsPartition,
-  listBoardCardsPartitionSpine,
-  sweepBoardCardJanitor,
-  sweepBoardCardsPartition,
-} from "../board-cards.ts";
-import {
-  listBoardMilestonesPartition,
-  sweepBoardMilestonesPartition,
-} from "../board-milestones.ts";
-import {
-  listMilestoneCardsPartition,
-  milestoneCardsHash,
-  sweepMilestoneCardsPartition,
-  MILESTONE_CARDS_PAYLOAD_FIELDS,
-} from "../milestone-cards.ts";
-import { PARTITION_READ_CONCURRENCY, mapWithConcurrency } from "../concurrency.ts";
-import {
-  BOARD_CARDS_FIELDS,
-  DEFAULT_COLUMNS,
-  OWNER_APP_ID,
-  UNIQUE_SCHEMAS,
-  allPinnedSchemas,
-  checkPinnedSchemaIdentity,
-  duplicateDeclaredSchemaNames,
-  formatDuplicateDeclaredName,
-  formatSchemaIdentityMismatch,
-  isAcceptedPinDeviation,
-  resolveLoadedSchema,
-} from "../schemas.ts";
+import { OWNER_APP_ID, type SchemaDefinition } from "../schemas.ts";
 
-// A single machine-readable health check. `pass`/`fail` checks flip `ok`;
-// `info` checks (e.g. the optional PATH shim) are advisory and never do.
 export type DoctorCheck = { name: string; status: "pass" | "fail" | "info"; detail?: string };
-
 export type DoctorOptions = {
   configPath?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
-  // Optional structured channel: invoked once per check, in the same order as
-  // the printed lines. The CLI omits it (keeping the boolean + text contract);
-  // the MCP server passes one to build `structuredContent`. Does NOT alter the
-  // printed output.
   onCheck?: (check: DoctorCheck) => void;
-  /** Board slug for `--stale-rows`. Default `default`. */
-  board?: string;
-  /** Walk column secondaries and delete rows whose Card tip is another column. */
-  staleRows?: boolean;
 };
-
-// The machine-readable doctor report — the single shape shared by the CLI
-// `doctor --json` path and the MCP `fkanban_doctor` tool's `structuredContent`,
-// so the two can't diverge. `version` is the installed kanban CLI version
-// (from package.json, the same source as `kanban --version`) — a report field,
-// not a check, so it never affects `ok`. `lines` is the human report (joined
-// ✓/✗ output) for callers that also want the text (the MCP tool surfaces it as
-// `content`).
 export type DoctorReport = { ok: boolean; version: string; checks: DoctorCheck[]; lines: string[] };
 
-// Rows that entered or left a partition while a parity check ran are not
-// evidence of anything, and specifically not grounds for the WRITE repair these
-// checks prescribe. They still get a line: silently discarding them is how a
-// check that fires on churn looks like a check that fires on drift.
-function reportPartitionChurn(
-  info: (label: string, detail?: string) => void,
-  index: string,
-  partition: string,
-  moved: readonly string[],
-): void {
-  if (moved.length === 0) return;
-  info(
-    `${index} partition churn (${partition})`,
-    `${moved.length} row(s) entered or left while the check ran (concurrent writes) — ` +
-      `excluded from the parity verdict: ${moved.slice(0, 3).join(", ")}`,
-  );
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(stable).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.entries(value)
+    .filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => JSON.stringify(key) + ":" + stable(item)).join(",") + "}";
+  return JSON.stringify(value);
 }
 
-// A RED that could not be re-checked still stands, but the operator is about to
-// run a write repair on its say-so, so the verdict must not present a
-// first-pass suspicion as a confirmed finding.
-function unconfirmedSuffix(reason: string, confirmed: boolean): string {
-  return confirmed
-    ? reason
-    : `${reason} — UNCONFIRMED: the second sweep did not complete, so a row deleted mid-check ` +
-      `cannot be ruled out; re-run doctor before repairing`;
+// Match the serialized defaults as well as every declared field and range part.
+function namedKeys(keys: SchemaDefinition["alternate_keys"] = {}) {
+  return Object.fromEntries(Object.entries(keys).map(([name, key]) => [name, {
+    hash_field: key.hash_field ?? "", hash_literal: key.hash_literal ?? null,
+    range_field: key.range_field ?? null, range_separator: key.range_separator ?? null,
+    range_parts: (key.range_parts ?? []).map(part => ({ field: part.field, format: part.format ?? "text" })),
+    missing: key.missing ?? "reject", omit_empty_hash: key.omit_empty_hash ?? false,
+  }]));
 }
 
-// Run doctor while collecting the structured `{ ok, version, checks }` report
-// and the human lines, without printing anything. Both the CLI `--json` flag and
-// the MCP handler build their output from this so the shape stays identical.
-export async function runDoctorStructured(
-  opts: Omit<DoctorOptions, "print" | "onCheck"> = {},
-): Promise<DoctorReport> {
+export async function runDoctorStructured(opts: Omit<DoctorOptions, "print" | "onCheck"> = {}): Promise<DoctorReport> {
   const lines: string[] = [];
   const checks: DoctorCheck[] = [];
-  const ok = await doctor({ ...opts, print: (l) => lines.push(l), onCheck: (c) => checks.push(c) });
+  const ok = await doctor({ ...opts, print: line => lines.push(line), onCheck: check => checks.push(check) });
   return { ok, version: pkg.version, checks, lines };
 }
 
 export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
-  const print = opts.print ?? ((l: string) => console.log(l));
-  const onCheck = opts.onCheck;
+  const print = opts.print ?? console.log;
   let ok = true;
-  const check = (pass: boolean, label: string, detail?: string) => {
+  const check = (pass: boolean, name: string, detail?: string) => {
     if (!pass) ok = false;
-    print(`${pass ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}`);
-    onCheck?.({ name: label, status: pass ? "pass" : "fail", detail });
+    print(`${pass ? "✓" : "✗"} ${name}${detail ? ` — ${detail}` : ""}`);
+    opts.onCheck?.({ name, status: pass ? "pass" : "fail", detail });
   };
-  const info = (label: string, detail?: string) => {
-    print(`· ${label}${detail ? ` — ${detail}` : ""}`);
-    onCheck?.({ name: label, status: "info", detail });
+  const info = (name: string, detail?: string) => {
+    print(`· ${name}${detail ? ` — ${detail}` : ""}`);
+    opts.onCheck?.({ name, status: "info", detail });
   };
-
-  // Report the installed kanban version up front — the one fact a bug report
-  // most needs. Sourced from package.json (same as `kanban --version`), it's a
-  // report line, not a check, so it never flips `ok`.
   print(`  fkanban v${pkg.version}`);
-
-  // Is this report coming from the installed build? `pkg.version` has been
-  // "0.1.0" for the life of the repo and cannot answer that. Runs first
-  // because the answer qualifies every verdict below it.
   reportRunningBuild(check, info);
-
-  // Informational only — the global shim is optional, so this never flips `ok`.
-  // It just tells the user whether bare `fkanban` resolves on PATH.
-  await reportShim(print, onCheck);
-
+  await reportShim(print, opts.onCheck);
   const cfg = tryReadConfig(opts.configPath);
   check(cfg !== null, "config present", cfg ? undefined : "run `kanban init`");
   if (!cfg) return false;
-
-  const socketPath = resolveSocketPath(cfg);
-  // DOCTOR_OPS_LABEL, not the plain board label: doctor's write-probes and
-  // parity sweeps are synthetic, and pooling them with real board traffic in
-  // `lastdb ops` has already produced two wrong verdicts about the board's
-  // write path. See nodeHeaders() in client.ts.
-  const node = newNodeClient({
-    baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
-    userHash: cfg.userHash,
-    verbose: opts.verbose,
-    socketPath,
-    opsLabel: DOCTOR_OPS_LABEL,
-    // doctor describes an old node instead of refusing to look at it.
-    skipApiVersionGate: true,
-  });
-
-  if (multiKey(cfg)) {
-    const results = await Promise.allSettled(ownedSchemas().map(async (entry) => {
-      const name = cfg.schemaHashes[entry.key];
-      if (!name) throw new Error(`No configured ${entry.key} schema`);
-      const response = await node.rawCall("GET", `/api/schema/${encodeURIComponent(name)}`);
-      const root = response.json as { data?: unknown };
-      const value = (root?.data ?? root) as { schema?: { independent_fields?: boolean; alternate_keys?: Record<string, unknown> } };
-      if (response.status !== 200 || !value.schema?.independent_fields ||
-          Object.keys(entry.schema.alternate_keys ?? {}).some((key) => !Object.hasOwn(value.schema?.alternate_keys ?? {}, key))) {
-        throw new Error("The installed schema does not declare its independent values and named keys");
-      }
-      return entry.key;
-    }));
-    results.forEach((result, index) => check(result.status === "fulfilled", `${ownedSchemas()[index]!.key} owned schema`,
-      result.status === "rejected" ? String(result.reason) : undefined));
-    info("record membership", "Named keys are maintained in the primary mutation. Legacy membership repair does not apply.");
-    return ok;
-  }
-
-  // Which transport the node calls take. Local nodes are socket-only (the
-  // loopback TCP control plane was retired), so the socket carries the board
-  // data-plane routes plus the schema/identity reads doctor needs; with
-  // `folddb-full.sock` it carries the whole node HTTP app. When no socket file
-  // is present the transport is `unavailable` — there is no TCP to fall back to,
-  // so requests will fail. This line is informational only — never flips `ok`;
-  // it lets a user confirm the socket is live (or see that it's missing).
-  // Printed BEFORE the reachability probe so the transport is named even if
-  // that probe then fails.
-  const transport = node.nodeTransport();
-  const socketDataPlane = transport.transport === "socket";
-  if (transport.transport === "socket") {
-    print(`  node socket:     ${transport.socketPath}`);
-  } else {
-    print(`  node:            ${cfg.nodeUrl}`);
-  }
-  // The schema_service URL is recorded in config for diagnostics only — unlike
-  // `node:` (reachability-probed below), the CLI never contacts it directly.
-  // Mini owns mandatory registration, so don't print this as if the CLI had
-  // independently checked the authoritative endpoint.
-  print(`  schema (config): ${cfg.schemaServiceUrl}  (informational — Mini owns required schema registration)`);
-
-  if (transport.transport === "socket") {
-    const fallback = isLoopbackNodeUrl(cfg.nodeUrl)
-      ? "socket-only; no TCP fallback"
-      : "TCP fallback configured";
-    const detail = `Unix socket — ${transport.socketPath} (${fallback})`;
-    print(`✓ node transport: socket — ${detail}`);
-    onCheck?.({ name: "node transport", status: "info", detail });
-  } else {
-    // Socket-only: a missing socket means the node is unreachable, not that TCP
-    // takes over. Name it plainly so a user doesn't read "tcp" as a live path.
-    const detail = transport.socketPath
-      ? `socket missing at ${transport.socketPath} (local nodes are socket-only; ${cfg.nodeUrl} has no live TCP control plane)`
-      : `no socket configured (local nodes are socket-only; ${cfg.nodeUrl} has no live TCP control plane)`;
-    print(`· node transport: unavailable — ${detail}`);
-    onCheck?.({ name: "node transport", status: "info", detail });
-  }
-
-  check(Boolean(cfg.schemaHashes.card), "card schema hash in config", cfg.schemaHashes.card);
-  check(Boolean(cfg.schemaHashes.board), "board schema hash in config", cfg.schemaHashes.board);
-
-  let queryRoundTrip: { cards: number; boards: number } | null = null;
-  // The board + card sets from whichever round-trip branch ran, kept so the
-  // later checks don't re-read the whole board to re-derive what this already
-  // fetched. `null` means no round trip succeeded — those checks then fall back
-  // to reading for themselves rather than silently skipping.
-  //
-  // Note the `else` arm below reads like a non-socket/TCP fallback. It is not:
-  // the client is socket-only, so an absent socket fails `node reachable +
-  // provisioned` and doctor returns before reaching it. It is only reachable
-  // when the socket IS live but this first round trip threw — i.e. it is a
-  // RETRY, which is why it also records the sets.
-  //
-  // Reuse is safe here, and it is worth saying WHY rather than leaving the next
-  // reader to re-derive it: no check below depends on observing state AFTER the
-  // schema write-probes. The parity check re-reads each PARTITION itself (that
-  // comparison is the check); only the board LIST is reused. The multi-field
-  // smoke check just needs one live card slug, and taking it from the pre-probe
-  // set is strictly better — a set read after the probes could catch a
-  // throwaway probe row mid-delete.
-  let boardSet: Board[] | null = null;
-  let cardSet: Card[] | null = null;
-  if (socketDataPlane) {
-    try {
-      const boards = await listBoards(node, cfg);
-      const cards = await listCards(node, cfg, { boards });
-      boardSet = boards;
-      cardSet = cards;
-      queryRoundTrip = { cards: cards.length, boards: boards.length };
-      check(true, "node reachable via socket", `${transport.socketPath} — query round-trip: ${cards.length} cards, ${boards.length} boards`);
-    } catch (err) {
-      check(false, "node reachable via socket", formatDoctorError(err));
-    }
-  }
-
-  try {
-    const id = await node.autoIdentity();
-    check(id.provisioned, "node reachable + provisioned", id.provisioned ? undefined : id.reason);
-  } catch (err) {
-    const detail = formatDoctorError(err);
-    check(false, "node reachable + provisioned", detail);
+  try { requireMultiKey(cfg); } catch (error) {
+    check(false, "multi-key conversion complete", formatDoctorError(error));
     return false;
   }
-
-  // The client↔node version handshake (`GET /api/version`). PASS when the
-  // node's api_version meets kanban's declared floor (package.json
-  // `lastdb.minApiVersion`); a node that predates the route reports 0 and
-  // still PASSES while the floor is 0. This is the one line that explains a
-  // `400 unknown_key` before anyone sees one.
-  if (node.nodeVersion) {
-    try {
-      const nv = await node.nodeVersion();
-      const build = nv.build ? ` build ${nv.build}` : "";
-      const reported = nv.handshake
-        ? `api_version ${nv.apiVersion}${build}`
-        : "no /api/version (node predates the handshake)";
-      const meets = nv.apiVersion >= MIN_LASTDB_API_VERSION;
-      check(
-        meets,
-        "node api_version",
-        `${reported}; kanban needs >= ${MIN_LASTDB_API_VERSION}` +
-          (meets ? "" : " — brew upgrade lastdb && brew services restart lastdb"),
-      );
-    } catch {
-      // Reachability was proven just above, so a failed version read means
-      // the node (or this transport) does not serve the route. Informational:
-      // the floor is enforced by the client gate, not by doctor.
-      info(
-        "node api_version",
-        `no answer from GET /api/version (older node or transport); kanban needs >= ${MIN_LASTDB_API_VERSION}`,
-      );
-    }
-  }
-
-  if (opts.staleRows) {
-    await reportStaleBoardCardRows({
-      node,
-      cfg,
-      board: (opts.board ?? "default").trim() || "default",
-      check,
-      info,
-    });
-    return ok;
-  }
-
-  // Cross-check the config hashes against the node's loaded schema set, and
-  // WRITE-PROBE the configured hash. A bare "config hash == a loaded hash"
-  // match is NOT enough: the node can load a stale, narrower schema version that
-  // resolves fine yet rejects every write (fkanban #94). So for each schema:
-  //   - confirm the configured hash is actually loaded, AND
-  //   - confirm it's the write-compatible resolution (its fields superset the
-  //     local definition) — flagging a config pinned to a narrower version, AND
-  //   - write-probe it (create+delete an all-fields throwaway), the runtime
-  //     backstop that catches non-writability regardless of reported fields.
-  // This makes `doctor` red — not cosmetically green — when writes are broken.
-  try {
-    const loaded = await node.listSchemas();
-
-    // Is each name fkanban declares answered by exactly ONE Available schema?
-    //
-    // Asked before every pin check because it is upstream of all of them. A pin
-    // is a hash, so a machine that HAS a config is immune to a duplicated name
-    // and every check below it reads green. The name is only resolved on a
-    // machine that has no config yet — `kanban init` — which is precisely the
-    // run no doctor observes. That is how this class stayed invisible for six
-    // weeks while it failed the public install path from thelastdb.com/llms.txt
-    // twice (2026-09-04T20:35Z, 2026-09-06T20:15Z): five Available fkanban
-    // schemas answered to `BoardCards_hashrange_v1`, a fresh install resolved
-    // the milestone-keyed rekey predecessor, and init correctly refused.
-    //
-    // ADVISORY, not a red — and that is a decision, not an oversight.
-    //
-    // Card `kanban-boardcards-name-collides-with-rekey-predecessor-20260907`
-    // asked for a FAIL. Two decisions already in this file's tests forbid one:
-    //
-    //   - `doctor-write-probe.test.ts`, "green: config pinned to a wide hash
-    //     survives a narrower WRITABLE version listed first". Measured on the
-    //     primary 2026-07-30: six `fkanban/Card` schemas, four write-compatible,
-    //     a node restart moved the resolver's tiebreak and doctor exited 1 over a
-    //     board whose writes had never broken — advising `kanban init`, which
-    //     declares by definition and returns the same hash, so the red was
-    //     UNCLEARABLE. The settled answer is the `resolution is ambiguous`
-    //     advisory a few checks below: say it, do not gate on it.
-    //   - `doctor-accepted-pin-identity.test.ts`, whose whole subject is "can
-    //     doctor ever go green on the primary?". The primary's `Milestone` and
-    //     `BoardCards_hashrange_v1` both have several Available claimants today,
-    //     and no supported node route retires one (`/api/schemas` has declare and
-    //     get, no rename and no delete — a rename would change the identity hash,
-    //     since `descriptive_name` folds into it). A red no operator can clear is
-    //     the environment the next REAL mismatch arrives into.
-    //
-    // So it is said in full, every run, with the exact claimant hashes, and it
-    // does not gate. `init` no longer depends on the name resolving uniquely
-    // (`correctDeclaredSchemaIdentities` picks the declared identity), so nothing
-    // downstream of this line is broken by the duplication either.
-    const dupes = duplicateDeclaredSchemaNames(loaded);
-    if (dupes.length === 0) {
-      check(true, "declared schema names unique", `${allPinnedSchemas().length} pinned keys`);
-    } else {
-      for (const d of dupes) {
-        info(
-          `${d.key} declared name is not unique`,
-          `${formatDuplicateDeclaredName(d)}. A name resolution (what \`kanban init\` does on a ` +
-            `machine with no config) can return any of them; init picks the declared identity ` +
-            `itself, so this does not break a fresh install. Retire the stale claimants in the ` +
-            `node catalog so "${d.descriptive_name}" addresses one schema.`,
-        );
+  const node = newNodeClient({ baseUrl: cfg.nodeUrl, schemaFieldAliases: cfg.schemaFieldAliases,
+    userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg),
+    opsLabel: DOCTOR_OPS_LABEL, skipApiVersionGate: true });
+  const transport = node.nodeTransport();
+  info("node transport", transport.transport === "socket" ? transport.socketPath : "socket unavailable");
+  const schemas = ownedSchemas();
+  const tasks = [
+    { name: "node reachable + provisioned", run: async () => {
+      const identity = await node.autoIdentity();
+      if (!identity.provisioned) throw new Error(identity.reason);
+    } },
+    { name: "node api_version", run: async () => {
+      if (!node.nodeVersion) throw new Error("The node client has no version route");
+      const version = await node.nodeVersion();
+      if (version.apiVersion < MIN_LASTDB_API_VERSION) throw new Error(`API ${version.apiVersion}; required ${MIN_LASTDB_API_VERSION}`);
+    } },
+    ...schemas.map(entry => ({ name: `${entry.key} owned schema`, run: async () => {
+      const name = cfg.schemaHashes[entry.key];
+      if (!name) throw new Error(`No configured ${entry.key} schema`);
+      const expected = cfg.schemaFieldAliases?.[name] ? canonicalSchema(entry.schema) : entry.schema;
+      const reply = await node.rawCall("GET", `/api/schema/${encodeURIComponent(name)}`);
+      const root = reply.json as { data?: unknown };
+      const value = (root?.data ?? root) as { schema?: unknown };
+      const installed = (value?.schema ?? value) as SchemaDefinition & { field_mappers?: Record<string, unknown> };
+      if (reply.status !== 200 || !installed?.independent_fields || installed.owner_app_id !== OWNER_APP_ID
+        || installed.descriptive_name !== expected.descriptive_name || installed.schema_type !== expected.schema_type
+        || stable([installed.key?.hash_field, installed.key?.range_field ?? null]) !== stable([expected.key.hash_field, expected.key.range_field ?? null])
+        || !Array.isArray(installed.fields) || stable([...installed.fields].sort()) !== stable([...expected.fields].sort())
+        || stable(namedKeys(installed.alternate_keys)) !== stable(namedKeys(expected.alternate_keys))
+        || Object.keys(installed.field_mappers ?? {}).length) {
+        throw new Error("The installed schema differs from the app's owned fields or named key layout");
       }
-    }
-
-    // Identity first, and for ALL SEVEN pinned keys — including the four
-    // membership/projection indexes that `resolveLoadedSchema` and
-    // `probeSchemaWritable` structurally cannot be called for (both are keyed on
-    // `RecordType`). Asked before writability because it is the more fundamental
-    // question: a pin that addresses the WRONG record type is not a weaker
-    // version of the right one, and "your milestone_cards pin points at the
-    // Milestone entity" beats any diagnosis derived from its field set.
-    //
-    // For the three RecordTypes this is subsumed by the resolution check below
-    // (a wrong-identity hash cannot appear in `compatible`), and it still runs on
-    // them deliberately: a check whose coverage depends on which loop a key
-    // happens to sit in is exactly the shape that let the primary's mispinned
-    // `milestone_cards` sit unreported. Uniform is cheap; selective is how blind
-    // spots get re-introduced.
-    for (const entry of allPinnedSchemas()) {
-      const configHash = cfg.schemaHashes[entry.key];
-      const identity = checkPinnedSchemaIdentity(entry, configHash, loaded);
-      // Does the loop below already report this key's unset/not-loaded state?
-      // Only the three RecordTypes are in `UNIQUE_SCHEMAS`, and for those its
-      // message is the better one (it names the remedy). Computed rather than
-      // assumed so that moving a key between the two lists cannot silently drop
-      // its coverage — the failure mode being repaired here in the first place.
-      const reportedBelow = UNIQUE_SCHEMAS.some((u) => (u.key as string) === entry.key);
-      if (identity.kind === "mismatch") {
-        if (isAcceptedPinDeviation(cfg.acceptedSchemaPinIdentities, entry.key, configHash, identity)) {
-          // Acknowledged deviation: report it every run, never fail on it.
-          //
-          // The condition is real and the check is right — but on a node whose
-          // only remedy is a data migration, and where `assertNoSilentSchemaRepin`
-          // correctly refuses to re-point the pin, a red here is one no operator
-          // action can clear. That is the failure mode this file already names
-          // twenty lines down: a permanent ✗ trains operators to ignore ✗, and
-          // the next REAL mismatch arrives into a doctor that already exits 1.
-          //
-          // Still printed in full, because "accepted" must not mean "hidden" —
-          // the acknowledgement narrows what is waived to one exact pair, and
-          // any other divergence on this key is still a fresh red.
-          info(
-            `${entry.key} pin identity — ACCEPTED DEVIATION`,
-            `config pins ${configHash}, registered as "${identity.loadedDescriptiveName}"` +
-              ` rather than ${entry.schema.schema.descriptive_name}` +
-              ` (${formatSchemaIdentityMismatch(identity)}).` +
-              ` Acknowledged in config via acceptedSchemaPinIdentities["${entry.key}"];` +
-              ` remove that entry to restore the check.`,
-          );
-        } else {
-          check(
-            false,
-            `${entry.key} pin identity`,
-            `config pins ${configHash}, which the node has registered as a DIFFERENT schema` +
-              ` — ${formatSchemaIdentityMismatch(identity)}. Reads and writes through this pin address` +
-              ` "${identity.loadedDescriptiveName}", not ${entry.schema.schema.descriptive_name}.` +
-              ` If this is the accepted state of this node (the rows are read and written` +
-              ` consistently through this pin and re-pointing it would orphan them), record it:` +
-              ` acceptedSchemaPinIdentities: { "${entry.key}":` +
-              ` { "hash": "${configHash}", "registeredAs": "${identity.loadedDescriptiveName}" } }`,
-          );
-        }
-      } else if (identity.kind === "ok") {
-        // A stale acknowledgement is cruft that outlives its reason, and this
-        // seat keeps finding suppressions nobody revisited. Say so the run it
-        // stops being needed, rather than leaving a waiver in place for a
-        // mismatch that no longer exists.
-        if (cfg.acceptedSchemaPinIdentities?.[entry.key]) {
-          info(
-            `${entry.key} pin identity acknowledgement is stale`,
-            `the pin now matches ${entry.schema.schema.descriptive_name};` +
-              ` remove acceptedSchemaPinIdentities["${entry.key}"] from config`,
-          );
-        }
-        check(true, `${entry.key} pin identity`, entry.schema.schema.descriptive_name);
-      } else if (identity.kind === "not_loaded" && !reportedBelow) {
-        // An extra-schema pin that points at nothing the node has loaded. Every
-        // read and write through it fails, and until now NOTHING in doctor said
-        // so for these four keys.
-        check(
-          false,
-          `${entry.key} pin identity`,
-          `config hash ${configHash} is not loaded on the node — run \`kanban init\``,
-        );
-      } else if (identity.kind === "unset" && !reportedBelow) {
-        // NOT a failure. An unpinned index is a supported degraded mode, not a
-        // broken one: `boardCardsHash`/`milestoneCardsHash` return null and their
-        // callers fall back to the unindexed path. Red here would fail doctor on
-        // every config predating a catalog entry — a red whose only cause is an
-        // optional feature being off is how doctors get ignored (the lesson
-        // already written into the resolution check below).
-        info(`${entry.key} not pinned`, "index unused — reads fall back to the unindexed path");
-      }
-
-      // WRITE-PROBE the five index pins. Deliberately OUTSIDE the if/else chain
-      // above: the first cut of this sat inside one of its arms, which put it on
-      // the `not_loaded` branch — a branch that by definition never runs for a
-      // pin that IS loaded — so doctor printed three write-probes and no index
-      // ones, exactly the shape of coverage-that-never-fires this seat keeps
-      // finding. `doctor-index-write-probe-wiring.test.ts` is the guard.
-      //
-      // `!reportedBelow` is COMPUTED from `UNIQUE_SCHEMAS` (not hard-coded), so
-      // each key is probed exactly once and moving a key between the two lists
-      // can neither drop nor double its coverage.
-      //
-      // Only when identity is `ok`: probing a pin that addresses a DIFFERENT
-      // record type answers a question nobody asked. A membership index is a
-      // field superset of the entity it indexes by construction, so a crossed
-      // pin accepts the write happily and would print a green write-probe
-      // directly under the red that matters.
-      if (identity.kind === "ok" && !reportedBelow) {
-        const probe = await probeSchemaWritable(node, configHash!, entry);
-        check(
-          probe.writable,
-          `${entry.key} write-probe`,
-          probe.writable
-            ? "create+delete of an all-fields record round-tripped" +
-                (probe.leaked ? ` — but the probe row LEAKED: ${probe.leaked}` : "")
-            : `node rejected a write of all fields — ${probe.reason}`,
-        );
-        if (probe.writable && probe.leaked) {
-          // Not a failure of the thing being checked, and not silent either: the
-          // probe writes its own partition, which every read of these four
-          // indexes is scoped away from, so nothing will ever reap it.
-          info(
-            `${entry.key} probe row left behind`,
-            `key ${WRITE_PROBE_SLUG} in schema ${configHash} — inert (no read addresses that partition) but not self-healing`,
-          );
-        }
-      }
-    }
-
-    for (const entry of UNIQUE_SCHEMAS) {
-      const descriptive = entry.schema.schema.descriptive_name;
-      const configHash = cfg.schemaHashes[entry.key];
-      const match = loaded.find((s) => s.name === configHash);
-      const resolution = resolveLoadedSchema(entry.key, loaded);
-
-      if (!match) {
-        check(false, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, `config hash ${configHash ?? "(unset)"} not loaded on node`);
-        continue;
-      }
-      // The config hash IS loaded. Is it A write-compatible version?
-      //
-      // NOT "is it the one the resolver picked". Several loaded schemas can be
-      // write-compatible at once (measured: four of the six `fkanban/Card`
-      // schemas on the primary), and every one of them accepts a full-field
-      // write, so pinning any of them is correct. Comparing against the single
-      // ranked pick turned a tiebreak into a hard FAIL: the 2026-07-30T21:58Z
-      // restart reordered the node's listing, the pick moved from the configured
-      // 23-field hash to an equally-writable 19-field one, and `doctor` exited 1
-      // over a board that had never lost a write — advising `kanban init`, which
-      // declares BY DEFINITION and hands the same configured hash straight back.
-      // A red no operator action can clear is how doctors get ignored.
-      const pinnedIsWritable =
-        resolution.kind === "ok" && resolution.compatible.includes(configHash!);
-      if (resolution.kind === "ok" && !pinnedIsWritable) {
-        check(
-          false,
-          `${OWNER_APP_ID}/${descriptive} config hash is the writable version`,
-          `config is pinned to ${configHash} but the node's write-compatible ${descriptive} is ${resolution.hash} — run \`kanban init\` to adopt it`,
-        );
-      } else {
-        check(true, `${OWNER_APP_ID}/${descriptive} loaded + matches config`, configHash);
-      }
-
-      // Ambiguity is a real finding, not a detail to drop: several loaded schemas
-      // share this identity AND all accept a full-field write, so the resolver
-      // has no principled reason to prefer one. It is informational (never flips
-      // `ok`) precisely BECAUSE the pinned hash being among them is fine — but it
-      // is worth saying out loud, since stale identities holding records are how
-      // writes end up spread across more than one version of a record type.
-      if (resolution.kind === "ok" && resolution.ambiguous) {
-        info(
-          `${OWNER_APP_ID}/${descriptive} resolution is ambiguous`,
-          `${resolution.compatible.length} loaded schemas match ${descriptive} and all accept a full-field write` +
-            ` — ranked pick ${resolution.hash} (widest field set, then hash)` +
-            `; config pins ${configHash}${pinnedIsWritable ? " (write-compatible)" : ""}`,
-        );
-      }
-
-      // Write-probe the configured hash — the actual "can the board be written?"
-      // signal. A red here is the #94 outage made visible (instead of a green
-      // doctor over a write-broken board).
-      //
-      // This runs even when the resolution check above FAILED. It used to
-      // `continue` past it, which meant a schema whose resolution looked wrong
-      // never got the one check that answers the question that matters — so a
-      // FALSE resolution failure silently disabled the real #94 detector for
-      // that schema. The configured hash is what every write actually targets,
-      // so probing it is most valuable precisely when resolution is in doubt.
-      const probe = await probeSchemaWritable(node, configHash!, entry);
-      check(
-        probe.writable,
-        `${OWNER_APP_ID}/${descriptive} write-probe`,
-        probe.writable
-          ? "create+delete of an all-fields record round-tripped" +
-              (probe.leaked ? ` — but the probe row LEAKED: ${probe.leaked}` : "")
-          : `node rejected a write of all fields — ${probe.reason}`,
-      );
-    }
-  } catch (err) {
-    if (queryRoundTrip !== null && isSocketModeSchemaListMiss(err)) {
-      info("schema list control-plane unavailable (socket mode)", socketModeSchemaListDetail(queryRoundTrip));
-    } else {
-      const detail = formatDoctorError(err);
-      check(false, "node schema list", detail);
-    }
-  }
-
-  if (queryRoundTrip !== null) {
-    check(true, "query round-trip", `${queryRoundTrip.cards} cards, ${queryRoundTrip.boards} boards`);
-  } else {
-    try {
-      const boards = await listBoards(node, cfg);
-      const cards = await listCards(node, cfg, { boards });
-      boardSet = boards;
-      cardSet = cards;
-      check(true, "query round-trip", `${cards.length} cards, ${boards.length} boards`);
-    } catch (err) {
-      check(false, "query round-trip", formatDoctorError(err));
-    }
-  }
-
-  // Membership-index key layout (BoardCards must partition by board, not
-  // milestone). Catalog expand that rewrites hash_field empties list scrapers.
-  // Hard-fail so LaunchAgents can refuse to start Factory/list pollers.
-  if (typeof node.getSchema === "function") {
-    for (const exp of MEMBERSHIP_KEY_EXPECTATIONS) {
-      const hash = cfg.schemaHashes[exp.configKey];
-      if (!hash) {
-        info(
-          `${exp.label} key layout`,
-          `config hash unset — run \`kanban init\` to declare ${exp.configKey}`,
-        );
-        continue;
-      }
-      try {
-        const detail = await node.getSchema(hash);
-        const result = checkMembershipKeyLayout(
-          {
-            schema_type: detail.schema_type,
-            hash_field: detail.key.hash_field,
-            range_field: detail.key.range_field,
-          },
-          exp.expected,
-          exp.alsoAccepts ?? [],
-        );
-        const live = `${detail.schema_type} key=${detail.key.hash_field}/${
-          detail.key.range_field ?? "—"
-        }`;
-        if (result.ok && result.note) {
-          // Accepted, but NOT as a plain pass. This used to render
-          //   ✓ BoardCards key layout (hash_field=board) — HashRange key=milestone/sk
-          // a green line naming one hash field in its title and a different one
-          // in its detail, which reads as "layout is board" to anyone skimming.
-          // The disagreement is designed (multi-key expand) and it decides which
-          // rows every read of this index returns, so it gets its own voice
-          // rather than being hidden inside a ✓.
-          info(`${exp.label} key layout — ${live}`, result.note);
-        } else {
-          check(
-            result.ok,
-            `${exp.label} key layout (hash_field=${exp.expected.hash_field})`,
-            result.ok ? live : result.reason,
-          );
-        }
-      } catch (err) {
-        check(
-          false,
-          `${exp.label} key layout (hash_field=${exp.expected.hash_field})`,
-          formatDoctorError(err),
-        );
-      }
-    }
-  } else {
-    info("membership key layout checks skipped", "node client has no getSchema");
-  }
-
-  // BoardCards projection parity — the check that catches silent row loss.
-  //
-  // Key layout above is metadata; this is behaviour, and behaviour is what the
-  // board actually serves. Two things it proves that nothing else does:
-  //
-  //   1. The board partition ANSWERS. That is the real question the key-layout
-  //      check was reaching for, and it survives a multi-key expand that moves
-  //      the catalog's reported hash_field.
-  //   2. The wide projection sees every row the spine sees. LastDB drops a row
-  //      from a result set when the field LEADING the projection has no atom on
-  //      it — with no error — so a card can fall out of list/pickup/overlap
-  //      while every other check stays green. On 2026-07-30 that was 58 rows on
-  //      the live board, and `board-cards-heal` reported missing_card: 0 because
-  //      it was reading through the same lossy projection.
-  //
-  // The baseline is `listBoardCardsPartitionComplete`, NOT the spine. Comparing
-  // the wide read against the spine compared two filtered reads and called their
-  // agreement clean: both are gated by their own leading field (`board` and
-  // `slug`), so a row carrying neither is missing from both sides of the
-  // subtraction and nets to zero. That is how `todo#00007777#debug-protein` — a
-  // Card-less row with one `title` atom — sat in the live `default` partition
-  // under a green "spine agrees". A check whose two inputs share the blind spot
-  // it is looking for cannot report the failure; the union over leading fields
-  // is the only input here that is not itself a projection.
-  const milestonesNamedByCards = new Set<string>();
-  // Boards whose BoardCards read did not happen or did not complete. The
-  // candidate list below is harvested from exactly that read, so a board in
-  // here is a board whose milestones are UNKNOWN — not a board with none.
-  //
-  // Without this the MilestoneCards check reported `no card names a milestone
-  // — nothing to check` whenever `board_cards` was unbound: a claim about the
-  // DATA, produced by a read that never ran. Found by the test for the
-  // NOT-CHECKED vocabulary rather than by inspection, which is the argument for
-  // asserting on what the operator reads.
-  const boardsWithUnharvestedCards: string[] = [];
-  try {
-    const boards = boardSet ?? (await listBoards(node, cfg));
-    for (const b of boards) {
-      const sweep = await sweepBoardCardsPartition(node, cfg, b.slug);
-      if (sweep === null) {
-        boardsWithUnharvestedCards.push(b.slug);
-        // One vocabulary for a coverage gap across all three indexes, so
-        // `doctor | grep 'NOT CHECKED'` is a complete answer to "what did this
-        // run not look at". It was three different phrasings, and the third one
-        // was a ✓.
-        info(
-          `BoardCards partition probe (${b.slug})`,
-          "NOT CHECKED — no `board_cards` schema hash in config; run `kanban init` to re-resolve the published schema hashes",
-        );
-        continue;
-      }
-      // A refused lead is a hole in the baseline, so parity below would be
-      // comparing the wide read against an enumeration that is itself short —
-      // and a parity check run on an incomplete baseline is the blind check
-      // this whole block replaced. Report the gap instead of a verdict.
-      //
-      // This is not hypothetical: the first sweep on the live primary found
-      // board `agent-dogfood-scratch` returning
-      // `HTTP 400 … laststore: corrupt: empty rec` for lead `column` while
-      // every other lead returned 0 rows. No kanban read leads with `column`,
-      // so that partition has looked empty and healthy to every check there is.
-      if (sweep.failedLeads.length > 0) {
-        boardsWithUnharvestedCards.push(b.slug);
-        check(
-          false,
-          `BoardCards projection parity (${b.slug})`,
-          `enumeration incomplete — node refused lead(s) ${
-            sweep.failedLeads.map((f) => f.field).join(", ")
-          }: ${sweep.failedLeads[0]!.error}`,
-        );
-        continue;
-      }
-      // Full write shape: doctor projection-parity compares product drop rate
-      // against the all-leads sweep (same contract as groom parity-check).
-      const wide = await listBoardCardsPartition(node, cfg, b.slug, {
-        fields: BOARD_CARDS_FIELDS,
-      });
-      if (wide === null) {
-        boardsWithUnharvestedCards.push(b.slug);
-        check(false, `BoardCards partition probe (${b.slug})`, "wide partition read returned no result");
-        continue;
-      }
-      // Free candidate list for the MilestoneCards parity check below: these
-      // Cards are already in hand, and every one that names a milestone names a
-      // partition worth checking. It is a CANDIDATE list, not truth — this read
-      // is itself the lossy one under test, so a milestone only reachable
-      // through a dropped row will not appear here. That gap is the reason the
-      // check below reports a lower bound and says so.
-      for (const c of wide) {
-        const ms = c.milestone ?? "";
-        if (ms.length > 0) milestonesNamedByCards.add(ms);
-      }
-      // A flagged row is not yet a finding. The sweep and the wide read above
-      // straddle live traffic — pickup, groom and the papercut routines write
-      // continuously, and `rank` is write-new-sk + delete-old-sk — so a row
-      // deleted between them is in the sweep and absent from the wide read,
-      // which is exactly the shape of a row the gate denied. Confirmed
-      // 2026-08-04 on rows that CANNOT be gated (all 24 fields written, one
-      // deleted mid-check, `scripts/probe-parity-delete-race-constructed.ts`),
-      // after this check fired twice unprompted on the live board that morning
-      // and was green four minutes later.
-      //
-      // `parityWithConfirmation` looks again and accuses only rows that held
-      // still, on the slug set rather than a difference of totals. The second
-      // sweep runs only when the first pass flagged something.
-      const { parity, moved, confirmed } = await parityWithConfirmation({
-        firstSweep: sweep.rows,
-        wideSlugs: new Set(wide.map((c) => c.slug)),
-        wideRows: wide.length,
-        resweep: () => sweepBoardCardsPartition(node, cfg, b.slug),
-      });
-      reportPartitionChurn(info, "BoardCards", b.slug, moved);
-      check(
-        parity.ok,
-        `BoardCards projection parity (${b.slug})`,
-        parity.ok
-          ? `${parity.rows} rows, every lead agrees`
-          : unconfirmedSuffix(parity.reason, confirmed),
-      );
-    }
-  } catch (err) {
-    // The board list itself failed, so not one card was harvested and the
-    // candidate set below is empty for a reason that has nothing to do with
-    // milestones.
-    boardsWithUnharvestedCards.push("<board list unavailable>");
-    check(false, "BoardCards projection parity", formatDoctorError(err));
-  }
-
-  // ---- the SAME failure, on the two indexes that had no parity check --------
-  //
-  // `checkProjectionParity` existed for two months with exactly one call site
-  // (BoardCards, above). `BoardMilestones` and `MilestoneCards` got a key-layout
-  // check — metadata — and nothing that reads a row. So the one failure mode
-  // that produces NO error, on the two indexes whose loss is hardest to notice,
-  // was unmeasured.
-  //
-  // Both display reads lead with their own partition key: `board` for
-  // BoardMilestones, `milestone` for MilestoneCards. That field is a payload
-  // COPY of the key, not the key — a row whose copy did not persist is still
-  // addressable, still returned under every other lead, and invisible to the
-  // read the product actually serves from. The spine reads deliberately lead
-  // with `slug` instead, and `listMilestoneCardsPartitionSpine`'s own doc
-  // already recorded the effect (56 rows -> 49 when `milestone` is projected).
-  // Nothing asserted it, so it stayed a comment while the drift ran.
-  //
-  // Measured live 2026-08-03, before this check existed: MilestoneCards
-  // partition `lastdb-0231-read-regression-fixes` held 7 rows under a full
-  // per-lead sweep and returned 4 under the wide read.
-  //
-  // ## The baseline is the full sweep here too, because the cost objection was
-  //    measured on the wrong index
-  //
-  // This check spent four runs on a one-field `slug` spine, with a recorded
-  // justification: the honest baseline is the per-lead sweep, but it "costs
-  // ~780ms per partition; across the milestone partitions on this board it
-  // would turn an 8s doctor into a 40s one." That number came from BoardCards'
-  // 123-row `default` partition and was never measured on either milestone
-  // index. Measured on the live primary 2026-08-04
-  // (`scripts/probe-milestone-parity-baseline-cost.ts`):
-  //
-  //   BoardMilestones  2 partitions, 17 leads:   201ms →  584ms   (2.9x)
-  //   MilestoneCards  19 partitions, 24 leads:   554ms → 1787ms   (3.2x)
-  //
-  // ~1.8s total, not 32s — the leads run pooled, and a one-field projection is
-  // the cheapest read the node serves. The estimate was wrong by an order of
-  // magnitude and it was blocking a correctness fix, which is the argument for
-  // measuring a constant before letting it decide something.
-  //
-  // What the sweep buys: the spine is blind to a row carrying neither `slug`
-  // nor the hash field — missing from BOTH sides of the subtraction, netting to
-  // zero, reported as clean. That is the same shape as the BoardCards bug this
-  // whole block was written for. The passing line can now say `every lead
-  // agrees` and mean it.
-  try {
-    const boards = boardSet ?? (await listBoards(node, cfg));
-    for (const b of boards) {
-      const sweep = await sweepBoardMilestonesPartition(node, cfg, b.slug);
-      if (sweep === null) {
-        // "or partition unreadable" used to be in this line and could not
-        // happen: `sweepBoardMilestonesPartition` returns null ONLY on an
-        // unresolvable schema hash — a read that fails comes back in
-        // `failedLeads` and is reported as a ✗ immediately below. A skip line
-        // that overstates what it is tolerating is the same defect as a verdict
-        // that overstates what it checked, one register quieter.
-        info(
-          `BoardMilestones projection parity (${b.slug})`,
-          "NOT CHECKED — no `board_milestones` schema hash in config; run `kanban init` to re-resolve the published schema hashes",
-        );
-        continue;
-      }
-      // A refused lead means the enumeration is short by exactly that lead, so
-      // parity below would compare the wide read against an incomplete
-      // baseline — the blind check this block replaced. Report the gap.
-      if (sweep.failedLeads.length > 0) {
-        check(
-          false,
-          `BoardMilestones projection parity (${b.slug})`,
-          `enumeration incomplete — node refused lead(s) ${
-            sweep.failedLeads.map((f) => f.field).join(", ")
-          }: ${sweep.failedLeads[0]!.error}`,
-        );
-        continue;
-      }
-      const wide = await listBoardMilestonesPartition(node, cfg, b.slug);
-      if (wide === null) {
-        check(false, `BoardMilestones projection parity (${b.slug})`, "wide partition read returned no result");
-        continue;
-      }
-      // Same delete-race, same remedy-that-writes. This index sweeps 17 leads
-      // across 2 partitions (~584ms measured), so the confirmation re-sweep is
-      // the cheapest of the three — and it only runs on a flagged pass.
-      const { parity, moved, confirmed } = await parityWithConfirmation({
-        firstSweep: sweep.rows,
-        wideSlugs: new Set(wide.map((m) => m.slug)),
-        wideRows: wide.length,
-        resweep: () => sweepBoardMilestonesPartition(node, cfg, b.slug),
-        remedy: `run \`kanban milestone reconcile <slug>\` for the affected milestone(s)`,
-      });
-      reportPartitionChurn(info, "BoardMilestones", b.slug, moved);
-      check(
-        parity.ok,
-        `BoardMilestones projection parity (${b.slug})`,
-        parity.ok
-          ? `${parity.rows} rows, every lead agrees`
-          : unconfirmedSuffix(parity.reason, confirmed),
-      );
-    }
-  } catch (err) {
-    check(false, "BoardMilestones projection parity", formatDoctorError(err));
-  }
-
-  // MilestoneCards: one partition per milestone, so this is checked only for
-  // milestones some card actually names — a partition nothing points at has no
-  // row for the product to lose. The candidate set came free from the board
-  // reads above; the cost here is 2 keyed partition reads per candidate, fanned
-  // out at the partition width, not a sweep and not a scan.
-  try {
-    const candidates = [...milestonesNamedByCards].sort();
-    if (candidates.length === 0 && boardsWithUnharvestedCards.length > 0) {
-      // "No card names a milestone" is a claim about the DATA. It may only be
-      // made from a read that happened. When the harvest above was skipped or
-      // incomplete, the honest report is that the answer is unknown — the same
-      // distinction the `unreadable` arm below draws between "no drift" and "no
-      // read", one level further up the dependency chain.
-      info(
-        "MilestoneCards projection parity",
-        `NOT CHECKED — the candidate list could not be harvested: BoardCards was not read for ${
-          boardsWithUnharvestedCards.slice(0, 3).join(", ")
-        }, so whether any card names a milestone is unknown`,
-      );
-    } else if (candidates.length === 0) {
-      info("MilestoneCards projection parity", "no card names a milestone — nothing to check");
-    } else {
-      const results = await mapWithConcurrency(
-        candidates,
-        async (ms) => {
-          const sweep = await sweepMilestoneCardsPartition(node, cfg, ms);
-          if (sweep === null) return { ms, skipped: true as const };
-          // Short by exactly the refused lead(s) — not a baseline anything may
-          // be compared against, and not a clean result either.
-          if (sweep.failedLeads.length > 0) {
-            return { ms, refused: sweep.failedLeads };
-          }
-          const wide = await listMilestoneCardsPartition(node, cfg, ms);
-          if (wide === null) return { ms, unreadable: true as const };
-          // Confirmation happens per partition, inside the fan-out, so the
-          // re-sweeps run at the same concurrency as the first pass and only
-          // for the partitions that flagged. A board with no drift adds nothing.
-          const confirmation = await parityWithConfirmation({
-            firstSweep: sweep.rows,
-            wideSlugs: new Set(wide.map((c) => c.slug)),
-            wideRows: wide.length,
-            resweep: () => sweepMilestoneCardsPartition(node, cfg, ms),
-          });
-          return {
-            ms,
-            spine: wide.length + (confirmation.parity.ok ? 0 : confirmation.parity.dropped),
-            wide: wide.length,
-            parity: confirmation.parity,
-            moved: confirmation.moved,
-            confirmed: confirmation.confirmed,
-          };
-        },
-        PARTITION_READ_CONCURRENCY,
-      );
-
-      const refused = results.filter((r) => "refused" in r) as Array<{
-        ms: string;
-        refused: ReadonlyArray<{ field: string; error: string }>;
-      }>;
-      const unreadable = results.filter((r) => "unreadable" in r).map((r) => r.ms);
-      // Partitions the sweep declined to open at all. Until 2026-08-05 these
-      // were dropped by all three filters below and left NO trace: nothing
-      // counted them, nothing printed them, and the verdict fell through to the
-      // success arm rendering `measured.length` as its coverage. With
-      // `milestone_cards` unpinned that is every candidate, and doctor printed
-      //
-      //   ✓ MilestoneCards projection parity — 0 rows across 0 milestone
-      //     partition(s), every lead agrees
-      //
-      // — "every lead agrees" over zero leads, as a PASS, on an index nothing
-      // read. The sibling indexes above never had this shape because they skip
-      // with a `continue` AT the call site, so their skip IS the printed line;
-      // this one folds its skips into an aggregate that had no slot for them.
-      //
-      // Not a red: `doctor` treats an unpinned index as a supported degraded
-      // mode (see the `identity.kind === "unset"` arm), and a red no operator
-      // action can clear is how doctors get ignored. `groom parity-check` DOES
-      // go red on the same state, and correctly — refusing to check parity is
-      // its one job. What is removed here is the false claim, not the verdict.
-      const skipped = results.filter((r) => "skipped" in r).map((r) => r.ms);
-      const skipReason = milestoneCardsHash(cfg) === null
-        ? "no `milestone_cards` schema hash in config — the index was not enumerated; run `kanban init` to re-resolve the published schema hashes"
-        : "the sweep declined the partition key";
-      const measured = results.filter(
-        (r): r is {
-          ms: string;
-          spine: number;
-          wide: number;
-          parity: ProjectionParityResult;
-          moved: string[];
-          confirmed: boolean;
-        } => "parity" in r,
-      );
-      for (const r of measured) reportPartitionChurn(info, "MilestoneCards", r.ms, r.moved);
-      const bad = measured.filter((r) => !r.parity.ok);
-
-      // A partition nobody could read is not a partition with no drift. Report
-      // it as a failure rather than letting the readable majority vouch for it
-      // — the same rule `listAllBoardMilestones` had to learn.
-      if (refused.length > 0) {
-        check(
-          false,
-          "MilestoneCards projection parity",
-          `${refused.length} partition(s) could not be fully enumerated — node refused lead(s) ${
-            refused[0]!.refused.map((f) => f.field).join(", ")
-          } on ${refused[0]!.ms}: ${refused[0]!.refused[0]!.error}`,
-        );
-      } else if (unreadable.length > 0) {
-        check(
-          false,
-          "MilestoneCards projection parity",
-          `${unreadable.length} partition(s) could not be read, so their row sets are unknown: ${
-            unreadable.slice(0, 3).join(", ")
-          }`,
-        );
-      } else if (bad.length > 0) {
-        const totalDropped = bad.reduce(
-          (n, r) => n + (r.parity.ok ? 0 : r.parity.dropped),
-          0,
-        );
-        check(
-          false,
-          "MilestoneCards projection parity",
-          unconfirmedSuffix(
-            `${totalDropped} row(s) across ${bad.length} of ${measured.length} milestone partition(s) are invisible to the wide read ` +
-              // Named from the field list the read actually passes, not from
-              // this index's hash field: `MILESTONE_CARDS_PAYLOAD_FIELDS`
-              // deliberately excludes `milestone`, which under HASH-ELSE-LEAD
-              // moves the gate to the leading field. Saying `milestone` here
-              // sent operators after an atom the read does not mind.
-              `(no atom for \`${
-                projectionGateField([...MILESTONE_CARDS_PAYLOAD_FIELDS], "milestone") ?? "?"
-              }\`, the field this read is gated on) — e.g. ${
-                bad.slice(0, 3).map((r) => `${r.ms} (${r.wide} of ${r.spine})`).join(", ")
-              } — run \`kanban milestone reconcile <slug>\` on each`,
-            // Confirmed only if EVERY flagged partition got a complete second
-            // sweep. One partition that could not be re-read makes the
-            // aggregate a suspicion, and the aggregate is what the operator acts on.
-            bad.every((r) => r.confirmed),
-          ),
-        );
-      } else if (measured.length === 0) {
-        // Nothing was opened, so there is no verdict to give. Reported as a
-        // skip in the same voice the two indexes above use, rather than as a ✓.
-        info(
-          "MilestoneCards projection parity",
-          `NOT CHECKED — ${skipped.length} milestone partition(s) skipped: ${skipReason}`,
-        );
-      } else {
-        const rows = measured.reduce((n, r) => n + r.wide, 0);
-        check(
-          true,
-          "MilestoneCards projection parity",
-          `${rows} rows across ${measured.length} milestone partition(s), every lead agrees` +
-            // The mixed case, and the reason the guard above is not enough on
-            // its own: `measured.length` is the count of partitions that were
-            // READ, and on its own it reads as the count that EXISTS. A
-            // candidate the sweep declined has to be named here or the readable
-            // majority silently vouches for it — the rule
-            // `listAllBoardMilestones` and the `unreadable` arm above already
-            // had to learn.
-            (skipped.length > 0
-              ? ` — ${skipped.length} further candidate partition(s) NOT checked (${skipReason}): ${
-                skipped.slice(0, 3).map((m) => JSON.stringify(m)).join(", ")
-              }`
-              : "") +
-            // A partially harvested candidate list makes this a LOWER BOUND on
-            // coverage, not a clean bill for the index: a milestone named only
-            // by cards on an unread board was never a candidate at all.
-            (boardsWithUnharvestedCards.length > 0
-              ? ` — candidate list INCOMPLETE: BoardCards was not read for ${
-                boardsWithUnharvestedCards.slice(0, 3).join(", ")
-              }, so milestones named only there were never checked`
-              : ""),
-        );
-      }
-    }
-  } catch (err) {
-    check(false, "MilestoneCards projection parity", formatDoctorError(err));
-  }
-
-  // Multi-field Card smoke: point-read one live card and require more than slug.
-  // Slug-only projection was the 2026-07-24 Mini degradation signature.
-  try {
-    // One live card slug is all this needs; re-listing the whole board to find
-    // one was the single largest avoidable read in doctor.
-    const sample = (cardSet ?? (await listCards(node, cfg))).find((c) => c.slug);
-    if (!sample) {
-      info("card multi-field smoke", "no cards to sample");
-    } else {
-      const full = await findCard(node, cfg, sample.slug);
-      if (!full) {
-        check(
-          false,
-          "card multi-field smoke",
-          `show/findCard missed slug ${sample.slug} (list thin row existed) — Mini may be degraded; do not run list scrapers that heal BoardCards`,
-        );
-      } else {
-        const hasShape =
-          (full.title && full.title.length > 0) ||
-          (full.board && full.board.length > 0) ||
-          (full.column && full.column.length > 0);
-        check(
-          Boolean(hasShape),
-          "card multi-field smoke",
-          hasShape
-            ? `${full.slug} has title/board/column`
-            : `${full.slug} returned slug-only projection (title/board/column empty) — Mini field join may be broken`,
-        );
-      }
-    }
-  } catch (err) {
-    check(false, "card multi-field smoke", formatDoctorError(err));
-  }
-
-  // Informational only — surface the MCP entrypoint + the exact, shim-aware
-  // `claude mcp add` command so a dev who just set up the CLI knows how to wire
-  // up the MCP half too. Never flips `ok` (matches the shim precedent): a
-  // missing/odd entrypoint is advisory, not a failure.
-  reportMcpEntrypoint(print, onCheck);
-
-  // Recent node rejections, from the durable sink. Advisory, never flips `ok`:
-  // the sink records deliberate probe failures alongside real client bugs (the
-  // BoardCards lead sweep a few checks above provokes some of them on purpose),
-  // so a count is a prompt to look, not a verdict.
-  //
-  // Printed HERE, at the end of the one command every operator and every
-  // chief-engineer run already types, because a durable record nothing surfaces
-  // is the same dead end as a stderr line nobody reads — which is exactly how
-  // the previous witness for these 400s went four hours without being found.
-  reportRecentRejections(print, onCheck);
-
+    } })),
+  ];
+  const results = await Promise.allSettled(tasks.map(task => task.run()));
+  results.forEach((result, index) => check(result.status === "fulfilled", tasks[index]!.name,
+    result.status === "rejected" ? formatDoctorError(result.reason) : undefined));
+  info("record membership", "LastDB maintains the named keys in each primary mutation.");
+  reportMcpEntrypoint(print, opts.onCheck);
+  reportRecentRejections(print, opts.onCheck);
   return ok;
 }
 
-async function reportStaleBoardCardRows(opts: {
-  node: NodeClient;
-  cfg: Config;
-  board: string;
-  check: (pass: boolean, label: string, detail?: string) => void;
-  info: (label: string, detail?: string) => void;
-}): Promise<void> {
-  const schemaHash = boardCardsHash(opts.cfg);
-  if (!schemaHash) {
-    opts.check(false, "stale BoardCards rows", "board_cards schema hash missing; run kanban init");
-    return;
-  }
-  const boardRec = await findBoard(opts.node, opts.cfg, opts.board);
-  const columns = boardRec?.columns?.length ? boardRec.columns : [...DEFAULT_COLUMNS];
-  const stale: Array<{ slug: string; listed: string; tip: string; sk: string }> = [];
-  for (const column of columns) {
-    const part = await listBoardCardsPartitionSpine(opts.node, opts.cfg, opts.board, { column });
-    if (!part) continue;
-    const bySlug = new Map<string, typeof part>();
-    for (const row of part) {
-      const group = bySlug.get(row.slug) ?? [];
-      group.push(row);
-      bySlug.set(row.slug, group);
-    }
-    const tips = await mapWithConcurrency([...bySlug.keys()], (slug) =>
-      findCard(opts.node, opts.cfg, slug),
-    );
-    for (const tip of tips) {
-      if (!tip) continue;
-      const rows = bySlug.get(tip.slug) ?? [];
-      for (const row of rows) {
-        if (tip.column && row.column && tip.column !== row.column) {
-          stale.push({ slug: tip.slug, listed: row.column, tip: tip.column, sk: row.sk });
-        }
-      }
-    }
-  }
-  if (stale.length === 0) {
-    opts.check(true, `stale BoardCards rows (${opts.board})`, "none");
-    return;
-  }
-  enqueueBoardCardJanitor(stale.map((row) => ({
-    schemaHash,
-    board: opts.board,
-    sk: row.sk,
-  })));
-  const healed = await sweepBoardCardJanitor(opts.node);
-  const sample = stale.slice(0, 5).map((s) => `${s.slug}:${s.listed}->${s.tip}`).join(", ");
-  opts.info(
-    `stale BoardCards rows (${opts.board})`,
-    `found=${stale.length} healed=${healed} ${sample}`,
-  );
-  opts.check(true, `stale BoardCards rows healed (${opts.board})`, `${healed} row(s)`);
-}
-
-/**
- * How many rejections doctor prints. Small on purpose: the file is a tail, and
- * a doctor run that dumps hundreds of lines is one whose real ✗ scrolls away.
- */
 const REJECTION_REPORT_LIMIT = 5;
 
 function reportRecentRejections(
@@ -1219,22 +145,6 @@ function formatDoctorError(err: unknown): string {
     return detail;
   }
   return err instanceof Error ? err.message : String(err);
-}
-
-function isSocketModeSchemaListMiss(err: unknown): boolean {
-  if (!(err instanceof FkanbanError)) return false;
-  if (err.code === "service_unreachable") return true;
-  return (
-    (err.code === "node_http_404" || err.code === "node_http_405") &&
-    err.message.includes("/api/schemas")
-  );
-}
-
-function socketModeSchemaListDetail(queryRoundTrip: { cards: number; boards: number }): string {
-  return (
-    "schema list requires the retired loopback TCP control-plane; unavailable in socket mode " +
-    `(expected: node is healthy; data-plane round-tripped ${queryRoundTrip.cards} cards, ${queryRoundTrip.boards} boards)`
-  );
 }
 
 // Resolve the MCP entrypoint `claude mcp add` would target and print it plus
@@ -1299,9 +209,7 @@ export function runningSourceRoot(): string {
 export function reportRunningBuild(
   check: (pass: boolean, label: string, detail?: string) => void,
   info: (label: string, detail?: string) => void,
-  // Tests pass a fixture root. Production callers must NOT: the default is the
-  // only value that answers "which tree is loaded right now", which is the
-  // question this check exists to ask.
+  // The default names the source tree loaded by this process.
   sourceRoot: string = runningSourceRoot(),
 ): void {
   const name = "running build is the installed build";
@@ -1379,8 +287,6 @@ export function resolveKanbanShim(): { name: "kanban" | "fkanban"; path: string 
  * `statSync` SUCCEED on embedded paths, so either would be a no-op that looks
  * like a guard (see the measurement in src/host_track.ts).
  *
- * `repoRoot` and `execPath` are parameters so both branches are reachable from
- * a test running in source mode; production callers pass the module's own root.
  */
 export function shimInstallHint(repoRoot: string, execPath: string = process.execPath): string {
   return isOnDisk(repoRoot)

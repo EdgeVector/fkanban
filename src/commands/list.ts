@@ -1,8 +1,8 @@
 // `fkanban list` — render a board (default board unless --board) as columns
 // of cards. Broad `--json` reads default to bounded body previews.
 
-import { FkanbanError, type NodeClient } from "../client.ts";
-import { multiKey } from "../multi-key.ts";
+import { type NodeClient } from "../client.ts";
+import { requireMultiKey } from "../multi-key.ts";
 import { namedColumnHeads } from "../named-column-heads.ts";
 import { type Config } from "../config.ts";
 import {
@@ -23,11 +23,9 @@ import {
 } from "../record.ts";
 import {
   headKeyId,
-  LIST_HEAD_SCHEMA_KEY,
-  readColumnHeads,
   type HeadAtom,
   type HeadCard,
-} from "../list-head.ts";
+} from "../column-window.ts";
 import {
   capPerColumn,
   previewCardBodies,
@@ -145,18 +143,6 @@ async function hydrateListedHeadCards(
     const truth = bySlug.get(card.slug);
     return truth ? mergeHeadDetail(card, truth) : card;
   });
-}
-
-function requireHeadHash(cfg: Config): string {
-  const hash = cfg.schemaHashes[LIST_HEAD_SCHEMA_KEY];
-  if (!hash) {
-    throw new FkanbanError({
-      code: "schema_not_configured",
-      message: "Column head schema is not registered.",
-      hint: "Run kanban init.",
-    });
-  }
-  return hash;
 }
 
 function cardFromHead(board: string, column: string, card: HeadCard): Card {
@@ -313,6 +299,7 @@ export type ListOptions = {
 export async function listResult(
   opts: ListOptions,
 ): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; partial: boolean; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
+  requireMultiKey(opts.cfg);
   const boardSlug = opts.board ?? "default";
   // An explicitly-passed board must exist — a typo'd name should error loudly
   // (matching `add`), not silently render an empty default-column board. The
@@ -336,10 +323,8 @@ export async function listResult(
   // Terminal map needs the board list; the footer needs the other boards' slugs.
   // Re-deriving either would be a second Board read for data already in hand.
   const boardsRead = listBoards(opts.node, opts.cfg);
-  // One exact key per column. A missing head is an empty column.
-  const headHash = multiKey(opts.cfg) ? "" : requireHeadHash(opts.cfg);
-  const readHeads = (keys: Parameters<typeof namedColumnHeads>[2]) => multiKey(opts.cfg)
-    ? namedColumnHeads(opts.node, opts.cfg, keys) : readColumnHeads(opts.node, headHash, keys);
+  // Each column uses its named key. The window is derived from current records.
+  const readHeads = (keys: Parameters<typeof namedColumnHeads>[2]) => namedColumnHeads(opts.node, opts.cfg, keys);
   const listedColumns = opts.column ? [opts.column] : [...DEFAULT_COLUMNS];
   const headsRead = readHeads(
     listedColumns.map((column) => ({ board: boardSlug, column })),
@@ -434,9 +419,9 @@ export async function listResult(
   // --json / --wide / --column (wide never shows the footer; column is a
   // focused view).
   //
-  // Other boards' column heads. A missing head counts as empty. A failed read
+  // Other boards' current column windows. A failed read
   // does not: the current board still renders, and the footer names the boards
-  // that were not read. readColumnHeads splits the keys into batches of 256.
+  // that were not read. Each requested column uses its own named key.
   let footer = "";
   if (!opts.column && !opts.json && !opts.wide) {
     const otherBoards = allBoards.filter((board) => board.slug !== boardSlug);

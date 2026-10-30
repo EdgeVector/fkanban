@@ -949,23 +949,16 @@ read, no schema resolution — and exits 0 iff the node answered. Use this for
 Flags:
   --json               machine-readable { ok, latency_ms, version, ... } report`),
 
-  doctor: withFooter(`fkanban doctor — health-check the local setup
+  doctor: withFooter(`fkanban doctor — check the local setup
 
 Usage:
   fkanban doctor [--json]
-  fkanban doctor --board default --stale-rows [--json]
 
-Verifies config, node reachability, and resolved schemas. Exits non-zero on
-any failed check.
-
-\`--stale-rows\` walks each column secondary on one board, drops BoardCards
-rows whose Card tip is another column, and deletes those known SKs. It does
-not scan.
+Verifies the config, node identity, API version, schema owner, fields, and
+named key layouts. This command makes no data changes. A failed check exits non-zero.
 
 Flags:
-  --json               machine-readable { ok, checks } report
-  --board <slug>       board for --stale-rows (default: default)
-  --stale-rows         list and heal stale BoardCards column rows`),
+  --json               machine-readable { ok, checks } report`),
 
   which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
@@ -1250,7 +1243,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // Bare `rm <slug>` deletes a live card. `--board`/`--column` switch to the
   // row-only orphan path: no Card, address the BoardCards row directly.
   rm: new Set(["board", "column"]),
-  doctor: new Set(["board", "stale-rows"]),
+  doctor: new Set([]),
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name", "accept-schema-repin"]),
   add: new Set([
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force", "create-only",
@@ -1498,7 +1491,6 @@ async function main(argv: string[]): Promise<number> {
         "allow-unclaimed": { type: "boolean" },
         check: { type: "boolean" },
         "group-by-milestone": { type: "boolean" },
-        "stale-rows": { type: "boolean" },
         "reap-stale-milestone-positions": { type: "boolean" },
       },
     });
@@ -1853,8 +1845,6 @@ async function dispatch(
       if (extra !== undefined) return extra;
       const doctorOpts = {
         verbose,
-        board: values.board as string | undefined,
-        staleRows: values["stale-rows"] === true,
       };
       if (values.json) {
         // Machine-readable: collect the structured report (no human ✓/✗ lines
