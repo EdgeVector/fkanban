@@ -104,3 +104,6 @@ It checks logical record membership, order, bodies, updates, and cursors.
 The historical layouts require complete key, value, current atom, and author checks across conversion and reopen.
 Physical database size may decrease. Logical record counts must remain correct.
 The primary does not participate in this check.
+
+Alternate-key requests, saved scopes, native receipts, and owned-layout comparisons use the exact Rust wire defaults.
+This keeps key fields, part order, formats, and missing-value behavior intact. Unknown properties and invalid types stop the operation.

@@ -1,4 +1,5 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { alternateKeyWire } from "./alternate-key-wire.ts";
 import { encodeFieldRequest, decodeFieldReply, localSchemaMetadata, type FieldAliasProfiles } from "./field-alias-transport.ts";
 import type { SchemaDefinition } from "./schemas.ts";
 // Typed HTTP wrappers for the LastDB node.
@@ -1264,6 +1265,7 @@ export function newNodeClient(opts: {
         await requireCanonicalHome();
         schema = canonicalSchema(local) as unknown as Record<string,unknown>;
       }
+      if (schema.alternate_keys !== undefined) schema = { ...schema, alternate_keys: alternateKeyWire(schema.alternate_keys) };
       const { status, body } = await callJson("/api/apps/declare-schema", "POST", {
         app_id: appId,
         schema,
