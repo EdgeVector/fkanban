@@ -218,7 +218,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     const config = await syncOwnedModel(node, {
       configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
       ...(nodeSocketPath ? { nodeSocketPath } : {}),
-    }, existing);
+    }, existing, canonicalVocabulary);
     writeConfig(config, configPath);
     await seedDefaultBoard(node, config, print);
     printNextSteps(print, bootstrapped || existing === null);

@@ -118,7 +118,7 @@ function takeCapped(sorted: readonly HeadCard[], column: string, keepSlug?: stri
   return [...kept, must].sort(compareHead);
 }
 
-function capComplete(cards: readonly HeadCard[], column: string, keepSlug?: string): HeadAtom {
+export function capComplete(cards: readonly HeadCard[], column: string, keepSlug?: string): HeadAtom {
   const sorted = [...cards].sort(compareHead);
   return {
     cards: takeCapped(sorted, column, keepSlug),

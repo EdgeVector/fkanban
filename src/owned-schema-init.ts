@@ -4,7 +4,7 @@ import type { Config } from "./config.ts";
 import { MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
 import { OWNER_APP_ID } from "./schemas.ts";
 
-export async function syncOwnedModel(node: NodeClient, base: Config, existing: Config | null): Promise<Config> {
+export async function syncOwnedModel(node: NodeClient, base: Config, existing: Config | null, canonicalVocabulary: boolean): Promise<Config> {
   const version = await node.rawCall("GET", "/api/version");
   const capabilities = (version.json as { capabilities?: Record<string, boolean> })?.capabilities;
   if (version.status !== 200 || !capabilities?.compound_alternate_keys_v1 || !capabilities.independent_hash_range_v1) {
@@ -34,6 +34,6 @@ export async function syncOwnedModel(node: NodeClient, base: Config, existing: C
     throw new FkanbanError({ code: "schema_pin_changed", message: "An owned schema address changed. The config remains unchanged." });
   }
   return { ...base, storageModel: MULTI_KEY_MODEL, schemaHashes,
-    schemaFieldAliases: Object.assign({}, ...resolved.map((entry) => profilesFor(entry.schema, [entry.identity, entry.runtime]))),
+    schemaFieldAliases: canonicalVocabulary ? Object.assign({}, ...resolved.map((entry) => profilesFor(entry.schema, [entry.identity, entry.runtime]))) : undefined,
   };
 }
