@@ -28,39 +28,17 @@ export type Config = {
   // owner-session attestation against an app-isolation node. When absent the
   // path is derived from LASTDB_HOME / FOLDDB_HOME (see `resolveSocketPath`).
   nodeSocketPath?: string;
-  // Card schema hash PROVEN (by a live write) to reject the optional card
-  // fields (CARD_OPTIONAL_SCHEMA_FIELDS). While it matches schemaHashes.card,
-  // card writes go straight to the legacy body-header shape instead of paying
-  // a failed full-shape mutation on every write (the node 500s on unknown
-  // fields; ~45% of all card mutations, 2026-07-17 request-ops investigation).
-  // Self-invalidates when the adopted card schema changes: a new hash means a
-  // new field set, so the memo no longer applies.
-  cardLegacyWriteHash?: string;
-  // Where this config was read from; never serialized. Lets a write-shape
-  // discovery persist without re-deriving the env-dependent path.
+  // The source config path is not serialized.
   configPath?: string;
   /**
    * When true, Kind:pr cards cannot enter todo/doing without a milestone.
-   * Loaded configs default this to true. Inline unit-test Config objects omit
-   * it (treated as false) so fixtures stay focused on their own invariants;
-   * tests that cover the guard set `enforceLivePrMilestone: true` explicitly.
+   * Loaded configs default this to true.
    */
   enforceLivePrMilestone?: boolean;
   /**
    * Operator acknowledgement that a pinned schema hash addresses a schema the
    * node registered under a DIFFERENT identity than the catalog declares, and
    * that this is the accepted state of this node rather than a defect to fix.
-   *
-   * Exists because the alternative is a red nobody can clear. On the primary,
-   * `milestone_cards` is pinned to a hash the node registered as `Milestone`
-   * (the multi-key expand put entity and index on one product). The rows are
-   * read and written consistently through that pin and are fine; the only
-   * remedy that would satisfy the identity check is a data migration on Tom's
-   * primary brain, and `assertNoSilentSchemaRepin` correctly REFUSES to
-   * re-point the pin. So doctor failed permanently on a condition no operator
-   * action could resolve — the exact shape this file already warns about:
-   * "a red whose only cause is an optional feature being off is how doctors
-   * get ignored".
    *
    * Scoped to the exact (hash, registeredAs) pair on purpose. Acknowledging
    * "milestone_cards may differ" would waive every future mismatch on that key;
@@ -177,23 +155,6 @@ export function writeConfig(
   writeConfigFile(path, JSON.stringify(persisted, null, 2) + "\n");
 }
 
-/**
- * Record that the currently adopted card schema rejects the optional card
- * fields, so every later process writes the legacy shape first instead of
- * failing a full-shape mutation per write. Best-effort: an unpersistable
- * config (read-only disk, test cfg with no configPath) still gets the
- * in-process memo and must never fail the card write that discovered it.
- */
-export function rememberCardLegacyWriteHash(cfg: Config, hash: string): void {
-  cfg.cardLegacyWriteHash = hash;
-  if (!cfg.configPath) return;
-  try {
-    writeConfig(cfg, cfg.configPath);
-  } catch {
-    /* in-process memo still applies */
-  }
-}
-
 export function schemaHashFor(
   type: RecordType,
   cfg: { schemaHashes: Record<string, string> },
@@ -246,14 +207,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
       ? (r.nodeSocketPath as string)
       : undefined;
 
-  const cardLegacyWriteHash =
-    typeof r.cardLegacyWriteHash === "string" && r.cardLegacyWriteHash.length > 0
-      ? (r.cardLegacyWriteHash as string)
-      : undefined;
-
-  // Default ON for real loaded configs; operators may set false in config.json
-  // to temporarily disable. Inline unit-test Config objects omit the field
-  // (undefined → not enforced) unless a test opts in explicitly.
+  // The loaded config enables the milestone rule unless the operator sets false.
   const enforceLivePrMilestone = r.enforceLivePrMilestone === false ? false : true;
 
   // Validated STRICTLY rather than coerced. This field's whole job is to
@@ -301,7 +255,6 @@ function assertConfigShape(path: string, raw: unknown): Config {
     schemaHashes,
     enforceLivePrMilestone,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
-    ...(cardLegacyWriteHash !== undefined ? { cardLegacyWriteHash } : {}),
     ...(acceptedSchemaPinIdentities !== undefined ? { acceptedSchemaPinIdentities } : {}),
   };
 }

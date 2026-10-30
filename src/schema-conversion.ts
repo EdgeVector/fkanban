@@ -107,7 +107,7 @@ export async function executeConversion(node: NodeClient, cfg: Config, path: str
       if (!current.independent_fields || !same(current.alternate_keys ?? {},request.alternate_keys)) fail("The published key layout differs.");
     }
     const schemaHashes=Object.fromEntries(plan.sources.flatMap(({entry})=>entry.keys.map((key)=>[key,cfg.schemaHashes[key]!])));
-    writeConfig({...cfg,cardLegacyWriteHash:undefined,storageModel:MULTI_KEY_MODEL,schemaHashes},path);
+    writeConfig({...cfg,storageModel:MULTI_KEY_MODEL,schemaHashes},path);
     report=await step("app_finish");
     return report;
   } catch(error) {

@@ -181,11 +181,11 @@ kanban list
 (Haven't installed the shim? Every `kanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
-If `init` reports `app_schema_declare_unsupported`, the node does not expose
-Mini's registered app-schema declaration route. Upgrade LastDB/FoldDB to a Mini
-build whose `/api/apps/declare-schema` resolves or registers every proposal
-with Schema Service; `--schema-service-url` is diagnostic because Mini owns the
-service call.
+Init requires a LastDB release with compound named keys and schema-owned values.
+An older installation needs the explicit `multi-key-convert` command first.
+Init does not convert existing data or change an accepted schema address.
+Mini resolves or registers each declaration with Schema Service.
+The `--schema-service-url` value is diagnostic because Mini owns that call.
 
 Schema synchronization has one executable transport: F-Kanban's node client
 calls Mini's `POST /api/apps/declare-schema` (normally through `kanban init`).

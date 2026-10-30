@@ -239,21 +239,15 @@ Options:
   --node-url <url>            base URL of the fold_db node (e.g. http://127.0.0.1)
   --schema-service-url <url>  schema_service URL recorded in config for diagnostics
   --node-socket-path <path>   unix socket of the node, instead of --node-url
-  --name <name>               display name to seed the default board with
-  --accept-schema-repin       adopt resolved schema hashes even when they differ
-                              from the ones config already pins. A schema hash is
-                              the ADDRESS of a record type: rows written under the
-                              old hash are invisible under the new one, and a
-                              re-pointed index reads exactly like an empty index.
-                              Without this flag init refuses and changes nothing.
+  --name <name>               node bootstrap identity
 
 Schema setup is orchestrated by the NODE through Mini's
 /api/apps/declare-schema route. The CLI does not contact --schema-service-url
 directly, but Mini must resolve or register every schema with Schema Service
 before returning its catalog identity. That URL is also recorded in
-~/.fkanban/config.json for diagnostics (it shows up in \`fkanban doctor\`). If
-init fails with app_schema_declare_unsupported, upgrade the node to a Mini
-build with registered app-schema declaration.
+~/.kanban/config.json for diagnostics. An older installation needs
+\`multi-key-convert\` before init can change its config. A node without
+compound named keys needs a compatible LastDB release.
 
 Example:
   fkanban init --node-url http://127.0.0.1 --name "Tom's board"`),
@@ -693,7 +687,6 @@ Usage:
   fkanban show <slug> [options]
 
 Options:
-  --canonical           exact Card state; skip the claim-placement overlay
   --json                machine-readable output
   --board <slug>        accepted as a compatibility no-op; card slugs are global
 
@@ -1204,7 +1197,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // row-only orphan path: no Card, address the BoardCards row directly.
   rm: new Set(["board", "column"]),
   doctor: new Set([]),
-  init: new Set(["node-url", "schema-service-url", "node-socket-path", "name", "accept-schema-repin"]),
+  init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
   add: new Set([
     "title", "board", "column", "assignee", "created-by", "tags", "deps", "replace-deps", "surfaces", "priority", "body", "force", "create-only",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
@@ -1233,7 +1226,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
-  show: new Set(["board", "canonical"]),
+  show: new Set(["board"]),
   // board's subcommands read title/columns/body (create) and force (rm).
   // --json-array is the legacy bare-array escape for board list.
   board: new Set(["title", "columns", "body", "force", "json-array"]),
@@ -1391,7 +1384,6 @@ async function main(argv: string[]): Promise<number> {
         "snapshot-sha256": { type: "string" },
         "claim-v2": { type: "boolean" },
         "create-only": { type: "boolean" },
-        canonical: { type: "boolean" },
         "created-by": { type: "string" },
         tags: { type: "string" },
         deps: { type: "string" },
@@ -1438,7 +1430,6 @@ async function main(argv: string[]): Promise<number> {
         "node-url": { type: "string" },
         "schema-service-url": { type: "string" },
         "node-socket-path": { type: "string" },
-        "accept-schema-repin": { type: "boolean" },
         "declare-link": { type: "boolean" },
         name: { type: "string" },
         worker: { type: "string" },
@@ -1588,7 +1579,6 @@ async function dispatch(
         schemaServiceUrl: values["schema-service-url"] as string | undefined,
         nodeSocketPath: values["node-socket-path"] as string | undefined,
         bootstrapName: values.name as string | undefined,
-        acceptSchemaRepin: values["accept-schema-repin"] === true,
         verbose,
       });
       return 0;
@@ -2717,7 +2707,6 @@ async function dispatch(
         slug,
         dbLocator: ambientDbLocator(values),
         json: values.json as boolean | undefined,
-        canonical: values.canonical as boolean | undefined,
       });
       console.log(out);
       return 0;
