@@ -649,7 +649,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     await updateCardRecord(opts, updated, opts.expectAssignee !== undefined
       ? { type: "value", field: "assignee", value: opts.expectAssignee } : undefined, existing);
     if (opts.expectAssignee !== undefined) {
-      return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column, membership_cleanup: "deferred" };
+      return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column, membership_cleanup: "native" };
     }
 
     // AFTER the write — see the note on the create path below.

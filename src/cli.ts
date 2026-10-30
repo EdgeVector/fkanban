@@ -25,9 +25,9 @@ import { loadAppCtx, loadCtx } from "./context.ts";
 import { convertMultiKey } from "./commands/multi-key-convert.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
-import { CREATE_ONLY_CONTRACT, CREATE_ONLY_CONTRACT_SHA256, OWNED_CREATE_ONLY_CONTRACT, OWNED_CREATE_ONLY_CONTRACT_SHA256 } from "./create-only-card.ts";
+import { CREATE_ONLY_CONTRACT, CREATE_ONLY_CONTRACT_SHA256 } from "./create-only-card.ts";
 import { markCmd } from "./commands/mark.ts";
-import { captureSnapshot, captureSnapshots, snapshotSlugsFile, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, OWNED_GUARDED_CONTRACT, OWNED_GUARDED_CONTRACT_SHA256, serializeSnapshot, snapshotFileOptions } from "./guarded-snapshot.ts";
+import { captureSnapshot, captureSnapshots, snapshotSlugsFile, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, serializeSnapshot, snapshotFileOptions } from "./guarded-snapshot.ts";
 import { setCmd } from "./commands/set.ts";
 import { ClaimConflictError, moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
@@ -1604,19 +1604,15 @@ async function dispatch(
     case "create-only-contract": {
       const extra = rejectExtraPositionals(positionals, 1, "create-only-contract");
       if (extra !== undefined) return extra;
-      if (values["storage-model"] !== undefined && !["legacy", "multi-key-v1"].includes(String(values["storage-model"]))) throw new Error("Unknown storage model");
-      console.log(JSON.stringify(values["storage-model"] === "multi-key-v1"
-        ? { ...OWNED_CREATE_ONLY_CONTRACT, contract_sha256: OWNED_CREATE_ONLY_CONTRACT_SHA256 }
-        : { ...CREATE_ONLY_CONTRACT, contract_sha256: CREATE_ONLY_CONTRACT_SHA256 }));
+      if (values["storage-model"] !== undefined && values["storage-model"] !== "multi-key-v1") throw new Error("Unknown storage model");
+      console.log(JSON.stringify({ ...CREATE_ONLY_CONTRACT, contract_sha256: CREATE_ONLY_CONTRACT_SHA256 }));
       return 0;
     }
     case "guarded-contract": {
       const extra = rejectExtraPositionals(positionals, 1, "guarded-contract");
       if (extra !== undefined) return extra;
-      if (values["storage-model"] !== undefined && !["legacy", "multi-key-v1"].includes(String(values["storage-model"]))) throw new Error("Unknown storage model");
-      console.log(JSON.stringify(values["storage-model"] === "multi-key-v1"
-        ? { ...OWNED_GUARDED_CONTRACT, contract_sha256: OWNED_GUARDED_CONTRACT_SHA256 }
-        : { ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 }));
+      if (values["storage-model"] !== undefined && values["storage-model"] !== "multi-key-v1") throw new Error("Unknown storage model");
+      console.log(JSON.stringify({ ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 }));
       return 0;
     }
     case "guarded-snapshot": {
@@ -2114,7 +2110,6 @@ async function dispatch(
           ...await snapshotFileOptions(values["guard-snapshot"] as string | undefined, values["snapshot-sha256"] as string | undefined),
           cfg: ctx.cfg,
           node: ctx.node,
-          probeNode: ctx.probeNode,
           slug,
           column,
           expectColumn: from ?? expect,

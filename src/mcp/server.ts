@@ -11,7 +11,7 @@ import { FkanbanError, newNodeClient, type NodeClient, type Verbose } from "../c
 import { readConfig, resolveSocketPath, ConfigMissingError, ConfigInvalidError, type Config } from "../config.ts";
 import { addCmd } from "../commands/add.ts";
 import { markCmd } from "../commands/mark.ts";
-import { captureSnapshot, captureSnapshots, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, OWNED_GUARDED_CONTRACT, OWNED_GUARDED_CONTRACT_SHA256, serializeSnapshot, sha256 } from "../guarded-snapshot.ts";
+import { captureSnapshot, captureSnapshots, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, serializeSnapshot, sha256 } from "../guarded-snapshot.ts";
 import { setCmd } from "../commands/set.ts";
 import { moveCmd } from "../commands/move.ts";
 import { listResult } from "../commands/list.ts";
@@ -656,11 +656,9 @@ export function createFkanbanMcpServer(
 
   server.registerTool("fkanban_guarded_contract", {
     title: "Read immutable guarded Card contract", description: "Return the embedded raw23 contract without config or node access.",
-    annotations: {readOnlyHint:true, openWorldHint:false}, inputSchema: { storage_model: z.enum(["legacy", "multi-key-v1"]).optional() },
-  }, async (args) => {
-    const contract = args.storage_model === "multi-key-v1" ? OWNED_GUARDED_CONTRACT : GUARDED_CONTRACT;
-    const contract_sha256 = args.storage_model === "multi-key-v1" ? OWNED_GUARDED_CONTRACT_SHA256 : GUARDED_CONTRACT_SHA256;
-    return toolResult(JSON.stringify(contract), { ...contract, contract_sha256 });
+    annotations: {readOnlyHint:true, openWorldHint:false}, inputSchema: { storage_model: z.literal("multi-key-v1").optional() },
+  }, async () => {
+    return toolResult(JSON.stringify(GUARDED_CONTRACT), { ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 });
   });
   server.registerTool("fkanban_guarded_snapshots", {
     title:"Read exact known-key Card snapshots",description:"One authenticated bounded native Card batch with explicit missing keys; malformed or incomplete reads refuse.",

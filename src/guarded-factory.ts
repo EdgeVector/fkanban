@@ -4,19 +4,18 @@ import { multiKey } from "./multi-key.ts";
 import { ownedCardBatchSupported } from "./owned-card-contract.ts";
 import type { Config } from "./config.ts";
 import { CARD_FIELDS } from "./schemas.ts";
-import { boardCardFieldsFromCard, boardCardsWriteHashes } from "./board-cards.ts";
 import {
   appendPosition, assertDefaultTodoWriteGuard, assertDbLocatorMatchesCard,
   claimHoldReason, depStatus, doneAtForColumnTransition, doneAtTag, ensureColumn,
   findBoard, findCardsWithFields, findMilestone, listCardsByColumn, firstDoingAtForColumnTransition,
-  firstDoingAtTag, isSubstantiveCardBody, maintainCardHead, nowIso, requireListHeadHash,
+  firstDoingAtTag, isSubstantiveCardBody, nowIso,
   terminalColumn, type Card,
 } from "./record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "./situations.ts";
 import { doingPeerFencesCandidate, PICKUP_V2_PEER_FIELDS } from "./pickup_v2.ts";
 import { assertLifecycleMoveAllowed } from "./pipeline_status.ts";
 import {
-  boundSnapshot, captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, OWNED_GUARDED_CONTRACT_SHA256,
+  boundSnapshot, captureSnapshot, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256,
   guardError, rawEqual, serializeSnapshot, sha256, snapshotByteSha, snapshotCard, validateRawFields,
   type FreshClaimChain, type GuardOptions, type GuardSnapshot, type GuardedReceipt, type RawFields,
 } from "./guarded-snapshot.ts";
@@ -57,40 +56,25 @@ function ownedCloseout(snapshot: GuardSnapshot, owner: string | undefined, termi
   return card;
 }
 export async function compoundUpdate(opts: Context, witness: GuardSnapshot, intended: RawFields, allowed: readonly string[]): Promise<GuardedReceipt> {
+  if (!multiKey(opts.cfg)) guardError("multi_key_conversion_required", "Convert this app to named alternate keys before a guarded update.");
   validateRawFields(intended, opts.slug);
   serializeSnapshot({ ...witness, fields: intended });
   for (const field of CARD_FIELDS) if (!allowed.includes(field) && JSON.stringify(witness.fields[field]) !== JSON.stringify(intended[field])) {
     guardError("guarded_delta_scope", `The finite operation cannot change ${field}.`);
   }
-  const version = await opts.node.nodeVersion?.();
-  const supported = multiKey(opts.cfg) ? await ownedCardBatchSupported(opts.node)
-    : version?.handshake && typeof version.build === "string" && COMPOUND_CARD_BUILDS.includes(version.build);
-  if (!supported || !opts.node.updateRecords || !opts.node.getSchema) {
-    guardError("guarded_batch_unsupported", "The exact proved compound build and atomic durable batch are required.");
+  if (!await ownedCardBatchSupported(opts.node) || !opts.node.updateRecords || !opts.node.getSchema) {
+    guardError("guarded_batch_unsupported", "The atomic owned-record capability and live schema metadata are required.");
   }
-  const hashes = multiKey(opts.cfg) ? [] : boardCardsWriteHashes(opts.cfg);
-  if (!multiKey(opts.cfg) && (!hashes.length || hashes.length > 2)) guardError("guarded_schema_unsupported", "One or two BoardCards destinations are required.");
-  const card = snapshotCard({ ...witness, fields: intended });
-  const boardFields = boardCardFieldsFromCard(card);
-  // Card raw values are authoritative for every shared published field, including tags.
-  for (const key of Object.keys(boardFields)) if (key in intended) boardFields[key] = intended[key];
-  const payloads = [
-    { hash: witness.schema_hash, fields: intended, hashField: "slug", rangeField: null },
-    ...hashes.map(hash => ({ hash, fields: boardFields, hashField: "board", rangeField: "sk" })),
-  ];
-  const schemas = await Promise.all(payloads.map(p => opts.node.getSchema!(p.hash)));
-  for (const [i, p] of payloads.entries()) {
-    const schema = schemas[i]!;
-    if (schema.key.hash_field !== p.hashField || schema.key.range_field !== p.rangeField || Object.keys(p.fields).some(f => !schema.fields.includes(f))) {
-      guardError("guarded_schema_unsupported", "Live schema does not declare the exact key and finite published fields.");
-    }
+  const schema = await opts.node.getSchema(witness.schema_hash);
+  if (schema.key.hash_field !== "slug" || schema.key.range_field !== null ||
+      Object.keys(intended).some(field => !schema.fields.includes(field))) {
+    guardError("guarded_schema_unsupported", "The live schema must declare the Card key and guarded fields.");
   }
   await opts.node.updateRecords([
     ...CARD_FIELDS.map(field => ({ schemaHash: witness.schema_hash, keyHash: opts.slug,
       fields: { [field]: witness.fields[field] },
       expected: { type: "value" as const, field, value: witness.fields[field]! }, durability: "durable" as const })),
     { schemaHash: witness.schema_hash, keyHash: opts.slug, fields: intended, durability: "durable" },
-    ...hashes.map(schemaHash => ({ schemaHash, keyHash: String(boardFields.board), rangeKey: String(boardFields.sk), fields: boardFields, durability: "durable" as const })),
   ]);
   // A durable ack alone does not establish the final public Card result.
   const next: GuardSnapshot = { ...witness, fields: intended };
@@ -98,8 +82,8 @@ export async function compoundUpdate(opts: Context, witness: GuardSnapshot, inte
   if (!rawEqual(actual.fields, intended)) guardError("guarded_readback_conflict", "A durable mutation completed, but its exact intended Card readback differs. Keep the slot held.");
   const json = serializeSnapshot(next);
   return { next_snapshot_json: json, next_snapshot_sha256: sha256(json), durability: "durable",
-    guard_snapshot_sha256: snapshotByteSha(witness), contract_sha256: multiKey(opts.cfg) ? OWNED_GUARDED_CONTRACT_SHA256 : GUARDED_CONTRACT_SHA256,
-    membership_cleanup: multiKey(opts.cfg) ? "native" : "deferred" };
+    guard_snapshot_sha256: snapshotByteSha(witness), contract_sha256: GUARDED_CONTRACT_SHA256,
+    membership_cleanup: "native" };
 }
 function nextFields(witness: GuardSnapshot, patch: RawFields): RawFields { return { ...witness.fields, ...patch }; }
 export async function guardedMark(opts: Context & GuardOptions & { expectAssignee?: string; line: string }) {
@@ -153,10 +137,7 @@ export async function guardedMove(opts: Context & GuardOptions & { expectAssigne
   }
   const next = nextFields(witness, { column: opts.column, position: appendPosition(), updated_at: now, tags });
   await gates(opts, snapshotCard({ ...witness, fields: next }), terminal);
-  requireListHeadHash(opts.cfg);
   const receipt = await compoundUpdate(opts, witness, next, ["column", "position", "updated_at", "tags"]);
-  // The proved batch stays Card + BoardCards. The column head follows it.
-  await maintainCardHead(opts, snapshotCard({ ...witness, fields: next }), card);
   return { slug: opts.slug, from: card.column, to: opts.column, ...receipt };
 }
 export type AcceptedHeldReceipt = {
@@ -205,17 +186,11 @@ async function finishExactRecovery(opts: Context & {worker:string;witness:GuardS
   const card=snapshotCard({...witness,fields:next}), board=await exactBoard(opts,witness);
   if (claimHoldReason(card)) guardError("claim_held", "A body-declared human hold prevents recovery clear.");
   await Promise.all([gates(opts,card,terminalColumn(board.columns)),assertRecoveryPeers(opts,card)]);
-  requireListHeadHash(opts.cfg);
   const receipt=await compoundUpdate(opts,witness,next,["block_status","block_reason","updated_at"]);
   return {receipt,claim:{result:"claimed" as const,card,from:"todo" as const,to:"doing" as const,worker,...receipt},previous:snapshotCard(witness)};
 }
 export async function guardedExactClaim(opts: Context & { worker: string; witness: GuardSnapshot; resume?: boolean }) {
   if (opts.resume) {
-    const held = snapshotCard(opts.witness);
-    // Update the head before the clear. A head failure leaves the synthetic
-    // hold, so resume can run again. A head read after the clear fails a
-    // finished claim, and the next exact claim then hits owner_conflict.
-    await maintainCardHead(opts, held, { ...held, column: "todo", assignee: "" });
     const cleared = await finishExactRecovery(opts);
     return cleared.claim;
   }
@@ -233,22 +208,15 @@ export async function guardedExactClaim(opts: Context & { worker: string; witnes
     tags, block_status: "needs_human", block_reason: reason });
   // Admission gates use the unheld admitted Card, before the recovery signal is added.
   await gates(opts, { ...snapshotCard({ ...witness, fields: held }), block_status: "none", block_reason: "" }, terminalColumn(board.columns), card);
-  requireListHeadHash(opts.cfg);
   const accepted = await compoundUpdate(opts, witness, held, ["column", "position", "assignee", "updated_at", "tags", "block_status", "block_reason"]);
   const recoveryWitness: GuardSnapshot = { ...witness, fields: held };
   // An error carries this accepted hold only after durable ack AND exact readback.
-  const cleared = await (async () => {
-    try {
-      // The proved batch stays Card + BoardCards. The column head follows it.
-      await maintainCardHead(opts, snapshotCard(recoveryWitness), snapshotCard(witness));
-      return await finishExactRecovery({...opts,witness:recoveryWitness});
-    }
-    catch(cause) { throw new ExactClaimRecoveryError(opts.slug,accepted,cause); }
-  })();
-  // The doing head already has this card from the update inside the recovery
-  // try. The clear changes block_status, block_reason, and updated_at. The
-  // head does not store those fields. A second head read here can fail the
-  // finished claim.
+  let cleared;
+  try {
+    cleared = await finishExactRecovery({...opts,witness:recoveryWitness});
+  } catch(cause) {
+    throw new ExactClaimRecoveryError(opts.slug,accepted,cause);
+  }
   // Preserve both real durable/readback receipts. The outer receipt still
   // names the held input of the clear, not the original admission witness.
   const claim_chain: FreshClaimChain = {

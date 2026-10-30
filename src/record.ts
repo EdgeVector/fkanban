@@ -5664,14 +5664,7 @@ export async function updateCardRecord(
 ): Promise<void> {
   if (expected?.type === "value" && expected.field === "assignee") {
     assertBodyLoaded(card, `guarded update of card "${card.slug}"`);
-    if (multiKey(opts.cfg)) {
-      await guardedCardUpdate(opts, card, expected);
-      return;
-    }
-    requireListHeadHash(opts.cfg);
     await guardedCardUpdate(opts, card, expected);
-    // The proved batch must not gain a head write. The head update follows it.
-    if (!flags?.skipListHead) await maintainCardHead(opts, card, previous ?? null);
     return;
   }
   const written = await writeCardRecordWithOptionalFieldFallback(

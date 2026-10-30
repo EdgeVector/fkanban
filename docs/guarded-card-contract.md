@@ -50,12 +50,12 @@ MCP uses `guard_snapshot_json`, `snapshot_sha256`, and `expect_assignee`.
 The snapshot tool returns `snapshot_json` and `snapshot_sha256`.
 CLI and MCP use the same parser, policy gates, finite deltas, and compound writer.
 
-Compound mode permits only Mini `0.23.3-2588-g24334db75`.
-The batch has 23 canonical guards, one final Card update, and one or two BoardCards destination updates.
-The maximum is 26 operations. All operations request durable acknowledgement.
-An absent canonical Card refuses. An absent exact BoardCards destination may enter through the guarded update.
-The writer does not create or repair a Board, delete membership, promote other Cards, or publish later unguarded effects.
-Old owner-only recovery compatibility does not prove this compound contract.
+Contract version 2 requires schema-owned values and `atomic_owned_mutations_v1`.
+The batch has 23 canonical guards and one final Card update.
+The maximum is 24 operations. All operations request durable acknowledgement.
+LastDB changes the named alternate addresses with the primary record in that request.
+An absent canonical Card refuses. An existing primary record refuses a create-only request.
+The writer leaves body marks intact during recovery edits and keeps the exact witness and readback rules.
 
 If the initial claim passes durable acknowledgement and exact readback, a failed clear returns `result: error`.
 The error includes `code: claim_recovery_pending`, `clear_code`, and a typed `accepted_held` receipt.
@@ -81,8 +81,6 @@ The body drain cancels at the 8 MiB cap.
 Duplicate, foreign, sparse, malformed, unresolved, inconsistent-count, or incomplete responses refuse.
 The reader does not deduplicate keys, infer rendered keys, fall back, or turn a failed read into missing truth.
 
-The public proof helper accepts `--artifact-root PATH` for the official artifact directory.
-It checks that artifact receipt against the source manifest and both program hashes before node work.
-It then uses a fresh private Mini, bounded native reads, and verified private process stops.
-The helper refuses unknown flags before node work.
-The primary remains outside this synthetic proof.
+The CI app comparison checks competing guarded writes through the actual app code.
+The artifact receipt remains a source and program identity check.
+It does not replace the required operational latency and cutover evidence.
