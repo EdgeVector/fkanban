@@ -1,7 +1,7 @@
 import { profilesFor } from "./canonical-vocabulary.ts";
 import { FkanbanError, type NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
-import { MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
+import { CONVERSION_HINT, MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
 import { OWNER_APP_ID } from "./schemas.ts";
 
 export async function syncOwnedModel(node: NodeClient, base: Config, existing: Config | null, canonicalVocabulary: boolean): Promise<Config> {
@@ -19,7 +19,7 @@ export async function syncOwnedModel(node: NodeClient, base: Config, existing: C
   const declarations = ownedSchemas();
   const names=new Set(declarations.map((entry)=>entry.schema.descriptive_name));
   if (catalog.schemas.some((schema) => schema.owner_app_id === OWNER_APP_ID && names.has(schema.descriptive_name ?? "") && !schema.independent_fields)) {
-    throw new FkanbanError({ code: "multi_key_conversion_required", message: "Existing F-Kanban values need the explicit multi-key conversion. Init leaves them unchanged." });
+    throw new FkanbanError({ code: "multi_key_conversion_required", message: "Existing F-Kanban values need the explicit multi-key conversion. Init leaves them unchanged.", hint: CONVERSION_HINT });
   }
   if (!node.declareAppSchema) throw new FkanbanError({ code: "schema_declare_unavailable", message: "The client cannot declare owned schemas." });
   const resolved = await Promise.all(declarations.map(async (entry) => {

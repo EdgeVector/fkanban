@@ -296,7 +296,7 @@ export function formatRank(res: RankResult, json?: boolean): string {
   const skipped = res.skipped ?? [];
   const human = skipped.length === 0
     ? ranked
-    : `${ranked}; skipped ${skipped.length} unhydratable BoardCards row(s): ` +
+    : `${ranked}; skipped ${skipped.length} unreadable Card record(s): ` +
       skipped.map((card) => `${card.slug}[${card.reason}]`).join(", ");
   return emit(res, human, json);
 }

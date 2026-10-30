@@ -133,7 +133,8 @@ export type AppSchemaDeclaration = {
   canonical: string;
   identityHash?: string;
   independentFields?: boolean;
-  resolution: "mint" | "link" | string;
+  /** The node reports `reuse` or `register`. The installed schema owns its values. */
+  resolution: string;
   decision?: string;
   auditEventId?: string;
   bindEligible: true;
@@ -610,10 +611,6 @@ export function newNodeClient(opts: {
   // a request later 403s with `transport_not_attested` (a restarted node drops
   // the in-memory session). Omit to talk to the node unattested.
   socketPath?: string;
-  // Dev-first app-caller mode. When present, requests carry an app capability
-  // envelope for this app id so the node applies per-app schema LINK mappings.
-  appId?: string;
-  appCapability?: string;
   // The `X-LastDB-Client` ops-attribution label. Defaults to DEFAULT_OPS_LABEL.
   // Diagnostic commands override it so their synthetic traffic is not pooled
   // with real board work in `lastdb ops` — see nodeHeaders() for why that
@@ -632,8 +629,6 @@ export function newNodeClient(opts: {
   const userHash = opts.userHash;
   const timeoutMs = opts.timeoutMs;
   const socketPath = opts.socketPath;
-  const appId = opts.appId;
-  const appCapability = opts.appCapability;
   const opsLabel = opts.opsLabel ?? DEFAULT_OPS_LABEL;
 
   // Owner-session token, established lazily on the first request and shared
@@ -739,12 +734,6 @@ export function newNodeClient(opts: {
     if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
     // Opt-in. The node returns x-lastdb-read-receipt only when this header is set.
     if (process.env.LASTDB_READ_RECEIPT === "1") h["x-lastdb-read-receipt"] = "1";
-    if (appId !== undefined && appId.length > 0) {
-      h["X-App-Capability"] = appCapability && appCapability.length > 0
-        ? appCapability
-        : appCapabilityHeader(appId);
-      h["X-Capability-Ts"] = Math.floor(Date.now() / 1000).toString();
-    }
     return h;
   };
 
@@ -1548,29 +1537,6 @@ function fieldString(fields: RowFields, key: string): string | null {
 function numField(obj: Record<string, unknown>, key: string): number {
   const v = obj[key];
   return typeof v === "number" ? v : 0;
-}
-
-function appCapabilityHeader(appId: string): string {
-  const now = new Date().toISOString();
-  const token = {
-    envelope: {
-      version: 1,
-      purpose: "capability_grant",
-      alg: "Ed25519",
-      key_id: "fkanban-dev-local",
-      issued_at: now,
-      env: "dev",
-      payload_hash: "dev-local",
-      sig: "ZGV2LWxvY2Fs",
-    },
-    capability_id: `fkanban-dev-local-${appId}`,
-    app_id: appId,
-    scope: { wildcard: `${appId}/*` },
-    granted_ops: ["read", "write"],
-    granted_at: now,
-    node_pubkey: "dev-local",
-  };
-  return Buffer.from(JSON.stringify(token), "utf8").toString("base64");
 }
 
 function bodyError(body: unknown): string | undefined {

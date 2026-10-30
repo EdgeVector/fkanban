@@ -21,7 +21,7 @@ import {
 import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, groomOpsLabel, type Verbose } from "./client.ts";
 import { ConfigMissingError, ConfigInvalidError } from "./config.ts";
-import { loadAppCtx, loadCtx } from "./context.ts";
+import { loadCtx } from "./context.ts";
 import { convertMultiKey } from "./commands/multi-key-convert.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
@@ -69,7 +69,6 @@ import { migrateAreaTagsCmd, migrateLegacyColumnsCmd } from "./commands/migrate.
 import { normalizePriority, PRIORITY_TIERS, writeBodyHeader, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import { pingCommand } from "./commands/ping.ts";
-import { FKANBAN_APP_ID, declareGatesLink, gatesCmd } from "./commands/gates.ts";
 import { suggestClosest } from "./suggest.ts";
 import {
   formatAdd,
@@ -134,7 +133,6 @@ Commands:
   search <query>       find cards by text across slug/title/body/tags/assignee (--board --column --field --limit --all --json --full-body)
                        --semantic ranks by MEANING via the LastSeek plane instead of substring
   flow <milestone>     show keyed feature-card stage waits for one milestone (--json)
-  gates                list open human gates via fbrain's linked open-decisions ledger (--json; --declare-link setup)
   show <slug>          print one card in detail, incl. deps + blocked state (--json)
   rm <slug>            delete a card (hard erase, no undo; refuses if live
                        cards depend on it)
@@ -642,28 +640,6 @@ Flags:
 Example:
   fkanban flow feature-delivery-effective-flow-v1 --json`),
 
-  gates: withFooter(`fkanban gates — list open human gates from fbrain's open-decisions ledger
-
-Usage:
-  fkanban gates [options]
-
-Options:
-  --declare-link       ask the node to declare fkanban's local Reference schema
-                       as a read-only LINK to fbrain's shared Reference canonical
-                       (setup/proof step; requires the dev node matcher)
-  --json               machine-readable open gate array
-
-Plain \`fkanban gates\` is read-only: it queries fkanban's app-local Reference
-schema, which the node translates through the persisted read-only LINK. It does
-not copy, write, clear, or own gate state.
-
-On app-isolation nodes, set FKANBAN_APP_CAPABILITY to a granted fkanban
-CapabilityToken blob so the node treats the request as the fkanban app.
-
-Example:
-  fkanban gates
-  fkanban gates --declare-link`),
-
   show: withFooter(`fkanban show — print one card in detail (deps + blocked state)
 
 Usage:
@@ -1127,7 +1103,6 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   rank: new Set(["board", "column", "mode"]),
   search: new Set(["board", "column", "field", "limit", "all", "full-body", "full_body", "json-array", "semantic"]),
   flow: new Set(),
-  gates: new Set(["declare-link"]),
   // show accepts --board as a compatibility no-op because agents often copy it
   // from list/add flows. Card slugs are global, so dispatch still ignores it.
   show: new Set(["board"]),
@@ -1332,7 +1307,6 @@ async function main(argv: string[]): Promise<number> {
         "node-url": { type: "string" },
         "schema-service-url": { type: "string" },
         "node-socket-path": { type: "string" },
-        "declare-link": { type: "boolean" },
         name: { type: "string" },
         worker: { type: "string" },
         "only-card": { type: "string" },
@@ -2481,28 +2455,6 @@ async function dispatch(
         milestone,
         json: values.json as boolean | undefined,
       }));
-      return 0;
-    }
-
-    case "gates": {
-      if (values["declare-link"]) {
-        const ctx = loadCtx({ verbose });
-        const res = await declareGatesLink({ node: ctx.node });
-        if (values.json) {
-          console.log(JSON.stringify(res));
-        } else {
-          console.log(
-            `declared ${res.app_id}/${res.schema} → ${res.canonical} (${res.resolution}; decision=${res.decision ?? res.resolution})`,
-          );
-        }
-        return 0;
-      }
-      const ctx = loadAppCtx({ appId: FKANBAN_APP_ID, verbose });
-      const out = await gatesCmd({
-        node: ctx.node,
-        json: values.json as boolean | undefined,
-      });
-      console.log(out);
       return 0;
     }
 

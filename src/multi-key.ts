@@ -4,9 +4,12 @@ import { EXTRA_SCHEMAS, UNIQUE_SCHEMAS, type SchemaDefinition } from "./schemas.
 
 export const MULTI_KEY_MODEL = "multi-key-v1" as const;
 export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storageModel === MULTI_KEY_MODEL;
+/** The one supported path for old shared-value data. See docs/multi-key-schemas.md. */
+export const CONVERSION_HINT =
+  "On the compatible LastDB release (lastdb#793), run `kanban multi-key-convert`, then `kanban multi-key-convert --apply --maintenance`. See docs/multi-key-schemas.md.";
 export function requireMultiKey(cfg: { storageModel?: string }): void {
   if (!multiKey(cfg)) throw new FkanbanError({ code: "multi_key_conversion_required",
-    message: "Complete the explicit app conversion before this command." });
+    message: "Complete the explicit app conversion before this command.", hint: CONVERSION_HINT });
 }
 
 export function ownedSchemas() {

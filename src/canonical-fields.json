@@ -10,26 +10,8 @@
         "data_domain": "general"
       }
     },
-    "work_card_membership_order_key": {
-      "description": "the column, zero-padded position, and card slug joined by # under one board or milestone",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
     "work_milestone_slug": {
       "description": "the stable slug of a work milestone; empty on a card with no assigned milestone",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_card_summary_json": {
-      "description": "one JSON-encoded work card summary without its Markdown description",
       "field_type": "String",
       "version": 1,
       "classification": {
@@ -223,24 +205,6 @@
         "data_domain": "general"
       }
     },
-    "work_membership_layout_version": {
-      "description": "the version marker of the work membership record layout",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_milestone_membership_order_key": {
-      "description": "the state, zero-padded position, and milestone slug joined by # under one board",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
     "work_milestone_title": {
       "description": "the one-line title of a work milestone",
       "field_type": "String",
@@ -398,33 +362,6 @@
         "data_domain": "general"
       }
     },
-    "work_card_summary_bucket_key": {
-      "description": "the all_cards key of the work card summary collection",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_card_summary_list_json": {
-      "description": "a JSON-encoded list of work card summaries without their Markdown descriptions",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_card_summary_list_updated_at": {
-      "description": "the RFC 3339 instant when the work card summary list was last updated",
-      "field_type": "DateTime",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
     "work_card_markdown": {
       "description": "the Markdown description of a work card",
       "field_type": "String",
@@ -490,98 +427,6 @@
     },
     "work_flow_ledger_record_updated_at": {
       "description": "the RFC 3339 instant when a work flow ledger record was last updated",
-      "field_type": "DateTime",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_column_head_scope_key": {
-      "description": "the work board and column selector for one column head",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_column_head_marker": {
-      "description": "the fixed range marker of a work column head",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_column_head_summary_json": {
-      "description": "a JSON-encoded head page of at most twenty short card titles in one work board column",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "knowledge_record_slug": {
-      "description": "the stable slug that identifies a knowledge record within its record type",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "knowledge_record_title": {
-      "description": "the one-line title of a knowledge record",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "knowledge_record_markdown": {
-      "description": "the Markdown text of a knowledge record",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "knowledge_record_status": {
-      "description": "the lifecycle status of a knowledge record, interpreted by its record type",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "knowledge_record_tag_labels": {
-      "description": "the freeform tag labels attached to a knowledge record",
-      "field_type": {
-        "Array": "String"
-      },
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "knowledge_record_created_at": {
-      "description": "the RFC 3339 instant when a knowledge record was created",
-      "field_type": "DateTime",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "knowledge_record_updated_at": {
-      "description": "the RFC 3339 instant when a knowledge record was last updated",
       "field_type": "DateTime",
       "version": 1,
       "classification": {

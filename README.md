@@ -28,8 +28,10 @@ LastDB changes the record and its alternate addresses in one native request.
 The alternate address has no separate payload copy.
 Canonical field reuse supplies definitions and types. Each schema retains its own values.
 
-Existing app data requires the explicit `multi-key-convert --apply --maintenance` command on the compatible release.
+Existing app data requires the explicit conversion on the compatible LastDB release.
 Normal init does not convert existing data. Keep the primary unchanged until its data conversion receives separate authorization.
+The command, the required releases, and the order are in
+[docs/multi-key-schemas.md](docs/multi-key-schemas.md#existing-installations).
 
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/run/dogfood + PR workflow and the non-obvious gotchas.
@@ -40,12 +42,12 @@ Normal init does not convert existing data. Keep the primary unchanged until its
 > board.
 
 Schema setup has one supported path: `kanban init` calls Mini's
-`POST /api/apps/declare-schema`. Mini resolves an existing catalog identity or
-registers a novel shape with Schema Service, anchors added fields as an
-expansion of the prior identity, loads the exact catalog definition, and only
-then returns the hash that fkanban may persist. There is no fkanban-side Schema
-Service script and no Mini local-mint fallback. Existing rows remain visible
-through expansion field mappers; schema changes do not bulk-copy card data.
+`POST /api/apps/declare-schema`. Mini resolves the definition through Schema
+Service, loads the local owned schema, and returns the identity that fkanban
+may persist. The receipt must confirm independent values. Each schema owns its
+record values; no declaration reads values from another schema. There is no
+fkanban-side Schema Service script and no Mini local-mint fallback. A changed
+definition identity stops init and leaves the config unchanged.
 
 ## Prerequisites
 
@@ -712,7 +714,7 @@ capability in `exact_claim_success_chain`.
 
 ## Standard canonical vocabulary
 
-`src/canonical-fields.json` defines 64 standard concepts for the active work schemas and the optional knowledge link.
+`src/canonical-fields.json` defines 47 standard concepts for the active work schemas.
 Schema publication uses these exact names, descriptions, types, and versions.
 The command interface keeps its local field names.
 An exact-schema field map translates queries, mutations, batches, and schema metadata.

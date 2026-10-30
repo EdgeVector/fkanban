@@ -369,7 +369,7 @@ async function indexedSearchCards(
   // no read, so the only edges that reach the node are the ones a printed
   // verdict can actually depend on.
   //
-  // Measured live, `scripts/probe-search-dep-scope-cost.ts`, 7 interleaved reps
+  // Measured live with a read-only probe (since removed), 7 interleaved reps
   // on a 191-card board (26 board-wide off-set deps):
   //
   // | query | matches | board-wide | match-scoped |

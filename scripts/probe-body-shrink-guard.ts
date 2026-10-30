@@ -39,7 +39,7 @@ const node = newNodeClient({
 });
 
 const boards = await listBoards(node, cfg);
-const cards = await listCardsWithBodies(node, cfg, { boards });
+const cards = await listCardsWithBodies(node, cfg);
 
 type Row = { slug: string; full: number; preview: number; keptPct: number; refused: string | null };
 const rows: Row[] = [];

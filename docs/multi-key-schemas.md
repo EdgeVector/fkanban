@@ -32,7 +32,32 @@ This check does not write data or request an old payload repair.
 
 ## Existing installations
 
-Run `kanban multi-key-convert` to read the plan.
+A home with F-Kanban schemas from an older release needs the explicit conversion.
+The conversion copies the current values into schema-owned Card, Board, and Milestone records.
+A home with no F-Kanban schemas does not need it. `kanban init` declares the owned schemas directly.
+
+### Required LastDB releases
+
+| Release | Source | API version | Use |
+|---|---|---|---|
+| Compatible | The first LastDB release that contains lastdb#793 | 12 | Run the conversion here. |
+| Removal | The first LastDB release that contains lastdb#803 | 13 | Open the home only after the conversion is complete. |
+
+The compatible node reports these `GET /api/version` capabilities:
+`app_schema_conversion_v1`, `owned_app_schemas_v1`, `compound_alternate_keys_v1`, and `independent_hash_range_v1`.
+The converter refuses a node without `app_schema_conversion_v1`. Init refuses a node without the two key capabilities.
+The removal release refuses unconverted shared-value schemas at startup. It cannot do the conversion for an old home.
+
+### Order
+
+1. Install the compatible LastDB release.
+2. On a format 4 or 5 home, stop the daemon and run `lastdb db enable-alternate-keys`. Then start the daemon.
+3. Install the F-Kanban release that contains this converter.
+4. Run `kanban multi-key-convert` to read the plan. This step writes nothing.
+5. Run `kanban multi-key-convert --apply --maintenance` to convert the data and write the config.
+6. Run `kanban doctor`. It checks the owner, the fields, and the named key layout of each owned schema.
+7. Upgrade LastDB to the removal release.
+
 Use `--apply --maintenance` only for an explicit request pause and config cutover.
 The command does not run during init or an ordinary mutation.
 

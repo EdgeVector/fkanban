@@ -7,7 +7,6 @@ import { requireMultiKey } from "./multi-key.ts";
 export type Ctx = {
   cfg: Config;
   node: NodeClient;
-
 };
 
 export function loadCtx(
@@ -23,20 +22,6 @@ export function loadCtx(
     // Omitted for ordinary commands, so they keep the plain board label.
     // Diagnostic entrypoints pass their own — see client.ts DEFAULT_OPS_LABEL.
     opsLabel: opts.opsLabel,
-  });
-  return { cfg, node };
-}
-
-export function loadAppCtx(opts: { appId: string; configPath?: string; verbose?: Verbose }): Ctx {
-  const cfg = readConfig(opts.configPath);
-  requireMultiKey(cfg);
-  const node = newNodeClient({
-    baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
-    userHash: cfg.userHash,
-    verbose: opts.verbose,
-    socketPath: resolveSocketPath(cfg),
-    appId: opts.appId,
-    appCapability: process.env.FKANBAN_APP_CAPABILITY,
   });
   return { cfg, node };
 }
