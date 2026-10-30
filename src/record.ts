@@ -2854,43 +2854,8 @@ function dedupeCardsBySlug(cards: Card[]): Card[] {
   return [...bySlug.values()];
 }
 
-/** Drain `/api/list` for one primary schema without hydrating field atoms. */
-async function listAllRecordHashes(node: NodeClient, schemaHash: string): Promise<string[]> {
-  if (node.listRecordKeys) {
-    const hashes = new Set<string>();
-    const seenCursors = new Set<string>();
-    let cursor: string | null = null;
-    for (;;) {
-      const page = await node.listRecordKeys(schemaHash, { limit: 1000, cursor });
-      for (const key of page.keys) {
-        if (key.range !== null) {
-          throw new FkanbanError({
-            code: "unexpected_range_key",
-            message: `Schema ${schemaHash} returned a range key from a primary-key enumeration.`,
-            hint: "Enumerate the primary Hash schema, not a HashRange membership projection.",
-          });
-        }
-        hashes.add(key.hash);
-      }
-      if (!page.has_more) break;
-      if (!page.next_cursor || page.next_cursor === cursor || seenCursors.has(page.next_cursor)) {
-        throw new FkanbanError({
-          code: "record_key_list_stalled",
-          message: `LastDB /api/list did not advance its cursor for schema ${schemaHash}.`,
-        });
-      }
-      seenCursors.add(page.next_cursor);
-      cursor = page.next_cursor;
-    }
-    return [...hashes];
-  }
-
-  throw new FkanbanError({ code: "record_key_list_unavailable",
-    message: "The node client cannot enumerate explicit primary keys." });
-}
-
 /** Collect Card identities, then read bounded batches of exact primary keys. */
-async function readAllCardRecords(
+export async function readAllCardRecords(
   node: NodeClient,
   cfg: Config,
   requestedFields: string[],
@@ -3056,25 +3021,9 @@ export async function listCards(
 }
 
 /**
- * Complete-body card set: key list + HashKey point-gets over Card. Prefer the native index / thin list for hot paths — this is for
- * free-text search and for whole-board sweeps that JUDGE or REWRITE bodies
- * (`groom stale-blockers`, `rank`, `migrate area-tags`), which cannot use the
- * body-free list without deciding on a body they never read.
- *
- * DEDUPED BY SLUG, keeping the longest body — the scan returns MORE THAN ONE
- * row for some slugs even though `Card` is a `Hash` schema keyed on `slug`.
- * Measured on the live primary 2026-07-31: 468 rows for 421 distinct slugs, 47
- * slugs duplicated, and in every duplicated pair one row carries the real body
- * and the other is EMPTY. The keyed read is authoritative and unaffected —
- * `HashKey(slug)` returns exactly ONE row, always the non-empty one (verified
- * over 12 affected slugs) — so the ghost rows are a scan-only artifact and the
- * scan, not the data, is what needs defending.
- *
- * Same keep-longest rule (and the same reasoning) as `listCardBodies`: an
- * empty row carries no text any caller could want, so it must never displace
- * one that does, and length is order-independent where last-write-wins is not.
- * Without this, callers saw one card twice — `search --complete` listed it
- * twice, and every body-judging sweep got a coin flip on which row it judged.
+ * Complete Card bodies for commands that read or change text.
+ * The all-card named key supplies primary identities. Bounded primary batches
+ * fetch the fields. Duplicate results retain the complete body defensively.
  */
 export async function listCardsWithBodies(
   node: NodeClient,
@@ -3090,25 +3039,9 @@ export async function listCardsWithBodies(
 }
 
 /**
- * slug → body for every Card the node will return, in ONE narrow scan.
- *
- * `search`'s default path matches against a body-free display read, so on its
- * own it can only match body text for cards some *other* index happened to
- * surface. This is the cheapest read that can answer "whose body contains the
- * query" for the whole board, and it replaces a per-candidate point-read
- * fan-out. Measured on the live primary: slug+body over 647 rows is **413ms**,
- * against ~5.5s for the 50 wide point reads it replaces (~110ms each — on this
- * node a point read costs orders more per row than a scan amortizes).
- *
- * Projected narrow for cost and for indexes whose gate is sparse under
- * HASH-ELSE-LEAD (hash field when projected, else lead — not the superseded
- * `any_missing` "EVERY field" model). On Card the hash is `slug`, which this
- * read already projects, so extra non-gate fields do not drop live rows; two
- * fields (`slug`+`body`) is still the floor this match needs and the cheapest
- * full-board body surface.
- *
- * Pairs with the `BODY_OMITTED` contract — callers hydrate a body-free card
- * through `withLoadedBody`, which is the marker-clearing path.
+ * Read the complete body for every named Card identity in bounded primary batches.
+ * Search uses this text without one separate call per candidate.
+ * Body-omission markers remain explicit on other preview paths.
  */
 export async function listCardBodies(
   node: NodeClient,
@@ -3263,57 +3196,6 @@ export async function listCardsByColumn(
 }
 
 
-export async function scanCardSummariesForReconcile(
-  node: NodeClient,
-  cfg: Config,
-): Promise<ScannedCardRow[]> {
-  const projection = cardListProjectionFields(fieldsFor("card"));
-  // Key list establishes which slugs exist; each HashKey point-get is truth.
-  // Keep ScannedCardRow semantics: only treat established non-empty fields as
-  // known (blank still collapses to undefined via scannedCardRow).
-  const cards = await readAllCardRecords(node, cfg, projection);
-  return cards.map((c) => scannedCardRow(c));
-}
-
-/**
- * One row of the Card full scan, typed so it cannot be mistaken for truth.
- *
- * `slug` is the only field a scan establishes. Every other field is optional,
- * and `undefined` means THE SCAN DID NOT ESTABLISH THIS — it does not mean
- * "empty". The distinction is the whole point: a blank scan field is
- * indistinguishable from a real empty value in the wire rows (measured
- * 2026-07-28: 843 of 1054 rows carried `board: ""`, `column: ""`, `title: ""`
- * on records that point-read fine), so collapsing blank to `undefined` here is
- * what forces a caller to write down which one it meant.
- *
- * Only the fields a reconciler has an actual use for are carried. Adding one
- * back is a decision, not a convenience: whatever you add, a caller can then
- * read, and the scan cannot vouch for any of it.
- */
-export type ScannedCardRow = {
-  slug: string;
-  /** `undefined` = not established by the scan. Never "the card has no board". */
-  board?: string;
-  /** `undefined` = not established by the scan. Never "the card has no column". */
-  column?: string;
-};
-
-/** Project a scan row, collapsing "the scan said nothing" to `undefined`. */
-function scannedCardRow(c: Card): ScannedCardRow {
-  const row: ScannedCardRow = { slug: c.slug };
-  if (c.board) row.board = c.board;
-  if (c.column) row.column = c.column;
-  return row;
-}
-
-export async function findCardSummaryForReconcile(
-  node: NodeClient,
-  cfg: Config,
-  slug: string,
-): Promise<Card | null> {
-  return findCardWithFields(node, cfg, slug, cardListProjectionFields(fieldsFor("card")));
-}
-
 /** Read one complete board key without a separate payload copy. */
 export async function listCardsOnBoard(
   node: NodeClient, cfg: Config, board: string, fields: string[] = CARD_LIST_FIELDS,
@@ -3343,60 +3225,6 @@ export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]
   requireMultiKey(cfg);
   return (await keyRows(node, schemaHashFor("board", cfg), "all", { HashKey: "all" }, fieldsFor("board")))
     .map(rowToBoard).filter(board => !isTombstoned(board.columns) && board.slug.length > 0);
-}
-
-/**
- * Every live board this node can prove exists, read from Board truth rather than
- * from the `all_boards` rollup. Discovery source for the `listBoards` cold-seed
- * and for `groom board-list-heal`.
- *
- * Board discovery here is a deliberate admin key-list drain and the no-scan
- * contract permits it: boards are bounded (a handful), and this is a
- * seed/reconciler path, never a hot read (`concepts-lastdb-agent-access-model`).
- *
- * TWO RULES, BOTH LEARNED THE HARD WAY (measured read-only on the primary
- * 2026-07-28 — papercut-lastdb-full-scan-drops-fields-on-conflicted-records):
- *
- * 1. A SCAN ROW CARRIES ONLY ITS KEY FIELD. For any record whose key atom has
- *    `has_conflicts`, every other requested field is silently dropped — not
- *    nulled, not an error (25 of 26 Board rows came back slug-only). Trusting
- *    them would seed `all_boards` with `title:""`, `columns:[]`; since
- *    `isTombstoned([])` is false those hollow boards read as LIVE and
- *    `kanban list` would render a board with no columns. So the scan supplies
- *    slugs and nothing else, and every board is hydrated by a point read.
- *
- * 2. A SCAN IS NOT A CENSUS. It omits live records that a point read returns:
- *    the scan listed 34 Board slugs — `agent-dogfood-scratch2/3/4` among them —
- *    while `agent-dogfood-scratch` and eight `zz-kstress-*` boards were absent
- *    from it yet point-read fine, with real titles and columns. So **absence
- *    from a scan is not evidence of deletion.** Callers that must decide whether
- *    a record is gone (the reconciler deciding "ghost") pass those slugs in via
- *    `alsoConsider` and let the point read be the verdict. Without that, a heal
- *    would have deleted nine live boards' index entries and made every card on
- *    them invisible to `kanban list` — the exact failure it exists to prevent.
- */
-export async function scanBoardsForReconcile(
-  node: NodeClient,
-  cfg: Config,
-  /** Extra slugs to verify by point read even if key list never listed them. */
-  alsoConsider?: Iterable<string>,
-): Promise<Board[]> {
-  const hash = schemaHashFor("board", cfg);
-  // /api/list supplies identities only; every board is still hydrated by
-  // findBoard (point read). alsoConsider covers callers that already know a
-  // slug the key list might race with (index entries under heal).
-  const slugs = new Set<string>(await listAllRecordHashes(node, hash));
-  for (const slug of alsoConsider ?? []) {
-    if (slug.length > 0) slugs.add(slug);
-  }
-
-  const boards: Board[] = [];
-  for (const slug of slugs) {
-    // findBoard point-reads and already drops tombstoned/hollow boards.
-    const board = await findBoard(node, cfg, slug);
-    if (board) boards.push(board);
-  }
-  return boards.sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 // Fields sufficient to resolve dependency status / card existence — everything
@@ -3609,33 +3437,6 @@ export async function cardExists(
   return cards.some((c) => c.slug === slug);
 }
 
-function cardListProjectionFields(fields: string[]): string[] {
-  const bodyFree = fields.filter((field) => field !== "body");
-  return withRequiredFields(bodyFree, [
-    "slug",
-    "title",
-    "board",
-    "column",
-    "position",
-    "assignee",
-    "tags",
-    "deps",
-    "surfaces",
-    "created_at",
-    "created_by",
-    "updated_at",
-    "repo",
-    "base",
-    "kind",
-    "block_status",
-    "block_reason",
-    "north_star",
-    "milestone",
-    "pr_url",
-    "branch",
-  ]);
-}
-
 /** Collect body keys, then fetch bounded primary-key batches. Preserve the caller's order. */
 export async function hydrateCardBodies(node: NodeClient, cfg: Config, cards: Card[]): Promise<Card[]> {
   const slugs = [...new Set(cards.filter(card => isBodyOmitted(card) && !card.body).map(card => card.slug))];
@@ -3819,43 +3620,6 @@ export async function includePointReadableReferencedMilestones(
     bySlug.set(milestone.slug, milestone);
   }
   return sortMilestones([...bySlug.values()]);
-}
-
-/** The result of {@link sweepMilestoneSlugs}: slugs reached, and leads refused. */
-export type MilestoneSlugSweep = {
-  /** Every slug reachable under some leading field, deduped. */
-  slugs: string[];
-  /** What the single widest-projection scan alone would have reached. */
-  wideScanSlugs: number;
-  /**
-   * Leads the node refused. Non-empty means `slugs` is a LOWER BOUND, and a
-   * caller asserting completeness must fail rather than report a clean result.
-   */
-  failedLeads: Array<{ field: string; error: string }>;
-};
-
-export async function sweepMilestoneSlugs(
-  node: NodeClient,
-  cfg: Config,
-): Promise<MilestoneSlugSweep> {
-  const schemaHash = schemaHashFor("milestone", cfg);
-  // /api/list returns live keys without field-atom gates, so one key drain
-  // replaces the old union-of-lead full scans (which under-counted whenever a
-  // lead atom was missing). failedLeads stays for heal completeness reporting
-  // if the key list itself is unavailable.
-  try {
-    const slugs = await listAllRecordHashes(node, schemaHash);
-    return { slugs, wideScanSlugs: slugs.length, failedLeads: [] };
-  } catch (err) {
-    return {
-      slugs: [],
-      wideScanSlugs: 0,
-      failedLeads: [{
-        field: "listRecordKeys",
-        error: err instanceof Error ? err.message : String(err),
-      }],
-    };
-  }
 }
 
 export async function findMilestone(node: NodeClient, cfg: Config, slug: string): Promise<Milestone | null> {

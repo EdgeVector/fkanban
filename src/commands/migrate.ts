@@ -21,11 +21,11 @@ import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   TERMINAL_COLUMN,
-  findCard,
+  findCards,
   isPickupAreaTag,
   listBoardCardsWithBodies,
   nowIso,
-  scanCardSummariesForReconcile,
+  readAllCardRecords,
   updateCardRecord,
   withPickupAreaTags,
   type Card,
@@ -189,17 +189,9 @@ export async function migrateLegacyColumnsCmd(
   const valid = new Set(resolveColumns());
   const slugFilter = opts.slugs?.length ? new Set(opts.slugs) : null;
 
-  const candidates = (await scanCardSummariesForReconcile(opts.node, opts.cfg)).filter(
-    (c) =>
-      (!slugFilter || slugFilter.has(c.slug)) &&
-      // `undefined` = the scan did not establish a column, which is NOT evidence
-      // of a valid one. Unknown stays a candidate and the point-read below
-      // decides; only a column the scan actually produced may exclude a card.
-      // (Same behaviour as before — a blank column was never in `valid` — but
-      // it was true by accident of `""` not being a column name, and the type
-      // now makes it a decision.)
-      (c.column === undefined || !valid.has(c.column)),
-  );
+  // Named all-card keys establish membership. The primary batch supplies the fields.
+  const candidates = (await readAllCardRecords(opts.node, opts.cfg, ["slug", "board", "column"]))
+    .filter((card) => (!slugFilter || slugFilter.has(card.slug)) && !valid.has(card.column));
 
   const result: MigrateLegacyColumnsResult = {
     scanned: 0,
@@ -210,19 +202,14 @@ export async function migrateLegacyColumnsCmd(
     dryRun,
   };
 
-  // Read every truth up front, bounded-parallel, then write serially — the
-  // shape `board_cards_heal` settled on. Reads overlap because a `rows=1` Card
-  // point-read is latency-bound; writes stay strictly one-at-a-time because
-  // each one fans out to three index updates and this is a maintenance path
-  // that must not starve the interactive board.
-  const truths = await mapWithConcurrency(candidates, (c) =>
-    findCard(opts.node, opts.cfg, c.slug),
-  );
+  // Re-read complete records in bounded batches before the mutation decisions.
+  const keys = candidates.map((card) => card.slug);
+  const chunks = Array.from({ length: Math.ceil(keys.length / 16) }, (_, offset) => keys.slice(offset * 16, offset * 16 + 16));
+  const truths = (await mapWithConcurrency(chunks, (slugs) => findCards(opts.node, opts.cfg, slugs), 4)).flat();
 
   for (const card of truths) {
     result.scanned += 1;
-    // Truth decides. A scan row that has since been moved onto a real column is
-    // dropped here rather than rewritten off a stale read.
+    // A card that moved after the first read needs no column change.
     if (!card || valid.has(card.column)) continue;
 
     result.offColumn += 1;
