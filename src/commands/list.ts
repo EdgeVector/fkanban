@@ -272,13 +272,6 @@ export type ListOptions = {
   // convention). Injected by tests so the notice is asserted, not printed.
   // The default envelope path does not warn on stderr (truncation is structural).
   warn?: WarnSink;
-  /**
-   * After a column list, HashKey the whole BoardCards partition and delete
-   * rows whose Card tip is another column. Default off: the happy path
-   * (`kanban list --column`, MCP list, pickup ready) must not hydrate the
-   * full partition. Pass true only from heal/janitor callers.
-   */
-  healStaleRows?: boolean;
 };
 
 // Both the human text and the structured (`--json`) payload, built from a

@@ -2,6 +2,7 @@
 
 import { newNodeClient, type NodeClient, type Verbose } from "./client.ts";
 import { readConfig, resolveSocketPath, type Config } from "./config.ts";
+import { requireMultiKey } from "./multi-key.ts";
 import { searchVisibilityProbeClient } from "./board-cards.ts";
 
 export type Ctx = {
@@ -13,9 +14,10 @@ export type Ctx = {
 };
 
 export function loadCtx(
-  opts: { configPath?: string; verbose?: Verbose; opsLabel?: string } = {},
+  opts: { configPath?: string; verbose?: Verbose; opsLabel?: string; forConversion?: boolean } = {},
 ): Ctx {
   const cfg = readConfig(opts.configPath);
+  if (!opts.forConversion) requireMultiKey(cfg);
   const node = newNodeClient({
     baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
     userHash: cfg.userHash,
@@ -30,6 +32,7 @@ export function loadCtx(
 
 export function loadAppCtx(opts: { appId: string; configPath?: string; verbose?: Verbose }): Ctx {
   const cfg = readConfig(opts.configPath);
+  requireMultiKey(cfg);
   const node = newNodeClient({
     baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
     userHash: cfg.userHash,

@@ -1537,7 +1537,7 @@ async function dispatch(
     case "multi-key-convert": {
       const extra=rejectExtraPositionals(positionals,1,"multi-key-convert");
       if(extra!==undefined) return extra;
-      const {node,cfg}=loadCtx({verbose});
+      const {node,cfg}=loadCtx({verbose,forConversion:true});
       console.log(JSON.stringify(await convertMultiKey(node,cfg,{apply:values.apply===true,
         maintenance:values.maintenance===true,abort:values.abort===true})));
       return 0;
@@ -2230,7 +2230,6 @@ async function dispatch(
         fullBody: fullBodyList,
         groupByMilestone: values["group-by-milestone"] as boolean | undefined,
         jsonArray: Boolean(values["json-array"]),
-        healStaleRows: false,
       });
       console.log(out);
       return 0;

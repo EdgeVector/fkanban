@@ -324,7 +324,6 @@ async function indexedSearchCards(
     opts.cfg,
     filter,
     CARD_SEARCH_DISPLAY_FIELDS,
-    { allowKeyListFallback: false },
   );
 
   const inScope = (c: Card): boolean =>

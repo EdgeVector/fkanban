@@ -1,32 +1,21 @@
 import { guardedCardUpdate } from "./guarded-card-update.ts";
-import { keyRows, multiKey, requireMultiKey } from "./multi-key.ts";
+import { keyRows, requireMultiKey } from "./multi-key.ts";
 // Domain helpers: turn fold_db query rows into typed Card / Board records,
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
-import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
+import { mapWithConcurrency, POINT_READ_CONCURRENCY, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
 import {
-  patchBoardListIndex,
-  readBoardListIndex,
-  writeBoardListIndex,
   type BoardSummary,
 } from "./card-list-index.ts";
 import {
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
-  boardCardSk,
-  boardCardsHash,
   boardCardsProjectionForCardFields,
-  enqueueBoardCardJanitor,
   listAllBoardCards,
   listBoardCardsPartition,
-  listBoardCardsPartitionSpine,
-  preferFresherBoardCard,
-  sweepBoardCardJanitor,
-  upsertBoardCard,
 } from "./board-cards.ts";
 import {
-  boardMilestonesHash,
   listAllBoardMilestones,
   listBoardMilestonesPartition,
 } from "./board-milestones.ts";
@@ -35,7 +24,6 @@ import {
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
   CARD_FIELDS,
-  CARD_OPTIONAL_SCHEMA_FIELDS,
   fieldsFor,
   resolveColumns,
 } from "./schemas.ts";
@@ -2657,7 +2645,7 @@ export function queryTerms(query: string): string[] {
  * narrower reason. The list IS the predicate's inputs, so the two cannot drift.
  *
  * Widening a key-list projection to carry them costs no extra round trip:
- * `listCardsFromKeyList` already issues one HashKey point-get per card hash, so
+ * `readAllCardRecords` already issues one HashKey point-get per card hash, so
  * the added fields ride reads that were happening anyway, and `body` already
  * dominates the row size. It cannot drop rows either — `isKeyOnlyRow` discards
  * a row only when it carries NOTHING but the hash field, and more projected
@@ -3041,184 +3029,80 @@ async function listAllRecordHashes(node: NodeClient, schemaHash: string): Promis
     return [...hashes];
   }
 
-  // Injected test doubles that predate `/api/list` still answer an unfiltered
-  // queryAll. Production `newNodeClient` always implements listRecordKeys; a
-  // live LastDB node rejects unfiltered queries, so this branch cannot
-  // enumerate production rows.
-  const res = await node.queryAll({ schemaHash, fields: ["slug"] });
-  const hashes = new Set<string>();
-  for (const row of res.results ?? []) {
-    const keyed = typeof row.key?.hash === "string" ? row.key.hash : "";
-    const slug = keyed || stringField((row.fields ?? {}) as Record<string, unknown>, "slug");
-    if (slug.length > 0) hashes.add(slug);
-  }
-  return [...hashes];
+  throw new FkanbanError({ code: "record_key_list_unavailable",
+    message: "The node client cannot enumerate explicit primary keys." });
 }
 
 /** Collect Card identities, then read bounded batches of exact primary keys. */
-async function listCardsFromKeyList(
+async function readAllCardRecords(
   node: NodeClient,
   cfg: Config,
   requestedFields: string[],
 ): Promise<Card[]> {
   const schemaHash = schemaHashFor("card", cfg);
-  const hashes = multiKey(cfg)
-    ? (await keyRows(node, schemaHash, "all", { HashKey: "all" }, ["slug"])).map((row) => row.key.hash!)
-    : await listAllRecordHashes(node, schemaHash);
+  requireMultiKey(cfg);
+  const projection = [...new Set(["slug", "tags", ...requestedFields])];
+  const hashes = (await keyRows(node, schemaHash, "all", { HashKey: "all" }, ["slug"])).map(row => row.key.hash!);
   // Bound the number of full bodies per response.
   const chunks = Array.from({ length: Math.ceil(hashes.length / 16) }, (_, i) => hashes.slice(i * 16, i * 16 + 16));
   const rows = await mapWithConcurrency(
     chunks,
     async (keys) => {
-      const res = await node.queryAll({ schemaHash, fields: requestedFields,
+      const res = await node.queryAll({ schemaHash, fields: projection,
         filter: { HashRangeKeys: keys.map((hash) => [hash, ""]) } as unknown as QueryFilter });
       return res.results;
     },
     POINT_READ_CONCURRENCY,
   );
-  return dedupeCardsBySlug(
+  const cards = dedupeCardsBySlug(
     rows
       .flat()
       .filter((row) => !isKeyOnlyRow(row, requestedFields))
       .map(rowToCard)
       .filter((card) => card.slug.length > 0 && !isHiddenCard(card)),
   );
+  return requestedFields.includes("body") ? cards : markBodyOmitted(cards);
 }
 
 // Shared body of the three card list paths below: query the card schema for the
 // given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
 // Native deletes are hidden by the node before this point.
-/**
- * Which read actually answered a card list.
- *
- * Reported, never inferred. `listCardsByFilter` used to hand its caller a
- * hard-coded `indexed: false` on both return paths, so the one thing that
- * consumed it — `search`'s `FKANBAN_DEBUG_QUERY_PLAN` line — printed a constant
- * dressed as a measurement. An operator reading `displayIndexed: false` while
- * debugging a slow search would conclude the display read had missed its index
- * and go provisioning one, on a board where BoardCards was serving the read
- * correctly the whole time.
- *
- * That is the same defect shape this suite keeps finding in its own
- * instruments — a check that can only ever report one answer — and it is worse
- * in a diagnostic than in a test, because a diagnostic is what someone reaches
- * for when they already believe something is wrong.
- *
- * The values are the real branches of {@link listCardsWithFields}, not a
- * healthy/unhealthy summary: `refused` and `full-scan` are both "not served by
- * an index" but they want opposite responses, and collapsing them back to a
- * boolean would rebuild the field this replaces.
- */
-export type CardListServedBy =
-  /** BoardCards HashRange partitions — the healthy Dynamo-style path. */
-  | "board-cards"
-  /** The legacy CardListIndex rollup (unbound `board_cards`, i.e. a legacy node). */
-  | "card-list-index"
-  /** Admin full scan over Card; also seeds the indexes. Rare and expensive. */
-  | "full-scan"
-  /** No index answered and `allowKeyListFallback: false` declined key-list drain. */
-  | "refused"
-  /** A `HashKey` filter — a Card point read, not a list at all. */
-  | "card-point-read";
+// Report the source that actually answered this read.
+export type CardListServedBy = "named-card-keys" | "card-point-read";
 
 async function listCardsWithFields(
   node: NodeClient,
   cfg: Config,
   fields: string[],
   filter?: QueryFilter,
-  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
+  opts: BoardListOpt = {},
 ): Promise<Card[]> {
   return (await listCardsWithFieldsTraced(node, cfg, fields, filter, opts)).cards;
 }
 
-/**
- * {@link listCardsWithFields}, plus which branch answered.
- *
- * Split rather than widening the original's return type so the six callers that
- * only want cards stay untouched — the trace exists for the diagnostic, and a
- * diagnostic should not get to reshape the read path it reports on.
- */
+/** Keep the request's key scope explicit. Named reads and primary reads never repair data. */
 async function listCardsWithFieldsTraced(
-  node: NodeClient,
-  cfg: Config,
-  fields: string[],
-  filter?: QueryFilter,
-  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
+  node: NodeClient, cfg: Config, fields: string[], filter?: QueryFilter, opts: BoardListOpt = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
-  // Prefer BoardCards HashRange partitions (hash=board) — Dynamo-style list.
-  // Never hydrate body for board-wide lists (that was the N+1 storm). Callers
-  // that need body must findCard/show by slug.
-  // HashKey filters still go to the Card schema (point reads).
+  requireMultiKey(cfg);
   if (filter === undefined) {
-    // BoardCards answers this list. A new node does not keep an older rollup
-    // or a Card key list readable.
-    {
-      const boards = opts.boards ?? (await listBoards(node, cfg));
-      const cardFields = fields.includes("body")
-        ? fields.filter((f) => f !== "body")
-        : fields;
-      const projection =
-        cardFields.length > 0
-          ? boardCardsProjectionForCardFields(cardFields)
-          : [...BOARD_CARDS_LIST_FIELDS];
-      const partitioned = await listAllBoardCards(node, cfg, boards, {
-        fields: projection,
-        skipTerminalColumn: opts.activeOnly === true,
-        ...(opts.column ? { column: opts.column } : {}),
-      });
-      if (partitioned !== null && partitioned.length > 0) {
-        // BoardCards rows are already body-free; promote any structured fields.
-        return {
-          cards: markBodyOmitted(
-            partitioned
-              .filter((c) => !isHiddenCard(c))
-              .map((c) => Object.assign(c, deriveStructuredFields(c))),
-          ),
-          servedBy: "board-cards",
-        };
-      }
-      // A new node has no older list. An empty BoardCards answer is empty.
-      // A missing schema does not fall through to CardListIndex or a Card key list.
-      if (partitioned !== null) return { cards: [], servedBy: "board-cards" };
-      return { cards: [], servedBy: "refused" };
-    }
+    const boards = opts.boards ?? await listBoards(node, cfg);
+    const projection = boardCardsProjectionForCardFields(fields.filter(field => field !== "body"));
+    const cards = await listAllBoardCards(node, cfg, boards, {
+      fields: projection.length ? projection : BOARD_CARDS_LIST_FIELDS,
+      skipTerminalColumn: opts.activeOnly === true, ...(opts.column ? { column: opts.column } : {}),
+    });
+    if (cards === null) throw new FkanbanError({ code: "named_key_unavailable", message: "The board keys are unavailable." });
+    return { cards: markBodyOmitted(cards.filter(card => !isHiddenCard(card))
+      .map(card => Object.assign(card, deriveStructuredFields(card)))), servedBy: "named-card-keys" };
   }
-
-
-  const hash = schemaHashFor("card", cfg);
-  const query = (queryFields: string[]) =>
-    node.queryAll({ schemaHash: hash, fields: queryFields, filter });
-  let res;
-  try {
-    res = await query(fields);
-  } catch (err) {
-    if (!isOnlyOptionalFieldMiss(err, fields)) throw err;
-    res = await query(fields.filter((field) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)));
-  }
-  // A point read is where a fresh delete is actually observed: `findCard` and
-  // everything built on it (`show`, proof-card verdicts, pickup peers) come
-  // through here, and for ~1s after `rm` the node still answers with a
-  // key-only row. Without this, `kanban show <just-deleted-slug>` renders an
-  // empty card and exits 0 — the one answer a caller must not get from a
-  // question about existence.
-  const cards = res.results
-    .filter((row) => !isKeyOnlyRow(row, fields))
-    .map(rowToCard)
-    .filter((c) => !isHiddenCard(c));
-  return {
-    cards: fields.includes("body") ? cards : markBodyOmitted(cards),
-    servedBy: "card-point-read",
-  };
+  const response = await node.queryAll({ schemaHash: schemaHashFor("card", cfg), fields, filter });
+  const cards = response.results.filter(row => !isKeyOnlyRow(row, fields)).map(rowToCard).filter(card => !isHiddenCard(card));
+  return { cards: fields.includes("body") ? cards : markBodyOmitted(cards), servedBy: "card-point-read" };
 }
 
-function isOnlyOptionalFieldMiss(err: unknown, fields: string[]): boolean {
-  return (
-    err instanceof FkanbanError &&
-    err.code === "unknown_fields" &&
-    fields.some((field) => (CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(field)) &&
-    (CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).some((field) => err.message.includes(field))
-  );
-}
+
+
 
 // The node's /api/query `filter` is a fold_db HashRangeFilter (HashKey /
 // range-key shapes only) — field-equality filters like `{column: "todo"}` are
@@ -3240,7 +3124,7 @@ async function listCardsClientFiltered(
   cfg: Config,
   fields: string[],
   predicate: Record<string, string>,
-  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
+  opts: BoardListOpt = {},
 ): Promise<Card[]> {
   return (await listCardsClientFilteredTraced(node, cfg, fields, predicate, opts)).cards;
 }
@@ -3251,7 +3135,7 @@ async function listCardsClientFilteredTraced(
   cfg: Config,
   fields: string[],
   predicate: Record<string, string>,
-  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
+  opts: BoardListOpt = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const required = Object.keys(predicate);
   const matches = (c: Card): boolean =>
@@ -3265,7 +3149,7 @@ async function listCardsClientFilteredTraced(
   // `listAllBoardCards` and the display read came back empty — then a newly
   // created card on the named board was invisible even though `show` (a Card
   // point-get) returned it. Scope the read to the named partition.
-  const listOpts: { allowKeyListFallback?: boolean } & BoardListOpt = {
+  const listOpts: BoardListOpt = {
     ...opts,
     ...(predicate.board && !opts.boards ? { boards: [{ slug: predicate.board }] } : {}),
   };
@@ -3349,7 +3233,7 @@ export async function listCardsWithBodies(
   node: NodeClient,
   cfg: Config,
 ): Promise<Card[]> {
-  const cards = await listCardsFromKeyList(node, cfg, fieldsFor("card"));
+  const cards = await readAllCardRecords(node, cfg, fieldsFor("card"));
   const bySlug = new Map<string, Card>();
   for (const card of cards) {
     const seen = bySlug.get(card.slug);
@@ -3385,7 +3269,7 @@ export async function listCardBodies(
 ): Promise<Map<string, string>> {
   // Key list + HashKey point-get (slug+body). Keep-longest still applies if a
   // keyed read ever returned duplicates; production HashKey returns one row.
-  const cards = await listCardsFromKeyList(node, cfg, ["slug", "body"]);
+  const cards = await readAllCardRecords(node, cfg, ["slug", "body"]);
   const bodies = new Map<string, string>();
   for (const card of cards) {
     const seen = bodies.get(card.slug);
@@ -3405,7 +3289,7 @@ export async function listCardBodies(
  * under-selects on every field a body does not happen to repeat (a title, a
  * tag, an assignee), which would leave the narrower half of the same bug open.
  *
- * The extra fields are free in round trips. `listCardsFromKeyList` already
+ * The extra fields are free in round trips. `readAllCardRecords` already
  * issues one HashKey point-get per card hash, so this widens rows that were
  * already being read, and `body` already dominates their size. The
  * HASH-ELSE-LEAD caution that keeps {@link listCardBodies} narrow does not bite
@@ -3413,7 +3297,7 @@ export async function listCardBodies(
  * fields cannot drop live rows.
  *
  * ONE difference from `listCardBodies` worth naming, because it is a behaviour
- * change and not a widening: projecting `tags` lets `listCardsFromKeyList`'s
+ * change and not a widening: projecting `tags` lets `readAllCardRecords`'s
  * `isHiddenCard` filter actually fire. A legacy tag-tombstoned card is dropped
  * here and survives the two-field read, which cannot see the tag it would be
  * judged on. That is the correct direction — a hidden card is not a search
@@ -3426,7 +3310,7 @@ export async function listCardSearchSurfaces(
   node: NodeClient,
   cfg: Config,
 ): Promise<Map<string, CardSearchSurface>> {
-  const cards = await listCardsFromKeyList(node, cfg, [...CARD_SEARCH_SURFACE_FIELDS]);
+  const cards = await readAllCardRecords(node, cfg, [...CARD_SEARCH_SURFACE_FIELDS]);
   const bySlug = new Map<string, CardSearchSurface>();
   for (const card of cards) {
     const seen = bySlug.get(card.slug);
@@ -3586,132 +3470,23 @@ export async function listPickupAreaPeers(node: NodeClient, cfg: Config, card: C
   return filterPickupAreaPeers(node, cfg, summaries, targetRepo, targetAreas);
 }
 
-/**
- * Cards in one column via BoardCards HashRangePrefix only (one keyed query).
- *
- * No client-filter / CardListIndex secondary path: if the prefix query fails
- * or BoardCards is unconfigured, throw so we notice primary breakage.
- */
+/** Read the source records through one board-column key. This read never writes. */
 export async function listCardsByColumn(
-  node: NodeClient,
-  cfg: Config,
-  column: string,
-  fields: string[],
-  board?: string,
-  /**
-   * `opts.projection` narrows what BoardCards is asked for. Use it only when the
-   * rows are consumed by a *predicate* rather than rendered — the dependency
-   * seed in `list --column` is the one such caller today
-   * ({@link BOARD_CARDS_DEP_SEED_FIELDS}). `fields` is unrelated: it is the
-   * Card-side projection, and only `reconcileBoardCardSummaries({verify:true})`
-   * reads it.
-   */
-  opts?: { projection?: readonly string[]; healStaleRows?: boolean },
+  node: NodeClient, cfg: Config, column: string, fields: string[], board?: string,
+  opts?: { projection?: readonly string[] },
 ): Promise<Card[]> {
-  if (!board) {
-    throw new FkanbanError({
-      code: "missing_argument",
-      message: "listCardsByColumn requires a board slug (BoardCards HashRangePrefix primary path).",
-      hint: "Pass the board id (e.g. default). Client-side multi-board column scan is removed.",
-    });
-  }
+  requireMultiKey(cfg);
+  if (!board) throw new FkanbanError({ code: "missing_argument", message: "A column read requires its board slug." });
   const part = await listBoardCardsPartition(node, cfg, board, {
-    column,
-    fields: opts?.projection ?? boardCardsProjectionForCardFields(fields),
+    column, fields: opts?.projection ?? boardCardsProjectionForCardFields(fields),
   });
-  if (part === null) {
-    throw new FkanbanError({
-      code: "schema_not_configured",
-      message: `BoardCards schema hash missing; cannot list column "${column}" on board "${board}".`,
-      hint: "Run kanban init / ensure config.schemaHashes.board_cards is set. No secondary list path.",
-    });
-  }
-  if (multiKey(cfg)) return markBodyOmitted(part.filter((card) => !isHiddenCard(card))
-    .map((card) => Object.assign(card, deriveStructuredFields(card))));
-  const exclusive = await dropStaleColumnMembership(
-    node,
-    cfg,
-    board,
-    column,
-    part,
-    opts?.healStaleRows === true,
-  );
-  const reconciled = await reconcileBoardCardSummaries(node, cfg, exclusive, fields);
-  return reconciled
-    .filter((c) => !isHiddenCard(c))
-    .map((c) => Object.assign(c, deriveStructuredFields(c)));
+  if (part === null) throw new FkanbanError({ code: "named_key_unavailable", message: "The board-column key is unavailable." });
+  return markBodyOmitted(part.filter(card => !isHiddenCard(card))
+    .map(card => Object.assign(card, deriveStructuredFields(card))));
 }
 
-/**
- * Drop BoardCards rows in `column` whose Card tip lives in another column.
- *
- * The occupancy check is a HashKey of the whole BoardCards partition (~365
- * atoms on the live default board). That belongs on the heal/janitor path
- * only. The happy path (`healStaleRows` false: MCP list, pickup ready,
- * `kanban list --column`) returns the prefix page as-is.
- *
- * When `heal` is set, other-column occupancy comes from one HashKey spine
- * read (slug + SK), not a per-row Card get. Card tip is read only for slugs
- * that already appear in two columns.
- *
- * Unique membership in the listed column is kept even when the tip differs —
- * deleting that row would hide the card. Overlap losers enqueue for the janitor
- * when `heal` is set.
- */
-async function dropStaleColumnMembership(
-  node: NodeClient,
-  cfg: Config,
-  board: string,
-  column: string,
-  part: Card[],
-  heal: boolean,
-): Promise<Card[]> {
-  if (!heal || part.length === 0) return part;
-  const spine = await listBoardCardsPartitionSpine(node, cfg, board);
-  if (!spine) return part;
-  const otherSlugs = new Set<string>();
-  for (const row of spine) {
-    if (row.slug && row.column && row.column !== column) otherSlugs.add(row.slug);
-  }
-  const kept: Card[] = [];
-  const overlap: Card[] = [];
-  for (const card of part) {
-    if (otherSlugs.has(card.slug)) overlap.push(card);
-    else kept.push(card);
-  }
-  if (overlap.length === 0) return part;
 
-  const overlapSlugs = [...new Set(overlap.map((c) => c.slug))];
-  const tips = await mapWithConcurrency(overlapSlugs, (slug) =>
-    findCardWithFields(node, cfg, slug, ["slug", "column"]),
-  );
-  const tipColumn = new Map<string, string>();
-  for (const tip of tips) {
-    if (tip?.slug && tip.column) tipColumn.set(tip.slug, tip.column);
-  }
 
-  const dropped: Card[] = [];
-  for (const card of overlap) {
-    const tip = tipColumn.get(card.slug);
-    if (tip === undefined || tip === column) kept.push(card);
-    else dropped.push(card);
-  }
-
-  if (heal && dropped.length > 0) {
-    const schemaHash = boardCardsHash(cfg);
-    if (schemaHash) {
-      enqueueBoardCardJanitor(
-        dropped.map((card) => ({
-          schemaHash,
-          board: card.board || board,
-          sk: boardCardSk(card.column, card.position, card.slug),
-        })),
-      );
-      await sweepBoardCardJanitor(node);
-    }
-  }
-  return kept;
-}
 
 /**
  * Every card slug the Card schema holds, body-free — the reconciler's discovery
@@ -3757,7 +3532,7 @@ export async function scanCardSummariesForReconcile(
   // Key list establishes which slugs exist; each HashKey point-get is truth.
   // Keep ScannedCardRow semantics: only treat established non-empty fields as
   // known (blank still collapses to undefined via scannedCardRow).
-  const cards = await listCardsFromKeyList(node, cfg, projection);
+  const cards = await readAllCardRecords(node, cfg, projection);
   return cards.map((c) => scannedCardRow(c));
 }
 
@@ -3814,40 +3589,24 @@ export async function findCardSummaryForReconcile(
   return findCardWithFields(node, cfg, slug, cardListProjectionFields(fieldsFor("card")));
 }
 
-/**
- * Thin cards on one board only (one BoardCards partition).
- * An empty partition is an empty board. This does not read an older rollup.
- */
+/** Read one complete board key without a separate payload copy. */
 export async function listCardsOnBoard(
-  node: NodeClient,
-  cfg: Config,
-  board: string,
-  fields: string[] = CARD_LIST_FIELDS,
+  node: NodeClient, cfg: Config, board: string, fields: string[] = CARD_LIST_FIELDS,
 ): Promise<Card[]> {
-  const part = await listBoardCardsPartition(node, cfg, board, {
-    fields: boardCardsProjectionForCardFields(fields),
-  });
-  if (part === null) {
-    throw new FkanbanError({
-      code: "schema_not_configured",
-      message: `BoardCards schema is not available for board "${board}".`,
-      hint: "Run kanban init. This list does not read an older card rollup.",
-    });
-  }
-  if (part.length === 0) return [];
-  if (multiKey(cfg)) return markBodyOmitted(part.filter((c)=>!isHiddenCard(c)).map((c)=>Object.assign(c,deriveStructuredFields(c))));
-  const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
-  return reconciled
-    .filter((c) => !isHiddenCard(c))
-    .map((c) => Object.assign(c, deriveStructuredFields(c)));
+  requireMultiKey(cfg);
+  const part = await listBoardCardsPartition(node, cfg, board, { fields: boardCardsProjectionForCardFields(fields) });
+  if (part === null) throw new FkanbanError({ code: "named_key_unavailable", message: "The board key is unavailable." });
+  return markBodyOmitted(part.filter(card => !isHiddenCard(card))
+    .map(card => Object.assign(card, deriveStructuredFields(card))));
 }
+
 
 export async function listCardsByFilter(
   node: NodeClient,
   cfg: Config,
   filter: QueryFilter,
   fields: string[],
-  opts: { allowKeyListFallback?: boolean } & BoardListOpt = {},
+  opts: BoardListOpt = {},
 ): Promise<{ cards: Card[]; servedBy: CardListServedBy }> {
   const entries = Object.entries(filter).filter(([, value]) => value.length > 0);
   if (entries.length === 0) {
@@ -3857,59 +3616,11 @@ export async function listCardsByFilter(
 }
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
-  if (multiKey(cfg)) {
-    return (await keyRows(node, cfg.schemaHashes.board!, "all", { HashKey: "all" }, fieldsFor("board")))
-      .map(rowToBoard).filter((board) => !isTombstoned(board.columns) && board.slug.length > 0);
-  }
-  const live = (boards: Board[]) =>
-    boards.filter((b) => !isTombstoned(b.columns) && b.slug.length > 0);
-
-  const indexed = await readBoardListIndex(node, cfg);
-  if (indexed !== null) {
-    return live(
-      indexed.map((b) => ({
-        slug: b.slug,
-        title: b.title,
-        body: b.body,
-        columns: b.columns,
-        created_at: b.created_at,
-        updated_at: b.updated_at,
-      })),
-    );
-  }
-
-  // Missing rollup: recover Board truth without taking down first-run list.
-  // Tests and admin-shaped fakes still answer `scanBoardsForReconcile`. Live
-  // Mini rejects unfiltered `/api/list` and `/api/query` as
-  // `full_schema_scan_not_allowed` (2026-07-19 situations list; 2026-08-19
-  // first-run `kanban list`). Catch that 400 and answer HashKey(default);
-  // `groom board-list-heal` still owns repairing extra boards on that node.
-  try {
-    const boards = live(await scanBoardsForReconcile(node, cfg));
-    if (boards.length > 0) {
-      try {
-        await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
-      } catch {
-        // best-effort; the drain already answered this list
-      }
-    }
-    return boards;
-  } catch (err) {
-    const scanRejected =
-      err instanceof FkanbanError && err.code === "full_schema_scan_not_allowed";
-    if (!scanRejected) throw err;
-    const defaultBoard = await findBoard(node, cfg, DEFAULT_BOARD_SLUG);
-    const boards = defaultBoard ? live([defaultBoard]) : [];
-    if (boards.length > 0) {
-      try {
-        await writeBoardListIndex(node, cfg, boards.map(toBoardSummary));
-      } catch {
-        // best-effort; the point-read already answered this list
-      }
-    }
-    return boards;
-  }
+  requireMultiKey(cfg);
+  return (await keyRows(node, schemaHashFor("board", cfg), "all", { HashKey: "all" }, fieldsFor("board")))
+    .map(rowToBoard).filter(board => !isTombstoned(board.columns) && board.slug.length > 0);
 }
+
 
 export function toBoardSummary(b: Board): BoardSummary {
   return {
@@ -4127,101 +3838,26 @@ export async function listCardsForDisplay(
   return listCardsWithFields(node, cfg, CARD_DISPLAY_FIELDS, undefined, opts);
 }
 
-/**
- * Live cards on every board EXCEPT `viewedBoard` — the `list` footer's read.
- *
- * The footer used to be fed by `listCardsForDisplay`, a cross-board read that
- * fans out over EVERY board partition including the one already on screen, at
- * the wide 24-field BoardCards projection. `otherBoardsFooter` then dropped all
- * of those rows on its first line (`if (c.board === viewedBoard) continue`).
- *
- * On the live board that is not a small waste: `default` holds 783 of the 829
- * rows, and re-reading it is the single most expensive query fkanban makes
- * (measured 2026-07-30: BoardCards `HashKey(default)` is the #1 consumer of
- * node wall time system-wide, avg 615ms/call). Bare `kanban list` issued THREE
- * partition reads where `list --json` — same board, same cards, no footer —
- * issued one. Two of the three existed to render a one-line navigation hint,
- * and the more expensive of those two was a verbatim re-read of the partition
- * the command had already fetched.
- *
- * So: skip the viewed board at the QUERY, not in the reducer, and project only
- * {@link BOARD_CARDS_FOOTER_FIELDS}. Returns `null` when BoardCards cannot
- * serve the read at all (unconfigured schema), so the caller can fall back to
- * the cross-board path rather than silently print no footer — an absent footer
- * is indistinguishable from "no other board has cards".
- *
- * ## Why a failed partition read does not propagate
- *
- * This read exists to render ONE LINE of navigation hint about boards the user
- * is not looking at. It is the last read `list` issues and the only one whose
- * absence costs nothing but the hint. Yet until 2026-08-01 a node error here
- * escaped and took the whole command down: bare `kanban list` exited 1 and
- * printed no board at all because the empty `agent-dogfood-scratch` partition
- * answered this projection with `HTTP 400 … laststore: corrupt: empty rec`,
- * while `default` — every card anyone cares about — had already been read back
- * intact three queries earlier.
- *
- * Three properties made that outage possible at once, and the fix targets the
- * only one that is fkanban's to own:
- *
- * 1. The corrupt marker is LastDB's
- *    ([[papercut-lastdb-corrupt-empty-rec-on-one-lead-field-agent-dogfood-scratch]]).
- * 2. It is reachable ONLY through a narrow projection — the same partition
- *    answers the wide 14- and 22-field reads with 0 rows, cleanly. Narrowing a
- *    projection is not purely a cost win; it changes which index structures the
- *    node must touch, so it can newly EXPOSE damage a wide read never sees.
- * 3. A decorative cross-board read could fail a command whose own board was
- *    fine. That is the bug fixed here.
- *
- * So a per-board failure is neither swallowed nor rethrown — the same contract
- * {@link sweepBoardCardsPartition} settled for `failedLeads`. The slug is
- * RETURNED in `unreadable` and the footer names it, because a board that could
- * not be read must never render as a board with no cards: those are different
- * facts and only one of them is worth acting on.
- */
+/** A failed decorative read names its board without discarding the main board view. */
 export async function listOtherBoardCardsForFooter(
-  node: NodeClient,
-  cfg: Config,
-  viewedBoard: string,
-  boards: Array<{ slug: string }>,
-): Promise<{ cards: Card[]; unreadable: string[] } | null> {
-  // An EMPTY board list is "I don't know", not "there are no other boards" —
-  // but only on the legacy shape (no `board_cards` hash). With BoardCards
-  // bound, first-run `kanban list` after `init` has exactly one board (or none
-  // yet); falling through to a cross-board Card census is the
-  // `full_schema_scan_not_allowed` 400 that takes the whole command down.
-  if (boards.length === 0) {
-    return boardCardsHash(cfg) ? { cards: [], unreadable: [] } : null;
-  }
-  const others = boards.filter((b) => b.slug !== viewedBoard);
-  // A genuine single-board install has nothing to advertise, and the footer
-  // renders "" for an empty set. Costs zero reads.
-  if (others.length === 0) return { cards: [], unreadable: [] };
-  const out: Card[] = [];
-  const unreadable: string[] = [];
-  for (const b of others) {
-    let part: Card[] | null;
+  node: NodeClient, cfg: Config, viewedBoard: string, boards: Array<{ slug: string }>,
+): Promise<{ cards: Card[]; unreadable: string[] }> {
+  requireMultiKey(cfg);
+  const others = boards.filter(board => board.slug !== viewedBoard);
+  const parts = await mapWithConcurrency(others, async board => {
     try {
-      part = await listBoardCardsPartition(node, cfg, b.slug, {
-        fields: BOARD_CARDS_FOOTER_FIELDS,
-      });
+      const cards = await listBoardCardsPartition(node, cfg, board.slug, { fields: BOARD_CARDS_FOOTER_FIELDS });
+      return { board: board.slug, cards };
     } catch {
-      // This board's partition is unreadable. Keep the boards that ARE
-      // readable, name this one, and let `list` finish — see the note above.
-      unreadable.push(b.slug);
-      continue;
+      return { board: board.slug, cards: null };
     }
-    if (part === null) return null; // caller falls back to the cross-board read
-    for (const c of part) {
-      if (isHiddenCard(c)) continue;
-      // `board` is the partition key, so it is authoritative here even though
-      // the narrow projection carries no title/assignee for these rows. The
-      // footer counts by board and renders nothing else.
-      out.push(c.board ? c : { ...c, board: b.slug });
-    }
-  }
-  return { cards: out, unreadable };
+  }, PARTITION_READ_CONCURRENCY);
+  return {
+    cards: parts.flatMap(part => part.cards ?? []).filter(card => !isHiddenCard(card)),
+    unreadable: parts.filter(part => part.cards === null).map(part => part.board),
+  };
 }
+
 
 // Point read by slug — the node resolves a HashKey filter as an indexed key
 // lookup, so this never scans the board.
@@ -4356,149 +3992,29 @@ function cardListProjectionFields(fields: string[]): string[] {
   ]);
 }
 
-function arraysEqual(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((value, i) => value === b[i]);
+
+
+
+
+
+
+
+
+
+
+
+
+/** Collect body keys, then fetch bounded primary-key batches. Preserve the caller's order. */
+export async function hydrateCardBodies(node: NodeClient, cfg: Config, cards: Card[]): Promise<Card[]> {
+  const slugs = [...new Set(cards.filter(card => isBodyOmitted(card) && !card.body).map(card => card.slug))];
+  const chunks = Array.from({ length: Math.ceil(slugs.length / 16) }, (_, i) => slugs.slice(i * 16, i * 16 + 16));
+  const results = await mapWithConcurrency(chunks,
+    keys => findCardsWithFields(node, cfg, keys, ["slug", "body", "tags"]), POINT_READ_CONCURRENCY);
+  const bodies = new Map(results.flat().filter((card): card is Card => card !== null).map(card => [card.slug, card.body]));
+  return cards.map(card => isBodyOmitted(card) && !card.body && bodies.has(card.slug)
+    ? withLoadedBody(card, bodies.get(card.slug)!) : card);
 }
 
-function boardCardSummaryMatchesTruth(summary: Card, truth: Card): boolean {
-  return (
-    summary.slug === truth.slug &&
-    summary.title === truth.title &&
-    (summary.board || DEFAULT_BOARD_SLUG) === (truth.board || DEFAULT_BOARD_SLUG) &&
-    summary.column === truth.column &&
-    String(summary.position) === String(truth.position) &&
-    summary.assignee === truth.assignee &&
-    arraysEqual(summary.tags, truth.tags) &&
-    arraysEqual(summary.deps, truth.deps) &&
-    arraysEqual(summary.surfaces, truth.surfaces) &&
-    summary.created_at === truth.created_at &&
-    (summary.created_by || UNKNOWN_CREATED_BY) === (truth.created_by || UNKNOWN_CREATED_BY) &&
-    summary.updated_at === truth.updated_at &&
-    summary.repo === truth.repo &&
-    summary.base === truth.base &&
-    summary.kind === truth.kind &&
-    summary.block_status === truth.block_status &&
-    summary.block_reason === truth.block_reason &&
-    summary.north_star === truth.north_star &&
-    (summary.milestone ?? "") === (truth.milestone ?? "") &&
-    summary.pr_url === truth.pr_url &&
-    summary.branch === truth.branch
-  );
-}
-
-/**
- * Collapse a BoardCards partition to one card per slug — pure, no node reads.
- *
- * Duplicate sks for a slug are an invariant violation (board-cards.ts keeps at
- * most one row per (board, slug)); when one slips through, prefer the fresher
- * `updated_at` rather than first-wins, which used to pin a stale `doing#` ghost
- * ahead of the real `done#` row forever.
- */
-function dedupeBoardCardSummaries(cards: Card[]): Card[] {
-  const bySlug = new Map<string, Card>();
-  for (const card of cards) {
-    const prev = bySlug.get(card.slug);
-    bySlug.set(card.slug, prev ? preferFresherBoardCard(prev, card) : card);
-  }
-  return [...bySlug.values()].map((card) =>
-    Object.assign({ ...card, body: card.body || "" }, deriveStructuredFields(card)),
-  );
-}
-
-/**
- * Read model for board/column list previews.
- *
- * **Default: trust the projection.** BoardCards is an app-owned dual-written
- * secondary carrying CARD_FIELDS minus `body` (compare BOARD_CARDS_FIELDS with
- * CARD_FIELDS), and `cardListProjectionFields` strips `body` — so a per-row Card
- * point-read returns exactly the fields the BoardCards row already holds and
- * yields no new data on the happy path. Re-reading Card per row turned one keyed
- * partition query into 1+N serial point-reads: `list --column todo` rendering 10
- * cards cost 11 Card queries / 26.6s against the live node, and a drifted row
- * additionally triggered a full-partition purge scan inside `upsertBoardCard`.
- * Dynamo-shaped reads trust the GSI; drift is repaired by an explicit
- * reconciler, not by the hot read path (`concepts-lastdb-agent-access-model`).
- *
- * `verify: true` opts back into Card-authoritative reconciliation for paths that
- * are *about* drift rather than about rendering. It stays 1+N by construction,
- * so callers must bound the input.
- *
- * On Card miss under `verify`: **keep the BoardCards row and render the thin
- * summary** — never delete. A point-read miss can mean Mini degradation,
- * blind-key issues, or conflicted projection — not a true orphan. Destructive
- * orphan cleanup is only `groom board-cards-heal --apply` (explicit,
- * circuit-breakable). Incident 2026-07-23/24: list scrapers (Factory) deleted
- * ~1k BoardCards rows when Card multi-field reads failed after schema expand +
- * sync stress.
- */
-async function reconcileBoardCardSummaries(
-  node: NodeClient,
-  cfg: Config,
-  cards: Card[],
-  fields: string[],
-  opts: { verify?: boolean } = {},
-): Promise<Card[]> {
-  // BoardCards rows carry no body — mark them so nothing downstream mistakes
-  // `body: ""` for an empty brief (see `Card[BODY_OMITTED]`).
-  const deduped = markBodyOmitted(dedupeBoardCardSummaries(cards));
-  if (!opts.verify) return deduped;
-
-  const projection = cardListProjectionFields(fields);
-  const bodyVerified = projection.includes("body");
-  const out: Card[] = [];
-
-  for (const card of deduped) {
-    const truth = await findCardWithFields(node, cfg, card.slug, projection);
-    if (!truth) {
-      // Read-only on miss: surface the BoardCards thin row; do not removeBoardCard.
-      out.push(card);
-      continue;
-    }
-
-    Object.assign(truth, deriveStructuredFields(truth));
-    if (!bodyVerified) truth[BODY_OMITTED] = true;
-    if (!boardCardSummaryMatchesTruth(card, truth)) {
-      try {
-        await upsertBoardCard(node, cfg, truth, card);
-      } catch {
-        // best-effort read repair; still return point-read truth
-      }
-    }
-    out.push(truth);
-  }
-
-  return out;
-}
-
-/**
- * Point-get bodies for a page of cards (MCP preview / list --full-body).
- *
- * The list read is body-free — BoardCards stores no body — so every card that
- * needs one costs a Card point-read. That is proportional to the page, but the
- * page is NOT always small: `--all` / `all:true` sets the cap to 0, and
- * `capFlat`/`capPerColumn` read 0 as "no cap", so this runs over the whole
- * board (552 cards on the primary as of 2026-07-28).
- *
- * Bounded-parallel for that reason. The previous unbounded `Promise.all` opened
- * one socket per card and tipped Mini into "too many concurrent reads" exactly
- * when the board was largest — the failure scaled with the board, so it stayed
- * invisible until it wasn't. `board_cards_heal` had already learned this and
- * capped itself at 6; this shares that pool rather than rediscovering it.
- */
-export async function hydrateCardBodies(
-  node: NodeClient,
-  cfg: Config,
-  cards: Card[],
-): Promise<Card[]> {
-  return mapWithConcurrency(cards, async (c) => {
-    // Only a card whose body was never READ needs a point-read. A card already
-    // carrying its stored body — including a stored body that really is empty —
-    // is done, and re-reading it would pay N reads to learn nothing.
-    if (!isBodyOmitted(c) || c.body.length > 0) return c;
-    const full = await findCard(node, cfg, c.slug);
-    return full ? withLoadedBody(c, full.body) : c;
-  });
-}
 
 // Resolve a card by slug, throwing the canonical `card_not_found` error when
 // it doesn't exist (or is tombstoned). Shared by the card-editing commands
@@ -4556,88 +4072,22 @@ export async function requireBoard(node: NodeClient, cfg: Config, slug: string):
   return board;
 }
 
-// Write paths can recover a missing board record when live cards still point at
-// that board: the cards prove the board slug is real user state, so recreate the
-// board metadata with default columns instead of stranding add/move.
-//
-// A BOARD IS TWO WRITES, NOT ONE. The Board record is truth; `all_boards` is
-// what `listBoards` actually reads, and it re-seeds from truth only when the row
-// is ABSENT — a readable rollup that omits a live board is trusted forever. So
-// healing only the primary leaves the board permanently invisible to
-// `list`/`pickup`/`overlap`/the milestone portfolio while `show <slug>` keeps
-// working, which is the split that makes this kind of drift so hard to read.
-// Every other Board write in the repo patches both (`boardCreateCmd` on either
-// branch, `board rm` on removal); this one is not an exception.
-//
-// `warn` reports a rollup patch that could not be applied. It does NOT fail the
-// caller — see the catch below for why that direction is deliberate.
-export async function ensureBoardRecord(
-  node: NodeClient,
-  cfg: Config,
-  slug: string,
-  opts: { warn?: (msg: string) => void } = {},
-): Promise<Board> {
-  // The self-heal below infers a board's existence from cards that point at it,
-  // so it is only as trustworthy as those pointers. An EMPTY board slug is not
-  // a pointer: a card storing `board: ""` is a card that was never placed —
-  // the shape a deadline-truncated write leaves behind — and treating it as
-  // evidence would mint a board whose slug is "" as this path's response to
-  // data damage. Refuse before the read; nothing legitimate asks for it.
-  if (slug.length === 0) {
-    throw new FkanbanError({
-      code: "board_not_found",
-      message: `Board "" does not exist.`,
-      hint:
-        "An empty board slug means the card was never placed (a truncated write drops fields silently). " +
-        "Re-run the write with an explicit --board.",
-    });
-  }
+/** Recover missing board metadata only when current Card records reference that board. */
+export async function ensureBoardRecord(node: NodeClient, cfg: Config, slug: string): Promise<Board> {
+  requireMultiKey(cfg);
+  if (!slug) throw new FkanbanError({ code: "board_not_found", message: "An empty board slug cannot identify a board." });
   const board = await findBoard(node, cfg, slug);
   if (board) return board;
-
-  const referenced = (await listCardStatuses(node, cfg)).some((c) => c.board === slug);
-  if (!referenced) {
-    throw new FkanbanError({
-      code: "board_not_found",
-      message: `Board "${slug}" does not exist.`,
-      hint: boardCreateHint(slug),
-    });
+  const references = await keyRows(node, schemaHashFor("card", cfg), "by_board", { HashKey: slug }, ["slug", "tags"]);
+  if (!references.some(row => row.key.hash !== WRITE_PROBE_SLUG && !isTombstoned(arrayStringField(row.fields, "tags")))) {
+    throw new FkanbanError({ code: "board_not_found", message: "Board " + JSON.stringify(slug) + " does not exist.",
+      hint: boardCreateHint(slug) });
   }
-
-  const healed = seededBoard(slug);
-  await node.createRecord({
-    schemaHash: schemaHashFor("board", cfg),
-    fields: boardToFields(healed),
-    keyHash: healed.slug,
-  });
-
-  // REPORT, NEVER REFUSE — the rule `test/milestone-reconcile-index-read-failure.test.ts`
-  // settled for heal paths, applied here in the direction the call site demands.
-  //
-  // `patchBoardListIndex` legitimately throws: `index_unreadable` when the row is
-  // there but its payload does not come back (an ordinary shed), `cas_conflict`
-  // after four losing retries. In `boardCreateCmd` letting that propagate is
-  // right — the user asked for a board, and an unlisted board is not one.
-  //
-  // Here the caller asked to move/add/remove a CARD and the heal is a side
-  // effect. Rethrowing would abort that write while keeping the Board record it
-  // just created, and the retry meets the same shed; swallowing would leave the
-  // board silently invisible, which is the bug this call exists to close. So the
-  // caller's write completes and the part that did not is named, with its repair.
-  try {
-    await patchBoardListIndex(node, cfg, toBoardSummary(healed), "upsert");
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    (opts.warn ?? console.error)(
-      `kanban: warning: board "${slug}" was recreated from live cards, but the ` +
-        `all_boards rollup could not be patched (${reason}). The board and its ` +
-        `cards stay invisible to \`kanban list\`, \`pickup\`, and \`overlap\` ` +
-        `(\`kanban show <slug>\` still works) until the rollup is repaired: ` +
-        `run \`kanban groom board-list-heal --apply\`.`,
-    );
-  }
-  return healed;
+  const recovered = seededBoard(slug);
+  await node.createRecord({ schemaHash: schemaHashFor("board", cfg), keyHash: slug, fields: boardToFields(recovered) });
+  return recovered;
 }
+
 
 export function cardToFields(c: Card): Record<string, unknown> {
   return {
@@ -4697,141 +4147,28 @@ function sortMilestones(milestones: Milestone[]): Milestone[] {
   );
 }
 
-/**
- * Replace BoardMilestones membership copies with the fat Milestone HashKey row
- * that `milestone show` reads.
- *
- * BoardMilestones is a dual-written / Mini-folded copy. Live drift (2026-08-26):
- * the index still said `state=active` for milestones whose HashKey primary was
- * `complete`, and it blanked `north_star` values `show` returned. Gap-report
- * then queued `decompose` / `complete_proof` that the state CLI correctly
- * refused. A keyed read of the Milestone primary is the access pattern `show`
- * already uses; this is not a Milestone product scan. The slugs are read
- * together ({@link findMilestones}), not one query per milestone.
- *
- * Dual leftover SK rows (state is in the range key) are collapsed to one slug
- * before the keyed read so a stale `active#…` row cannot outrank a newer copy.
- * An index row with no primary row stays as the index reported it.
- */
-export async function hydrateMilestonesFromPrimary(
-  node: NodeClient,
-  cfg: Config,
-  milestones: Milestone[],
-): Promise<Milestone[]> {
-  if (milestones.length === 0) return [];
-  const unique = new Map<string, Milestone>();
-  for (const listed of milestones) {
-    if (!listed.slug) continue;
-    const prev = unique.get(listed.slug);
-    if (!prev || (listed.updated_at || "") > (prev.updated_at || "")) {
-      unique.set(listed.slug, listed);
-    }
-  }
-  const listed = [...unique.values()];
-  const primary = await findMilestones(node, cfg, listed.map((row) => row.slug));
-  return sortMilestones(listed.map((row, i) => primary[i] ?? row));
-}
 
-/**
- * Milestones on one board via BoardMilestones HashRange.
- *
- * When the index is bound and the partition query succeeds, an empty partition
- * is authoritative. The admin-only heal command owns legacy backfill; hot list,
- * portfolio, and gap-report paths must not product-scan Milestone just because
- * an indexed board currently has no rows.
- *
- * Index hits are HashKey-hydrated so `list` / `portfolio` / `gap-report` report
- * the same `state` and `north_star` as `milestone show`.
- */
+
+
+/** A failed named-key read is not an empty milestone list. */
 export async function listMilestonesOnBoard(node: NodeClient, cfg: Config, board: string): Promise<Milestone[]> {
-  const fromIndex = await listBoardMilestonesPartition(node, cfg, board);
-  if (multiKey(cfg)) return fromIndex ?? [];
-  if (fromIndex !== null) return hydrateMilestonesFromPrimary(node, cfg, fromIndex);
-  return (await listMilestones(node, cfg)).filter((m) => m.board === board);
-}
-
-/**
- * List milestones without product full-scan when BoardMilestones is bound:
- * one HashRange partition per board. Falls back to Milestone full-scan (+ sparse
- * HashKey hydrate) when the index is unbound or ANY partition query fails.
- *
- * "any", not "every": a board whose partition could not be read has an unknown
- * milestone set, and no other board's success can supply it. See
- * {@link listAllBoardMilestones}.
- */
-/**
- * Waits before each retry of a failed BoardMilestones partition read. Tests
- * set KANBAN_MILESTONE_INDEX_RETRY_MS=0 to keep the retry without the wait.
- */
-function milestoneIndexRetryMs(): number[] {
-  const raw = process.env.KANBAN_MILESTONE_INDEX_RETRY_MS?.trim();
-  if (raw === "0") return [0, 0];
-  return [2_000, 5_000];
-}
-
-export async function listMilestones(
-  node: NodeClient,
-  cfg: Config,
-  opts: BoardListOpt = {},
-): Promise<Milestone[]> {
-  const boards = opts.boards ?? (await listBoards(node, cfg));
-  let fromIndex = await listAllBoardMilestones(node, cfg, boards);
-  if (multiKey(cfg)) return fromIndex ?? [];
-  // A failed partition read is usually node backpressure. Two bounded retries
-  // before refusing: `milestone portfolio` used to fail the whole
-  // feature-prove run on one shed read
-  // (papercut-feature-prove-milestone-portfolio-backpressure-20260922).
-  if (fromIndex === null && boardMilestonesHash(cfg)) {
-    for (const waitMs of milestoneIndexRetryMs()) {
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      fromIndex = await listAllBoardMilestones(node, cfg, boards);
-      if (fromIndex !== null) break;
-    }
-  }
-  if (fromIndex !== null) return hydrateMilestonesFromPrimary(node, cfg, fromIndex);
-
-  // `null` above means one of two very different things, and substituting the
-  // product scan is only right for one of them — the same conflation that
-  // `listCardsWithFields` had to unpick (a failed read is not evidence that an
-  // index is missing).
-  //
-  // INDEX BOUND but unreadable => a partition threw. Do NOT fall through. On
-  // Cards the product scan is a safe substitute (measured: no rows lost at any
-  // projection width). On Milestone it is not, measured on the primary
-  // 2026-07-31:
-  //
-  //   product Milestone scan   62 slugs
-  //   BoardMilestones index    32 slugs, every one point-readable and real
-  //   in both                   8
-  //   index-only               24  <- live milestones the scan CANNOT see,
-  //                                   including active ones
-  //   scan-only                54  <- slug-only rows carrying no other atom,
-  //                                   unreachable by any keyed read
-  //
-  // So the scan is wrong in BOTH directions here: it would drop 24 real
-  // milestones and invent 54 phantoms that `milestone show` cannot open and
-  // `requireMilestone` throws on. Answering a transient shed with that is worse
-  // than saying we could not read — a caller can retry a failure; it cannot
-  // detect a plausible wrong list.
-  if (boardMilestonesHash(cfg)) {
-    throw new FkanbanError({
-      code: "board_milestones_unreadable",
-      message:
-      "BoardMilestones partition read failed (after " + (milestoneIndexRetryMs().length + 1) + " attempts) — refusing to answer from the Milestone product scan, " +
-        "which on this data misses live milestones and surfaces unreachable slug-only rows. " +
-        "This is usually node backpressure (service_timeout / too many concurrent reads): retry. " +
-        "If the index is genuinely stale, run `kanban groom milestone-indexes-heal`.",
-    });
-  }
-
-  // Index UNBOUND (fresh node, pre-backfill) — enumerate Milestone keys, then
-  // read the live rows by key, in batches (same hydrate contract as sparse scan).
-  const hashes = await listAllRecordHashes(node, schemaHashFor("milestone", cfg));
-  const milestones = (await findMilestones(node, cfg, hashes)).filter(
-    (m): m is Milestone => m !== null,
-  );
+  requireMultiKey(cfg);
+  const milestones = await listBoardMilestonesPartition(node, cfg, board);
+  if (milestones === null) throw new FkanbanError({ code: "named_key_unavailable", message: "The board milestone key is unavailable." });
   return sortMilestones(milestones);
 }
+
+
+
+
+export async function listMilestones(node: NodeClient, cfg: Config, opts: BoardListOpt = {}): Promise<Milestone[]> {
+  requireMultiKey(cfg);
+  const boards = opts.boards ?? await listBoards(node, cfg);
+  const milestones = await listAllBoardMilestones(node, cfg, boards);
+  if (milestones === null) throw new FkanbanError({ code: "named_key_unavailable", message: "A board milestone key is unavailable." });
+  return sortMilestones(milestones);
+}
+
 
 /**
  * Add milestones that the keyed card set references and Milestone point reads

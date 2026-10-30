@@ -1,3 +1,4 @@
+import { requireMultiKey } from "../multi-key.ts";
 // MCP server for fkanban — exposes the board as tools to MCP clients
 // (Claude Code, Codex, etc.) over stdio. Each handler calls the in-process
 // command function, so an agent sees the same result as the matching
@@ -382,6 +383,7 @@ export function createFkanbanMcpServer(
         hint: "Run `kanban init` first.",
       });
     }
+    requireMultiKey(cfg);
     const node = explicitNode ?? newNodeClient({ baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
     return { cfg, node };
   };

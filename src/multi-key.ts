@@ -6,7 +6,7 @@ export const MULTI_KEY_MODEL = "multi-key-v1" as const;
 export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storageModel === MULTI_KEY_MODEL;
 export function requireMultiKey(cfg: { storageModel?: string }): void {
   if (!multiKey(cfg)) throw new FkanbanError({ code: "multi_key_conversion_required",
-    message: "Complete the explicit app conversion before this mutation." });
+    message: "Complete the explicit app conversion before this command." });
 }
 const RETIRED = new Set(["board_cards", "milestone_cards", "board_milestones", "card_list_index", "kanban_list_head"]);
 

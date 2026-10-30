@@ -12,6 +12,11 @@ Milestone reconcile and detail read the named milestone key. They do not repair 
 The CLI and MCP return the same child status, ready frontier, and proof verdict.
 Read failures stop the command. An incomplete read cannot report an empty milestone.
 Doctor checks the schema owner, primary key, fields, and complete named key layout.
+Ordinary CLI and MCP requests require the converted config. The explicit converter can read the old config.
+Board create writes one Board record. Board removal reads the named board key and removes Card records in bounded batches.
+The default-board and external-dependency guards remain. A remaining Card record prevents removal of the Board record.
+Body reads collect primary keys first. Each batch contains at most 16 bodies.
+Already loaded bodies stay unchanged. Soft-deleted records do not enter the result.
 
 ## Existing installations
 
