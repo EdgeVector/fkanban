@@ -2,6 +2,8 @@
 // of cards. Broad `--json` reads default to bounded body previews.
 
 import { FkanbanError, type NodeClient } from "../client.ts";
+import { multiKey } from "../multi-key.ts";
+import { namedColumnHeads } from "../named-column-heads.ts";
 import { type Config } from "../config.ts";
 import {
   BODY_OMITTED,
@@ -335,11 +337,11 @@ export async function listResult(
   // Re-deriving either would be a second Board read for data already in hand.
   const boardsRead = listBoards(opts.node, opts.cfg);
   // One exact key per column. A missing head is an empty column.
-  const headHash = requireHeadHash(opts.cfg);
+  const headHash = multiKey(opts.cfg) ? "" : requireHeadHash(opts.cfg);
+  const readHeads = (keys: Parameters<typeof namedColumnHeads>[2]) => multiKey(opts.cfg)
+    ? namedColumnHeads(opts.node, opts.cfg, keys) : readColumnHeads(opts.node, headHash, keys);
   const listedColumns = opts.column ? [opts.column] : [...DEFAULT_COLUMNS];
-  const headsRead = readColumnHeads(
-    opts.node,
-    headHash,
+  const headsRead = readHeads(
     listedColumns.map((column) => ({ board: boardSlug, column })),
   );
   // `allSettled`, not `all`: with `all` whichever read rejects FIRST decides the
@@ -378,9 +380,7 @@ export async function listResult(
   let heads = headsSettled.value;
   const extraColumns = columns.filter((column) => !listedColumns.includes(column));
   if (extraColumns.length > 0) {
-    const more = await readColumnHeads(
-      opts.node,
-      headHash,
+    const more = await readHeads(
       extraColumns.map((column) => ({ board: boardSlug, column })),
     );
     heads = new Map([...heads, ...more]);
@@ -446,7 +446,7 @@ export async function listResult(
     let cross: Card[] = [];
     let unreadable: string[] = [];
     try {
-      const otherHeads = await readColumnHeads(opts.node, headHash, pairs);
+      const otherHeads = await readHeads(pairs);
       cross = otherBoards.flatMap((board) => cardsFromHeads(board.slug, board.columns, otherHeads));
     } catch {
       cross = [];

@@ -243,7 +243,7 @@ function applyPriority(tags: string[], priority?: PriorityTier): string[] {
 
 import type { GuardedReceipt } from "../guarded-snapshot.ts";
 
-export type AddResult = Partial<GuardedReceipt> & Partial<CreateOnlyReceipt> & { membership_cleanup?: "deferred"; slug: string; action: "created" | "updated"; board: string; column: string };
+export type AddResult = Partial<GuardedReceipt> & Partial<CreateOnlyReceipt> & { membership_cleanup?: "deferred" | "native"; slug: string; action: "created" | "updated"; board: string; column: string };
 
 function suppressDefaultTodoWarning(card: Pick<Card, "board" | "column">, force?: boolean): boolean {
   return !force && card.board === "default" && card.column === "todo";

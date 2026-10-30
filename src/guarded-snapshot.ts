@@ -25,12 +25,17 @@ export function sha256(bytes: string | Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 export const GUARDED_CONTRACT_SHA256 = sha256(JSON.stringify(GUARDED_CONTRACT) + "\n");
+export const OWNED_GUARDED_CONTRACT = Object.freeze({ ...GUARDED_CONTRACT, version: 2,
+  name: "fkanban-owned-raw23-guarded-card", compound_builds: [], required_capability: "atomic_owned_mutations_v1",
+  max_batch_operations: 24, membership_cleanup: "native",
+});
+export const OWNED_GUARDED_CONTRACT_SHA256 = sha256(JSON.stringify(OWNED_GUARDED_CONTRACT) + "\n");
 export type RawFields = Record<string, string | string[]>;
 export type GuardSnapshot = { version: 1; schema_hash: string; fields: RawFields };
 export type GuardOptions = { guardSnapshotJson?: string; snapshotSha256?: string };
 export type GuardedReceipt = {
   next_snapshot_json: string; next_snapshot_sha256: string; durability: "durable";
-  guard_snapshot_sha256: string; contract_sha256: string; membership_cleanup: "deferred";
+  guard_snapshot_sha256: string; contract_sha256: string; membership_cleanup: "deferred" | "native";
 };
 export type FreshClaimChain = {
   version: 1; mode: "fresh"; initial_snapshot_sha256: string;

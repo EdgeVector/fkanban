@@ -1,0 +1,73 @@
+// One owned record per slug. Named keys contain addresses, never payload copies.
+import { FkanbanError, type NodeClient, type QueryRow } from "./client.ts";
+import type { Config } from "./config.ts";
+import { EXTRA_SCHEMAS, UNIQUE_SCHEMAS, type SchemaDefinition } from "./schemas.ts";
+
+export const MULTI_KEY_MODEL = "multi-key-v1" as const;
+export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storageModel === MULTI_KEY_MODEL;
+const RETIRED = new Set(["board_cards", "milestone_cards", "board_milestones", "card_list_index", "kanban_list_head"]);
+
+export function ownedSchemas() {
+  return [...UNIQUE_SCHEMAS, ...EXTRA_SCHEMAS.filter((entry) => !RETIRED.has(entry.key))].map((entry) => {
+    const schema = structuredClone(entry.schema.schema);
+    schema.independent_fields = true;
+    const ordered = (hash: string, state: string): NonNullable<SchemaDefinition["alternate_keys"]>[string] => ({
+      hash_field: hash, missing: "reject", range_separator: "#", range_parts: [
+        { field: state }, { field: "position", format: { padded_text: { width: 8 } } }, { field: "slug" },
+      ],
+    });
+    if (entry.key === "card") schema.alternate_keys = {
+      by_board: ordered("board", "column"), by_milestone: { ...ordered("milestone", "column"), missing: "omit", omit_empty_hash: true },
+    };
+    if (entry.key === "milestone") schema.alternate_keys = { by_board: ordered("board", "state") };
+    if (entry.key === "board") schema.alternate_keys = { all: { hash_literal: "all", range_field: "slug" } };
+    return { key: entry.key, schema };
+  });
+}
+
+export type NamedRow = QueryRow & { matched_key: { hash: string; range: string } };
+export type NamedPage = { results: NamedRow[]; has_more: boolean; next_cursor?: unknown };
+
+export async function keyPage(
+  node: NodeClient, cfg: Pick<Config, "schemaHashes">, type: string, name: string,
+  filter: unknown, fields: readonly string[], limit = 1000, cursor?: unknown,
+): Promise<NamedPage> {
+  const response = await node.rawCall("POST", "/api/query", {
+    schema_name: cfg.schemaHashes[type], key_name: name, filter, fields: [...fields], limit, response_format: "values",
+    ...(cursor ? { cursor } : {}),
+  });
+  const root = response.json as { data?: unknown };
+  const page = (root?.data ?? root) as NamedPage;
+  if (response.status !== 200 || !Array.isArray(page?.results) || typeof page.has_more !== "boolean"
+      || page.results.some((row) => !row.key?.hash || !row.matched_key?.hash || typeof row.matched_key.range !== "string")) {
+    throw new FkanbanError({ code: "multi_key_read_failed", message: `The ${type}/${name} read did not return a valid named-key page.` });
+  }
+  if (page.has_more && !page.next_cursor) throw new FkanbanError({ code: "multi_key_cursor_missing", message: "The named-key page has no continuation." });
+  return page;
+}
+
+export async function keyRows(
+  node: NodeClient, cfg: Pick<Config, "schemaHashes">, type: string, name: string,
+  filter: unknown, fields: readonly string[],
+): Promise<NamedRow[]> {
+  const rows: NamedRow[] = [];
+  let cursor: unknown;
+  const seen = new Set<string>();
+  for (let pageNumber = 0; pageNumber < 1000; pageNumber += 1) {
+    const page = await keyPage(node, cfg, type, name, filter, fields, 1000, cursor);
+    for (const row of page.results) {
+      const id = JSON.stringify(row.key);
+      if (seen.has(id)) throw new FkanbanError({ code: "multi_key_duplicate", message: "The named-key pages repeat a primary record." });
+      seen.add(id);
+      rows.push(row);
+    }
+    if (!page.has_more) return rows;
+    if (JSON.stringify(cursor) === JSON.stringify(page.next_cursor)) throw new FkanbanError({ code: "multi_key_cursor_stalled", message: "The named-key cursor did not advance." });
+    cursor = page.next_cursor;
+  }
+  throw new FkanbanError({ code: "multi_key_read_limit", message: "The named-key read exceeded its page limit." });
+}
+
+export function primaryProjection(fields: readonly string[]): string[] {
+  return [...new Set(["slug", "board", "column", "position", ...fields.filter((field) => !["sk", "layout"].includes(field))])];
+}

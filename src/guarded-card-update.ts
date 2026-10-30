@@ -2,6 +2,8 @@ import { FkanbanError, type CasExpectation, type NodeClient } from "./client.ts"
 import type { Config } from "./config.ts";
 import { cardToFields, type Card } from "./record.ts";
 import { boardCardFieldsFromCard, boardCardsWriteHashes } from "./board-cards.ts";
+import { multiKey } from "./multi-key.ts";
+import { ownedCardBatchSupported } from "./owned-card-contract.ts";
 
 // A git-describe count is not a compatibility promise. Expand only after the
 // cross-schema race/durability proof passes for that exact node build.
@@ -17,6 +19,15 @@ export async function guardedCardUpdate(
   card: Card,
   expected: CasExpectation,
 ): Promise<void> {
+  if (multiKey(opts.cfg)) {
+    if (!opts.node.updateRecords || !opts.cfg.schemaHashes.card || !await ownedCardBatchSupported(opts.node)) {
+      throw new FkanbanError({ code: "guarded_batch_unsupported", message: "Guarded updates require the atomic primary-record batch." });
+    }
+    const fields = cardToFields(card);
+    delete fields.body;
+    await opts.node.updateRecords([{ schemaHash: opts.cfg.schemaHashes.card, keyHash: card.slug, fields, expected, durability: "durable" }]);
+    return;
+  }
   const version = await opts.node.nodeVersion?.();
   if (!version?.handshake || !GUARDED_CARD_BATCH_BUILDS.includes(
     version.build as typeof GUARDED_CARD_BATCH_BUILDS[number],

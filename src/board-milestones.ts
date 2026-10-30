@@ -6,6 +6,7 @@
 // Never product full-scan the Milestone schema when this index is bound.
 
 import type { Config } from "./config.ts";
+import { keyRows, multiKey } from "./multi-key.ts";
 import type { NodeClient, QueryFilter, QueryRow } from "./client.ts";
 import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
 import { padPositionSegment, unpadPositionSegment } from "./position_key.ts";
@@ -291,6 +292,10 @@ export async function listBoardMilestonesPartition(
   cfg: Config,
   board: string,
 ): Promise<Milestone[] | null> {
+  if (multiKey(cfg)) {
+    const fields = BOARD_MILESTONES_FIELDS.filter((field) => !["sk", "layout"].includes(field));
+    return (await keyRows(node, cfg, "milestone", "by_board", { HashKey: board }, fields)).map((row) => milestoneFromBoardMilestoneFields(row.fields));
+  }
   const schemaHash = boardMilestonesHash(cfg);
   if (!schemaHash) return null;
   try {
@@ -356,6 +361,13 @@ export async function listBoardMilestonesPartitionSpine(
   cfg: Config,
   board: string,
 ): Promise<BoardMilestoneRow[] | null> {
+  if (multiKey(cfg)) {
+    return (await keyRows(node, cfg, "milestone", "by_board", { HashKey: board }, ["slug"])).map((row) => {
+      const parsed = parseBoardMilestoneSk(row.matched_key.range);
+      if (!parsed || parsed.slug !== row.key.hash) throw new Error("Milestone alternate key differs from its primary key");
+      return { board, sk: row.matched_key.range, ...parsed };
+    });
+  }
   const schemaHash = boardMilestonesHash(cfg);
   if (!schemaHash) return null;
   let res;
@@ -500,7 +512,7 @@ export async function listAllBoardMilestones(
   cfg: Config,
   boards: Array<{ slug: string }>,
 ): Promise<Milestone[] | null> {
-  if (!boardMilestonesHash(cfg)) return null;
+  if (!multiKey(cfg) && !boardMilestonesHash(cfg)) return null;
   if (boards.length === 0) return [];
   // Read the partitions TOGETHER, matching `listAllBoardCards`. These are
   // independent partition reads and a read is almost entirely per-request

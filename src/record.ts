@@ -1,4 +1,5 @@
 import { guardedCardUpdate } from "./guarded-card-update.ts";
+import { keyRows, multiKey } from "./multi-key.ts";
 // Domain helpers: turn fold_db query rows into typed Card / Board records,
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
@@ -3649,6 +3650,8 @@ export async function listCardsByColumn(
       hint: "Run kanban init / ensure config.schemaHashes.board_cards is set. No secondary list path.",
     });
   }
+  if (multiKey(cfg)) return markBodyOmitted(part.filter((card) => !isHiddenCard(card))
+    .map((card) => Object.assign(card, deriveStructuredFields(card))));
   const exclusive = await dropStaleColumnMembership(
     node,
     cfg,
@@ -3856,6 +3859,7 @@ export async function listCardsOnBoard(
     });
   }
   if (part.length === 0) return [];
+  if (multiKey(cfg)) return markBodyOmitted(part.filter((c)=>!isHiddenCard(c)).map((c)=>Object.assign(c,deriveStructuredFields(c))));
   const reconciled = await reconcileBoardCardSummaries(node, cfg, part, fields);
   return reconciled
     .filter((c) => !isHiddenCard(c))
@@ -3877,6 +3881,10 @@ export async function listCardsByFilter(
 }
 
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
+  if (multiKey(cfg)) {
+    return (await keyRows(node, cfg, "board", "all", { HashKey: "all" }, fieldsFor("board")))
+      .map(rowToBoard).filter((board) => !isTombstoned(board.columns) && board.slug.length > 0);
+  }
   const live = (boards: Board[]) =>
     boards.filter((b) => !isTombstoned(b.columns) && b.slug.length > 0);
 
@@ -4761,6 +4769,7 @@ export async function hydrateMilestonesFromPrimary(
  */
 export async function listMilestonesOnBoard(node: NodeClient, cfg: Config, board: string): Promise<Milestone[]> {
   const fromIndex = await listBoardMilestonesPartition(node, cfg, board);
+  if (multiKey(cfg)) return fromIndex ?? [];
   if (fromIndex !== null) return hydrateMilestonesFromPrimary(node, cfg, fromIndex);
   return (await listMilestones(node, cfg)).filter((m) => m.board === board);
 }
@@ -4791,6 +4800,7 @@ export async function listMilestones(
 ): Promise<Milestone[]> {
   const boards = opts.boards ?? (await listBoards(node, cfg));
   let fromIndex = await listAllBoardMilestones(node, cfg, boards);
+  if (multiKey(cfg)) return fromIndex ?? [];
   // A failed partition read is usually node backpressure. Two bounded retries
   // before refusing: `milestone portfolio` used to fail the whole
   // feature-prove run on one shed read
@@ -5031,6 +5041,7 @@ export async function upsertMilestoneRecord(
     keyHash: milestone.slug,
     fields: milestoneToFields(milestone),
   });
+  if (multiKey(cfg)) return;
   if (boardMilestonesHash(cfg)) {
     // Protein-primary: Mini should fold BoardMilestones tips from the fat
     // Milestone write; we only retire obsolete keyed rows we can address.
@@ -5371,6 +5382,7 @@ export async function createCardRecord(
   card: Card,
 ): Promise<void> {
   await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
+  if (multiKey(opts.cfg)) return;
   await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
   // skipOrphanPurge: this sk was just minted for a card that did not exist, so
   // there can be no other row for the slug to purge. (There is no pre-write read
@@ -5409,6 +5421,7 @@ function listHeadHash(cfg: Config): string {
 }
 
 export function requireListHeadHash(cfg: Config): string {
+  if (multiKey(cfg)) return "";
   return listHeadHash(cfg);
 }
 
@@ -5530,6 +5543,7 @@ export async function maintainCardHead(
   card: Card,
   previous: Card | null,
 ): Promise<void> {
+  if (multiKey(opts.cfg)) return;
   await syncCardHead(opts.node, listHeadHash(opts.cfg), card, previous, { refill: headRefill(opts) });
 }
 
@@ -5544,6 +5558,7 @@ export async function syncRankedColumnHead(
   column: string,
   cards: readonly Card[],
 ): Promise<void> {
+  if (multiKey(opts.cfg)) return;
   const result = await columnCardsForHead(opts.node, opts.cfg, board, column, []);
   if (!result.complete) {
     console.error(
@@ -5644,6 +5659,10 @@ export async function updateCardRecord(
 ): Promise<void> {
   if (expected?.type === "value" && expected.field === "assignee") {
     assertBodyLoaded(card, `guarded update of card "${card.slug}"`);
+    if (multiKey(opts.cfg)) {
+      await guardedCardUpdate(opts, card, expected);
+      return;
+    }
     requireListHeadHash(opts.cfg);
     await guardedCardUpdate(opts, card, expected);
     // The proved batch must not gain a head write. The head update follows it.
@@ -5674,6 +5693,7 @@ export async function updateCardRecord(
   // row wide AND current, for zero extra round trips. A wide Card write
   // returns null — it just stored `card` whole, so `card` IS current.
   const effective = written ? rowToCard({ fields: written, key: { hash: card.slug, range: null } }) : card;
+  if (multiKey(opts.cfg)) return;
   await patchCardListIndex(opts.node, opts.cfg, effective, "upsert");
   await writeCardMembership(opts, effective, previous ?? null, {}, flags);
   // Search visibility is a contract for a NEW or MOVED BoardCards address —
@@ -5753,6 +5773,10 @@ export async function deleteCardRecord(
   card: Card,
 ): Promise<void> {
   const hash = schemaHashFor("card", opts.cfg);
+  if (multiKey(opts.cfg)) {
+    await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
+    return;
+  }
   const truth = await readCardMembershipKeys(opts.node, opts.cfg, card);
   // Membership rows FIRST, the Card atom LAST. `removeBoardCard`'s primary
   // tip delete now retries then THROWS on a genuine failure (it used to
@@ -6134,6 +6158,13 @@ export async function deleteCardRecordsBatch(
 ): Promise<void> {
   if (cards.length === 0) return;
   const hash = schemaHashFor("card", opts.cfg);
+  if (multiKey(opts.cfg)) {
+    if (!opts.node.deleteRecords) throw new FkanbanError({ code: "batch_delete_unavailable", message: "The node client cannot batch the primary deletes." });
+    for (let offset = 0; offset < cards.length; offset += CARD_DELETE_BATCH) {
+      await opts.node.deleteRecords(cards.slice(offset, offset + CARD_DELETE_BATCH).map((card) => ({ schemaHash: hash, keyHash: card.slug })));
+    }
+    return;
+  }
 
   // Provenance first, and CONCURRENTLY: these are independent point reads, and
   // the reason they cannot be skipped is `deleteCardRecord`'s — a thin caller

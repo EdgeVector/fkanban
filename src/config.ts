@@ -1,10 +1,11 @@
+import { writeConfigFile } from "./config-file.ts";
 import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Persistent CLI config — `~/.kanban/config.json` by default, with
 // `~/.fkanban/config.json` as the compatibility fallback. Holds the canonical
 // schema hashes (NOT the descriptive names) plus the node + schema-service URLs
 // and the node user hash.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -15,6 +16,7 @@ const PRIMARY_CONFIG_ENV = "KANBAN_CONFIG";
 const LEGACY_CONFIG_ENV = "FKANBAN_CONFIG";
 
 export type Config = {
+  storageModel?: "multi-key-v1";
   schemaFieldAliases?: FieldAliasProfiles;
   configVersion: number;
   nodeUrl: string;
@@ -172,7 +174,7 @@ export function writeConfig(
 ): void {
   mkdirSync(dirname(path), { recursive: true });
   const { configPath: _omit, ...persisted } = config;
-  writeFileSync(path, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+  writeConfigFile(path, JSON.stringify(persisted, null, 2) + "\n");
 }
 
 /**
@@ -211,6 +213,9 @@ function assertConfigShape(path: string, raw: unknown): Config {
     throw new ConfigInvalidError(path, "not an object");
   }
   const r = raw as Record<string, unknown>;
+  if (r.storageModel !== undefined && r.storageModel !== "multi-key-v1") {
+    throw new ConfigInvalidError(path, "unsupported storageModel");
+  }
 
   if (r.configVersion !== undefined && r.configVersion !== CONFIG_VERSION) {
     throw new ConfigInvalidError(path, `unsupported configVersion "${String(r.configVersion)}" (expected ${CONFIG_VERSION})`);
@@ -287,6 +292,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
   }
 
   return {
+    ...(r.storageModel === "multi-key-v1" ? { storageModel: "multi-key-v1" as const } : {}),
     schemaFieldAliases:parseFieldAliases(r.schemaFieldAliases),
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,

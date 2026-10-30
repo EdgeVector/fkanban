@@ -104,7 +104,7 @@ export type MoveResult = Omit<Partial<GuardedReceipt>, "membership_cleanup"> & {
    * out), so a stale row may remain for `board-cards-heal`. Failed deletes and
    * a timeout also print a warning on stderr.
    */
-  membership_cleanup?: "deferred" | "purged";
+  membership_cleanup?: "deferred" | "purged" | "native";
   slug: string;
   from: string;
   to: string;

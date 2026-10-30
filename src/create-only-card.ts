@@ -1,11 +1,13 @@
 // Public finite creation: all Card fields must be absent at atomic publication.
 import { type NodeClient } from "./client.ts";
+import { multiKey } from "./multi-key.ts";
+import { ownedCardBatchSupported } from "./owned-card-contract.ts";
 import { type Config, schemaHashFor } from "./config.ts";
 import { CARD_FIELDS } from "./schemas.ts";
 import { boardCardFieldsFromCard, boardCardsWriteHashes } from "./board-cards.ts";
 import { cardToFields, claimHoldReason, maintainCardHead, requireListHeadHash, type Card } from "./record.ts";
 import {
-  captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT_SHA256, guardError,
+  captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT_SHA256, OWNED_GUARDED_CONTRACT_SHA256, guardError,
   rawEqual, serializeSnapshot, sha256, validateRawFields,
 } from "./guarded-snapshot.ts";
 
@@ -21,10 +23,15 @@ export const CREATE_ONLY_CONTRACT = Object.freeze({
   durability: "durable", membership_cleanup: "deferred", retries: 0,
 });
 export const CREATE_ONLY_CONTRACT_SHA256 = sha256(JSON.stringify(CREATE_ONLY_CONTRACT) + "\n");
+export const OWNED_CREATE_ONLY_CONTRACT = Object.freeze({ ...CREATE_ONLY_CONTRACT, version: 2,
+  name: "fkanban-owned-raw23-create-only", compound_builds: [], required_capability: "atomic_owned_mutations_v1",
+  max_board_destinations: 0, max_batch_operations: 24, membership_cleanup: "native",
+});
+export const OWNED_CREATE_ONLY_CONTRACT_SHA256 = sha256(JSON.stringify(OWNED_CREATE_ONLY_CONTRACT) + "\n");
 export type CreateOnlyReceipt = {
   next_snapshot_json: string; next_snapshot_sha256: string; durability: "durable";
   contract_sha256: string; card_guarded_contract_sha256: string;
-  absence_guard: "all23-absent"; membership_cleanup: "deferred";
+  absence_guard: "all23-absent"; membership_cleanup: "deferred" | "native";
 };
 export function assertCreateOnlyScope(card: Card, force?: boolean): void {
   if (force || card.column !== "backlog" || card.assignee !== "" || claimHoldReason(card) ||
@@ -38,10 +45,12 @@ export async function createOnlyCard(opts: { node: NodeClient; cfg: Config }, ca
   const fields = validateRawFields(cardToFields(card), card.slug);
   const witness = { version: 1 as const, schema_hash: schemaHash, fields };
   serializeSnapshot(witness);
-  const hashes = boardCardsWriteHashes(opts.cfg);
+  const hashes = multiKey(opts.cfg) ? [] : boardCardsWriteHashes(opts.cfg);
   const build = await opts.node.nodeVersion?.();
-  if (!build?.handshake || typeof build.build !== "string" || !COMPOUND_CARD_BUILDS.includes(build.build) || !opts.node.updateRecords || !opts.node.getSchema ||
-      hashes.length < 1 || hashes.length > CREATE_ONLY_CONTRACT.max_board_destinations) {
+  const supported = multiKey(opts.cfg) ? await ownedCardBatchSupported(opts.node)
+    : build?.handshake && typeof build.build === "string" && COMPOUND_CARD_BUILDS.includes(build.build);
+  if (!supported || !opts.node.updateRecords || !opts.node.getSchema ||
+      (!multiKey(opts.cfg) && (hashes.length < 1 || hashes.length > CREATE_ONLY_CONTRACT.max_board_destinations))) {
     guardError("create_only_unsupported", "The exact proved node build, atomic batch and BoardCards destinations are required.");
   }
   const boardFields = boardCardFieldsFromCard(card);
@@ -76,6 +85,7 @@ export async function createOnlyCard(opts: { node: NodeClient; cfg: Config }, ca
   await maintainCardHead(opts, card, null);
   const json = serializeSnapshot(witness);
   return { next_snapshot_json: json, next_snapshot_sha256: sha256(json), durability: "durable",
-    contract_sha256: CREATE_ONLY_CONTRACT_SHA256, card_guarded_contract_sha256: GUARDED_CONTRACT_SHA256,
-    absence_guard: "all23-absent", membership_cleanup: "deferred" };
+    contract_sha256: multiKey(opts.cfg) ? OWNED_CREATE_ONLY_CONTRACT_SHA256 : CREATE_ONLY_CONTRACT_SHA256,
+    card_guarded_contract_sha256: multiKey(opts.cfg) ? OWNED_GUARDED_CONTRACT_SHA256 : GUARDED_CONTRACT_SHA256,
+    absence_guard: "all23-absent", membership_cleanup: multiKey(opts.cfg) ? "native" : "deferred" };
 }

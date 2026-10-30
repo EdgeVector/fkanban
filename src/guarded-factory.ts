@@ -1,5 +1,7 @@
 // Finite public factory mutations. Raw Card guards precede every destination upsert.
 import { FkanbanError, type NodeClient } from "./client.ts";
+import { multiKey } from "./multi-key.ts";
+import { ownedCardBatchSupported } from "./owned-card-contract.ts";
 import type { Config } from "./config.ts";
 import { CARD_FIELDS } from "./schemas.ts";
 import { boardCardFieldsFromCard, boardCardsWriteHashes } from "./board-cards.ts";
@@ -14,7 +16,7 @@ import { assertSituationPreflightAllowed, type SituationPreflight } from "./situ
 import { doingPeerFencesCandidate, PICKUP_V2_PEER_FIELDS } from "./pickup_v2.ts";
 import { assertLifecycleMoveAllowed } from "./pipeline_status.ts";
 import {
-  boundSnapshot, captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256,
+  boundSnapshot, captureSnapshot, COMPOUND_CARD_BUILDS, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, OWNED_GUARDED_CONTRACT_SHA256,
   guardError, rawEqual, serializeSnapshot, sha256, snapshotByteSha, snapshotCard, validateRawFields,
   type FreshClaimChain, type GuardOptions, type GuardSnapshot, type GuardedReceipt, type RawFields,
 } from "./guarded-snapshot.ts";
@@ -61,11 +63,13 @@ export async function compoundUpdate(opts: Context, witness: GuardSnapshot, inte
     guardError("guarded_delta_scope", `The finite operation cannot change ${field}.`);
   }
   const version = await opts.node.nodeVersion?.();
-  if (!version?.handshake || typeof version.build !== "string" || !COMPOUND_CARD_BUILDS.includes(version.build) || !opts.node.updateRecords || !opts.node.getSchema) {
+  const supported = multiKey(opts.cfg) ? await ownedCardBatchSupported(opts.node)
+    : version?.handshake && typeof version.build === "string" && COMPOUND_CARD_BUILDS.includes(version.build);
+  if (!supported || !opts.node.updateRecords || !opts.node.getSchema) {
     guardError("guarded_batch_unsupported", "The exact proved compound build and atomic durable batch are required.");
   }
-  const hashes = boardCardsWriteHashes(opts.cfg);
-  if (!hashes.length || hashes.length > 2) guardError("guarded_schema_unsupported", "One or two BoardCards destinations are required.");
+  const hashes = multiKey(opts.cfg) ? [] : boardCardsWriteHashes(opts.cfg);
+  if (!multiKey(opts.cfg) && (!hashes.length || hashes.length > 2)) guardError("guarded_schema_unsupported", "One or two BoardCards destinations are required.");
   const card = snapshotCard({ ...witness, fields: intended });
   const boardFields = boardCardFieldsFromCard(card);
   // Card raw values are authoritative for every shared published field, including tags.
@@ -94,7 +98,8 @@ export async function compoundUpdate(opts: Context, witness: GuardSnapshot, inte
   if (!rawEqual(actual.fields, intended)) guardError("guarded_readback_conflict", "A durable mutation completed, but its exact intended Card readback differs. Keep the slot held.");
   const json = serializeSnapshot(next);
   return { next_snapshot_json: json, next_snapshot_sha256: sha256(json), durability: "durable",
-    guard_snapshot_sha256: snapshotByteSha(witness), contract_sha256: GUARDED_CONTRACT_SHA256, membership_cleanup: "deferred" };
+    guard_snapshot_sha256: snapshotByteSha(witness), contract_sha256: multiKey(opts.cfg) ? OWNED_GUARDED_CONTRACT_SHA256 : GUARDED_CONTRACT_SHA256,
+    membership_cleanup: multiKey(opts.cfg) ? "native" : "deferred" };
 }
 function nextFields(witness: GuardSnapshot, patch: RawFields): RawFields { return { ...witness.fields, ...patch }; }
 export async function guardedMark(opts: Context & GuardOptions & { expectAssignee?: string; line: string }) {

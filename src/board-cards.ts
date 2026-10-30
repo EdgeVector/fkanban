@@ -17,6 +17,7 @@
 import { resolveSocketPath, type Config } from "./config.ts";
 import { FkanbanError, newNodeClient, type NodeClient, type QueryFilter } from "./client.ts";
 import { BOARD_CARDS_FIELDS, BOARD_CARDS_LAYOUT } from "./schemas.ts";
+import { keyRows, multiKey, primaryProjection } from "./multi-key.ts";
 import {
   mapWithConcurrency,
   PARTITION_READ_CONCURRENCY,
@@ -1907,6 +1908,12 @@ export async function listBoardCardsPartition(
   board: string,
   opts?: { column?: string; excludeColumn?: string; fields?: readonly string[] },
 ): Promise<Card[] | null> {
+  if (multiKey(cfg)) {
+    const filters = opts?.column ? [{ HashRangePrefix: { hash: board, prefix: `${opts.column}#` } }]
+      : opts?.excludeColumn ? excludeColumnRanges(board, opts.excludeColumn) : [{ HashKey: board }];
+    const pages = await Promise.all(filters.map((filter) => keyRows(node, cfg, "card", "by_board", filter, primaryProjection(opts?.fields ?? BOARD_CARDS_LIST_FIELDS))));
+    return pages.flat().map((row) => cardFromBoardCardFields(row.fields));
+  }
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return null;
   const column = opts?.column?.trim();
@@ -1996,6 +2003,14 @@ export async function listBoardCardsPartitionSpine(
   board: string,
   opts?: { column?: string },
 ): Promise<BoardCardSpineRow[] | null> {
+  if (multiKey(cfg)) {
+    const filter = opts?.column ? { HashRangePrefix: { hash: board, prefix: `${opts.column}#` } } : { HashKey: board };
+    return (await keyRows(node, cfg, "card", "by_board", filter, ["slug"])).map((row) => {
+      const parsed = parseBoardCardSk(row.matched_key.range);
+      if (!parsed || parsed.slug !== row.key.hash) throw new Error("Card alternate key differs from its primary key");
+      return { board, sk: row.matched_key.range, ...parsed };
+    });
+  }
   const schemaHash = boardCardsHash(cfg);
   if (!schemaHash) return null;
   const column = opts?.column?.trim();
@@ -2449,7 +2464,7 @@ export async function listAllBoardCards(
   boards: Array<{ slug: string; columns?: readonly string[] }>,
   opts?: { fields?: readonly string[]; skipTerminalColumn?: boolean; column?: string },
 ): Promise<Card[] | null> {
-  if (!boardCardsHash(cfg)) return null;
+  if (!multiKey(cfg) && !boardCardsHash(cfg)) return null;
   if (boards.length === 0) return [];
   const projection = opts?.fields ?? BOARD_CARDS_LIST_FIELDS;
   const parts = await mapWithConcurrency(

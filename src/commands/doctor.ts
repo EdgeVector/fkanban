@@ -3,6 +3,7 @@
 // round-trips.
 
 import { MIN_LASTDB_API_VERSION } from "../lastdb-version.ts";
+import { multiKey, ownedSchemas } from "../multi-key.ts";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
@@ -173,6 +174,25 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     // doctor describes an old node instead of refusing to look at it.
     skipApiVersionGate: true,
   });
+
+  if (multiKey(cfg)) {
+    const results = await Promise.allSettled(ownedSchemas().map(async (entry) => {
+      const name = cfg.schemaHashes[entry.key];
+      if (!name) throw new Error(`No configured ${entry.key} schema`);
+      const response = await node.rawCall("GET", `/api/schema/${encodeURIComponent(name)}`);
+      const root = response.json as { data?: unknown };
+      const value = (root?.data ?? root) as { schema?: { independent_fields?: boolean; alternate_keys?: Record<string, unknown> } };
+      if (response.status !== 200 || !value.schema?.independent_fields ||
+          Object.keys(entry.schema.alternate_keys ?? {}).some((key) => !Object.hasOwn(value.schema?.alternate_keys ?? {}, key))) {
+        throw new Error("The installed schema does not declare its independent values and named keys");
+      }
+      return entry.key;
+    }));
+    results.forEach((result, index) => check(result.status === "fulfilled", `${ownedSchemas()[index]!.key} owned schema`,
+      result.status === "rejected" ? String(result.reason) : undefined));
+    info("record membership", "Named keys are maintained in the primary mutation. Legacy membership repair does not apply.");
+    return ok;
+  }
 
   // Which transport the node calls take. Local nodes are socket-only (the
   // loopback TCP control plane was retired), so the socket carries the board

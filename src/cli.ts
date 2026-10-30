@@ -22,11 +22,12 @@ import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, groomOpsLabel, type Verbose } from "./client.ts";
 import { ConfigMissingError, ConfigInvalidError } from "./config.ts";
 import { loadAppCtx, loadCtx } from "./context.ts";
+import { convertMultiKey } from "./commands/multi-key-convert.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
-import { CREATE_ONLY_CONTRACT, CREATE_ONLY_CONTRACT_SHA256 } from "./create-only-card.ts";
+import { CREATE_ONLY_CONTRACT, CREATE_ONLY_CONTRACT_SHA256, OWNED_CREATE_ONLY_CONTRACT, OWNED_CREATE_ONLY_CONTRACT_SHA256 } from "./create-only-card.ts";
 import { markCmd } from "./commands/mark.ts";
-import { captureSnapshot, captureSnapshots, snapshotSlugsFile, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, serializeSnapshot, snapshotFileOptions } from "./guarded-snapshot.ts";
+import { captureSnapshot, captureSnapshots, snapshotSlugsFile, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256, OWNED_GUARDED_CONTRACT, OWNED_GUARDED_CONTRACT_SHA256, serializeSnapshot, snapshotFileOptions } from "./guarded-snapshot.ts";
 import { setCmd } from "./commands/set.ts";
 import { ClaimConflictError, moveCmd } from "./commands/move.ts";
 import { listCmd } from "./commands/list.ts";
@@ -105,7 +106,7 @@ import {
 export const TOP_HELP = `fkanban — a kanban board over fold_db
 
 Usage:
-  fkanban <command> [options]
+  fkanban <command> [options]\n  fkanban multi-key-convert [--apply --maintenance] [--abort]
 
 Global:
   --db <locator>       write-target DB (lastdb://personal | lastdb://org/<slug>/<db>);
@@ -208,6 +209,7 @@ function withFooter(body: string): string {
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
+  "multi-key-convert": "fkanban multi-key-convert [--apply --maintenance] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. No primary change occurs through init.",
   "create-only-contract": withFooter(`fkanban create-only-contract — immutable atomic creation contract
 
 Usage:
@@ -1244,6 +1246,7 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "json-arr
 // flags its dispatch branch actually reads. Commands absent here (e.g. `mark`, `show`,
 // `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
+  "multi-key-convert": new Set(["apply","maintenance","abort"]),
   // Bare `rm <slug>` deletes a live card. `--board`/`--column` switch to the
   // row-only orphan path: no Card, address the BoardCards row directly.
   rm: new Set(["board", "column"]),
@@ -1258,8 +1261,8 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // cannot clobber a brief via accidental body/stdin.
   mark: new Set(["guard-snapshot", "snapshot-sha256", "expect-assignee"]),
   "guarded-snapshot": new Set(["slugs-file"]),
-  "guarded-contract": new Set(),
-  "create-only-contract": new Set(),
+  "guarded-contract": new Set(["storage-model"]),
+  "create-only-contract": new Set(["storage-model"]),
   set: new Set(["guard-snapshot", "snapshot-sha256",
     "title", "assignee", "expect-assignee", "tags", "surfaces", "priority", "force",
     "repo", "base", "kind", "block-status", "block-reason", "north-star", "milestone", "pr-url", "branch",
@@ -1431,6 +1434,7 @@ async function main(argv: string[]): Promise<number> {
         assignee: { type: "string" },
         "expect-assignee": { type: "string" },
         "guard-snapshot": { type: "string" },
+        "storage-model": { type: "string" },
         "slugs-file": { type: "string" },
         "snapshot-sha256": { type: "string" },
         "claim-v2": { type: "boolean" },
@@ -1459,6 +1463,8 @@ async function main(argv: string[]): Promise<number> {
         force: { type: "boolean" },
         "dry-run": { type: "boolean" },
         apply: { type: "boolean" },
+        maintenance: { type: "boolean" },
+        abort: { type: "boolean" },
         "min-age-hours": { type: "string" },
         "pileup-threshold": { type: "string" },
         "max-drift": { type: "string" },
@@ -1587,16 +1593,30 @@ async function dispatch(
   verbose: Verbose | undefined,
 ): Promise<number> {
   switch (cmd) {
+    case "multi-key-convert": {
+      const extra=rejectExtraPositionals(positionals,1,"multi-key-convert");
+      if(extra!==undefined) return extra;
+      const {node,cfg}=loadCtx({verbose});
+      console.log(JSON.stringify(await convertMultiKey(node,cfg,{apply:values.apply===true,
+        maintenance:values.maintenance===true,abort:values.abort===true})));
+      return 0;
+    }
     case "create-only-contract": {
       const extra = rejectExtraPositionals(positionals, 1, "create-only-contract");
       if (extra !== undefined) return extra;
-      console.log(JSON.stringify({ ...CREATE_ONLY_CONTRACT, contract_sha256: CREATE_ONLY_CONTRACT_SHA256 }));
+      if (values["storage-model"] !== undefined && !["legacy", "multi-key-v1"].includes(String(values["storage-model"]))) throw new Error("Unknown storage model");
+      console.log(JSON.stringify(values["storage-model"] === "multi-key-v1"
+        ? { ...OWNED_CREATE_ONLY_CONTRACT, contract_sha256: OWNED_CREATE_ONLY_CONTRACT_SHA256 }
+        : { ...CREATE_ONLY_CONTRACT, contract_sha256: CREATE_ONLY_CONTRACT_SHA256 }));
       return 0;
     }
     case "guarded-contract": {
       const extra = rejectExtraPositionals(positionals, 1, "guarded-contract");
       if (extra !== undefined) return extra;
-      console.log(JSON.stringify({ ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 }));
+      if (values["storage-model"] !== undefined && !["legacy", "multi-key-v1"].includes(String(values["storage-model"]))) throw new Error("Unknown storage model");
+      console.log(JSON.stringify(values["storage-model"] === "multi-key-v1"
+        ? { ...OWNED_GUARDED_CONTRACT, contract_sha256: OWNED_GUARDED_CONTRACT_SHA256 }
+        : { ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 }));
       return 0;
     }
     case "guarded-snapshot": {

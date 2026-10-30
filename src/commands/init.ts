@@ -1,4 +1,6 @@
 import { profilesFor, applicationAliasProfiles } from "../canonical-vocabulary.ts";
+import { multiKey } from "../multi-key.ts";
+import { syncOwnedModel } from "../owned-schema-init.ts";
 // `kanban init` — bring a node to the point where the CLI/MCP can read +
 // write the board:
 //
@@ -211,6 +213,17 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     : !before.some((schema) => schema.owner_app_id === OWNER_APP_ID && schema.fields.some((field) => ["slug","board","klh_h"].includes(field)));
   const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose, socketPath,
     schemaFieldAliases:existing?.schemaFieldAliases,canonicalVocabulary });
+
+  if (!existing || multiKey(existing)) {
+    const config = await syncOwnedModel(node, {
+      configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
+      ...(nodeSocketPath ? { nodeSocketPath } : {}),
+    }, existing);
+    writeConfig(config, configPath);
+    await seedDefaultBoard(node, config, print);
+    printNextSteps(print, bootstrapped || existing === null);
+    return { config, bootstrapped };
+  }
 
   // Step 2: ask Mini to resolve/register fkanban's schemas and return catalog
   // identities. The CLI does not bypass Mini to mint a local identity.

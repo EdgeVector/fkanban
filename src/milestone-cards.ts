@@ -5,6 +5,7 @@
 // Empty milestone field → no row (remove prior if cleared).
 
 import type { Config } from "./config.ts";
+import { keyRows, multiKey, primaryProjection } from "./multi-key.ts";
 import type { NodeClient, QueryFilter, QueryRow } from "./client.ts";
 import { mapWithConcurrency, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
 import { MILESTONE_CARDS_FIELDS, MILESTONE_CARDS_LAYOUT } from "./schemas.ts";
@@ -410,6 +411,11 @@ export async function listMilestoneCardsPartition(
   cfg: Config,
   milestone: string,
 ): Promise<Card[] | null> {
+  if (multiKey(cfg)) {
+    if (!milestone.trim()) return [];
+    const rows = await keyRows(node, cfg, "card", "by_milestone", { HashKey: milestone }, primaryProjection(MILESTONE_CARDS_PAYLOAD_FIELDS));
+    return rows.map((row) => cardFromMilestoneCardFields({ ...row.fields, sk: row.matched_key.range }));
+  }
   const schemaHash = milestoneCardsHash(cfg);
   if (!schemaHash || !milestone.trim()) return null;
   try {
@@ -455,6 +461,10 @@ export async function findMilestoneCardBySk(
   milestone: string,
   sk: string,
 ): Promise<Card | null> {
+  if (multiKey(cfg)) {
+    const rows = await keyRows(node, cfg, "card", "by_milestone", { HashRangeKey: { hash: milestone, range: sk } }, primaryProjection(MILESTONE_CARDS_PAYLOAD_FIELDS));
+    return rows[0] ? cardFromMilestoneCardFields({ ...rows[0].fields, milestone, sk }) : null;
+  }
   const schemaHash = milestoneCardsHash(cfg);
   if (!schemaHash || !milestone.trim() || !sk.trim()) return null;
   const filter = { HashRangePrefix: { hash: milestone, prefix: sk } } as unknown as QueryFilter;
@@ -513,6 +523,14 @@ export async function listMilestoneCardsPartitionSpine(
   cfg: Config,
   milestone: string,
 ): Promise<MilestoneCardRow[] | null> {
+  if (multiKey(cfg)) {
+    if (!milestone.trim()) return [];
+    return (await keyRows(node, cfg, "card", "by_milestone", { HashKey: milestone }, ["slug"])).map((row) => {
+      const parsed = parseBoardCardSk(row.matched_key.range);
+      if (!parsed || parsed.slug !== row.key.hash) throw new Error("Card alternate key differs from its primary key");
+      return { milestone, sk: row.matched_key.range, ...parsed };
+    });
+  }
   const schemaHash = milestoneCardsHash(cfg);
   if (!schemaHash || !milestone.trim()) return null;
   let res;
