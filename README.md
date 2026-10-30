@@ -1,8 +1,7 @@
 # kanban
 
-A kanban board over [fold_db](https://github.com/EdgeVector/fold/tree/main/fold_db). Cards move through columns; every
-change persists in folddb. Modeled on `fbrain` — a thin Bun/TypeScript client
-of the LastDB/FoldDB node (`/api/mutation` + `/api/query`) using Mini's
+A kanban board over [LastDB](https://github.com/EdgeVector/lastdb). Cards move through columns.
+Each change goes through the LastDB node (`/api/mutation` + `/api/query`) and uses Mini's
 Schema Service-backed app-schema declaration for its private-visibility record
 shapes.
 
@@ -15,27 +14,22 @@ with `fbrain/*` or any other app on a shared daemon):
 
 - **`fkanban/Card`** — primary record by `slug` (includes body)
 - **`fkanban/Board`** — board metadata by `slug`
-- **`fkanban/BoardCards`** — thin membership by `board` + `sk` (list/pickup)
-- **`fkanban/MilestoneCards`** — thin reverse membership by `milestone` + `sk`
+- **`fkanban/Milestone`** — milestone metadata by `slug`
 
 Default columns: `backlog → todo → doing → done`.
 
-### Multi-key proteins (BoardCards ↔ MilestoneCards)
+### Named alternate keys
 
-Hot-path card create/update **writes BoardCards only** for the thin payload
-(including `milestone` and `sk`). LastDB Mini binds BoardCards and MilestoneCards
-as multi-key siblings and **folds** shared field tips onto the milestone
-partition — the app does **not** dual-write MilestoneCards payload on every
-mutation, and does **not** call protein APIs.
+Each card write changes one primary record. Named keys serve the board, milestone, and all-card lists.
+The board and milestone ranges retain the column, position, and slug order.
+Each read returns the primary key for a later mutation.
 
-On move / milestone clear / delete, the app **retires** obsolete MilestoneCards
-keys (deletes). Heal (`milestone-indexes-heal`) may still full dual-write to
-repair drift.
+LastDB changes the record and its alternate addresses in one native request.
+The alternate address has no separate payload copy.
+Canonical field reuse supplies definitions and types. Each schema retains its own values.
 
-Shared field descriptions match between the two layouts so field identity can
-align; `layout` stays distinct so partition markers never co-identity.
-
-See fold `docs/app-developers-multi-key-proteins.md`.
+Existing app data requires the explicit `multi-key-convert --apply --maintenance` command on the compatible release.
+Normal init does not convert existing data. Keep the primary unchanged until its data conversion receives separate authorization.
 
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
 > build/run/dogfood + PR workflow and the non-obvious gotchas.
