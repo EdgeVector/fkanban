@@ -2,7 +2,7 @@
 import { syncOwnedModel } from "../owned-schema-init.ts";
 import { requireMultiKey } from "../multi-key.ts";
 import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fkanbanInvocation, mcpAddCommand } from "../mcp/register.ts";
 import { OWNER_APP_ID, DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "../schemas.ts";
@@ -41,6 +41,8 @@ export async function seedDefaultBoard(node: NodeClient, config: Config, print: 
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = opts.print ?? console.log;
   const configPath = opts.configPath ?? defaultConfigPath();
+  if(existsSync(configPath+".conversion.json"))throw new Error("Resume the saved app conversion before init.");
+  const priorConfig=existsSync(configPath)?readFileSync(configPath,"utf8"):null;
   const existing = tryReadConfig(configPath);
   if (existing) requireMultiKey(existing);
   assertSafePrimaryConfigRepoint({ existing, requestedNodeSocketPath: opts.nodeSocketPath, configPath,
@@ -72,7 +74,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   print("[2/3] declare schema-owned records and named keys");
   const config = await syncOwnedModel(node, { configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl,
     userHash, schemaHashes: {}, ...(nodeSocketPath ? { nodeSocketPath } : {}) }, existing, canonicalVocabulary);
-  writeConfig(config, configPath);
+  writeConfig(config, configPath,priorConfig);
   print("[3/3] ensure the default board");
   await seedDefaultBoard(node, config, print);
   printNextSteps(print, bootstrapped || existing === null);

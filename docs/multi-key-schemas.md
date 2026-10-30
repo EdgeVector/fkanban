@@ -18,8 +18,10 @@ The default-board and external-dependency guards remain. A remaining Card record
 Card body reads collect primary keys first. Each batch contains at most 16 bodies.
 Already loaded bodies stay unchanged. Soft-deleted records do not enter the result.
 Milestone body pages contain at most 16 records. The page size does not reduce the overall record limit.
-The old membership schemas, payload copies, list rollups, packed-summary prototype, and repair queues are removed.
-The app declares Card, Board, Milestone, and flow-event records. Only the explicit converter names retired schemas.
+The normal request path no longer uses the old membership schemas, payload copies, list rollups, or repair queues.
+Fresh setup declares Card, Board, Milestone, and flow-event records only.
+An existing home keeps the five historical layouts as separate owned schemas during conversion.
+Their records can differ from the current source records. They do not become alternate keys.
 
 ## Operational check
 
@@ -34,6 +36,10 @@ This check does not write data or request an old payload repair.
 
 A home with F-Kanban schemas from an older release needs the explicit conversion.
 The conversion copies the current values into schema-owned Card, Board, and Milestone records.
+It also preserves installed BoardCards, MilestoneCards, BoardMilestones, CardListIndex, and ColumnHeadAtom records.
+It keeps their primary keys and every existing primary member. It does not infer record correspondence.
+Repeated setup keeps their saved runtime addresses, definition identities, and field aliases.
+An unknown or ambiguous app schema requires owner review before the converter pauses requests.
 A home with no F-Kanban schemas does not need it. `kanban init` declares the owned schemas directly.
 
 ### Required LastDB releases
@@ -45,7 +51,11 @@ A home with no F-Kanban schemas does not need it. `kanban init` declares the own
 
 The compatible node reports these `GET /api/version` capabilities:
 `app_schema_conversion_v1`, `owned_app_schemas_v1`, `compound_alternate_keys_v1`, and `independent_hash_range_v1`.
-The converter refuses a node without `app_schema_conversion_v1`. Init refuses a node without the two key capabilities.
+The converter refuses a node without `app_schema_conversion_v1`.
+Alias retirement also requires `app_schema_alias_retirement_v1`.
+The node checks actual runtime molecules, field types, and key roles before the request pause.
+It refuses an alias with unique values, transforms, or fields outside one audited source.
+Init refuses a node without the two key capabilities.
 The removal release refuses unconverted shared-value schemas at startup. It cannot do the conversion for an old home.
 
 ### Order
@@ -65,7 +75,10 @@ The node freezes requests, copies the current atom references and author clocks,
 A body field identifies a Card, Board, or Milestone member.
 The converter refuses unique source values without a selected member. It does not infer membership from a shared key field.
 
+Before the request pause, the command saves the exact source config, target config, schema requests, and alias retirements.
+It binds the returned change identity to that durable scope. A different scope cannot resume or abort the job.
 The command writes the config to disk before the node resumes requests.
+Init and other config writes cannot replace an active conversion scope.
 Repeat the same command after an interruption.
 Before publication, `--apply --maintenance --abort` removes the unpublished copy and restores the old state.
 After publication, resume forward. The node keeps requests blocked until completion.
@@ -84,5 +97,6 @@ The linked LastDB CI run compares the exact app revisions across the app and dae
 The control release converts an old app home before the candidate daemon opens it.
 The workload uses generated data on owned CI homes.
 It checks logical record membership, order, bodies, updates, and cursors.
+The historical layouts require complete key, value, current atom, and author checks across conversion and reopen.
 Physical database size may decrease. Logical record counts must remain correct.
 The primary does not participate in this check.

@@ -24,6 +24,8 @@ export type Config = {
   userHash: string;
   // canonical schema hash per record type: { card, board }
   schemaHashes: Record<string, string>;
+  /** Definition identities are separate from literal runtime addresses. */
+  schemaIdentities?: Record<string,string>;
   // Optional override for the node's Unix-domain control socket, used for
   // owner-session attestation against an app-isolation node. When absent the
   // path is derived from LASTDB_HOME / FOLDDB_HOME (see `resolveSocketPath`).
@@ -127,10 +129,20 @@ export function tryReadConfig(path: string = defaultReadConfigPath()): Config | 
 export function writeConfig(
   config: Config,
   path: string = defaultConfigPath(),
+  expected?:string|null,
+  conversionScope?:string,
 ): void {
   mkdirSync(dirname(path), { recursive: true });
+  const scopePath=path+".conversion.json";
+  if(existsSync(scopePath)&&readFileSync(scopePath,"utf8")!==conversionScope)throw new Error("Resume the saved app conversion before a config change.");
+  writeConfigFile(path,configBytes(config),expected);
+}
+
+export function configBytes(config:Config):string {
   const { configPath: _omit, ...persisted } = config;
-  writeConfigFile(path, JSON.stringify(persisted, null, 2) + "\n");
+  const ordered=(value:unknown):unknown=>Array.isArray(value)?value.map(ordered):value&&typeof value==="object"
+    ?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,ordered(item)])):value;
+  return JSON.stringify(ordered(persisted),null,2)+"\n";
 }
 
 export function schemaHashFor(
@@ -184,6 +196,9 @@ function assertConfigShape(path: string, raw: unknown): Config {
     typeof r.nodeSocketPath === "string" && r.nodeSocketPath.length > 0
       ? (r.nodeSocketPath as string)
       : undefined;
+  const rawIdentities=r.schemaIdentities;
+  if(rawIdentities!==undefined&&(!rawIdentities||typeof rawIdentities!=="object"||Array.isArray(rawIdentities)
+    ||Object.values(rawIdentities).some((value)=>typeof value!=="string"||!/^[a-f0-9]{64}$/.test(value))))throw new ConfigInvalidError(path,"schemaIdentities must contain exact definition identities");
 
   // The loaded config enables the milestone rule unless the operator sets false.
   const enforceLivePrMilestone = r.enforceLivePrMilestone === false ? false : true;
@@ -201,6 +216,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
     schemaServiceUrl,
     userHash: r.userHash as string,
     schemaHashes,
+    schemaIdentities:rawIdentities as Record<string,string>|undefined,
     enforceLivePrMilestone,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
   };

@@ -433,6 +433,87 @@
         "sensitivity_level": 0,
         "data_domain": "general"
       }
+    },
+    "work_card_membership_order_key": {
+      "description": "the column, zero-padded position, and card slug joined by # under one board or milestone",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_membership_layout_version": {
+      "description": "the version marker of the work membership record layout",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_milestone_membership_order_key": {
+      "description": "the state, zero-padded position, and milestone slug joined by # under one board",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_summary_bucket_key": {
+      "description": "the all_cards key of the work card summary collection",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_summary_list_json": {
+      "description": "a JSON-encoded list of work card summaries without their Markdown descriptions",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_card_summary_list_updated_at": {
+      "description": "the RFC 3339 instant when the work card summary list was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_column_head_scope_key": {
+      "description": "the work board and column selector for one column head",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_column_head_marker": {
+      "description": "the fixed range marker of a work column head",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "work_column_head_summary_json": {
+      "description": "a JSON-encoded head page of at most twenty short card titles in one work board column",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
     }
   },
   "schemas": {
@@ -497,6 +578,87 @@
       "created_at": "work_milestone_created_at",
       "updated_at": "work_milestone_updated_at",
       "completed_at": "work_milestone_completed_at_text"
+    },
+    "BoardCards_hashrange_v1": {
+      "board": "work_board_slug",
+      "sk": "work_card_membership_order_key",
+      "slug": "work_card_slug",
+      "title": "work_card_title",
+      "column": "work_board_column_name",
+      "position": "work_card_position_decimal_text",
+      "assignee": "work_card_assignee_identifier",
+      "tags": "work_card_tag_labels",
+      "deps": "work_card_dependency_slugs",
+      "surfaces": "work_card_surface_names",
+      "created_at": "work_card_created_at",
+      "created_by": "work_card_creator_identifier",
+      "updated_at": "work_card_updated_at",
+      "db": "work_card_database_locator",
+      "repo": "repository_full_name",
+      "base": "pull_request_base_branch_name",
+      "kind": "work_card_kind",
+      "block_status": "work_card_block_status",
+      "block_reason": "work_card_block_reason",
+      "north_star": "north_star_slug",
+      "milestone": "work_milestone_slug",
+      "pr_url": "pull_request_url",
+      "branch": "development_branch_name",
+      "layout": "work_membership_layout_version"
+    },
+    "MilestoneCards_hashrange_v1_children_20260723": {
+      "milestone": "work_milestone_slug",
+      "sk": "work_card_membership_order_key",
+      "slug": "work_card_slug",
+      "title": "work_card_title",
+      "board": "work_board_slug",
+      "column": "work_board_column_name",
+      "position": "work_card_position_decimal_text",
+      "assignee": "work_card_assignee_identifier",
+      "tags": "work_card_tag_labels",
+      "deps": "work_card_dependency_slugs",
+      "surfaces": "work_card_surface_names",
+      "created_at": "work_card_created_at",
+      "created_by": "work_card_creator_identifier",
+      "updated_at": "work_card_updated_at",
+      "db": "work_card_database_locator",
+      "repo": "repository_full_name",
+      "base": "pull_request_base_branch_name",
+      "kind": "work_card_kind",
+      "block_status": "work_card_block_status",
+      "block_reason": "work_card_block_reason",
+      "north_star": "north_star_slug",
+      "pr_url": "pull_request_url",
+      "branch": "development_branch_name",
+      "layout": "work_membership_layout_version"
+    },
+    "FkanbanMilestonePortfolioByBoardIndex": {
+      "board": "work_board_slug",
+      "sk": "work_milestone_membership_order_key",
+      "slug": "work_milestone_slug",
+      "title": "work_milestone_title",
+      "body": "work_milestone_markdown",
+      "state": "work_milestone_state",
+      "position": "work_milestone_position_decimal_text",
+      "north_star": "north_star_slug",
+      "driver": "work_milestone_driver_name",
+      "deps": "work_milestone_dependency_slugs",
+      "proof_card": "work_milestone_proof_card_slug",
+      "proof_status": "work_milestone_proof_status",
+      "block_reason": "work_milestone_block_reason",
+      "created_at": "work_milestone_created_at",
+      "updated_at": "work_milestone_updated_at",
+      "completed_at": "work_milestone_completed_at_text",
+      "layout": "work_membership_layout_version"
+    },
+    "CardListIndex": {
+      "key": "work_card_summary_bucket_key",
+      "payload_json": "work_card_summary_list_json",
+      "updated_at": "work_card_summary_list_updated_at"
+    },
+    "ColumnHeadAtom_exact_key_v1": {
+      "klh_h": "work_column_head_scope_key",
+      "klh_r": "work_column_head_marker",
+      "klh_page": "work_column_head_summary_json"
     }
   }
 }
