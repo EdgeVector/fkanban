@@ -1,6 +1,7 @@
 // One owned record per slug. Named keys contain addresses, never payload copies.
 import { FkanbanError, type NodeClient, type QueryRow } from "./client.ts";
 import { EXTRA_SCHEMAS, UNIQUE_SCHEMAS, type SchemaDefinition } from "./schemas.ts";
+import { queryPageSize } from "./query-page-size.ts";
 
 export const MULTI_KEY_MODEL = "multi-key-v1" as const;
 export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storageModel === MULTI_KEY_MODEL;
@@ -38,8 +39,12 @@ export async function keyPage(
   node: NodeClient, schema: string, name: string,
   filter: unknown, fields: readonly string[], limit = 1000, cursor?: unknown,
 ): Promise<NamedPage> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+    throw new FkanbanError({ code: "multi_key_page_size", message: "The named-key page size must be between 1 and 1000." });
+  }
   const response = await node.rawCall("POST", "/api/query", {
-    schema_name: schema, key_name: name, filter, fields: [...fields], limit, response_format: "values",
+    schema_name: schema, key_name: name, filter, fields: [...fields],
+    limit: Math.min(limit, queryPageSize(fields.length)), response_format: "values",
     ...(cursor ? { cursor } : {}),
   });
   const root = response.json as { data?: unknown };
@@ -60,11 +65,12 @@ export async function keyRows(
     throw new FkanbanError({ code: "multi_key_page_size", message: "The named-key page size must be between 1 and 1000." });
   }
   const rows: NamedRow[] = [];
+  const boundedPageSize = Math.min(pageSize, queryPageSize(fields.length));
   let cursor: unknown;
   const seen = new Set<string>();
-  const maxPages = Math.ceil(1_000_000 / pageSize);
+  const maxPages = Math.ceil(1_000_000 / boundedPageSize);
   for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
-    const page = await keyPage(node, schema, name, filter, fields, pageSize, cursor);
+    const page = await keyPage(node, schema, name, filter, fields, boundedPageSize, cursor);
     for (const row of page.results) {
       const id = JSON.stringify(row.key);
       if (seen.has(id)) throw new FkanbanError({ code: "multi_key_duplicate", message: "The named-key pages repeat a primary record." });

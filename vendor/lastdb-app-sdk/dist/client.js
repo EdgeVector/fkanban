@@ -1020,7 +1020,7 @@ function parseQueryPage(body, returnedRows) {
     const limit = body['limit'];
     const offset = body['offset'];
     const hasMore = body['has_more'];
-    const nextCursor = parseKeyValue(body['next_cursor']);
+    const nextCursor = parseQueryCursor(body['next_cursor']);
     if (typeof limit !== 'number' ||
         typeof offset !== 'number' ||
         typeof hasMore !== 'boolean') {
@@ -1235,6 +1235,26 @@ function parseRowKey(rawKey) {
         return { key: rawKey, keyValue: null };
     }
     return { key: '', keyValue: null };
+}
+// Query cursors carry server bindings beyond the primary record coordinates.
+function parseQueryCursor(raw) {
+    if (raw === null || raw === undefined) return null;
+    const key = parseKeyValue(raw);
+    if (!key || !isObject(raw)) {
+        throw new UnexpectedResponseError('query returned an invalid cursor', 200, raw);
+    }
+    for (const name of ['hash', 'range']) {
+        const value = raw[name];
+        if (value !== null && value !== undefined && typeof value !== 'string') {
+            throw new UnexpectedResponseError('query returned an invalid cursor coordinate', 200, raw);
+        }
+    }
+    const comparison = raw['comparison'];
+    if (comparison !== null && comparison !== undefined
+        && (typeof comparison !== 'string' || comparison.length === 0)) {
+        throw new UnexpectedResponseError('query returned an invalid comparison cursor', 200, raw);
+    }
+    return { ...raw, ...key };
 }
 function parseKeyValue(rawKey) {
     if (!isObject(rawKey)) {

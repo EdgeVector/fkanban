@@ -28,6 +28,10 @@ export interface KeyValue {
     hash: string | null;
     range: string | null;
 }
+/** Complete server continuation; primary-row keys do not carry this binding. */
+export interface QueryCursor extends KeyValue {
+    comparison?: string | null;
+}
 /** Options for the keys-only {@link LastDbClient.list} membership page. */
 export interface ListOptions {
     /** Page size sent to Mini (default 100, clamped by Mini to 1000). */
@@ -459,7 +463,7 @@ export interface QueryPage {
     /** True when more records exist beyond the returned page. */
     hasMore: boolean;
     /** Cursor to pass as `QueryFilter.cursor` for the next page, when available. */
-    nextCursor: KeyValue | null;
+    nextCursor: QueryCursor | null;
 }
 /** `POST /api/query` success body. */
 export interface QueryResult {

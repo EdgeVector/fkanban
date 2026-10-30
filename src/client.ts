@@ -1,5 +1,6 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
 import { alternateKeyWire } from "./alternate-key-wire.ts";
+import { queryPageSize } from "./query-page-size.ts";
 import { encodeFieldRequest, decodeFieldReply, localSchemaMetadata, type FieldAliasProfiles } from "./field-alias-transport.ts";
 import type { SchemaDefinition } from "./schemas.ts";
 // Typed HTTP wrappers for the LastDB node.
@@ -141,11 +142,8 @@ export type AppSchemaDeclaration = {
   bindEligible: true;
 };
 
-// Single-request page size for the /api/query pagination loop — the node caps
-// individual pages at 1000. fkanban boards stay well under that, so in
-// practice one round trip resolves the whole schema.
-const QUERY_PAGE_SIZE = 1000;
-const QUERY_PAGE_LIMIT = 1000;
+// Preserve the complete-read row cap independently of per-request page cost.
+const QUERY_ROW_LIMIT = 1_000_000;
 
 // `X-LastDB-Client` ops-attribution labels. Real board work carries the plain
 // label; each DIAGNOSTIC entrypoint carries its own so `lastdb ops` can rank
@@ -874,6 +872,7 @@ export function newNodeClient(opts: {
     fields: string[];
     filter?: QueryFilter;
   }): Promise<QueryResponse> => {
+    const pageSize = queryPageSize(opts.fields.length || Object.keys(fieldProfiles[opts.schemaHash] ?? {}).length);
     const rows: SdkQueryResult["rows"] = [];
     let schema = "";
     let rowCount = 0;
@@ -895,7 +894,7 @@ export function newNodeClient(opts: {
         const body: Record<string, unknown> = {
           schema_name: opts.schemaHash,
           fields: opts.fields,
-          limit: QUERY_PAGE_SIZE,
+          limit: pageSize,
           ...(opts.filter !== undefined ? { filter: opts.filter as JsonValue } : {}),
           ...(cursor === null ? { offset } : { cursor }),
         };
@@ -909,7 +908,7 @@ export function newNodeClient(opts: {
 
         const pageHasMore = parsed.page !== null
           ? parsed.page.hasMore
-          : parsed.rows.length >= QUERY_PAGE_SIZE;
+          : parsed.rows.length >= pageSize;
         const nextCursor = parsed.page?.nextCursor ?? null;
 
         // The node returned the cursor it was just handed and still claims more
@@ -942,46 +941,15 @@ export function newNodeClient(opts: {
         }
 
         if (!pageHasMore) break;
-        if (rows.length >= QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT) break;
-        if (parsed.rows.length === 0) break;
+        if (rows.length >= QUERY_ROW_LIMIT || parsed.rows.length === 0) {
+          throw new FkanbanError({ code: "query_read_incomplete",
+            message: "The query still has records after its complete-read limit or an empty page." });
+        }
 
-        // OFFSET-PATH NO-PROGRESS GUARD.
-        //
-        // The cursor path above already refuses to trust a cursor the node
-        // hands back unadvanced. The offset path had no equivalent — and the
-        // offset path is the one EVERY product read takes, because
-        // `can_push_down` requires `filter.is_none()` so key-restricted reads
-        // never get a honored cursor.
-        //
-        // Measured on the live primary 2026-08-03, Card full scan, 194-card
-        // board (`scripts/probe-scan-duplicate-locus.ts`):
-        //
-        //   page 1   537 rows   373 distinct   164 duplicates WITHIN the page
-        //   pages 2-18  1002 rows   ZERO new slugs, all 17 of them
-        //
-        // `has_more` stayed true throughout and `total_count` claimed 1502, so
-        // the loop kept paying ~190ms per round trip for rows it already held:
-        // 17 of 18 requests and ~3.2s of `kanban search`'s 3.6s, for nothing.
-        //
-        // A non-empty page that adds no new row identity cannot be progress —
-        // row keys are unique, so "every row here is one I already have" means
-        // this page is a repeat, not a new window. Stopping is SET-PRESERVING,
-        // not merely close: the drain de-dups by this exact key on the way out
-        // (`queryResponseFromSdk`), so the rows dropped here are rows the
-        // caller was never going to see. `test/query-paging-no-progress.test.ts`
-        // pins that equality rather than the request count alone.
-        //
-        // Node-side this is fold's bug (a full scan should not serve duplicate
-        // rows in one page, nor advertise `has_more` past its last distinct
-        // row) — filed as papercut-lastdb-query-offset-paging-repeats-first-page.
-        // The guard is version-neutral: a node that pages correctly always
-        // yields fresh rows, so it never fires.
+        // A repeated offset page does not prove complete membership.
         if (freshRows === 0) {
-          verbose(
-            `node: /api/query returned ${parsed.rows.length} row(s) at offset ${offset}, ` +
-              "none of them new — treating the offset drain as complete",
-          );
-          break;
+          throw new FkanbanError({ code: "query_cursor_stalled",
+            message: "The query repeats a page while more records remain." });
         }
 
         cursor = cursorUnhonored ? null : nextCursor;
