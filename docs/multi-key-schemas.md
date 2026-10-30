@@ -1,5 +1,9 @@
 # F-Kanban multi-key schemas
 
+A kept source with field mappings requires `app_schema_private_mapper_conversion_v1`.
+The node checks private molecule UUIDs, selected-source closure, and different key roles before the request pause.
+Direct aliases stay outside the kept-source set. Published targets must have no field mappings.
+
 New installations declare independent record values. Canonical fields still reuse their definitions.
 Named keys belong to the source record schema. A mutation updates the record and its keys in one native request.
 

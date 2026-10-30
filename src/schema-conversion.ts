@@ -354,7 +354,8 @@ export async function conversionPlan(
     const candidates = installed.filter(
       (source) =>
         source.descriptive_name === entry.schema.descriptive_name &&
-        !Object.keys(source.field_mappers ?? {}).length,
+        (!Object.keys(source.field_mappers ?? {}).length ||
+          !source.name.startsWith(OWNER_APP_ID + "/")),
     );
     const matches = pin
       ? candidates.filter(
@@ -367,6 +368,13 @@ export async function conversionPlan(
     }
     const source = matches[0]!,
       matched = conversionDefinition(source, entry.schema);
+    if (
+      Object.keys(source.field_mappers ?? {}).length &&
+      !version.capabilities.app_schema_private_mapper_conversion_v1
+    )
+      fail(
+        "A mapped source needs app_schema_private_mapper_conversion_v1 before conversion.",
+      );
     if (
       entry.keys.some(
         (key) =>
@@ -408,14 +416,12 @@ export async function conversionPlan(
       "This conversion needs app_schema_alias_retirement_v1 before it can retire an alias.",
     );
   const requests = await Promise.all(
-    sources.map(
-      async ({ entry, source, definition }): Promise<Request> => ({
-        schema: source.name,
-        expected_identity: source.identity_hash,
-        alternate_keys: definition.alternate_keys ?? {},
-        membership: await membership(entry, source),
-      }),
-    ),
+    sources.map(async ({ entry, source, definition }): Promise<Request> => ({
+      schema: source.name,
+      expected_identity: source.identity_hash,
+      alternate_keys: definition.alternate_keys ?? {},
+      membership: await membership(entry, source),
+    })),
   );
   const retainedProfiles = new Set(
     sources.flatMap(({ source, entry }) => [
