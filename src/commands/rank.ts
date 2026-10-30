@@ -167,7 +167,7 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
     // already at its ranked position. The column head is one atom after this
     // loop, so a per-card head update must not keep the last written slug.
     if (!mustWrite.has(i)) continue;
-    await writeCardPatch(opts, card, { position: String(position) }, { skipListHead: true });
+    await writeCardPatch(opts, card, { position: String(position) });
     reordered++;
   }
   // Meta cards and body-omitted cards stay at the position the column read

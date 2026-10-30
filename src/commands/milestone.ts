@@ -528,7 +528,7 @@ export async function milestoneAddCmd(opts: MilestoneAddOptions): Promise<Milest
   };
   await validateLinks(opts, milestone);
   await validateTransition(opts, existing, milestone);
-  await upsertMilestoneRecord(opts.node, opts.cfg, milestone, existing !== null, existing);
+  await upsertMilestoneRecord(opts.node, opts.cfg, milestone, existing !== null);
   // Report every field this write moved that the CALLER never named. Both of
   // these are deliberate rules, and both were invisible: the result type could
   // only say `state`, so a lifecycle move and a driver rewrite left the same

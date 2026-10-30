@@ -1,5 +1,5 @@
 import { guardedCardUpdate } from "./guarded-card-update.ts";
-import { keyRows, multiKey } from "./multi-key.ts";
+import { keyRows, multiKey, requireMultiKey } from "./multi-key.ts";
 // Domain helpers: turn fold_db query rows into typed Card / Board records,
 // list + find by slug, soft-delete (tombstone), slug + column validation.
 
@@ -10,23 +10,18 @@ import {
   headCardFrom,
   headKeyId,
   readColumnHeads,
-  removeCardsFromHeads,
   syncCardHead,
   writeColumnHead,
   type HeadRefillResult,
 } from "./list-head.ts";
 import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "./concurrency.ts";
 import {
-  patchCardListIndex,
-  patchCardListIndexRemoveMany,
   patchBoardListIndex,
   readBoardListIndex,
   writeBoardListIndex,
   type BoardSummary,
 } from "./card-list-index.ts";
 import {
-  awaitBoardCardSearchVisible,
-  searchVisibilityTimeoutWarning,
   BOARD_CARDS_COLUMN_FIELDS,
   BOARD_CARDS_FOOTER_FIELDS,
   BOARD_CARDS_LIST_FIELDS,
@@ -38,26 +33,15 @@ import {
   listBoardCardsPartition,
   listBoardCardsPartitionSpine,
   preferFresherBoardCard,
-  removeBoardCard,
-  removeBoardCardsBatch,
   sweepBoardCardJanitor,
   upsertBoardCard,
-  type BoardCardWriteOptions,
 } from "./board-cards.ts";
 import {
   boardMilestonesHash,
-  ensureBoardMilestoneMembership,
   listAllBoardMilestones,
   listBoardMilestonesPartition,
-  retireBoardMilestoneMembership,
-  upsertBoardMilestone,
 } from "./board-milestones.ts";
-import {
-  removeMilestoneCard,
-  removeMilestoneCardsBatch,
-  retireMilestoneCardMembership,
-} from "./milestone-cards.ts";
-import { rememberCardLegacyWriteHash, schemaHashFor, type Config } from "./config.ts";
+import { schemaHashFor, type Config } from "./config.ts";
 import {
   DEFAULT_BOARD_SLUG,
   DEFAULT_COLUMNS,
@@ -2613,10 +2597,9 @@ export async function writeCardPatch(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
   patch: Partial<Card>,
-  flags?: { skipListHead?: boolean },
 ): Promise<void> {
   const updated: Card = { ...card, ...patch, updated_at: nowIso() };
-  await updateCardRecord(opts, updated, undefined, card, flags);
+  await updateCardRecord(opts, updated, undefined, card);
 }
 
 // Would adding the edge `fromSlug → toSlug` (fromSlug depends on toSlug) close a
@@ -5035,87 +5018,16 @@ export async function requireMilestone(node: NodeClient, cfg: Config, slug: stri
 }
 
 export async function upsertMilestoneRecord(
-  node: NodeClient,
-  cfg: Config,
-  milestone: Milestone,
-  exists: boolean,
-  previous?: Milestone | null,
+  node: NodeClient, cfg: Config, milestone: Milestone, exists: boolean,
 ): Promise<void> {
+  requireMultiKey(cfg);
   await node[exists ? "updateRecord" : "createRecord"]({
-    schemaHash: schemaHashFor("milestone", cfg),
-    keyHash: milestone.slug,
+    schemaHash: schemaHashFor("milestone", cfg), keyHash: milestone.slug,
     fields: milestoneToFields(milestone),
   });
-  if (multiKey(cfg)) return;
-  if (boardMilestonesHash(cfg)) {
-    // Protein-primary: Mini should fold BoardMilestones tips from the fat
-    // Milestone write; we only retire obsolete keyed rows we can address.
-    // List / portfolio / gap-report read BoardMilestones only — if fold did
-    // not land a membership tip (unbound sibling, missing key fields, lag),
-    // the milestone is invisible to factory drivers while still point-readable
-    // via `milestone show`. Ensure the index row exists after retire.
-    // Brain: papercut-milestone-portfolio-list-undercount.
-    await retireBoardMilestoneMembership(node, cfg, milestone, previous ?? null);
-    await ensureBoardMilestoneMembership(node, cfg, milestone, previous ?? null);
-  } else {
-    await upsertBoardMilestone(node, cfg, milestone, previous ?? null);
-  }
 }
 
-function cardToLegacyOptionalFields(c: Card): Record<string, unknown> {
-  const fields = cardToFields({
-    ...c,
-    body: writeBodyHeader(
-      writeBodyHeader(
-        writeBodyHeader(writeBodyListHeader(c.body, "Surfaces", c.surfaces ?? []), "Db", c.db ?? ""),
-        "Created By",
-        c.created_by ?? UNKNOWN_CREATED_BY,
-      ),
-      "Milestone",
-      c.milestone ?? "",
-    ),
-  });
-  for (const field of CARD_OPTIONAL_SCHEMA_FIELDS) delete fields[field];
-  return fields;
-}
-
-function isOptionalFieldWriteMiss(err: unknown): boolean {
-  return err instanceof FkanbanError &&
-    err.code === "unknown_fields" &&
-    (CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).some((field) => err.message.includes(field));
-}
-
-type CardWriteOp = "createRecord" | "updateRecord";
-
-/** The projection a legacy schema (one without the optional fields) can answer. */
-const CARD_LEGACY_FIELDS: readonly string[] = CARD_FIELDS.filter(
-  (f) => !(CARD_OPTIONAL_SCHEMA_FIELDS as readonly string[]).includes(f),
-);
-
-/**
- * Read the one Card row for `slug` at the WIDE projection — and treat
- * "not returned" as "not writable narrowly".
- *
- * Same safety gate, and the same reasoning, as
- * {@link readWholeBoardCardRow}. Under HASH-ELSE-LEAD a wide read returns a
- * row when the gate atom is present (Card hash = `slug`), even if non-gate
- * fields are sparse — it is not the superseded `any_missing` model. Callers
- * still treat `null` as "do not write narrowly": a narrow `updateRecord`
- * against a MISSING row does not fail; it silently stores just the subset it
- * was handed. `isKeyOnlyRow` on a returned wide row still distinguishes husks
- * from live sparse cards.
- *
- * `null` means absent or ungated; the caller's answer is "write wide", which
- * heals either missing or partial.
- *
- * This does NOT reuse the `previous` card the callers already have. `previous`
- * is a Card object with no record of the projection it was read through —
- * `BODY_OMITTED` tracks that question for exactly one field, and the other 21
- * have no such marker. Inferring wholeness from an object that cannot state
- * its own provenance is how a thin read becomes silent data loss, so this pays
- * a fresh 214ms read (measured, `scripts/probe-card-write-cost.ts`) to buy an
- * answer it can actually justify.
- */
+/** Read the exact primary fields. A partial or absent record cannot authorize a narrow update. */
 async function readWholeCardRow(
   node: NodeClient,
   cfg: Config,
@@ -5152,17 +5064,7 @@ function sameCardValue(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
-/**
- * The subset of `next` that differs from what is stored.
- *
- * `slug` is not re-sent: it addresses the row (it travels as keyHash) and
- * cannot differ here — a slug change is a different record, not an update.
- *
- * Only for a caller that cannot state the baseline it edited (`previous`
- * omitted). It answers "what is different NOW", which is a different question
- * from "what did this command change" the moment anyone else writes the same
- * card — see {@link intendedCardFields}.
- */
+/** Without a caller baseline, retain only differences from the current stored fields. */
 function changedCardFields(
   stored: Record<string, unknown>,
   next: Record<string, unknown>,
@@ -5178,31 +5080,7 @@ function changedCardFields(
   return out;
 }
 
-/**
- * The subset of `next` THIS command changed — measured against the baseline it
- * read, not against what happens to be stored when the write goes out.
- *
- * Every card command is a read-modify-write: resolve the card, apply guards,
- * write. `previous` is that first read, and `next` is it plus the command's
- * edit. Everything else in `next` is a COPY of the baseline that the command
- * never looked at.
- *
- * Diffing against `stored` (what {@link changedCardFields} does) cannot tell
- * those apart. A peer write that lands in the gap shows up as a difference, so
- * it gets "restored" to the copy this command has been carrying since before
- * the peer wrote — the second writer silently reverts the first, on fields it
- * never named. That is not last-writer-wins; it is last-writer-wins per
- * RECORD, which on a board with concurrent pickup / watch / closeout / groom
- * writers means an edit can disappear seconds after a successful write.
- *
- * Diffing against `previous` gives last-writer-wins per FIELD: two commands
- * editing different fields of one card both land, and two commands editing the
- * SAME field resolve to whichever wrote last. No re-read, no retry, no CAS —
- * the write simply stops claiming authority over fields it never read.
- *
- * `stored` still gets a say, but only to DROP work: a field already at the
- * intended value is not worth a byte on the wire.
- */
+/** Write only fields the caller changed from its baseline. Drop values already current in storage. */
 function intendedCardFields(
   previous: Record<string, unknown>,
   stored: Record<string, unknown>,
@@ -5222,42 +5100,7 @@ function intendedCardFields(
   return out;
 }
 
-/**
- * Try to satisfy an update by sending only the fields that changed.
- * Returns `true` when the write is done, `false` to fall through to the wide
- * path (which heals a missing or incomplete row).
- *
- * ## Why this reads before it writes
- *
- * Write cost scales with the number of fields SENT, and `Card` has 22.
- * Measured on the live primary, one uncontended row
- * (`scripts/probe-card-write-cost.ts`):
- *
- * | update | ms |
- * |---|---|
- * | 22 fields, every value changed | 3677 |
- * | 22 fields sent, 2 actually changed (what every card mutation cost) | 3269 |
- * | 3 fields sent (key + 2 changed) | 989 |
- * | 22 fields, every value byte-identical | 148 |
- *
- * The dedupe in that last row is whole-record, not per-molecule
- * (`lastdb-unchanged-value-skip-is-whole-record-not-per-molecule`), so
- * re-sending 20 unchanged fields buys nothing and costs ~200ms each.
- *
- * The `body` is one atom like any other, not a byte cost: the same 2-field
- * update with a 40x larger body (32KB vs 1.3KB) measured 3578ms against
- * 3269ms. So the win here is field COUNT, and it is available to every card
- * mutation — including a move, whose key (`slug`) does not change.
- *
- * ## Which diff, and why it is a correctness question
- *
- * `previousFields` is the baseline the caller read before it edited. With it,
- * the write carries only what the command changed ({@link intendedCardFields});
- * without it, only what differs from the stored row right now
- * ({@link changedCardFields}), which reverts any peer write that landed in the
- * gap. Narrowing started as a latency win; the baseline is what makes it a
- * concurrency guarantee.
- */
+/** Return whether the narrow update completed. Keep the primary key and any expected field explicit. */
 async function writeChangedCardFieldsOnly(
   opts: { cfg: Config; node: NodeClient },
   card: Card,
@@ -5266,153 +5109,45 @@ async function writeChangedCardFieldsOnly(
   projected: readonly string[],
   previousFields: Record<string, unknown> | null,
   expected?: CasExpectation,
-): Promise<Record<string, unknown> | null> {
+): Promise<boolean> {
   let stored: { fields: Record<string, unknown>; projected: readonly string[] } | null;
   try {
     stored = await readWholeCardRow(opts.node, opts.cfg, card.slug, projected);
   } catch {
-    // The probe is an optimization; its failure must never be the reason a
-    // write fails. Fall through to the wide path, which either succeeds or
-    // surfaces the same fault with its own well-worn fallback machinery.
-    return null;
+    // The full primary write remains responsible for an unavailable narrow-read path.
+    return false;
   }
-  if (!stored) return null;
+  if (!stored) return false;
   const changed = previousFields
     ? intendedCardFields(previousFields, stored.fields, next, stored.projected)
     : changedCardFields(stored.fields, next, stored.projected);
   if (expected) {
-    // The node evaluates a CAS precondition against the WRITE PAYLOAD, not
-    // against stored state. Measured on a real node 2026-08-23
-    // (`scripts/probe-card-cas-narrow-write.ts`): with `column` stored as
-    // `todo`, `expected column=todo` is ACCEPTED when the payload carries
-    // `column` and REJECTED when it does not. A narrow write that drops the
-    // CAS field therefore fails a precondition that holds.
-    //
-    // `absent` has no value to carry, so it keeps the wide write.
-    if (expected.type !== "value") return null;
+    // Include a value expectation in the narrow payload. An absence guard keeps the full write.
+    if (expected.type !== "value") return false;
     if (!(expected.field in changed)) {
       // Not a field this command changed. Carry it at its STORED value: the
       // assertion becomes testable and the field still ends where it started.
-      if (!(expected.field in stored.fields)) return null;
+      if (!(expected.field in stored.fields)) return false;
       changed[expected.field] = stored.fields[expected.field];
     }
   } else if (Object.keys(changed).length === 0) {
-    // Nothing changed: the node would no-op this in ~148ms, but a round trip we
-    // can prove is pointless is a round trip not worth taking.
-    return { ...stored.fields };
+    // No field changed and no guard requires a request.
+    return true;
   }
   await opts.node.updateRecord({ schemaHash, fields: changed, keyHash: card.slug, expected });
-  // The record as it now stands: what was stored a moment ago, plus this
-  // write. The caller needs it for the membership write and would otherwise
-  // pay a second read to learn what this one already knows.
-  return { ...stored.fields, ...changed };
-}
-
-async function writeCardRecordWithOptionalFieldFallback(
-  opts: { cfg: Config; node: NodeClient },
-  card: Card,
-  op: CardWriteOp,
-  expected?: CasExpectation,
-  /** The card as the caller read it, before its edit. See {@link intendedCardFields}. */
-  previous?: Card,
-): Promise<Record<string, unknown> | null> {
-  // Single choke point for every card write. `cardToFields` emits the WHOLE
-  // record, so persisting a body-free projection silently blanks the stored
-  // brief — the failure mode `rank`, `migrate area-tags`, `groom --apply` and
-  // `pickup claim` each had, invisibly, because a thin card and a genuinely
-  // empty one look identical. Refuse here rather than at four call sites, so
-  // no future caller can reintroduce it.
-  assertBodyLoaded(card, `writing card "${card.slug}"`);
-  const hash = schemaHashFor("card", opts.cfg);
-  // A hash already proven to reject the optional fields writes the legacy
-  // shape directly — the full-shape attempt would fail the same way it did
-  // when the memo was recorded (same hash ⇒ same field set).
-  const legacyShape = opts.cfg.cardLegacyWriteHash === hash;
-  // Narrow path: send only what this command changed. Skipped for a create —
-  // the row does not exist, so there is nothing to diff and the probe could
-  // only ever return "absent".
-  //
-  // A CAS expectation rides along rather than disqualifying the write.
-  // `move --from` / `--expect-column` is the board's most contended write and
-  // has no business reverting a peer's title edit to win a column claim. The
-  // narrow path carries the CAS field explicitly, because the node reads the
-  // precondition off the payload — see the measurement there.
-  if (op === "updateRecord") {
-    const written = await writeChangedCardFieldsOnly(
-      opts,
-      card,
-      hash,
-      legacyShape ? cardToLegacyOptionalFields(card) : cardToFields(card),
-      legacyShape ? CARD_LEGACY_FIELDS : CARD_FIELDS,
-      previous ? (legacyShape ? cardToLegacyOptionalFields(previous) : cardToFields(previous)) : null,
-      expected,
-    );
-    if (written) return written;
-  }
-  if (legacyShape) {
-    await opts.node[op]({ schemaHash: hash, fields: cardToLegacyOptionalFields(card), keyHash: card.slug, expected });
-    return null;
-  }
-  try {
-    await opts.node[op]({ schemaHash: hash, fields: cardToFields(card), keyHash: card.slug, expected });
-  } catch (err) {
-    if (!isOptionalFieldWriteMiss(err)) throw err;
-    try {
-      await opts.node[op]({ schemaHash: hash, fields: cardToLegacyOptionalFields(card), keyHash: card.slug, expected });
-    } catch (retryErr) {
-      // The retry uses the legacy body-header shape, so its error is more
-      // informative than the original optional-field rejection.
-      throw retryErr;
-    }
-    // Full shape failed AND the legacy shape succeeded on the same op — the
-    // schema provably lacks the optional fields. Remember, so later processes
-    // stop paying a failed mutation (and a polluted error tally) per write.
-    rememberCardLegacyWriteHash(opts.cfg, hash);
-  }
-  return null;
+  return true;
 }
 
 export async function createCardRecord(
-  opts: {
-    cfg: Config;
-    node: NodeClient;
-    // Short-timeout client for the post-write search-visibility wait's own
-    // probe reads. Set by `loadCtx`/`loadAppCtx` for real CLI invocations;
-    // omitted (falls back to `node`) by tests that construct `opts` directly.
-    // See `SEARCH_INDEX_PROBE_TIMEOUT_MS` in board-cards.ts for why this
-    // matters: without it, a refused probe read inherits the write's own
-    // (often much larger) HTTP deadline instead of failing fast.
-    probeNode?: NodeClient;
-  },
-  card: Card,
+  opts: { cfg: Config; node: NodeClient }, card: Card,
 ): Promise<void> {
-  await writeCardRecordWithOptionalFieldFallback(opts, card, "createRecord");
-  if (multiKey(opts.cfg)) return;
-  await patchCardListIndex(opts.node, opts.cfg, card, "upsert");
-  // skipOrphanPurge: this sk was just minted for a card that did not exist, so
-  // there can be no other row for the slug to purge. (There is no pre-write read
-  // to skip any more — `upsertBoardCard` always writes wide.)
-  await writeCardMembership(opts, card, null, { skipOrphanPurge: true });
-  if (!(await awaitBoardCardSearchVisible(opts.node, opts.cfg, card, { probeNode: opts.probeNode }))) {
-    console.error(searchVisibilityTimeoutWarning(card.slug));
-  }
+  requireMultiKey(opts.cfg);
+  assertBodyLoaded(card, `create of card "${card.slug}"`);
+  await opts.node.createRecord({ schemaHash: schemaHashFor("card", opts.cfg),
+    keyHash: card.slug, fields: cardToFields(card) });
 }
 
-/**
- * State the keyed membership rows this card should have.
- *
- * **Protein-primary multi-key path** (docs/app-developers-multi-key-proteins.md):
- *
- * 1. Write **BoardCards** with the full thin payload, including `milestone` and
- *    `sk`, so Mini can fold shared field tips onto MilestoneCards.
- * 2. **Retire** obsolete MilestoneCards tips (milestone cleared or sk moved) —
- *    delete only; do not dual-write the full MilestoneCards payload here.
- * 3. Never call protein control routes — bind/fold/backfill are the node's job.
- *
- * Heal commands may still call `upsertMilestoneCard` to rebuild drift.
- * test/no-protein-reach.test.ts and test/protein-primary-membership.test.ts
- * pin this arrangement.
- */
+/** Legacy head lookup for maintenance code. Primary mutations do not use this schema. */
 function listHeadHash(cfg: Config): string {
   const hash = cfg.schemaHashes[LIST_HEAD_SCHEMA_KEY];
   if (!hash) {
@@ -5594,253 +5329,27 @@ export async function syncRankedColumnHead(
   await writeColumnHead(opts.node, listHeadHash(opts.cfg), board, column, overlaid);
 }
 
-async function writeCardMembership(
-  opts: { cfg: Config; node: NodeClient },
-  card: Card,
-  previous: Card | null,
-  writeOpts: BoardCardWriteOptions = {},
-  flags?: { skipListHead?: boolean },
-): Promise<void> {
-  // Every caller has ALREADY written the Card record, so a failure from here
-  // on leaves the card's column (Card, read by `show` and the claim) and its
-  // board row (BoardCards, read by `list` and pickup) disagreeing. That is
-  // the "card in todo that pickup cannot see" state measured 2026-10-02T23:14Z
-  // (papercut-kanban-live-todo-card-absent-from-pickup-partition-20260924):
-  // one service_timeout here and the card sat off the queue until a manual
-  // backlog->todo bounce rewrote the row.
-  //
-  // So re-send the membership step on backpressure. Each part is an upsert to
-  // an exact key or a delete, so a re-send after a deadline expiry cannot
-  // double-apply — the reason client.ts refuses to re-send a generic write
-  // does not hold here. Any other error, and the last backpressure error,
-  // still propagates.
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await upsertBoardCard(opts.node, opts.cfg, card, previous, writeOpts);
-      await retireMilestoneCardMembership(opts.node, opts.cfg, card, previous);
-      if (!flags?.skipListHead) await maintainCardHead(opts, card, previous);
-      // Janitor is process-local. Sweep in this same request so the previous SK
-      // delete is not lost when the CLI exits.
-      await sweepBoardCardJanitor(opts.node);
-      return;
-    } catch (err) {
-      const wait = membershipRetryDelaysMs[attempt];
-      if (wait === undefined || !isMembershipBackpressure(err)) throw err;
-      console.error(
-        `kanban: board row write for "${card.slug}" hit node backpressure ` +
-          `(${(err as FkanbanError).code}); retry ${attempt + 1}/${membershipRetryDelaysMs.length} in ${wait}ms`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, wait));
-    }
-  }
-}
-
-let membershipRetryDelaysMs: readonly number[] = [1000, 3000];
-
-export function setMembershipRetryDelaysForTests(delays: readonly number[]): void {
-  membershipRetryDelaysMs = delays;
-}
-
-function isMembershipBackpressure(err: unknown): boolean {
-  return err instanceof FkanbanError &&
-    (err.code === "service_timeout" || err.code === "node_overloaded");
-}
-
 export async function updateCardRecord(
-  opts: { cfg: Config; node: NodeClient },
-  card: Card,
-  expected?: CasExpectation,
-  /**
-   * The card as this caller read it, before its edit.
-   *
-   * Required to delete the old BoardCards sk on a move, and — since the
-   * concurrent-update fix — it is also what tells the Card write which fields
-   * this command actually changed, so it cannot revert a peer's edit to a
-   * field it never named ({@link intendedCardFields}). Omitting it still
-   * writes, with the older whole-record semantics.
-   */
-  previous?: Card,
-  flags?: { skipListHead?: boolean },
+  opts: { cfg: Config; node: NodeClient }, card: Card,
+  expected?: CasExpectation, previous?: Card,
 ): Promise<void> {
+  requireMultiKey(opts.cfg);
+  assertBodyLoaded(card, `update of card "${card.slug}"`);
   if (expected?.type === "value" && expected.field === "assignee") {
-    assertBodyLoaded(card, `guarded update of card "${card.slug}"`);
     await guardedCardUpdate(opts, card, expected);
     return;
   }
-  const written = await writeCardRecordWithOptionalFieldFallback(
-    opts,
-    card,
-    "updateRecord",
-    expected,
-    previous,
-  );
-  // The membership write is WIDE by contract — a BoardCards row must carry
-  // every field or it drops out of the projections `list`/`pickup`/`overlap`
-  // read. So narrowing the Card write above is only half the fix: the
-  // BoardCards row is dual-written from shared field molecules, and a wide
-  // payload built from the caller's stale snapshot lands on the Card record
-  // through those shared tips.
-  //
-  // Measured 2026-08-23 against a real node: Card write `{assignee}` sets
-  // `Card.assignee = "agent-a"`; a later `upsertBoardCard` carrying the
-  // pre-edit snapshot puts `Card.assignee` back to `""` — with no Card write
-  // in between. The secondary is a full-record write to the primary by proxy.
-  //
-  // `written` is the record as it now stands (stored ∪ this write), which the
-  // Card write already had in hand. Building membership from that keeps the
-  // row wide AND current, for zero extra round trips. A wide Card write
-  // returns null — it just stored `card` whole, so `card` IS current.
-  const effective = written ? rowToCard({ fields: written, key: { hash: card.slug, range: null } }) : card;
-  if (multiKey(opts.cfg)) return;
-  await patchCardListIndex(opts.node, opts.cfg, effective, "upsert");
-  await writeCardMembership(opts, effective, previous ?? null, {}, flags);
-  // Search visibility is a contract for a NEW or MOVED BoardCards address —
-  // `createCardRecord` always waits, and an update waits only when the spine
-  // (board/column/position) changed so search must discover a new sk.
-  //
-  // A title-only (or any non-spine) update leaves the row where search already
-  // found it. Waiting here re-lists the partition up to eight times per writer.
-  // dogfood kstress-1787946224: BURST concurrent `add --title` processes each
-  // paid that wait, writers failed under the load, the original title remained,
-  // and the harness labeled the residue `torn-write`. Skip the wait when the
-  // address did not move.
-  if (!previous || boardCardsAddressChanged(previous, effective)) {
-    if (!(await awaitBoardCardSearchVisible(opts.node, opts.cfg, effective))) {
-      console.error(searchVisibilityTimeoutWarning(effective.slug));
-    }
-  }
+  const hash = schemaHashFor("card", opts.cfg), fields = cardToFields(card);
+  if (await writeChangedCardFieldsOnly(opts, card, hash, fields, CARD_FIELDS,
+      previous ? cardToFields(previous) : null, expected)) return;
+  await opts.node.updateRecord({ schemaHash: hash, fields, keyHash: card.slug, expected });
 }
 
-/** True when BoardCards would place `next` under a different address than `previous`. */
-function boardCardsAddressChanged(previous: Card, next: Card): boolean {
-  return (
-    previous.board !== next.board ||
-    previous.column !== next.column ||
-    String(previous.position) !== String(next.position)
-  );
-}
-
-/**
- * The fields a membership REMOVAL is keyed by, and nothing else.
- *
- * `board` and `column`/`position` are BoardCards spine fields, so a thin row
- * already carries them. `milestone` is the one that is not: it is the
- * MilestoneCards PARTITION KEY and it is absent from every thin projection in
- * this app. Read narrow — six fields is the whole question.
- */
-const CARD_MEMBERSHIP_KEY_FIELDS = ["slug", "board", "column", "position", "milestone"] as const;
-
-/**
- * Remove Card + BoardCards + MilestoneCards membership (payload indexes only).
- *
- * **Why this re-reads the card it was just handed.** The two index removals key
- * off different fields, and only one of them is guaranteed to be on the object:
- *
- *   removeBoardCard      partition = card.board       BoardCards SPINE, always projected
- *   removeMilestoneCard  partition = card.milestone   NOT in the spine
- *
- * and `removeMilestoneCard` opens with `if (!ms) return`. LastDB returns "" for
- * a field the caller did not project, so that guard cannot tell "no milestone"
- * from "you did not ask" — and two of this function's three callers hand it a
- * thin BoardCards row (`archive-done` via ARCHIVE_AGE_FIELDS, `board rm
- * --force` via listCards). Both projections omit `milestone`.
- *
- * The result was not a failure but silent permanent drift: the Card goes away
- * and its MilestoneCards row stays, and nothing can key its partition afterward
- * because the Card that named it is gone. Measured on the primary 2026-08-01,
- * `scripts/probe-archive-orphans-milestone-membership.ts`: 66 orphan rows, 63
- * of them in the terminal column archive-done sweeps.
- *
- * This is the same refusal `readWholeCardRow` already makes on the write path —
- * "inferring wholeness from an object that cannot state its own provenance is
- * how a thin read becomes silent data loss". A delete is rare (archive-done is
- * capped; `rm` is manual), so one narrow point-read is the cheapest honest
- * answer available. On a miss the caller's card stands: a Card that is already
- * gone cannot be re-derived, and refusing to clean up would be strictly worse.
- *
- * **Both milestones, not the better one.** The Card record is the authority on
- * where this card belongs, but the caller's object is still evidence of where
- * it USED to. Retiring a slug from a partition it does not occupy is a no-op,
- * and `removeMilestoneCard` only ever touches rows carrying this slug — so
- * there is no cost to honouring a stale hint and a permanent orphan to pay for
- * discarding one. The read exists to ADD the partition the caller could not
- * name, never to overrule one it did.
- */
 export async function deleteCardRecord(
-  opts: { cfg: Config; node: NodeClient },
-  card: Card,
+  opts: { cfg: Config; node: NodeClient }, card: Card,
 ): Promise<void> {
-  const hash = schemaHashFor("card", opts.cfg);
-  if (multiKey(opts.cfg)) {
-    await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
-    return;
-  }
-  const truth = await readCardMembershipKeys(opts.node, opts.cfg, card);
-  // Membership rows FIRST, the Card atom LAST. `removeBoardCard`'s primary
-  // tip delete now retries then THROWS on a genuine failure (it used to
-  // swallow one) — so a throw here must still find the Card atom intact:
-  // a surviving Card is a clean, re-runnable `kanban rm <slug>`, while a
-  // surviving BoardCards/MilestoneCards tip after the atom is already gone
-  // is a dangling tip that degrades every read of its partition until an
-  // operator runs a repair tool.
-  // (papercut-kanban-card-delete-leaves-boardcards-tip-without-atom-root-cause-20260924)
-  await patchCardListIndex(opts.node, opts.cfg, card, "remove");
-  await removeBoardCard(opts.node, opts.cfg, truth);
-  await removeCardsFromHeads(opts.node, listHeadHash(opts.cfg), [truth, card], { refill: headRefill(opts) });
-  for (const milestone of membershipPartitionsToRetire(card, truth)) {
-    await removeMilestoneCard(opts.node, opts.cfg, { ...truth, milestone });
-  }
-  await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
-}
-
-/** Every MilestoneCards partition that could hold a row for this slug. */
-function membershipPartitionsToRetire(card: Card, truth: Card): string[] {
-  const out: string[] = [];
-  for (const ms of [truth.milestone, card.milestone]) {
-    const trimmed = (ms ?? "").trim();
-    if (trimmed && !out.includes(trimmed)) out.push(trimmed);
-  }
-  return out;
-}
-
-/**
- * The card's own membership keys, read from the Card record rather than trusted
- * from the caller's object. Falls back to `card` when the Card row is missing
- * or unreadable — a best-effort cleanup beats none.
- */
-async function readCardMembershipKeys(
-  node: NodeClient,
-  cfg: Config,
-  card: Card,
-): Promise<Card> {
-  const hash = schemaHashFor("card", cfg);
-  if (!hash || !card.slug) return card;
-  try {
-    const res = await node.queryAll({
-      schemaHash: hash,
-      fields: [...CARD_MEMBERSHIP_KEY_FIELDS],
-      filter: { HashKey: card.slug },
-    });
-    for (const row of res.results ?? []) {
-      const f = (row.fields ?? {}) as Record<string, unknown>;
-      if (String(f.slug ?? "") !== card.slug) continue;
-      return {
-        ...card,
-        board: String(f.board ?? "") || card.board,
-        column: String(f.column ?? "") || card.column,
-        position: String(f.position ?? "") || card.position,
-        // Deliberately NOT `|| card.milestone` — the caller's value is not lost,
-        // it is carried separately by `membershipPartitionsToRetire`. Folding it
-        // in here would make the two indistinguishable and the "retire both"
-        // decision unstatable.
-        milestone: String(f.milestone ?? ""),
-      };
-    }
-  } catch {
-    // Read-side failure must not strand the delete; fall through to the caller's
-    // card, which is what this function did unconditionally before.
-  }
-  return card;
+  requireMultiKey(opts.cfg);
+  await opts.node.deleteRecord({ schemaHash: schemaHashFor("card", opts.cfg), keyHash: card.slug });
 }
 
 // The outcome of probing whether a schema hash actually accepts a write of
@@ -6104,115 +5613,23 @@ export function applyBodyPriorityTag(card: Pick<Card, "body" | "tags">, explicit
  */
 export const CARD_DELETE_BATCH = 48;
 
-/**
- * Delete MANY cards and their membership rows in as few node requests as
- * possible — the sweep-shaped twin of {@link deleteCardRecord}.
- *
- * ## Why this exists rather than a loop over `deleteCardRecord`
- *
- * `deleteCardRecord` is shaped for a single interactive `rm`, and every step it
- * takes is per-card: one point read for provenance, one Card delete, one whole
- * `all_cards` read-modify-write, one BoardCards partition spine read plus a
- * delete, and the same again per milestone partition. A sweep multiplies all of
- * it by the card count.
- *
- * The dominant cost is not the row work, it is the per-REQUEST purge. The node
- * splits hard erasures off and calls `purge_records_bulk` ONCE per (schema,
- * verb) for a whole request (`mutation_manager/write.rs:266`,
- * `purge/mod.rs:604`), and that one call runs
- * `refresh_runtime_field_molecules` once, restoring EVERY runtime field
- * molecule for the schema (`purge/helpers.rs:532`). BoardCards has 24 fields
- * and molecules are evicted between requests, so a per-card delete re-pays the
- * whole restore each time.
- *
- * Measured on the live primary 2026-08-18 (`lastdb ops`, client label
- * `kanban-groom-archive-done`, `lastdbd 0.23.3-880-g2e7775fe2`): 54 archives
- * cost 108 purges and **120.2 s** of materialize (Card 63.6 s / BoardCards
- * 56.6 s, ~1.11 s each), all of it inside the exclusive purge barrier that
- * blocks every other writer of those two schemas. Batched, the same work is
- * a handful of materializes. See
- * `papercut-kanban-archive-done-purges-one-card-per-request`.
- *
- * ## Ordering
- *
- * Same as {@link deleteCardRecord}: membership first, the Card atom last.
- * `all_cards`, then BoardCards, then the column head, then MilestoneCards,
- * then the Card atom. The head refill reads BoardCards, so that row is gone
- * before the head update, and the deleted slugs are excluded from the refill.
- * A failed head update leaves the Card atom in place. The next `kanban rm`
- * of that slug can finish the head and the atom.
- *
- * ## Failure attribution
- *
- * The node rejects a whole batch on any item's failure and never names the
- * item, so a rejected atom chunk is retried ONE ROW AT A TIME. `onError`
- * sees each atom that still failed. Membership is already gone by then. The
- * Card atom remains, and a later `kanban rm` of that slug deletes it.
- */
+/** Bounded primary-key batches. No per-record request or implicit retry. */
 export async function deleteCardRecordsBatch(
-  opts: { cfg: Config; node: NodeClient },
-  cards: Card[],
+  opts: { cfg: Config; node: NodeClient }, cards: Card[],
   onError?: (card: Card, err: unknown) => void,
 ): Promise<void> {
-  if (cards.length === 0) return;
+  requireMultiKey(opts.cfg);
+  if (!cards.length) return;
+  if (!opts.node.deleteRecords) throw new FkanbanError({ code: "batch_delete_unavailable",
+    message: "The node client cannot batch the primary deletes." });
   const hash = schemaHashFor("card", opts.cfg);
-  if (multiKey(opts.cfg)) {
-    if (!opts.node.deleteRecords) throw new FkanbanError({ code: "batch_delete_unavailable", message: "The node client cannot batch the primary deletes." });
-    for (let offset = 0; offset < cards.length; offset += CARD_DELETE_BATCH) {
-      await opts.node.deleteRecords(cards.slice(offset, offset + CARD_DELETE_BATCH).map((card) => ({ schemaHash: hash, keyHash: card.slug })));
-    }
-    return;
-  }
-
-  // Provenance first, and CONCURRENTLY: these are independent point reads, and
-  // the reason they cannot be skipped is `deleteCardRecord`'s — a thin caller
-  // row cannot state its own milestone, and a delete that trusts it leaves a
-  // MilestoneCards orphan nothing can ever key.
-  const truths = await mapWithConcurrency(
-    cards,
-    (card) => readCardMembershipKeys(opts.node, opts.cfg, card),
-    POINT_READ_CONCURRENCY,
-  );
-
-  await patchCardListIndexRemoveMany(opts.node, opts.cfg, cards.map((card) => card.slug));
-  await removeBoardCardsBatch(opts.node, opts.cfg, truths);
-  await removeCardsFromHeads(
-    opts.node,
-    listHeadHash(opts.cfg),
-    cards.flatMap((card, index) => [truths[index] ?? card, card]),
-    { refill: headRefill(opts) },
-  );
-
-  // Both the partition the Card names and the one the caller's object named —
-  // the same "retire both, never the better one" rule `deleteCardRecord`
-  // applies, for the same reason: a stale hint costs a no-op delete, discarding
-  // one costs a permanent orphan.
-  const milestoneRows: Card[] = [];
-  for (const [index, card] of cards.entries()) {
-    const truth = truths[index] ?? card;
-    for (const milestone of membershipPartitionsToRetire(card, truth)) {
-      milestoneRows.push({ ...truth, milestone });
-    }
-  }
-  await removeMilestoneCardsBatch(opts.node, opts.cfg, milestoneRows);
-
-  const batch = opts.node.deleteRecords?.bind(opts.node);
-  for (let i = 0; i < cards.length; i += CARD_DELETE_BATCH) {
-    const chunk = cards.slice(i, i + CARD_DELETE_BATCH);
+  for (let offset = 0; offset < cards.length; offset += CARD_DELETE_BATCH) {
+    const chunk = cards.slice(offset, offset + CARD_DELETE_BATCH);
     try {
-      // A client with no batch delete verb (the ad-hoc test fakes) still has to
-      // delete. Per-card is what this used to do everywhere, so falling back to
-      // it is a loss of speed and nothing else.
-      if (!batch) throw new Error("node client exposes no batch delete");
-      await batch(chunk.map((card) => ({ schemaHash: hash, keyHash: card.slug })));
-    } catch {
-      for (const card of chunk) {
-        try {
-          await opts.node.deleteRecord({ schemaHash: hash, keyHash: card.slug });
-        } catch (err) {
-          onError?.(card, err);
-        }
-      }
+      await opts.node.deleteRecords(chunk.map(card => ({ schemaHash: hash, keyHash: card.slug })));
+    } catch(error) {
+      if (!onError) throw error;
+      for (const card of chunk) onError(card, error);
     }
   }
 }
