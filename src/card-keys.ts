@@ -15,6 +15,23 @@ export function cardKeyProjection(fields: readonly string[]): string[] {
   return primaryProjection(fields).filter(field => field !== "body" && allowed.has(field));
 }
 
+export async function listCardsByMilestoneKey(
+  node: NodeClient, cfg: Config, milestone: string, fields: readonly string[] = CARD_KEY_LIST_FIELDS,
+): Promise<Card[]> {
+  requireMultiKey(cfg);
+  if (!milestone.trim()) return [];
+  const rows = await keyRows(node, schemaHashFor("card", cfg), "by_milestone", { HashKey: milestone },
+    cardKeyProjection([...fields, "milestone"]));
+  return rows.map(row => {
+    const card = rowToCard(row);
+    if (card.slug !== row.key.hash || card.milestone !== milestone || row.matched_key.hash !== milestone) {
+      throw new FkanbanError({ code: "card_key_mismatch", message: "The milestone key returned a record outside its requested membership." });
+    }
+    card[BODY_OMITTED] = true;
+    return card;
+  });
+}
+
 export async function listCardsByBoardKey(
   node: NodeClient, cfg: Config, board: string,
   opts?: { column?: string; excludeColumn?: string; fields?: readonly string[] },

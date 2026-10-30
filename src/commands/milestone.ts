@@ -1,6 +1,7 @@
 import { FkanbanError, type NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
-import { keyRows, requireMultiKey } from "../multi-key.ts";
+import { requireMultiKey } from "../multi-key.ts";
+import { listCardsByMilestoneKey } from "../card-keys.ts";
 import { CARD_FIELDS } from "../schemas.ts";
 import type { MilestoneAddResult, MilestoneStateResult } from "../format.ts";
 import {
@@ -46,8 +47,6 @@ import {
   validateSlug,
   type Milestone,
   type Card,
-  rowToCard,
-  BODY_OMITTED,
   type Board,
 } from "../record.ts";
 
@@ -528,22 +527,16 @@ export async function milestoneReconcileResult(opts: {
 }): Promise<MilestoneReconcileResult & { text: string; boards: Board[] }> {
   requireMultiKey(opts.cfg);
   const milestone = await requireMilestone(opts.node, opts.cfg, opts.slug);
-  const [rows, boards, proofCard] = await Promise.all([
-    keyRows(opts.node, opts.cfg.schemaHashes.card!, "by_milestone", { HashKey: milestone.slug },
+  const [children, boards, proofCard] = await Promise.all([
+    listCardsByMilestoneKey(opts.node, opts.cfg, milestone.slug,
       CARD_FIELDS.filter(field => field !== "body")),
     listBoards(opts.node, opts.cfg),
     milestone.proof_card ? findProofCard(opts.node, opts.cfg, milestone.proof_card) : Promise.resolve(null),
   ]);
-  const children = rows.map(row => {
-    const card = rowToCard(row);
-    if (card.slug !== row.key.hash || card.milestone !== milestone.slug
-      || card.board !== milestone.board || row.matched_key.hash !== milestone.slug) {
-      throw new FkanbanError({ code: "multi_key_membership_mismatch",
-        message: "The milestone key returned a record outside its declared membership." });
-    }
-    card[BODY_OMITTED] = true;
-    return card;
-  });
+  if (children.some(card => card.board !== milestone.board)) {
+    throw new FkanbanError({ code: "multi_key_membership_mismatch",
+      message: "A milestone child belongs to a different board." });
+  }
   // The empty-milestone warning needs other completed cards from the same board.
   // Read that key only when no implementation child exists.
   const [statuses, boardCards, proofCardSparse] = await Promise.all([
