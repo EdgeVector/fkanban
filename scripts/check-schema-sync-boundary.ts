@@ -11,10 +11,6 @@ export type BoundaryViolation = { path: string; rule: string; detail: string };
 
 const CANONICAL_ROUTE = "/api/apps/declare-schema";
 const CANONICAL_ROUTE_OWNER = "src/client.ts";
-const MILESTONE_CARDS_REPAIR_ALLOWLIST = new Set([
-  "src/commands/milestone.ts",
-  "src/milestone-cards.ts",
-]);
 
 export function findSchemaSyncBoundaryViolations(files: SourceFile[]): BoundaryViolation[] {
   const violations: BoundaryViolation[] = [];
@@ -57,12 +53,12 @@ export function findSchemaSyncBoundaryViolations(files: SourceFile[]): BoundaryV
     const importsOrCallsMilestonePayloadUpsert =
       /\bimport\s*{[^}]*\bupsertMilestoneCard\b[^}]*}/s.test(codeOnly) ||
       /\bupsertMilestoneCard\s*\(/.test(codeOnly);
-    if (!MILESTONE_CARDS_REPAIR_ALLOWLIST.has(path) && importsOrCallsMilestonePayloadUpsert) {
+    if (importsOrCallsMilestonePayloadUpsert) {
       violations.push({
         path,
         rule: "milestone-cards-hot-path-payload-write",
         detail:
-          "MilestoneCards payload upserts belong only to repair/reconcile; card mutations write BoardCards and let Mini fold sibling tips",
+          "The source Card mutation maintains the named milestone key; app request paths must not write separate payload copies",
       });
     }
   }

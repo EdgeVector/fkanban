@@ -26,6 +26,14 @@ Decision: `decision-2026-10-09-retire-all-tests-and-test-coverage`.
 - Keep product code and non-test build, format, lint, secret, and deployment checks.
 <!-- last-stack:no-tests:end -->
 
+## Schema-owned values and named alternate keys (Tom, 2026-10-29)
+
+New designs use one schema with named alternate keys for the same records.
+Canonical field reuse supplies definitions, not shared record values.
+Preserve existing schemas until an explicit conversion. Keep record order, cursors, complete membership, and primary mutation keys.
+Use the compound-key contract. Preserve each app's declared key order.
+Use CI for the app conversion and latency comparison. Source work does not authorize a primary data change.
+
 # AGENTS.md — developing kanban itself
 
 Canonical build/run/PR commands for this repo. `CLAUDE.md` is a symlink to
@@ -59,10 +67,8 @@ F-Brain, and create or update a matching F-Kanban card when the issue is
 actionable. Prefer dedupe/update over duplicate records. Do this
 opportunistically, unless filing it would materially derail urgent user work.
 
-Read this before touching a list path: `fbrain get
-concepts-kanban-body-free-card-projections` — `listCards` serves the board
-from body-free BoardCards partitions; judging/rewriting a body needs
-`listCardsWithBodies`/`findCard`, not `listCards`.
+List paths read schema-owned records through named keys. Fetch the body by primary key before a body change.
+Do not write back a preview or a record whose body was omitted.
 
 ## Build / typecheck
 

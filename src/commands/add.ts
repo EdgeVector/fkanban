@@ -55,7 +55,6 @@ import {
   type PriorityTier,
 } from "../record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
-import { resolveCurrentClaim } from "../current_claim.ts";
 import { assertCreateOnlyScope, createOnlyCard, type CreateOnlyReceipt } from "../create-only-card.ts";
 
 export type AddOptions = {
@@ -64,7 +63,6 @@ export type AddOptions = {
   // Short-timeout twin of `node` for the post-create search-visibility wait's
   // probe reads — see `createCardRecord` (record.ts). Omit in tests to keep
   // every probe on `node`, unchanged from before this option existed.
-  probeNode?: NodeClient;
   slug: string;
   title?: string;
   board?: string;
@@ -243,7 +241,7 @@ function applyPriority(tags: string[], priority?: PriorityTier): string[] {
 
 import type { GuardedReceipt } from "../guarded-snapshot.ts";
 
-export type AddResult = Partial<GuardedReceipt> & Partial<CreateOnlyReceipt> & { membership_cleanup?: "deferred"; slug: string; action: "created" | "updated"; board: string; column: string };
+export type AddResult = Partial<GuardedReceipt> & Partial<CreateOnlyReceipt> & { membership_cleanup?: "deferred" | "native"; slug: string; action: "created" | "updated"; board: string; column: string };
 
 function suppressDefaultTodoWarning(card: Pick<Card, "board" | "column">, force?: boolean): boolean {
   return !force && card.board === "default" && card.column === "todo";
@@ -323,54 +321,9 @@ function bodySourceGate(body: string): void {
   }
 }
 
-/**
- * A placement (`board` / `column`) with `""` read as ABSENT — never as a board
- * named "" or a column named "".
- *
- * Both fields are BoardCards key material (`board` is the partition, `column`
- * leads the range key), so a card storing "" for either is not placed anywhere:
- * it has no membership row and no list can surface it. That shape is reachable
- * without anyone asking for it — a mutation that hits the client deadline
- * mid-flight lands some of the card's fields and not others. Measured on the
- * primary 2026-07-28: `body`, `column` and `milestone` written, `title` and
- * `board` empty (papercut-kanban-write-timeout-leaves-a-partially-written-card).
- *
- * Resolving these with `??` made the empty value AUTHORITATIVE. `""` is not
- * nullish, so it beat the `"default"` / first-column fallback and was then
- * validated as if it were a real slug — `Card board "" does not match milestone
- * "x" (default)` and `"" is not a valid kanban column`. The retry the timeout
- * hint tells you to run ("writes are upserts keyed by slug, so re-running is
- * safe") is precisely the retry that could not succeed, and the escape —
- * passing `--board default` explicitly — is required by no other create.
- *
- * Applied to the caller's option as well as to the stored value: `--board ""`
- * is not a request to place a card on a board named "", and honoring it is how
- * a second damaged card would get made.
- */
+
 function placementOrAbsent(value: string | undefined): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
-}
-
-/**
- * Read the card this write updates.
- *
- * A worker stamps `--branch` / `--pr-url` right after `pickup claim`. The keyed
- * Card read can still serve the pre-claim todo row at that moment (see the
- * note in `pickup_claim.ts`), and the todo-lane guard then refuses the stamp:
- * "Card cannot carry --branch / --pr-url in default/todo". Measured 2026-09-23
- * 06:00Z: claim returned doing, the stamp was refused, and a point read still
- * said todo (papercut-kanban-claim-returned-doing-but-metadata-sees-todo-20260923).
- *
- * `show` already joins the claim-authoritative BoardCards doing row for this
- * case. The stamp uses the same join, and only when it writes branch/pr_url
- * without an explicit column, so every other write keeps its one point read.
- */
-async function readExistingForWrite(opts: AddOptions): Promise<Card | null> {
-  const existing = await findCard(opts.node, opts.cfg, opts.slug);
-  if (!existing) return existing;
-  const stampsClaimMetadata = opts.branch !== undefined || opts.prUrl !== undefined;
-  if (!stampsClaimMetadata || opts.column !== undefined) return existing;
-  return resolveCurrentClaim(opts.node, opts.cfg, existing);
 }
 
 /**
@@ -455,7 +408,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
   if (opts.createOnly && (opts.force || opts.expectAssignee !== undefined)) {
     throw new FkanbanError({code:"create_only_scope",message:"Create-only cannot use force or an update owner guard."});
   }
-  const existing = await readExistingForWrite(opts);
+  const existing = await findCard(opts.node, opts.cfg, opts.slug);
   if (opts.createOnly && existing) {
     throw new FkanbanError({code:"card_exists",message:`Card "${opts.slug}" already exists. Create-only sent no mutation.`});
   }
@@ -649,7 +602,7 @@ export async function addCmd(opts: AddOptions): Promise<AddResult> {
     await updateCardRecord(opts, updated, opts.expectAssignee !== undefined
       ? { type: "value", field: "assignee", value: opts.expectAssignee } : undefined, existing);
     if (opts.expectAssignee !== undefined) {
-      return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column, membership_cleanup: "deferred" };
+      return { slug: opts.slug, action: "updated", board: boardSlug, column: updated.column, membership_cleanup: "native" };
     }
 
     // AFTER the write — see the note on the create path below.

@@ -52,9 +52,7 @@ export const PICKUP_CATEGORIES = [
   "collision",
   "stale-metadata",
   "situation-fenced",
-  // Not a card verdict: rows on no board column (Milestone rows reach the card
-  // list through BoardCards). Counted so dropping them from classification is
-  // visible, never classified — see `activeCards`.
+
   "off-board/non-card",
 ] as const;
 export type PickupCategory = (typeof PICKUP_CATEGORIES)[number];
@@ -499,27 +497,6 @@ export function buildPickupStatusReport(
   };
 }
 
-/**
- * Resolve off-set dependency targets — for the cards that actually get a verdict.
- *
- * This is the same argument `hydrateForPickupClassification` makes for BODIES,
- * carried to the dep fan-out: a card only has a dep verdict if it is CLASSIFIED,
- * and `buildPickupStatusReport` classifies `activeCards` — nothing in a board's
- * terminal column. A dep edge that ONLY a terminal card declares therefore
- * produces a `depStatus` no code path can observe.
- *
- * Passing the whole board bought nothing and paid a Card HashKey point-read per
- * unresolvable slug, on every request, forever. `cards` still goes in as
- * `knownCards`, so same-board deps stay free — only the ACTIVE set's off-set
- * edges are point-read.
- *
- * Measured on the live board: four such reads (`dep-x`, `dep-skep1`, `dep-panel`,
- * `dep-v4` — stress-harness residue held by nine finished `protein-*` cards),
- * ~620ms per `pickup status`. Draining the `done` archive made it WORSE, not
- * better: archiving a finished card whose dependents are also finished turns
- * every one of those edges into a dangling target, and the count went 4 -> 14
- * mid-sweep. The cost scales with archive churn, which is exactly backwards.
- */
 async function withDependencyStatuses(
   opts: { cfg: Config; node: NodeClient } | undefined,
   cards: Card[],

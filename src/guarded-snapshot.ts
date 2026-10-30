@@ -6,12 +6,10 @@ import { type Config, schemaHashFor } from "./config.ts";
 import { CARD_FIELDS } from "./schemas.ts";
 import { rowToCard, type Card } from "./record.ts";
 
-export const COMPOUND_CARD_BUILD = "0.23.3-2588-g24334db75";
-export const COMPOUND_CARD_BUILDS: readonly string[] = Object.freeze([COMPOUND_CARD_BUILD, "0.23.3-2693-gb70418967", "0.23.3-2708-gc85aba73f"]);
 export const GUARDED_CONTRACT = Object.freeze({
-  version: 1, name: "fkanban-raw23-guarded-card", snapshot_version: 1,
-  card_fields: [...CARD_FIELDS], compound_builds: [...COMPOUND_CARD_BUILDS],
-  max_snapshot_keys:256, max_snapshot_result_bytes:8388608, snapshot_batch_shape:"ordered-items-with-explicit-missing", max_dependency_keys: 256, max_peer_dependency_keys: 512, max_snapshot_bytes: 1048576, max_marker_bytes: 16384, max_batch_operations: 26,
+  version: 2, name: "fkanban-owned-raw23-guarded-card", snapshot_version: 1,
+  card_fields: [...CARD_FIELDS], required_capability: "atomic_owned_mutations_v1",
+  max_snapshot_keys:256, max_snapshot_result_bytes:8388608, snapshot_batch_shape:"ordered-items-with-explicit-missing", max_dependency_keys: 256, max_peer_dependency_keys: 512, max_snapshot_bytes: 1048576, max_marker_bytes: 16384, max_batch_operations: 24,
   cli_snapshot_flags: ["--guard-snapshot", "--snapshot-sha256"],
   cli_owner_flag: "--expect-assignee", mcp_snapshot_fields: ["guard_snapshot_json", "snapshot_sha256"],
   operations: ["mark", "set-pr-branch", "set-unowned-surfaces", "backlog-to-todo", "doing-to-terminal", "exact-claim-v2"],
@@ -19,7 +17,7 @@ export const GUARDED_CONTRACT = Object.freeze({
   snapshot_batch_cli_flag:"--slugs-file", snapshot_batch_mcp_tool:"fkanban_guarded_snapshots",
   accepted_held:Object.freeze({version:1,stage:"accepted-held",result:"error",resume:"supplied-snapshot-and-exact-worker",drive:false}),
   exact_claim_success_chain:Object.freeze({version:1,field:"claim_chain",mode:"fresh",stages:Object.freeze(["accepted-held","cleared"]),guard_snapshot_sha256:"per-stage-input",resume:"single-clear-receipt"}),
-  durability: "durable", membership_cleanup: "deferred",
+  durability: "durable", membership_cleanup: "native",
 });
 export function sha256(bytes: string | Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -30,7 +28,7 @@ export type GuardSnapshot = { version: 1; schema_hash: string; fields: RawFields
 export type GuardOptions = { guardSnapshotJson?: string; snapshotSha256?: string };
 export type GuardedReceipt = {
   next_snapshot_json: string; next_snapshot_sha256: string; durability: "durable";
-  guard_snapshot_sha256: string; contract_sha256: string; membership_cleanup: "deferred";
+  guard_snapshot_sha256: string; contract_sha256: string; membership_cleanup: "native";
 };
 export type FreshClaimChain = {
   version: 1; mode: "fresh"; initial_snapshot_sha256: string;

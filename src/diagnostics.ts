@@ -1,45 +1,4 @@
-/**
- * A durable, bounded sink for the node rejections fkanban cannot fix at runtime.
- *
- * WHY THIS EXISTS. On 2026-08-04 a chief-engineer run shipped a witness for the
- * malformed-query 400s the primary had been counting under `app=kanban` for
- * days: `pipeline_status.querySchema` stopped swallowing them and started
- * printing a `kanban: warning: …` line naming schema, projection and filter.
- * Four hours later the next run went looking for what it had caught and found
- * nothing — not because no 400 happened (the node's per-schema counter carried
- * one on `board_cards`), but because:
- *
- *   1. The witness printed to `console.error`, and the process that most often
- *      talks to the node is `kanban mcp` — a long-lived stdio server whose
- *      stderr belongs to whatever spawned it. There were six of them running.
- *      fkanban writes exactly one file (`config.json`); a warning it prints has
- *      nowhere to land.
- *   2. It was installed at ONE call site, on the cross-app lastgit join. The
- *      400 the node actually attributed to kanban was on `board_cards` — this
- *      repo's own membership index — which that call site never reads.
- *
- * `lastdb ops` keeps a 256-entry ring that rotates within hours and reports
- * `err=N` with no request shape, so "a 400 happened somewhere in the last day"
- * was the most any run could learn. That is the whole reason four consecutive
- * runs could not name one.
- *
- * So the sink is deliberately shaped against BOTH failures:
- *
- *   - It is a FILE, not a stream. It outlives the process that wrote it, which
- *     is the only property that makes a rare event investigable at all.
- *   - It is fed from `queryAll` in `client.ts` — the one funnel every kanban
- *     read passes through — so coverage is a property of the call graph rather
- *     than of somebody remembering to add a line. A read path added tomorrow is
- *     covered the day it is written.
- *
- * It records; it does not judge. A lead probe that the sweep EXPECTS to fail
- * (`sweepBoardCardsPartition` walks every field as a projection lead precisely
- * to find the ones the node refuses) lands here too, tagged with its argv. That
- * is the right trade: a recorder that tries to be clever about which 400s are
- * "real" is a recorder that can be wrong in the direction of silence, which is
- * the failure this file exists to end. `kanban doctor` prints the tail with the
- * command that caused each one, and a human tells them apart in one glance.
- */
+
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 

@@ -1,4 +1,6 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { alternateKeyWire } from "./alternate-key-wire.ts";
+import { queryPageSize } from "./query-page-size.ts";
 import { encodeFieldRequest, decodeFieldReply, localSchemaMetadata, type FieldAliasProfiles } from "./field-alias-transport.ts";
 import type { SchemaDefinition } from "./schemas.ts";
 // Typed HTTP wrappers for the LastDB node.
@@ -131,17 +133,17 @@ export type AppSchemaDeclaration = {
   app_id: string;
   schema: string;
   canonical: string;
-  resolution: "mint" | "link" | string;
+  identityHash?: string;
+  independentFields?: boolean;
+  /** The node reports `reuse` or `register`. The installed schema owns its values. */
+  resolution: string;
   decision?: string;
   auditEventId?: string;
   bindEligible: true;
 };
 
-// Single-request page size for the /api/query pagination loop — the node caps
-// individual pages at 1000. fkanban boards stay well under that, so in
-// practice one round trip resolves the whole schema.
-const QUERY_PAGE_SIZE = 1000;
-const QUERY_PAGE_LIMIT = 1000;
+// Preserve the complete-read row cap independently of per-request page cost.
+const QUERY_ROW_LIMIT = 1_000_000;
 
 // `X-LastDB-Client` ops-attribution labels. Real board work carries the plain
 // label; each DIAGNOSTIC entrypoint carries its own so `lastdb ops` can rank
@@ -348,15 +350,7 @@ export type LoadedSchema = {
   // Empty when the node omits `fields` (older nodes) — callers fall back to
   // descriptive_name matching + a write probe.
   fields: string[];
-  // The schema's key layout, as reported in `/api/schemas`. Fields alone CANNOT
-  // separate an entity from its own secondary index: a membership index carries
-  // the entity's fields plus its index fields, so it is a strict field superset
-  // of the entity BY CONSTRUCTION and wins any "widest superset" contest. The
-  // key layout is what actually distinguishes them — `MilestoneCards` is
-  // HashRange `milestone/sk`, the `Milestone` entity is Hash `slug` — and a
-  // schema keyed differently can never be the write target for this record type.
-  // `null` when the node omits `key` (older nodes); callers must then fall back
-  // rather than treat a missing layout as a match.
+
   key: { hash_field: string; range_field: string | null } | null;
   // Catalog lifecycle state (`Available` / `Blocked` / ...) as `/api/schemas`
   // reports it. Only an `Available` schema answers a name resolution or accepts
@@ -443,47 +437,7 @@ export type NodeClient = {
     durability?: "durable";
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string; rangeKey?: string | null }): Promise<void>;
-  /**
-   * Upsert many records in ONE request (`POST /api/mutations/batch`).
-   *
-   * ## Why this exists, and why it is not just "fewer round trips"
-   *
-   * The node takes a write gate before applying a mutation, keyed per
-   * `(molecule, hash)` — `acquire_molecule_write_locks` builds its key from
-   * `ChangedKey::disk_hash()`, so the RANGE half of a HashRange key is not in
-   * it. Every row of one BoardCards partition therefore shares one gate, and
-   * concurrent writers of that partition do not overlap: they queue.
-   *
-   * Measured on the live primary (`probe-boardcards-write-lock-contention.ts`,
-   * 12 rows, identical payload):
-   *
-   * | regime                          | vs serial |
-   * |---------------------------------|-----------|
-   * | serial, one partition           | 1.00x     |
-   * | concurrent x3, ONE partition    | **0.91x** |
-   * | concurrent x3, 12 partitions    | 2.12x     |
-   * | one batch request               | 2.10x     |
-   *
-   * The second row is the one that matters: fanning writes out across a single
-   * partition is not merely a wash, it is a small net LOSS — the concurrency
-   * buys nothing and the extra in-flight requests cost something. A batch gets
-   * the whole win without needing the rows to live on different boards, because
-   * `write_mutations_batch_async` groups by schema and takes the gate ONCE for
-   * the group.
-   *
-   * All-or-nothing: the node rejects the whole batch on any item's validation
-   * or access failure, so callers that need per-item error isolation must
-   * handle the throw and retry individually. {@link upsertBoardCardsBatch} is
-   * the BoardCards-shaped wrapper that does exactly that.
-   *
-   * Optional for the same reason `search?` and `getSchema?` are: the ad-hoc
-   * test fakes implement only the slice of `NodeClient` their subject touches,
-   * and making this required is a mechanical edit to ~28 files that buys no
-   * assertion. The SHARED fake (`test/fake-node.ts`) DOES implement it, so the
-   * batch path is exercised rather than silently fallen back over — see
-   * `test/board-cards-batch-write.test.ts`, which fails if the seed reverts to
-   * one-write-per-card.
-   */
+
   updateRecords?(rows: Array<{
     schemaHash: string;
     fields: Record<string, unknown>;
@@ -492,52 +446,7 @@ export type NodeClient = {
     expected?: CasExpectation;
     durability?: "durable";
   }>): Promise<void>;
-  /**
-   * Delete many rows in one request — the retirement half of {@link updateRecords}.
-   *
-   * ## Why this exists separately, and why it was missing
-   *
-   * `updateRecords` hard-codes `mutation_type: "update"` on every item it
-   * sends, so for a long time the batch endpoint could only be reached to
-   * WRITE. That was a property of this client, never of the node: fold's
-   * `execute_mutations_batch` builds each item through the same
-   * `MutationComponents { .., mutation_type, .. }` as the single-record route,
-   * so a delete in a batch resolves, validates and writes by exactly the path a
-   * single delete does.
-   *
-   * The cost of not having it is paid per ROW on a gate taken per BOARD. A
-   * BoardCards write gates on `(molecule, hash-half)`, so every sk retirement —
-   * the delete in every `move`, every `rank` reposition, every `groom
-   * board-cards-heal` duplicate reap — took the whole board's write gate on its
-   * own, behind every other kanban process writing that board.
-   *
-   * Measured on the live primary (`scripts/probe-boardcards-batch-delete.ts`),
-   * 48 rows, arms interleaved so a warming node cannot hand either one the win:
-   *
-   *   | per-row `deleteRecord` x48 | 110.7s / 250.9s |
-   *   | one batched request        |  42.7s /  51.4s |
-   *   | speedup                    |  2.59x / 4.88x  |
-   *
-   * with a projected partition read-back after each arm confirming the rows are
-   * actually gone — a 200 that deletes nothing would otherwise read as a win.
-   *
-   * ## The read-back caveat that probe also pinned
-   *
-   * Both per-row arms left the LAST-deleted row reading as still present, and
-   * both were empty 3s later
-   * (`scripts/probe-boardcards-batch-delete-survivor.ts`: survivor is always
-   * delete-order index N-1, gone after settle). That is the BoardCards index
-   * lagging its own ack — the same asymmetry `upsertBoardCard` documents for
-   * writes ("the INDEX lags; the record does not") — reaching deletes. It is
-   * NOT a lost delete, and a caller that re-reads a partition to confirm its own
-   * reap will see one phantom survivor. Do not build a repair decision on that
-   * read.
-   *
-   * All-or-nothing like `updateRecords`, and optional for the same reason: the
-   * ad-hoc fakes implement only what their subject touches. The SHARED fake
-   * implements it, so the batched path is exercised rather than silently
-   * fallen back over.
-   */
+
   deleteRecords?(rows: Array<{
     schemaHash: string;
     keyHash: string;
@@ -701,10 +610,6 @@ export function newNodeClient(opts: {
   // a request later 403s with `transport_not_attested` (a restarted node drops
   // the in-memory session). Omit to talk to the node unattested.
   socketPath?: string;
-  // Dev-first app-caller mode. When present, requests carry an app capability
-  // envelope for this app id so the node applies per-app schema LINK mappings.
-  appId?: string;
-  appCapability?: string;
   // The `X-LastDB-Client` ops-attribution label. Defaults to DEFAULT_OPS_LABEL.
   // Diagnostic commands override it so their synthetic traffic is not pooled
   // with real board work in `lastdb ops` — see nodeHeaders() for why that
@@ -723,8 +628,6 @@ export function newNodeClient(opts: {
   const userHash = opts.userHash;
   const timeoutMs = opts.timeoutMs;
   const socketPath = opts.socketPath;
-  const appId = opts.appId;
-  const appCapability = opts.appCapability;
   const opsLabel = opts.opsLabel ?? DEFAULT_OPS_LABEL;
 
   // Owner-session token, established lazily on the first request and shared
@@ -830,12 +733,6 @@ export function newNodeClient(opts: {
     if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
     // Opt-in. The node returns x-lastdb-read-receipt only when this header is set.
     if (process.env.LASTDB_READ_RECEIPT === "1") h["x-lastdb-read-receipt"] = "1";
-    if (appId !== undefined && appId.length > 0) {
-      h["X-App-Capability"] = appCapability && appCapability.length > 0
-        ? appCapability
-        : appCapabilityHeader(appId);
-      h["X-Capability-Ts"] = Math.floor(Date.now() / 1000).toString();
-    }
     return h;
   };
 
@@ -975,6 +872,7 @@ export function newNodeClient(opts: {
     fields: string[];
     filter?: QueryFilter;
   }): Promise<QueryResponse> => {
+    const pageSize = queryPageSize(opts.fields.length || Object.keys(fieldProfiles[opts.schemaHash] ?? {}).length);
     const rows: SdkQueryResult["rows"] = [];
     let schema = "";
     let rowCount = 0;
@@ -996,7 +894,7 @@ export function newNodeClient(opts: {
         const body: Record<string, unknown> = {
           schema_name: opts.schemaHash,
           fields: opts.fields,
-          limit: QUERY_PAGE_SIZE,
+          limit: pageSize,
           ...(opts.filter !== undefined ? { filter: opts.filter as JsonValue } : {}),
           ...(cursor === null ? { offset } : { cursor }),
         };
@@ -1010,7 +908,7 @@ export function newNodeClient(opts: {
 
         const pageHasMore = parsed.page !== null
           ? parsed.page.hasMore
-          : parsed.rows.length >= QUERY_PAGE_SIZE;
+          : parsed.rows.length >= pageSize;
         const nextCursor = parsed.page?.nextCursor ?? null;
 
         // The node returned the cursor it was just handed and still claims more
@@ -1043,46 +941,15 @@ export function newNodeClient(opts: {
         }
 
         if (!pageHasMore) break;
-        if (rows.length >= QUERY_PAGE_SIZE * QUERY_PAGE_LIMIT) break;
-        if (parsed.rows.length === 0) break;
+        if (rows.length >= QUERY_ROW_LIMIT || parsed.rows.length === 0) {
+          throw new FkanbanError({ code: "query_read_incomplete",
+            message: "The query still has records after its complete-read limit or an empty page." });
+        }
 
-        // OFFSET-PATH NO-PROGRESS GUARD.
-        //
-        // The cursor path above already refuses to trust a cursor the node
-        // hands back unadvanced. The offset path had no equivalent — and the
-        // offset path is the one EVERY product read takes, because
-        // `can_push_down` requires `filter.is_none()` so key-restricted reads
-        // never get a honored cursor.
-        //
-        // Measured on the live primary 2026-08-03, Card full scan, 194-card
-        // board (`scripts/probe-scan-duplicate-locus.ts`):
-        //
-        //   page 1   537 rows   373 distinct   164 duplicates WITHIN the page
-        //   pages 2-18  1002 rows   ZERO new slugs, all 17 of them
-        //
-        // `has_more` stayed true throughout and `total_count` claimed 1502, so
-        // the loop kept paying ~190ms per round trip for rows it already held:
-        // 17 of 18 requests and ~3.2s of `kanban search`'s 3.6s, for nothing.
-        //
-        // A non-empty page that adds no new row identity cannot be progress —
-        // row keys are unique, so "every row here is one I already have" means
-        // this page is a repeat, not a new window. Stopping is SET-PRESERVING,
-        // not merely close: the drain de-dups by this exact key on the way out
-        // (`queryResponseFromSdk`), so the rows dropped here are rows the
-        // caller was never going to see. `test/query-paging-no-progress.test.ts`
-        // pins that equality rather than the request count alone.
-        //
-        // Node-side this is fold's bug (a full scan should not serve duplicate
-        // rows in one page, nor advertise `has_more` past its last distinct
-        // row) — filed as papercut-lastdb-query-offset-paging-repeats-first-page.
-        // The guard is version-neutral: a node that pages correctly always
-        // yields fresh rows, so it never fires.
+        // A repeated offset page does not prove complete membership.
         if (freshRows === 0) {
-          verbose(
-            `node: /api/query returned ${parsed.rows.length} row(s) at offset ${offset}, ` +
-              "none of them new — treating the offset drain as complete",
-          );
-          break;
+          throw new FkanbanError({ code: "query_cursor_stalled",
+            message: "The query repeats a page while more records remain." });
         }
 
         cursor = cursorUnhonored ? null : nextCursor;
@@ -1274,7 +1141,6 @@ export function newNodeClient(opts: {
     }
   })();
 
-
   return {
     baseUrl: url,
     userHash,
@@ -1367,6 +1233,7 @@ export function newNodeClient(opts: {
         await requireCanonicalHome();
         schema = canonicalSchema(local) as unknown as Record<string,unknown>;
       }
+      if (schema.alternate_keys !== undefined) schema = { ...schema, alternate_keys: alternateKeyWire(schema.alternate_keys) };
       const { status, body } = await callJson("/api/apps/declare-schema", "POST", {
         app_id: appId,
         schema,
@@ -1375,6 +1242,10 @@ export function newNodeClient(opts: {
       const b = body as Record<string, unknown>;
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
       const schemaName = typeof b.schema === "string" ? b.schema : "";
+      const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
+      const independentFields = b.independent_fields === true;
+      if(local.independent_fields&&(!independentFields||!identityHash||!/^[a-f0-9]{64}$/.test(identityHash)
+        ||b.app_id!==appId||b.schema_name!==`${appId}/${local.name}`))throw new FkanbanError({code:"owned_schema_receipt_invalid",message:"The declaration did not confirm the exact owned app schema."});
       const resolution = typeof b.resolution === "string" ? b.resolution : "";
       const auditEventId = typeof b.audit_event_id === "string" ? b.audit_event_id : undefined;
       const explicitBindRejected = b.bind_eligible === false;
@@ -1385,11 +1256,11 @@ export function newNodeClient(opts: {
           hint: "Upgrade the node or inspect the app-schema declaration response. F-Kanban binds only schemas Mini accepts as app-declared catalog identities.",
         });
       }
-      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local,[canonical,schemaName]));
+      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local,[canonical,schemaName,identityHash ?? ""]));
       return {
         app_id: typeof b.app_id === "string" ? b.app_id : appId,
         schema: schemaName,
-        canonical,
+        canonical, identityHash, independentFields,
         resolution,
         decision: typeof b.decision === "string" ? b.decision : undefined,
         auditEventId,
@@ -1490,12 +1361,7 @@ export function newNodeClient(opts: {
         truncated: value.truncated === true,
       };
     },
-    // Both branches page through `queryAllPaged`. The vendored SDK's own
-    // `queryAll` (0.2.0) prefers a returned cursor over the offset and has no
-    // no-progress guard, so on this node it loops ~1000 requests on any
-    // partition past one page — and the partition closest to that cliff is
-    // BoardCards `HashKey(default)`, the board-wide list every surface uses.
-    // The guard lives in one place rather than being re-derived per caller.
+
     async queryAll({ schemaHash, fields, filter, rawKeyEvidence }) {
       try {
         if (rawKeyEvidence) {
@@ -1643,29 +1509,6 @@ function fieldString(fields: RowFields, key: string): string | null {
 function numField(obj: Record<string, unknown>, key: string): number {
   const v = obj[key];
   return typeof v === "number" ? v : 0;
-}
-
-function appCapabilityHeader(appId: string): string {
-  const now = new Date().toISOString();
-  const token = {
-    envelope: {
-      version: 1,
-      purpose: "capability_grant",
-      alg: "Ed25519",
-      key_id: "fkanban-dev-local",
-      issued_at: now,
-      env: "dev",
-      payload_hash: "dev-local",
-      sig: "ZGV2LWxvY2Fs",
-    },
-    capability_id: `fkanban-dev-local-${appId}`,
-    app_id: appId,
-    scope: { wildcard: `${appId}/*` },
-    granted_ops: ["read", "write"],
-    granted_at: now,
-    node_pubkey: "dev-local",
-  };
-  return Buffer.from(JSON.stringify(token), "utf8").toString("base64");
 }
 
 function bodyError(body: unknown): string | undefined {

@@ -1,7 +1,9 @@
 // `fkanban list` — render a board (default board unless --board) as columns
 // of cards. Broad `--json` reads default to bounded body previews.
 
-import { FkanbanError, type NodeClient } from "../client.ts";
+import { type NodeClient } from "../client.ts";
+import { requireMultiKey } from "../multi-key.ts";
+import { namedColumnHeads } from "../named-column-heads.ts";
 import { type Config } from "../config.ts";
 import {
   BODY_OMITTED,
@@ -21,11 +23,9 @@ import {
 } from "../record.ts";
 import {
   headKeyId,
-  LIST_HEAD_SCHEMA_KEY,
-  readColumnHeads,
   type HeadAtom,
   type HeadCard,
-} from "../list-head.ts";
+} from "../column-window.ts";
 import {
   capPerColumn,
   previewCardBodies,
@@ -143,18 +143,6 @@ async function hydrateListedHeadCards(
     const truth = bySlug.get(card.slug);
     return truth ? mergeHeadDetail(card, truth) : card;
   });
-}
-
-function requireHeadHash(cfg: Config): string {
-  const hash = cfg.schemaHashes[LIST_HEAD_SCHEMA_KEY];
-  if (!hash) {
-    throw new FkanbanError({
-      code: "schema_not_configured",
-      message: "Column head schema is not registered.",
-      hint: "Run kanban init.",
-    });
-  }
-  return hash;
 }
 
 function cardFromHead(board: string, column: string, card: HeadCard): Card {
@@ -284,13 +272,6 @@ export type ListOptions = {
   // convention). Injected by tests so the notice is asserted, not printed.
   // The default envelope path does not warn on stderr (truncation is structural).
   warn?: WarnSink;
-  /**
-   * After a column list, HashKey the whole BoardCards partition and delete
-   * rows whose Card tip is another column. Default off: the happy path
-   * (`kanban list --column`, MCP list, pickup ready) must not hydrate the
-   * full partition. Pass true only from heal/janitor callers.
-   */
-  healStaleRows?: boolean;
 };
 
 // Both the human text and the structured (`--json`) payload, built from a
@@ -311,22 +292,23 @@ export type ListOptions = {
 export async function listResult(
   opts: ListOptions,
 ): Promise<{ text: string; cards: CardDetail[]; board: Board; jsonLimit: number; partial: boolean; milestones?: Awaited<ReturnType<typeof listMilestones>> }> {
+  requireMultiKey(opts.cfg);
   const boardSlug = opts.board ?? "default";
-  // An explicitly-passed board must exist — a typo'd name should error loudly
-  // (matching `add`), not silently render an empty default-column board. The
-  // no-`--board` path defaults to `default`, which always exists, so it stays
-  // on the cheap `findBoard` lookup with no extra read on the hot path.
-  //
-  // ISSUED WITH the board-list read below, not before it. The two answer
-  // different questions off different keys — Board truth at HashKey(boardSlug)
-  // vs the `all_boards` rollup — and neither feeds the other, so serializing
-  // them only added a round trip. On this node round trips are what a list
-  // costs: `probe-read-fanout-serial-vs-concurrent.ts` (live, 7 interleaved
-  // reps) measured this pair at 153ms serial against 119ms overlapped, 7/7
-  // reps to the overlap. Reads overlap here even though WRITES do not
-  // (`probe-boardcards-write-lock-contention.ts` measured write fan-out at
-  // 0.91x of serial) — the write gate is a per-partition lock, and a read
-  // takes none.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   const boardRead =
     opts.board !== undefined
       ? requireBoard(opts.node, opts.cfg, boardSlug)
@@ -334,20 +316,18 @@ export async function listResult(
   // Terminal map needs the board list; the footer needs the other boards' slugs.
   // Re-deriving either would be a second Board read for data already in hand.
   const boardsRead = listBoards(opts.node, opts.cfg);
-  // One exact key per column. A missing head is an empty column.
-  const headHash = requireHeadHash(opts.cfg);
+  // Each column uses its named key. The window is derived from current records.
+  const readHeads = (keys: Parameters<typeof namedColumnHeads>[2]) => namedColumnHeads(opts.node, opts.cfg, keys);
   const listedColumns = opts.column ? [opts.column] : [...DEFAULT_COLUMNS];
-  const headsRead = readColumnHeads(
-    opts.node,
-    headHash,
+  const headsRead = readHeads(
     listedColumns.map((column) => ({ board: boardSlug, column })),
   );
-  // `allSettled`, not `all`: with `all` whichever read rejects FIRST decides the
-  // error, so a flaky rollup read could mask "no such board" on a typo'd
-  // `--board`. Settling all three and rethrowing in the old serial order keeps
-  // the error a caller sees identical to the one they got before — including
-  // the BoardCards read, which used to be issued only after both board reads
-  // had already succeeded and so must still surface last.
+
+
+
+
+
+
   const [boardSettled, boardsSettled, headsSettled] = await Promise.allSettled([
     boardRead,
     boardsRead,
@@ -378,9 +358,7 @@ export async function listResult(
   let heads = headsSettled.value;
   const extraColumns = columns.filter((column) => !listedColumns.includes(column));
   if (extraColumns.length > 0) {
-    const more = await readColumnHeads(
-      opts.node,
-      headHash,
+    const more = await readHeads(
       extraColumns.map((column) => ({ board: boardSlug, column })),
     );
     heads = new Map([...heads, ...more]);
@@ -434,9 +412,9 @@ export async function listResult(
   // --json / --wide / --column (wide never shows the footer; column is a
   // focused view).
   //
-  // Other boards' column heads. A missing head counts as empty. A failed read
+  // Other boards' current column windows. A failed read
   // does not: the current board still renders, and the footer names the boards
-  // that were not read. readColumnHeads splits the keys into batches of 256.
+  // that were not read. Each requested column uses its own named key.
   let footer = "";
   if (!opts.column && !opts.json && !opts.wide) {
     const otherBoards = allBoards.filter((board) => board.slug !== boardSlug);
@@ -446,7 +424,7 @@ export async function listResult(
     let cross: Card[] = [];
     let unreadable: string[] = [];
     try {
-      const otherHeads = await readColumnHeads(opts.node, headHash, pairs);
+      const otherHeads = await readHeads(pairs);
       cross = otherBoards.flatMap((board) => cardsFromHeads(board.slug, board.columns, otherHeads));
     } catch {
       cross = [];
@@ -509,11 +487,11 @@ export async function listCmd(opts: ListOptions): Promise<string> {
   if (opts.jsonArray && implicitJsonLimit > 0 && jsonLimit === 0) {
     warnIfTruncated("list", capped.length, total, opts.warn ?? console.error);
   }
-  // Bodies are never loaded for board-wide list (BoardCards thin projection).
-  // --full-body is the explicit opt-in to the expensive surface: it suppresses
-  // the implicit page cap (see `implicitJsonDefault`), so it point-gets one body
-  // per card it RETURNS — proportional to the requested data, not amplified.
-  // Callers bound it with --limit, which caps before hydration.
+
+
+
+
+
   const withBodies = opts.fullBody
     ? await hydrateCardBodies(opts.node, opts.cfg, capped)
     : capped;

@@ -1,3 +1,4 @@
+import { requireMultiKey } from "../multi-key.ts";
 // MCP server for fkanban — exposes the board as tools to MCP clients
 // (Claude Code, Codex, etc.) over stdio. Each handler calls the in-process
 // command function, so an agent sees the same result as the matching
@@ -59,7 +60,7 @@ import { capFlat, DEFAULT_SEARCH_LIMIT } from "../board.ts";
 
 const guardedReceiptSchema = z.object({
   next_snapshot_json:z.string(), next_snapshot_sha256:z.string(), durability:z.literal("durable"),
-  guard_snapshot_sha256:z.string(), contract_sha256:z.string(), membership_cleanup:z.literal("deferred"),
+  guard_snapshot_sha256:z.string(), contract_sha256:z.string(), membership_cleanup:z.enum(["deferred", "native"]),
 });
 const freshClaimChainSchema = z.object({
   version:z.literal(1), mode:z.literal("fresh"), initial_snapshot_sha256:z.string(),
@@ -93,6 +94,7 @@ export const FKANBAN_READ_TOOLS = [
   "fkanban_milestone_show",
   "fkanban_milestone_portfolio",
   "fkanban_milestone_detail",
+  "fkanban_milestone_reconcile",
   "fkanban_milestone_groom",
   "fkanban_doctor",
   "fkanban_ping",
@@ -122,11 +124,7 @@ export const FKANBAN_WRITE_TOOLS = [
   "fkanban_board_rm",
   "fkanban_milestone_add",
   "fkanban_milestone_state",
-  // reconcile REPAIRS the MilestoneCards index as it reads — one write per
-  // drifted row, seconds each on the shared node. It sat in the read list
-  // (and annotated readOnlyHint:true, so hosts could auto-run it) purely
-  // because its OUTPUT is a report. Pass `dry_run` for the report alone.
-  "fkanban_milestone_reconcile",
+
 ] as const;
 export const FKANBAN_TOOL_COUNT =
   FKANBAN_READ_TOOLS.length + FKANBAN_WRITE_TOOLS.length;
@@ -324,18 +322,6 @@ const milestoneSchema = z.object({
   completed_at: z.string(),
 });
 
-// What the MilestoneCards heal classified vs what it actually wrote. `upserts`
-// and `removals` are the drift; `issued`/`deferred` are what this call did
-// about it. A read command reports drift with issued 0 and applied false.
-const milestoneRepairsSchema = z.object({
-  applied: z.boolean(),
-  upserts: z.number(),
-  removals: z.number(),
-  issued: z.number(),
-  deferred: z.number(),
-  budget: z.number().nullable(),
-});
-
 // Required string args are declared `.optional()` (no Zod `.min(1)`) so an
 // empty OR missing value reaches the handler instead of the SDK's pre-handler
 // validation, which would dump a raw `MCP error -32602: Input validation
@@ -394,6 +380,7 @@ export function createFkanbanMcpServer(
         hint: "Run `kanban init` first.",
       });
     }
+    requireMultiKey(cfg);
     const node = explicitNode ?? newNodeClient({ baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases, userHash: cfg.userHash, socketPath: resolveSocketPath(cfg) });
     return { cfg, node };
   };
@@ -459,8 +446,7 @@ export function createFkanbanMcpServer(
         // position order, so `capFlat` slicing keeps ordering intact). The
         // human `text` is independently capped already.
         const { cards: capped, total, truncated } = capCards(cards, { limit: args.limit, all: args.all });
-        // List is thin (BoardCards); hydrate ONLY the capped page for previews
-        // / full_body — never N over the whole board.
+
         const withBodies = await hydrateCardBodies(node, cfg, capped);
         const previewed = previewBodies(withBodies, args.full_body ?? false);
         return toolResult(text, { cards: previewed, total, truncated: truncated || partial, partial });
@@ -656,8 +642,10 @@ export function createFkanbanMcpServer(
 
   server.registerTool("fkanban_guarded_contract", {
     title: "Read immutable guarded Card contract", description: "Return the embedded raw23 contract without config or node access.",
-    annotations: {readOnlyHint:true, openWorldHint:false}, inputSchema: {},
-  }, async () => toolResult(JSON.stringify(GUARDED_CONTRACT), { ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 }));
+    annotations: {readOnlyHint:true, openWorldHint:false}, inputSchema: { storage_model: z.literal("multi-key-v1").optional() },
+  }, async () => {
+    return toolResult(JSON.stringify(GUARDED_CONTRACT), { ...GUARDED_CONTRACT, contract_sha256: GUARDED_CONTRACT_SHA256 });
+  });
   server.registerTool("fkanban_guarded_snapshots", {
     title:"Read exact known-key Card snapshots",description:"One authenticated bounded native Card batch with explicit missing keys; malformed or incomplete reads refuse.",
     annotations:{readOnlyHint:true,openWorldHint:false},inputSchema:{slugs:z.array(z.string()).min(1).max(256)},
@@ -689,7 +677,7 @@ export function createFkanbanMcpServer(
       },
       outputSchema: {
         next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
-        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.enum(["deferred", "native"]).optional(),
         result: z.enum(["claimed", "none", "error"]),
         card: cardSchema.extend({repo:z.string(),base:z.string(),kind:z.string(),block_status:z.string(),block_reason:z.string(),pr_url:z.string(),branch:z.string(),db:z.string(),north_star:z.string(),milestone:z.string()}).optional(),
         from: z.literal("todo").optional(),
@@ -864,18 +852,9 @@ export function createFkanbanMcpServer(
     "fkanban_milestone_reconcile",
     {
       title: "Reconcile milestone",
-      // Named as a repair verb, because it is one: reconcile REPAIRS the
-      // MilestoneCards index as it reads. It was annotated readOnlyHint: true,
-      // which tells a host it is safe to run without approval — while it issued
-      // seconds-per-row writes to the shared node. Use `dry_run` to ask what it
-      // would repair; use fkanban_milestone_detail to only look.
-      description: "Repair a milestone's card index, then report its ready child-card frontier, proof state, and lifecycle warnings. WRITES unless dry_run.",
-      annotations: { title: "Reconcile milestone", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      inputSchema: {
-        slug: z.string().optional(),
-        dry_run: z.boolean().optional().describe("Classify index drift and report it without writing."),
-        max_repairs: z.number().int().min(0).optional().describe("Cap repair writes for this run (default 25). Reconcile is convergent, so a capped run makes strict progress and reports the remainder."),
-      },
+      description: "Read a milestone's complete child membership, ready frontier, proof state, and lifecycle warnings.",
+      annotations: { title: "Reconcile milestone", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: { slug: z.string().optional() },
       outputSchema: {
         milestone: milestoneSchema,
         children: z.array(z.object({ slug: z.string(), title: z.string(), column: z.string(), blocked: z.boolean(), blockedBy: z.array(z.string()) })),
@@ -890,15 +869,14 @@ export function createFkanbanMcpServer(
         // fkanban_milestone_show / _detail / _portfolio, which all declare them.
         proof_verdict: z.string().describe("The LIVE proof answer re-derived on this read — `unproven` where the stored proof_status claims passing and the evidence no longer holds."),
         proof_verdict_reason: z.string().describe("Why the verdict differs from the stored claim (e.g. missing-proof-card, no-proof-card)."),
-        repairs: milestoneRepairsSchema,
       },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
-        const result = await milestoneReconcileResult({ cfg, node, slug, apply: !args.dry_run, maxRepairs: args.max_repairs });
-        return toolResult(result.text, { ...milestoneReconcilePayload(result), repairs: result.repairs });
+        const result = await milestoneReconcileResult({ cfg, node, slug });
+        return toolResult(result.text, milestoneReconcilePayload(result));
       } catch (err) {
         return errorResult(err);
       }
@@ -941,17 +919,17 @@ export function createFkanbanMcpServer(
     "fkanban_milestone_detail",
     {
       title: "Milestone detail",
-      description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns. Read-only: reports index drift, repairs none.",
+      description: "Show one milestone outcome, proof, warnings, and child cards grouped by fixed board columns. Read-only: uses the schema's named milestone key.",
       annotations: { title: "Milestone detail", readOnlyHint: true, openWorldHint: false },
       inputSchema: { slug: z.string().optional() },
-      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), proof_verdict: z.string(), proof_verdict_reason: z.string(), columns: z.record(z.string(), z.array(milestoneChildSchema)), repairs: milestoneRepairsSchema },
+      outputSchema: { milestone: milestoneSchema, children: z.array(milestoneChildSchema), ready: z.array(milestoneChildSchema), proof: z.object({ slug: z.string(), terminal: z.boolean(), passingEvidence: z.boolean() }).nullable(), warnings: z.array(milestoneWarningSchema), proof_verdict: z.string(), proof_verdict_reason: z.string(), columns: z.record(z.string(), z.array(milestoneChildSchema)) },
     },
     async (args) => {
       try {
         const slug = requireArg(args.slug, "milestone slug", "Pass a non-empty `slug`.");
         const { cfg, node } = requireConfig();
         const result = await milestoneDetailResult({ cfg, node, slug });
-        return toolResult(result.text, { ...result.detail, repairs: result.repairs });
+        return toolResult(result.text, result.detail);
       } catch (err) {
         return errorResult(err);
       }
@@ -1036,7 +1014,7 @@ export function createFkanbanMcpServer(
       outputSchema: {
         next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
         contract_sha256:z.string().optional(), card_guarded_contract_sha256:z.string().optional(),
-        absence_guard:z.literal("all23-absent").optional(), membership_cleanup:z.literal("deferred").optional(),
+        absence_guard:z.literal("all23-absent").optional(), membership_cleanup:z.enum(["deferred", "native"]).optional(),
         slug: z.string(),
         action: z.enum(["created", "updated"]),
         board: z.string(),
@@ -1094,7 +1072,7 @@ export function createFkanbanMcpServer(
       },
       outputSchema: {
         next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
-        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.enum(["deferred", "native"]).optional(),
         slug: z.string(),
         action: z.enum(["created", "updated"]),
         board: z.string(),
@@ -1158,7 +1136,7 @@ export function createFkanbanMcpServer(
       },
       outputSchema: {
         next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
-        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.literal("deferred").optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.enum(["deferred", "native"]).optional(),
         slug: z.string(),
         action: z.enum(["created", "updated"]),
         board: z.string(),
@@ -1220,7 +1198,7 @@ export function createFkanbanMcpServer(
       },
       outputSchema: {
         next_snapshot_json:z.string().optional(), next_snapshot_sha256:z.string().optional(), durability:z.literal("durable").optional(),
-        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.enum(["deferred", "purged"]).optional(),
+        guard_snapshot_sha256:z.string().optional(), contract_sha256:z.string().optional(), membership_cleanup:z.enum(["deferred", "purged", "native"]).optional(),
         slug: z.string(),
         from: z.string(),
         to: z.string(),

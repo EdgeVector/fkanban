@@ -1,13 +1,4 @@
-// The position segment of a membership range key — one definition, three indexes.
-//
-// BoardCards (`column#pos(8)#slug`), MilestoneCards (same shape, via
-// `boardCardSk`) and BoardMilestones (`state#pos(8)#slug`) all encode a
-// position the same way, and all read it back. It lived twice: once correctly
-// in `board-cards.ts` and once, as `String(Number(seg))`, in
-// `board-milestones.ts`. That is not a coincidence to tidy up — a key format
-// duplicated per index is a format that drifts per index, and this one had
-// already drifted into a destructive inverse on the side nobody re-read.
-// It belongs to the key, so it lives with the key.
+
 
 /** Pad a position into the fixed-width segment the range key sorts on. */
 export function padPositionSegment(position: string | number): string {

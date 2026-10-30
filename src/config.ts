@@ -1,10 +1,11 @@
+import { writeConfigFile } from "./config-file.ts";
 import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Persistent CLI config — `~/.kanban/config.json` by default, with
 // `~/.fkanban/config.json` as the compatibility fallback. Holds the canonical
 // schema hashes (NOT the descriptive names) plus the node + schema-service URLs
 // and the node user hash.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -15,6 +16,7 @@ const PRIMARY_CONFIG_ENV = "KANBAN_CONFIG";
 const LEGACY_CONFIG_ENV = "FKANBAN_CONFIG";
 
 export type Config = {
+  storageModel?: "multi-key-v1";
   schemaFieldAliases?: FieldAliasProfiles;
   configVersion: number;
   nodeUrl: string;
@@ -22,61 +24,19 @@ export type Config = {
   userHash: string;
   // canonical schema hash per record type: { card, board }
   schemaHashes: Record<string, string>;
+  /** Definition identities are separate from literal runtime addresses. */
+  schemaIdentities?: Record<string,string>;
   // Optional override for the node's Unix-domain control socket, used for
   // owner-session attestation against an app-isolation node. When absent the
   // path is derived from LASTDB_HOME / FOLDDB_HOME (see `resolveSocketPath`).
   nodeSocketPath?: string;
-  // Card schema hash PROVEN (by a live write) to reject the optional card
-  // fields (CARD_OPTIONAL_SCHEMA_FIELDS). While it matches schemaHashes.card,
-  // card writes go straight to the legacy body-header shape instead of paying
-  // a failed full-shape mutation on every write (the node 500s on unknown
-  // fields; ~45% of all card mutations, 2026-07-17 request-ops investigation).
-  // Self-invalidates when the adopted card schema changes: a new hash means a
-  // new field set, so the memo no longer applies.
-  cardLegacyWriteHash?: string;
-  // Where this config was read from; never serialized. Lets a write-shape
-  // discovery persist without re-deriving the env-dependent path.
+  // The source config path is not serialized.
   configPath?: string;
   /**
    * When true, Kind:pr cards cannot enter todo/doing without a milestone.
-   * Loaded configs default this to true. Inline unit-test Config objects omit
-   * it (treated as false) so fixtures stay focused on their own invariants;
-   * tests that cover the guard set `enforceLivePrMilestone: true` explicitly.
+   * Loaded configs default this to true.
    */
   enforceLivePrMilestone?: boolean;
-  /**
-   * Operator acknowledgement that a pinned schema hash addresses a schema the
-   * node registered under a DIFFERENT identity than the catalog declares, and
-   * that this is the accepted state of this node rather than a defect to fix.
-   *
-   * Exists because the alternative is a red nobody can clear. On the primary,
-   * `milestone_cards` is pinned to a hash the node registered as `Milestone`
-   * (the multi-key expand put entity and index on one product). The rows are
-   * read and written consistently through that pin and are fine; the only
-   * remedy that would satisfy the identity check is a data migration on Tom's
-   * primary brain, and `assertNoSilentSchemaRepin` correctly REFUSES to
-   * re-point the pin. So doctor failed permanently on a condition no operator
-   * action could resolve — the exact shape this file already warns about:
-   * "a red whose only cause is an optional feature being off is how doctors
-   * get ignored".
-   *
-   * Scoped to the exact (hash, registeredAs) pair on purpose. Acknowledging
-   * "milestone_cards may differ" would waive every future mismatch on that key;
-   * acknowledging one pair means any OTHER divergence — a re-pointed pin, a
-   * re-registered hash — is still a fresh red.
-   */
-  acceptedSchemaPinIdentities?: Record<string, AcceptedPinIdentity>;
-};
-
-/**
- * One acknowledged pin/identity pair. Both halves are required: `hash` is what
- * config pins, `registeredAs` is the `descriptive_name` the node reports for
- * it. An acknowledgement that named only one of them could not tell "the state
- * I accepted" from "something moved underneath me".
- */
-export type AcceptedPinIdentity = {
-  hash: string;
-  registeredAs: string;
 };
 
 const SOCKET_FILE_NAME = "folddb.sock";
@@ -169,27 +129,20 @@ export function tryReadConfig(path: string = defaultReadConfigPath()): Config | 
 export function writeConfig(
   config: Config,
   path: string = defaultConfigPath(),
+  expected?:string|null,
+  conversionScope?:string,
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  const { configPath: _omit, ...persisted } = config;
-  writeFileSync(path, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+  const scopePath=path+".conversion.json";
+  if(existsSync(scopePath)&&readFileSync(scopePath,"utf8")!==conversionScope)throw new Error("Resume the saved app conversion before a config change.");
+  writeConfigFile(path,configBytes(config),expected);
 }
 
-/**
- * Record that the currently adopted card schema rejects the optional card
- * fields, so every later process writes the legacy shape first instead of
- * failing a full-shape mutation per write. Best-effort: an unpersistable
- * config (read-only disk, test cfg with no configPath) still gets the
- * in-process memo and must never fail the card write that discovered it.
- */
-export function rememberCardLegacyWriteHash(cfg: Config, hash: string): void {
-  cfg.cardLegacyWriteHash = hash;
-  if (!cfg.configPath) return;
-  try {
-    writeConfig(cfg, cfg.configPath);
-  } catch {
-    /* in-process memo still applies */
-  }
+export function configBytes(config:Config):string {
+  const { configPath: _omit, ...persisted } = config;
+  const ordered=(value:unknown):unknown=>Array.isArray(value)?value.map(ordered):value&&typeof value==="object"
+    ?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,ordered(item)])):value;
+  return JSON.stringify(ordered(persisted),null,2)+"\n";
 }
 
 export function schemaHashFor(
@@ -211,6 +164,9 @@ function assertConfigShape(path: string, raw: unknown): Config {
     throw new ConfigInvalidError(path, "not an object");
   }
   const r = raw as Record<string, unknown>;
+  if (r.storageModel !== undefined && r.storageModel !== "multi-key-v1") {
+    throw new ConfigInvalidError(path, "unsupported storageModel");
+  }
 
   if (r.configVersion !== undefined && r.configVersion !== CONFIG_VERSION) {
     throw new ConfigInvalidError(path, `unsupported configVersion "${String(r.configVersion)}" (expected ${CONFIG_VERSION})`);
@@ -240,15 +196,11 @@ function assertConfigShape(path: string, raw: unknown): Config {
     typeof r.nodeSocketPath === "string" && r.nodeSocketPath.length > 0
       ? (r.nodeSocketPath as string)
       : undefined;
+  const rawIdentities=r.schemaIdentities;
+  if(rawIdentities!==undefined&&(!rawIdentities||typeof rawIdentities!=="object"||Array.isArray(rawIdentities)
+    ||Object.values(rawIdentities).some((value)=>typeof value!=="string"||!/^[a-f0-9]{64}$/.test(value))))throw new ConfigInvalidError(path,"schemaIdentities must contain exact definition identities");
 
-  const cardLegacyWriteHash =
-    typeof r.cardLegacyWriteHash === "string" && r.cardLegacyWriteHash.length > 0
-      ? (r.cardLegacyWriteHash as string)
-      : undefined;
-
-  // Default ON for real loaded configs; operators may set false in config.json
-  // to temporarily disable. Inline unit-test Config objects omit the field
-  // (undefined → not enforced) unless a test opts in explicitly.
+  // The loaded config enables the milestone rule unless the operator sets false.
   const enforceLivePrMilestone = r.enforceLivePrMilestone === false ? false : true;
 
   // Validated STRICTLY rather than coerced. This field's whole job is to
@@ -256,46 +208,16 @@ function assertConfigShape(path: string, raw: unknown): Config {
   // acknowledgement" would be indistinguishable from an absent one — and a
   // malformed entry that silently parsed to a WILDCARD would waive a real
   // mismatch. A typo here is an error at read time, where it is visible.
-  const rawAccepted = r.acceptedSchemaPinIdentities;
-  let acceptedSchemaPinIdentities: Record<string, AcceptedPinIdentity> | undefined;
-  if (rawAccepted !== undefined) {
-    if (typeof rawAccepted !== "object" || rawAccepted === null || Array.isArray(rawAccepted)) {
-      throw new ConfigInvalidError(path, `field "acceptedSchemaPinIdentities" must be an object`);
-    }
-    acceptedSchemaPinIdentities = {};
-    for (const [k, v] of Object.entries(rawAccepted as Record<string, unknown>)) {
-      if (typeof v !== "object" || v === null || Array.isArray(v)) {
-        throw new ConfigInvalidError(
-          path,
-          `acceptedSchemaPinIdentities["${k}"] must be an object with "hash" and "registeredAs"`,
-        );
-      }
-      const e = v as Record<string, unknown>;
-      for (const f of ["hash", "registeredAs"] as const) {
-        if (typeof e[f] !== "string" || (e[f] as string).length === 0) {
-          throw new ConfigInvalidError(
-            path,
-            `acceptedSchemaPinIdentities["${k}"].${f} is not a non-empty string`,
-          );
-        }
-      }
-      acceptedSchemaPinIdentities[k] = {
-        hash: e.hash as string,
-        registeredAs: e.registeredAs as string,
-      };
-    }
-  }
-
   return {
+    ...(r.storageModel === "multi-key-v1" ? { storageModel: "multi-key-v1" as const } : {}),
     schemaFieldAliases:parseFieldAliases(r.schemaFieldAliases),
     configVersion: typeof r.configVersion === "number" ? r.configVersion : CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
     schemaServiceUrl,
     userHash: r.userHash as string,
     schemaHashes,
+    schemaIdentities:rawIdentities as Record<string,string>|undefined,
     enforceLivePrMilestone,
     ...(nodeSocketPath !== undefined ? { nodeSocketPath } : {}),
-    ...(cardLegacyWriteHash !== undefined ? { cardLegacyWriteHash } : {}),
-    ...(acceptedSchemaPinIdentities !== undefined ? { acceptedSchemaPinIdentities } : {}),
   };
 }

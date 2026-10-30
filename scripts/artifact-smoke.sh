@@ -16,6 +16,16 @@ done
 
 # CLIs answer --help. The MCP servers are stdio servers with no --help contract,
 # so only check that they exist.
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+  : "${RUNNER_TEMP:?GitHub must supply the owned temporary directory}"
+  export KANBAN_CONFIG="$RUNNER_TEMP/fkanban-artifact-help-absent.json"
+  export FKANBAN_CONFIG="$KANBAN_CONFIG"
+  export FOLDDB_SOCKET_PATH="$RUNNER_TEMP/fkanban-artifact-help-absent.sock"
+  export LASTDB_HOME="$RUNNER_TEMP/fkanban-artifact-help-absent-home"
+  test ! -e "$KANBAN_CONFIG"
+  test ! -e "$FOLDDB_SOCKET_PATH"
+  test ! -e "$LASTDB_HOME"
+fi
 dist/kanban --help >/dev/null
 dist/fkanban --help >/dev/null
 

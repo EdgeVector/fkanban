@@ -316,15 +316,14 @@ async function indexedSearchCards(
   if (opts.board) filter.board = opts.board;
   if (opts.column) filter.column = opts.column;
 
-  // Default search is the BoardCards display index. Do not HashKey every Card.
-  // Live primary 2026-09-02: that key-list drain was ~12 Card queries/s.
-  // Body-only hits and cards missing from BoardCards stay `--complete`.
+
+
+
   const displayRead = await listCardsByFilter(
     opts.node,
     opts.cfg,
     filter,
     CARD_SEARCH_DISPLAY_FIELDS,
-    { allowKeyListFallback: false },
   );
 
   const inScope = (c: Card): boolean =>
@@ -333,12 +332,12 @@ async function indexedSearchCards(
 
   const bySlug = new Map<string, Card>();
   for (const card of scopedDisplay) {
-    // BoardCards has no body. Keep BODY_OMITTED so MCP hydrate still runs.
+
     if (cardMatchesQuery(card, opts.query)) bySlug.set(card.slug, card);
   }
 
-  // Native fallback only when BoardCards could not enumerate. Default search
-  // must not HashKey Card rows on a healthy display read.
+
+
   let native: { slugs: string[]; saturated: boolean } | null = null;
   if (scopedDisplay.length === 0) {
     try {
@@ -370,7 +369,7 @@ async function indexedSearchCards(
   // no read, so the only edges that reach the node are the ones a printed
   // verdict can actually depend on.
   //
-  // Measured live, `scripts/probe-search-dep-scope-cost.ts`, 7 interleaved reps
+  // Measured live with a read-only probe (since removed), 7 interleaved reps
   // on a 191-card board (26 board-wide off-set deps):
   //
   // | query | matches | board-wide | match-scoped |

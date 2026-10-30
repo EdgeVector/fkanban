@@ -33,11 +33,10 @@ import {
   updateCardRecord,
   type Card,
 } from "../record.ts";
-import { retireStaleBoardCardRows, type StaleRowRetirement } from "../board-cards.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 import { planDoingClaim } from "../doing-claim.ts";
-import { purgeOtherColumnRowsForSlug } from "../board-cards.ts";
+import { multiKey } from "../multi-key.ts";
 import { activatePlannedMilestoneForDoing, type MilestoneActivationOutcome } from "../milestone_activation.ts";
 
 import { hasSnapshot, type GuardOptions } from "../guarded-snapshot.ts";
@@ -64,47 +63,14 @@ export type MoveOptions = GuardOptions & {
   assignee?: string;
   worker?: string;
   allowUnclaimed?: boolean;
-  /** Test seam: override process.env for claim-actor resolution. */
+  /** Optional process values for claim-actor resolution. */
   env?: Record<string, string | undefined>;
-  /**
-   * The short-deadline client for the owner-guarded move's post-commit
-   * partition READS (see `searchVisibilityProbeClient`). Absent, those reads
-   * ride `node`; the overall deadline below bounds them either way.
-   */
-  probeNode?: NodeClient;
-  /**
-   * Overall bound, in ms, for the owner-guarded move's post-commit cleanup
-   * pass. Defaults to {@link GUARDED_CLEANUP_DEADLINE_MS}. A test seam, not a
-   * tuning knob.
-   */
-  cleanupDeadlineMs?: number;
 };
-
-/**
- * How long the owner-guarded move may spend on its post-commit cleanup pass.
- *
- * The batch has already committed when the pass starts, so every second here is
- * spent AFTER the work that matters, inside a caller that is on a clock: the
- * Loom park and resume scripts run `timeout 60 kanban move ...`. A killed
- * `kanban` after a committed move is the worst outcome on offer, because the
- * script then reads the exit as a failed move and acts on it. Fifteen seconds
- * covers the normal pass (one 0.2-0.7 s partition read, up to ~5.9 s of
- * waiting for the destination row to show, one batch delete) and stops a slow
- * or hung node from costing more than that. Expiry is a warning, not a failure.
- */
-export const GUARDED_CLEANUP_DEADLINE_MS = 15_000;
 
 import type { GuardedReceipt } from "../guarded-snapshot.ts";
 
 export type MoveResult = Omit<Partial<GuardedReceipt>, "membership_cleanup"> & {
-  /**
-   * Owner-guarded move only. `"purged"`: the pass found stale rows and the node
-   * acknowledged every delete for them. `"deferred"`: anything else (no other
-   * row, destination row not yet visible, a delete failed, the pass timed
-   * out), so a stale row may remain for `board-cards-heal`. Failed deletes and
-   * a timeout also print a warning on stderr.
-   */
-  membership_cleanup?: "deferred" | "purged";
+  membership_cleanup?: "native";
   slug: string;
   from: string;
   to: string;
@@ -299,9 +265,9 @@ export async function claimCard(opts: {
   };
 
   try {
-    // Durable: the claim is the pickup lease (see withDurableWrites). The
-    // point read above is the final authority check before this CAS write;
-    // BoardCards may still show an old column after a move.
+
+
+
     await updateCardRecord(
       { cfg: opts.cfg, node: withDurableWrites(opts.node) },
       updated,
@@ -333,15 +299,6 @@ export async function claimCard(opts: {
       previous: card,
       next: updated,
     });
-    const claimBoard = await ensureBoardRecord(opts.node, opts.cfg, updated.board);
-    await purgeOtherColumnRowsForSlug(
-      opts.node,
-      opts.cfg,
-      updated.board,
-      updated.slug,
-      updated.column,
-      claimBoard.columns,
-    );
   } catch (err) {
     // A Card mutation can fail after it persists, for example while its
     // membership or flow-ledger side effects run. The durable claim write
@@ -405,13 +362,13 @@ async function promoteUnblockedBacklogDependents(opts: {
   for (const thin of candidates) {
     if (depStatus(thin, cardsWithMovedDependency).blocked) continue;
 
-    // `candidates` come from the body-free board list, and everything below
-    // this line needs the body: the pickup-readiness gate reads the brief, and
-    // the write carries the whole record. Without this hydrate the gate saw an
-    // empty body on EVERY dependent, threw `default_todo_not_pickup_ready`,
-    // and `isExpectedPromotionSkip` swallowed it — so dependency
-    // auto-promotion silently never fired on a board with BoardCards. One
-    // point-read per unblocked dependent, not per card on the board.
+
+
+
+
+
+
+
     const candidate = await findCard(opts.node, opts.cfg, thin.slug);
     if (!candidate) continue;
 
@@ -453,6 +410,8 @@ async function promoteUnblockedBacklogDependents(opts: {
 }
 
 export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
+  if (!multiKey(opts.cfg)) throw new FkanbanError({ code: "multi_key_conversion_required",
+    message: "Convert this app to named alternate keys before a card move." });
   if (hasSnapshot(opts)) {
     if (opts.force || opts.position !== undefined || opts.assignee !== undefined || opts.worker !== undefined || opts.allowUnclaimed) {
       throw new FkanbanError({code:"guarded_move_scope",message:"Snapshot-guarded move does not accept force, position or owner changes."});
@@ -593,89 +552,9 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     opts.column === "doing" && from !== "doing" && milestoneFound
       ? await activatePlannedMilestoneForDoing(opts, updated, milestoneState)
       : {};
-  // A move states where this card belongs, so it is also the repair for a card
-  // that reads as belonging in two places at once.
-  //
-  // `updateCardRecord` retires only the row the CALLER knew about — the address
-  // built from the Card point read it was handed. A drifted card has a row the
-  // Card record cannot name (the 2026-09-05 `doing` lane held 9 such rows of
-  // 13), so the documented repair `kanban move <slug> <truth-column> --force`
-  // exited 0, printed `done -> done`, and left the phantom row first in the
-  // listing. Agents reported a repair they had not made:
-  // `papercut-kanban-move-to-truth-column-does-not-clear-the-stale-listing-row-20260905`.
-  //
-  // Only the partition knows every row a slug holds, so the repair has to ask
-  // it. Best-effort: the card is already written and already correct, and a
-  // failure here leaves exactly the duplicate that existed a moment ago.
-  //
-  // The owner-guarded move runs this too. Its batch writes the destination row
-  // and, by contract, deletes nothing, so every source row it leaves behind was
-  // visible in `list --column <source>` while `show` read the new column: four
-  // quarantined cards sat in both `todo` and `doing` that way on 2026-10-09
-  // (`papercut-kanban-list-point-read-column-slug-inconsistency-20260925`).
-  // The purge is delete-only and runs AFTER the durable batch, so the Card
-  // record is never rewritten and a failure here cannot fail the guarded write.
-  //
-  // Only the guarded path is bounded and reads on the short-deadline client:
-  // its callers run under `timeout 60` and a kill after the commit is the
-  // failure to avoid (see GUARDED_CLEANUP_DEADLINE_MS). The plain move keeps
-  // the budget it always had.
-  const guarded = opts.expectAssignee !== undefined;
-  let retirement: StaleRowRetirement | undefined;
-  try {
-    retirement = await retireStaleBoardCardRows(
-      opts.node,
-      opts.cfg,
-      updated,
-      undefined,
-      guarded
-        ? { probeNode: opts.probeNode, deadlineMs: opts.cleanupDeadlineMs ?? GUARDED_CLEANUP_DEADLINE_MS }
-        : {},
-    );
-  } catch (err) {
-    // The move succeeded; a failed reap leaves exactly the duplicate that
-    // existed a moment ago, so it must not fail the command. It must not be
-    // SILENT either: an operator running this as the phantom-row repair needs
-    // to know the repair half did not run.
-    console.error(
-      `kanban: move wrote ${updated.slug} but could not retire its stale membership rows: ` +
-        `${err instanceof Error ? err.message : String(err)}. ` +
-        `Re-run the move, or use \`kanban groom board-cards-heal\`.`,
-    );
-  }
-  // A delete that the node did not acknowledge leaves its row in the partition,
-  // and a busy node (`service_timeout`) is precisely when that happens. The
-  // delete helper swallows the throw by design, so the only place left to say
-  // so is here.
-  if (retirement !== undefined && retirement.failed.length > 0) {
-    const shown = retirement.failed.slice(0, 5).join(", ");
-    const more = retirement.failed.length > 5 ? ` and ${retirement.failed.length - 5} more` : "";
-    console.error(
-      `kanban: move wrote ${updated.slug} but could not retire ${retirement.failed.length} of its ` +
-        `stale membership rows (the node did not acknowledge the delete): ${shown}${more}. ` +
-        `Re-run the move, or use \`kanban groom board-cards-heal\`.`,
-    );
-  }
-  if (guarded) {
-    // Stop here, as before: no completion checkpoint, flow-ledger write or
-    // dependent promotion after an owner-guarded move. "purged" says the pass
-    // found stale rows and the node acknowledged EVERY delete for them.
-    // "deferred" is everything else: the card held no other row, the
-    // destination row stayed invisible for the wait budget, a delete failed, or
-    // the pass threw or timed out (the stderr lines above), so a stale row may
-    // remain and a heal pass is the repair.
-    const purged = retirement !== undefined &&
-      retirement.attempted > 0 &&
-      retirement.failed.length === 0 &&
-      retirement.gateUnmet === 0;
-    return {
-      slug: card.slug,
-      from,
-      to: opts.column,
-      ...claimMeta,
-      ...activation,
-      membership_cleanup: purged ? "purged" : "deferred",
-    };
+  if (opts.expectAssignee !== undefined) {
+    return { slug: card.slug, from, to: opts.column, ...claimMeta, ...activation,
+      membership_cleanup: "native" };
   }
   // AFTER the write, never before. A completion checkpoint is a durable, one-way
   // append into Brain that nothing in this codebase retracts, so ordering it
@@ -690,7 +569,6 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   // before it can leave the board. Those two sites keep the opposite order on
   // purpose — there the checkpoint MUST precede the delete.
   //
-  // Pinned by `test/brain-checkpoint-write-ordering.test.ts`.
   await checkpointCardCompletion({
     cfg: opts.cfg,
     node: opts.node,
@@ -705,16 +583,6 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
     next: updated,
     terminalColumn: terminalColumn(columns),
   });
-  // Previous-SK janitor only knows the tip SK. Leftover rows in other columns
-  // (the live todo+doing dual-list bug) need prefix deletes on those columns.
-  await purgeOtherColumnRowsForSlug(
-    opts.node,
-    opts.cfg,
-    updated.board,
-    updated.slug,
-    updated.column,
-    columns,
-  );
   const promotedDependents =
     opts.column === terminalColumn(columns)
       ? await promoteUnblockedBacklogDependents({ cfg: opts.cfg, node: opts.node, dependency: updated })

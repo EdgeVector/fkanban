@@ -17,6 +17,7 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
+import { requireMultiKey } from "../multi-key.ts";
 import { mapWithConcurrency, POINT_READ_CONCURRENCY } from "../concurrency.ts";
 import {
   RANK_POSITION_STEP,
@@ -29,8 +30,6 @@ import {
   priorityOf,
   rankCards,
   requireBoard,
-  requireListHeadHash,
-  syncRankedColumnHead,
   writeCardPatch,
   type Milestone,
   type PriorityTier,
@@ -65,6 +64,7 @@ export type RankedCard = {
 };
 
 export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: RankMode }> {
+  requireMultiKey(opts.cfg);
   const boardSlug = opts.board ?? "default";
   const column = opts.column ?? "todo";
   const mode: RankMode = opts.mode === "priority" ? "priority" : "hard";
@@ -72,8 +72,6 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
   // so a typo'd `--column` errors loudly instead of silently ranking nothing.
   const board = await requireBoard(opts.node, opts.cfg, boardSlug);
   ensureColumn(column, board.columns);
-  // Fail before any position write when the column head schema is absent.
-  requireListHeadHash(opts.cfg);
 
   // Bodies required on both halves of this command: the priority SIGNAL is a
   // `Priority:` body header (the tag is only the fallback), and each reordered
@@ -96,11 +94,11 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
     (c) => c.board === boardSlug && c.column === column && !isMetaCardKind(c.kind),
   );
   const hydrated = await hydrateCardBodies(opts.node, opts.cfg, candidates);
-  // A BoardCards orphan has no Card primary to hydrate. Keep rank fail-open:
-  // the row remains visible to the explicit board-cards healer, while every
-  // real card can still be ordered. Passing the orphan through would make the
-  // first required position rewrite hit the body-loaded write guard and abort
-  // the entire pickup factory.
+
+
+
+
+
   const skipped = hydrated
     .filter(isBodyOmitted)
     .map((card) => ({ slug: card.slug, reason: "card-primary-missing" }));
@@ -140,16 +138,11 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
 
   const ranked = mode === "hard" ? rankCardsHardTodo(inColumn, ctx) : rankCards(inColumn);
 
-  // Positions are an ORDERING, not an address. Keep every card whose current
-  // position already sits in increasing order along `ranked` and write only the
-  // rest — each write is one gate acquisition on the board's single BoardCards
-  // partition, and a dense renumber spends ~54 of them to realize an order that
-  // needs 1 (see src/rank_positions.ts for the measurement).
+  // Preserve positions already in order. Write only the remaining primary records.
   const plan = planRankPositions(ranked.map((c) => c.position), RANK_POSITION_STEP);
   const mustWrite = new Set(plan.writeIndices);
 
   const order: RankedCard[] = [];
-  const positionBySlug = new Map<string, string>();
   let reordered = 0;
   for (let i = 0; i < ranked.length; i++) {
     const card = ranked[i]!;
@@ -162,22 +155,10 @@ export async function rankCmd(opts: RankOptions): Promise<RankResult & { mode: R
       lane,
       hard_tier: hardLaneTier(lane),
     });
-    positionBySlug.set(card.slug, String(position));
-    // Idempotent: skip the write (and the updated_at bump) when the card is
-    // already at its ranked position. The column head is one atom after this
-    // loop, so a per-card head update must not keep the last written slug.
+    // Skip an unchanged position and timestamp.
     if (!mustWrite.has(i)) continue;
-    await writeCardPatch(opts, card, { position: String(position) }, { skipListHead: true });
+    await writeCardPatch(opts, card, { position: String(position) });
     reordered++;
   }
-  // Meta cards and body-omitted cards stay at the position the column read
-  // returned. Rank does not reorder them, and the head must still show them.
-  const positioned = scoped
-    .filter((card) => card.board === boardSlug && card.column === column)
-    .map((card) => {
-      const next = positionBySlug.get(card.slug);
-      return next === undefined ? card : { ...card, position: next };
-    });
-  await syncRankedColumnHead(opts, boardSlug, column, positioned);
   return { board: boardSlug, column, total: ranked.length, reordered, order, mode, skipped };
 }

@@ -2,7 +2,6 @@
 
 import { type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
-import { resolveCurrentClaim } from "../current_claim.ts";
 import {
   assertDbLocatorMatchesCard,
   depStatus,
@@ -32,11 +31,9 @@ export async function showResult(opts: {
   node: NodeClient;
   slug: string;
   dbLocator?: string;
-  canonical?: boolean;
 }): Promise<{ text: string; card: CardDetail }> {
-  let card = await requireCard(opts.node, opts.cfg, opts.slug);
+  const card = await requireCard(opts.node, opts.cfg, opts.slug);
   assertDbLocatorMatchesCard(card, opts.dbLocator, "show");
-  if (!opts.canonical) card = await resolveCurrentClaim(opts.node, opts.cfg, card);
   // Resolve dep done-ness against each dep board's terminal column (a dep may
   // live on a different board than this card), falling back to `done`.
   // POINT-READ only this card's deps rather than scanning the whole card table:
@@ -75,7 +72,6 @@ export async function showCmd(opts: {
   node: NodeClient;
   slug: string;
   dbLocator?: string;
-  canonical?: boolean;
   json?: boolean;
 }): Promise<string> {
   const { text, card } = await showResult(opts);
