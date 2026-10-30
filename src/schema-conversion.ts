@@ -370,7 +370,7 @@ export async function conversionPlan(
       matched = conversionDefinition(source, entry.schema);
     if (
       Object.keys(source.field_mappers ?? {}).length &&
-      !version.capabilities.app_schema_private_mapper_conversion_v1
+      !version.capabilities?.app_schema_private_mapper_conversion_v1
     )
       fail(
         "A mapped source needs app_schema_private_mapper_conversion_v1 before conversion.",
