@@ -1,4 +1,4 @@
-// Init declares owned schemas. Existing data needs the explicit converter first.
+// Init declares owned schemas. It does not change existing records.
 import { syncOwnedModel } from "../owned-schema-init.ts";
 import { requireMultiKey } from "../multi-key.ts";
 import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
@@ -41,7 +41,6 @@ export async function seedDefaultBoard(node: NodeClient, config: Config, print: 
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = opts.print ?? console.log;
   const configPath = opts.configPath ?? defaultConfigPath();
-  if(existsSync(configPath+".conversion.json"))throw new Error("Resume the saved app conversion before init.");
   const priorConfig=existsSync(configPath)?readFileSync(configPath,"utf8"):null;
   const existing = tryReadConfig(configPath);
   if (existing) requireMultiKey(existing);

@@ -1,14 +1,94 @@
-import { profilesFor } from "./canonical-vocabulary.ts";
+import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
 import { FkanbanError, type NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
-import { CONVERSION_HINT, MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
-import { OWNER_APP_ID } from "./schemas.ts";
+import { MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
+import { OWNER_APP_ID, type SchemaDefinition } from "./schemas.ts";
 import { HISTORICAL_SCHEMAS } from "./legacy-schemas.ts";
-import {
-  conversionDefinition,
-  conversionCall,
-  type Metadata,
-} from "./schema-conversion.ts";
+
+type InstalledSchema = {
+  name: string;
+  identity_hash: string;
+  owner_app_id: string;
+  descriptive_name: string;
+  schema_type: string;
+  fields: string[];
+  key: Record<string, string>;
+  field_types: Record<string, unknown>;
+  field_descriptions: Record<string, string>;
+  alternate_keys?: unknown;
+  transform_fields?: Record<string, unknown>;
+};
+
+const object = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(stable).join(",") + "]";
+  if (value && typeof value === "object")
+    return (
+      "{" +
+      Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, item]) => JSON.stringify(key) + ":" + stable(item))
+        .join(",") +
+      "}"
+    );
+  return JSON.stringify(value);
+}
+const same = (left: unknown, right: unknown) => stable(left) === stable(right);
+
+async function readInstalledSchema(
+  node: NodeClient,
+  name: string,
+): Promise<InstalledSchema> {
+  const path = `/api/schema/${encodeURIComponent(name)}`;
+  const response = await node.rawCall("GET", path);
+  if (response.status !== 200 || object(response.json).ok === false)
+    throw new FkanbanError({
+      code: "schema_read_failed",
+      message: `${path} returned HTTP ${response.status}. Init leaves the config unchanged.`,
+    });
+  const payload = object(object(response.json).data ?? response.json);
+  return (payload.schema ?? payload) as InstalledSchema;
+}
+
+/** An installed historical definition must match exactly. No field rename is inferred. */
+function checkHistoricalDefinition(
+  source: InstalledSchema,
+  local: SchemaDefinition,
+): void {
+  const canonical = canonicalSchema(local);
+  const definition = same(
+    [...(source.fields ?? [])].sort(),
+    [...canonical.fields].sort(),
+  )
+    ? canonical
+    : local;
+  if (
+    source.owner_app_id !== OWNER_APP_ID ||
+    source.descriptive_name !== definition.descriptive_name ||
+    source.schema_type !== definition.schema_type ||
+    typeof source.identity_hash !== "string" ||
+    !/^[a-f0-9]{64}$/.test(source.identity_hash) ||
+    typeof source.name !== "string" ||
+    !source.name ||
+    !same([...(source.fields ?? [])].sort(), [...definition.fields].sort()) ||
+    !same(
+      [source.key?.hash_field, source.key?.range_field ?? null],
+      [definition.key.hash_field, definition.key.range_field ?? null],
+    ) ||
+    !same(source.field_types, definition.field_types) ||
+    !same(source.field_descriptions, definition.field_descriptions) ||
+    Object.keys(source.transform_fields ?? {}).length ||
+    Object.keys(source.alternate_keys ?? {}).length
+  )
+    throw new FkanbanError({
+      code: "historical_schema_differs",
+      message: `The installed ${local.descriptive_name} definition differs. Init leaves it unchanged.`,
+    });
+}
 
 export async function syncOwnedModel(
   node: NodeClient,
@@ -35,7 +115,7 @@ export async function syncOwnedModel(
   const root = response.json as { data?: unknown };
   const catalog = (root?.data ?? root) as {
     ready?: boolean;
-    schemas?: Metadata[];
+    schemas?: InstalledSchema[];
   };
   if (
     response.status !== 200 ||
@@ -74,14 +154,6 @@ export async function syncOwnedModel(
       message:
         "Several installed schemas claim one app record type. Init leaves them unchanged.",
     });
-  if (installed.some((schema) => schema.independent_fields !== true)) {
-    throw new FkanbanError({
-      code: "multi_key_conversion_required",
-      message:
-        "Existing F-Kanban values need the explicit multi-key conversion. Init leaves them unchanged.",
-      hint: CONVERSION_HINT,
-    });
-  }
   if (
     existing &&
     Object.keys(existing.schemaHashes).some(
@@ -105,22 +177,8 @@ export async function syncOwnedModel(
         installed.find(
           (source) => source.descriptive_name === entry.schema.descriptive_name,
         )!.name;
-      const source = await conversionCall<Metadata>(
-        node,
-        "GET",
-        `/api/schema/${encodeURIComponent(pin)}`,
-      );
-      conversionDefinition(source, entry.schema);
-      if (
-        source.independent_fields !== true ||
-        Object.keys(source.alternate_keys ?? {}).length ||
-        Object.keys(source.field_mappers ?? {}).length
-      )
-        throw new FkanbanError({
-          code: "historical_conversion_required",
-          message:
-            "A historical layout needs its explicit ownership conversion.",
-        });
+      const source = await readInstalledSchema(node, pin);
+      checkHistoricalDefinition(source, entry.schema);
       if (
         existing?.schemaIdentities?.[entry.key] &&
         existing.schemaIdentities[entry.key] !== source.identity_hash

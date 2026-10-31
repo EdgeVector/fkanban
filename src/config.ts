@@ -130,11 +130,8 @@ export function writeConfig(
   config: Config,
   path: string = defaultConfigPath(),
   expected?:string|null,
-  conversionScope?:string,
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  const scopePath=path+".conversion.json";
-  if(existsSync(scopePath)&&readFileSync(scopePath,"utf8")!==conversionScope)throw new Error("Resume the saved app conversion before a config change.");
   writeConfigFile(path,configBytes(config),expected);
 }
 

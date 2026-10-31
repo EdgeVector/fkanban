@@ -16,7 +16,7 @@ export type SchemaDefinition = {
   // Card, Board, and Milestone use Hash primary keys. Flow events use HashRange.
   schema_type: "Hash" | "HashRange";
   key: { hash_field: string; range_field?: string };
-  /** Reuse canonical field definitions without sharing record values. */
+  /** The schema owns its record values. Canonical fields reuse only their definitions. */
   independent_fields?: boolean;
   alternate_keys?: Record<string, {
     hash_field?: string;
@@ -88,8 +88,7 @@ export const CARD_FIELDS = [
   // `fkanban-card-structured-fields`). Promote signals a fresh agent needs
   // to decide "what do I pick up?" out of body prose into real fields, so
   // every routine reads them the same way. `priority` is intentionally
-  // ABSENT — it's owned by a parallel design and added later (cheap, per
-  // LastDB's read-through field-mapper republish).
+  // ABSENT — it's owned by a parallel design and added later.
   "repo",
   "base",
   "kind",

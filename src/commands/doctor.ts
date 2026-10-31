@@ -65,7 +65,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
   check(cfg !== null, "config present", cfg ? undefined : "run `kanban init`");
   if (!cfg) return false;
   try { requireMultiKey(cfg); } catch (error) {
-    check(false, "multi-key conversion complete", formatDoctorError(error));
+    check(false, "multi-key config", formatDoctorError(error));
     return false;
   }
   const node = newNodeClient({ baseUrl: cfg.nodeUrl, schemaFieldAliases: cfg.schemaFieldAliases,
@@ -91,13 +91,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
       const reply = await node.rawCall("GET", `/api/schema/${encodeURIComponent(name)}`);
       const root = reply.json as { data?: unknown };
       const value = (root?.data ?? root) as { schema?: unknown };
-      const installed = (value?.schema ?? value) as SchemaDefinition & { field_mappers?: Record<string, unknown> };
-      if (reply.status !== 200 || !installed?.independent_fields || installed.owner_app_id !== OWNER_APP_ID
+      const installed = (value?.schema ?? value) as SchemaDefinition | undefined;
+      if (reply.status !== 200 || !installed || installed.owner_app_id !== OWNER_APP_ID
         || installed.descriptive_name !== expected.descriptive_name || installed.schema_type !== expected.schema_type
         || stable([installed.key?.hash_field, installed.key?.range_field ?? null]) !== stable([expected.key.hash_field, expected.key.range_field ?? null])
         || !Array.isArray(installed.fields) || stable([...installed.fields].sort()) !== stable([...expected.fields].sort())
-        || stable(namedKeys(installed.alternate_keys)) !== stable(namedKeys(expected.alternate_keys))
-        || Object.keys(installed.field_mappers ?? {}).length) {
+        || stable(namedKeys(installed.alternate_keys)) !== stable(namedKeys(expected.alternate_keys))) {
         throw new Error("The installed schema differs from the app's owned fields or named key layout");
       }
     } })),

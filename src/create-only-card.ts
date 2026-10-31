@@ -1,6 +1,6 @@
 // Public finite creation: all Card fields must be absent at atomic publication.
 import { type NodeClient } from "./client.ts";
-import { multiKey } from "./multi-key.ts";
+import { MULTI_KEY_CONFIG_MESSAGE, multiKey } from "./multi-key.ts";
 import { ownedCardBatchSupported } from "./owned-card-contract.ts";
 import { type Config, schemaHashFor } from "./config.ts";
 import { CARD_FIELDS } from "./schemas.ts";
@@ -34,7 +34,7 @@ export function assertCreateOnlyScope(card: Card, force?: boolean): void {
   }
 }
 export async function createOnlyCard(opts: { node: NodeClient; cfg: Config }, card: Card): Promise<CreateOnlyReceipt> {
-  if (!multiKey(opts.cfg)) guardError("multi_key_conversion_required", "Convert this app to named alternate keys before a guarded create.");
+  if (!multiKey(opts.cfg)) guardError("multi_key_config_required", MULTI_KEY_CONFIG_MESSAGE);
   assertCreateOnlyScope(card);
   const schemaHash = schemaHashFor("card", opts.cfg);
   const fields = validateRawFields(cardToFields(card), card.slug);

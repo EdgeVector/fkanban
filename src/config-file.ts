@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-/** A config cutover must reach disk before the converter resumes app requests. */
+/** Write the config atomically: fsync the new file, rename it, then fsync the directory. */
 export function writeConfigFile(
   path: string,
   text: string,
