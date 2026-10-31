@@ -5,12 +5,13 @@ import { queryPageSize } from "./query-page-size.ts";
 
 export const MULTI_KEY_MODEL = "multi-key-v1" as const;
 export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storageModel === MULTI_KEY_MODEL;
-/** The one supported path for old shared-value data. See docs/multi-key-schemas.md. */
-export const CONVERSION_HINT =
-  "On the compatible LastDB release (lastdb#793), run `kanban multi-key-convert`, then `kanban multi-key-convert --apply --maintenance`. See docs/multi-key-schemas.md.";
+/** `kanban init` writes MULTI_KEY_MODEL. A config without it pins schemas that this release does not read. */
+export const MULTI_KEY_CONFIG_MESSAGE = "This config does not use the multi-key storage model.";
+const MULTI_KEY_CONFIG_HINT =
+  "Run `kanban init` with a new config path (KANBAN_CONFIG). Init does not replace this config.";
 export function requireMultiKey(cfg: { storageModel?: string }): void {
-  if (!multiKey(cfg)) throw new FkanbanError({ code: "multi_key_conversion_required",
-    message: "Complete the explicit app conversion before this command.", hint: CONVERSION_HINT });
+  if (!multiKey(cfg)) throw new FkanbanError({ code: "multi_key_config_required",
+    message: MULTI_KEY_CONFIG_MESSAGE, hint: MULTI_KEY_CONFIG_HINT });
 }
 
 export function ownedSchemas() {

@@ -1,6 +1,6 @@
 // Finite public factory mutations. Raw Card guards precede every destination upsert.
 import { FkanbanError, type NodeClient } from "./client.ts";
-import { multiKey } from "./multi-key.ts";
+import { MULTI_KEY_CONFIG_MESSAGE, multiKey } from "./multi-key.ts";
 import { ownedCardBatchSupported } from "./owned-card-contract.ts";
 import type { Config } from "./config.ts";
 import { CARD_FIELDS } from "./schemas.ts";
@@ -56,7 +56,7 @@ function ownedCloseout(snapshot: GuardSnapshot, owner: string | undefined, termi
   return card;
 }
 export async function compoundUpdate(opts: Context, witness: GuardSnapshot, intended: RawFields, allowed: readonly string[]): Promise<GuardedReceipt> {
-  if (!multiKey(opts.cfg)) guardError("multi_key_conversion_required", "Convert this app to named alternate keys before a guarded update.");
+  if (!multiKey(opts.cfg)) guardError("multi_key_config_required", MULTI_KEY_CONFIG_MESSAGE);
   validateRawFields(intended, opts.slug);
   serializeSnapshot({ ...witness, fields: intended });
   for (const field of CARD_FIELDS) if (!allowed.includes(field) && JSON.stringify(witness.fields[field]) !== JSON.stringify(intended[field])) {

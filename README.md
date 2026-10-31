@@ -28,9 +28,8 @@ LastDB changes the record and its alternate addresses in one native request.
 The alternate address has no separate payload copy.
 Canonical field reuse supplies definitions and types. Each schema retains its own values.
 
-Existing app data requires the explicit conversion on the compatible LastDB release.
-Normal init does not convert existing data. Keep the primary unchanged until its data conversion receives separate authorization.
-The command, the required releases, and the order are in
+Init does not convert existing data.
+The rules for an existing home are in
 [docs/multi-key-schemas.md](docs/multi-key-schemas.md#existing-installations).
 
 > Contributing to kanban itself? See [AGENTS.md](AGENTS.md) for the
@@ -184,7 +183,6 @@ kanban list
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
 Init requires a LastDB release with compound named keys and schema-owned values.
-An older installation needs the explicit `multi-key-convert` command first.
 Init does not convert existing data or change an accepted schema address.
 Mini resolves or registers each declaration with Schema Service.
 The `--schema-service-url` value is diagnostic because Mini owns that call.

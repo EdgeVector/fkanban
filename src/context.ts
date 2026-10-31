@@ -10,10 +10,10 @@ export type Ctx = {
 };
 
 export function loadCtx(
-  opts: { configPath?: string; verbose?: Verbose; opsLabel?: string; forConversion?: boolean } = {},
+  opts: { configPath?: string; verbose?: Verbose; opsLabel?: string } = {},
 ): Ctx {
   const cfg = readConfig(opts.configPath);
-  if (!opts.forConversion) requireMultiKey(cfg);
+  requireMultiKey(cfg);
   const node = newNodeClient({
     baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
     userHash: cfg.userHash,

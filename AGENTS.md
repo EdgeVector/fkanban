@@ -30,9 +30,9 @@ Decision: `decision-2026-10-09-retire-all-tests-and-test-coverage`.
 
 New designs use one schema with named alternate keys for the same records.
 Canonical field reuse supplies definitions, not shared record values.
-Preserve existing schemas until an explicit conversion. Keep record order, cursors, complete membership, and primary mutation keys.
+Preserve existing schemas. Keep record order, cursors, complete membership, and primary mutation keys.
 Use the compound-key contract. Preserve each app's declared key order.
-Use CI for the app conversion and latency comparison. Source work does not authorize a primary data change.
+Use CI for the latency comparison. Source work does not authorize a primary data change.
 
 # AGENTS.md — developing kanban itself
 

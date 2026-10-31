@@ -36,7 +36,7 @@ import {
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
 import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
 import { planDoingClaim } from "../doing-claim.ts";
-import { multiKey } from "../multi-key.ts";
+import { requireMultiKey } from "../multi-key.ts";
 import { activatePlannedMilestoneForDoing, type MilestoneActivationOutcome } from "../milestone_activation.ts";
 
 import { hasSnapshot, type GuardOptions } from "../guarded-snapshot.ts";
@@ -410,8 +410,7 @@ async function promoteUnblockedBacklogDependents(opts: {
 }
 
 export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
-  if (!multiKey(opts.cfg)) throw new FkanbanError({ code: "multi_key_conversion_required",
-    message: "Convert this app to named alternate keys before a card move." });
+  requireMultiKey(opts.cfg);
   if (hasSnapshot(opts)) {
     if (opts.force || opts.position !== undefined || opts.assignee !== undefined || opts.worker !== undefined || opts.allowUnclaimed) {
       throw new FkanbanError({code:"guarded_move_scope",message:"Snapshot-guarded move does not accept force, position or owner changes."});

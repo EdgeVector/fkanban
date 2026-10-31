@@ -22,7 +22,6 @@ import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, groomOpsLabel, type Verbose } from "./client.ts";
 import { ConfigMissingError, ConfigInvalidError } from "./config.ts";
 import { loadCtx } from "./context.ts";
-import { convertMultiKey } from "./commands/multi-key-convert.ts";
 import { runInit } from "./commands/init.ts";
 import { addCmd } from "./commands/add.ts";
 import { CREATE_ONLY_CONTRACT, CREATE_ONLY_CONTRACT_SHA256 } from "./create-only-card.ts";
@@ -90,7 +89,7 @@ import {
 export const TOP_HELP = `fkanban — a kanban board over fold_db
 
 Usage:
-  fkanban <command> [options]\n  fkanban multi-key-convert [--apply --maintenance] [--abort]
+  fkanban <command> [options]
 
 Global:
   --db <locator>       write-target DB (lastdb://personal | lastdb://org/<slug>/<db>);
@@ -186,7 +185,6 @@ function withFooter(body: string): string {
 // entry instead of the global TOP_HELP firehose. Every command listed in
 // TOP_HELP must have an entry here (a unit test enforces they can't drift).
 export const COMMAND_HELP: Record<string, string> = {
-  "multi-key-convert": "fkanban multi-key-convert [--apply --maintenance] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. No primary change occurs through init.",
   "create-only-contract": withFooter(`fkanban create-only-contract — immutable atomic creation contract
 
 Usage:
@@ -226,9 +224,8 @@ Schema setup is orchestrated by the NODE through Mini's
 /api/apps/declare-schema route. The CLI does not contact --schema-service-url
 directly, but Mini must resolve or register every schema with Schema Service
 before returning its catalog identity. That URL is also recorded in
-~/.kanban/config.json for diagnostics. An older installation needs
-\`multi-key-convert\` before init can change its config. A node without
-compound named keys needs a compatible LastDB release.
+~/.kanban/config.json for diagnostics. Init does not convert existing
+records. A node without compound named keys needs a compatible LastDB release.
 
 Example:
   fkanban init --node-url http://127.0.0.1 --name "Tom's board"`),
@@ -1073,8 +1070,6 @@ const UNIVERSAL_FLAGS = new Set(["help", "version", "verbose", "json", "json-arr
 // flags its dispatch branch actually reads. Commands absent here (e.g. `mark`, `show`,
 // `mcp`, `version`) accept only the universal flags.
 const COMMAND_FLAGS: Record<string, Set<string>> = {
-  "multi-key-convert": new Set(["apply","maintenance","abort"]),
-
   rm: new Set([]),
   doctor: new Set([]),
   init: new Set(["node-url", "schema-service-url", "node-socket-path", "name"]),
@@ -1286,8 +1281,6 @@ async function main(argv: string[]): Promise<number> {
         force: { type: "boolean" },
         "dry-run": { type: "boolean" },
         apply: { type: "boolean" },
-        maintenance: { type: "boolean" },
-        abort: { type: "boolean" },
         "min-age-hours": { type: "string" },
         "pileup-threshold": { type: "string" },
         "cutoff-hours": { type: "string" },
@@ -1409,14 +1402,6 @@ async function dispatch(
   verbose: Verbose | undefined,
 ): Promise<number> {
   switch (cmd) {
-    case "multi-key-convert": {
-      const extra=rejectExtraPositionals(positionals,1,"multi-key-convert");
-      if(extra!==undefined) return extra;
-      const {node,cfg}=loadCtx({verbose,forConversion:true});
-      console.log(JSON.stringify(await convertMultiKey(node,cfg,{apply:values.apply===true,
-        maintenance:values.maintenance===true,abort:values.abort===true})));
-      return 0;
-    }
     case "create-only-contract": {
       const extra = rejectExtraPositionals(positionals, 1, "create-only-contract");
       if (extra !== undefined) return extra;
