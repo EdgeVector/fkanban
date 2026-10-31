@@ -52,7 +52,7 @@ import {
   type NodeVersion as SdkNodeVersion,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
-import { KANBAN_APP_LABEL, MIN_LASTDB_API_VERSION } from "./lastdb-version.ts";
+import { KANBAN_APP_LABEL, MIN_LASTDB_API_VERSION, ownsValues } from "./lastdb-version.ts";
 
 import { isMalformedQuery, recordNodeRejection } from "./diagnostics.ts";
 
@@ -1243,7 +1243,10 @@ export function newNodeClient(opts: {
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
       const schemaName = typeof b.schema === "string" ? b.schema : "";
       const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
-      const independentFields = b.independent_fields === true;
+      // A node at API 13 or later may omit the key: it owns every schema.
+      // Ask for the API version only then, so today's replies cost no extra call.
+      const independentFields = ownsValues(b.independent_fields,
+        b.independent_fields === undefined ? (await dataClient().version()).apiVersion : 0);
       if(local.independent_fields&&(!independentFields||!identityHash||!/^[a-f0-9]{64}$/.test(identityHash)
         ||b.app_id!==appId||b.schema_name!==`${appId}/${local.name}`))throw new FkanbanError({code:"owned_schema_receipt_invalid",message:"The declaration did not confirm the exact owned app schema."});
       const resolution = typeof b.resolution === "string" ? b.resolution : "";
