@@ -1,0 +1,186 @@
+# F-Kanban checks its own LastDB compatibility (Tom, 2026-10-30). LastDB CI
+# no longer runs apps (lastdb#855). This job builds the two pinned LastDB
+# daemons, builds the real CLI artifact, and runs scripts/lastdb-compat-check.py:
+# init, 1000 cards, writes, and the list, column, full-list, and milestone views
+# on fresh generated homes with cloud backup off. Counts, windows, and page
+# chains must be exact. Timings are advisory. Raw output stays in the runner
+# temporary directory and the uploaded artifact, never in Git.
+#
+# DAEMON_BEFORE: lastdb main with lastdb#793 (the compatible release, API 12).
+# DAEMON_AFTER: the lastdb#803 head (the removal release, API 13). Update the
+# pin when #803 changes or merges.
+name: LastDB compatibility
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: lastdb-compat-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+env:
+  DAEMON_BEFORE: 34a1085360abcfce42ed23003400416dedbdddf1
+  DAEMON_AFTER: 8e367603e17640ed1ea9625391c8971f6a73edc1
+  APP_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+  # The daemons read the Schema Service environment at build time.
+  ENVIRONMENT: dev
+jobs:
+  compat:
+    name: LastDB compatibility (actual CLI)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.APP_REVISION }}
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: EdgeVector/lastdb
+          ref: ${{ env.DAEMON_BEFORE }}
+          path: daemon-before
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: EdgeVector/lastdb
+          ref: ${{ env.DAEMON_AFTER }}
+          path: daemon-after
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+      - name: Require the exact source revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C app rev-parse HEAD)" = "$APP_REVISION"
+          test "$(git -C daemon-before rev-parse HEAD)" = "$DAEMON_BEFORE"
+          test "$(git -C daemon-after rev-parse HEAD)" = "$DAEMON_AFTER"
+          printf 'App: `%s`\nDaemon before: `%s`\nDaemon after: `%s`\n' \
+            "$APP_REVISION" "$DAEMON_BEFORE" "$DAEMON_AFTER" >> "$GITHUB_STEP_SUMMARY"
+      # A pinned revision builds one binary. The cache key names the revision,
+      # and the check also requires the daemon to report bench-<revision>.
+      # Each binary is saved right after its build, so a failed check does not
+      # discard a good build.
+      - name: Restore the daemon built for DAEMON_BEFORE
+        id: cache-before
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/lastdbd-before
+          key: lastdbd-dev-release-${{ env.ENVIRONMENT }}-${{ env.DAEMON_BEFORE }}-ubuntu-24.04-v1
+      - name: Build the DAEMON_BEFORE daemon in CI
+        if: ${{ steps.cache-before.outputs.cache-hit != 'true' }}
+        env:
+          CARGO_BUILD_JOBS: '3'
+          CARGO_TERM_COLOR: never
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/daemon-before"
+          FOLDDB_BUILD_VERSION_OVERRIDE="bench-$DAEMON_BEFORE" CARGO_TARGET_DIR="$RUNNER_TEMP/lastdb-target-before" \
+            cargo build --locked --profile dev-release -p lastdb_node --bin lastdbd
+          mkdir -p "$RUNNER_TEMP/lastdbd-before"
+          cp "$RUNNER_TEMP/lastdb-target-before/dev-release/lastdbd" "$RUNNER_TEMP/lastdbd-before/lastdbd"
+          rm -rf "$RUNNER_TEMP/lastdb-target-before"
+      - name: Save the DAEMON_BEFORE daemon
+        if: ${{ steps.cache-before.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/lastdbd-before
+          key: lastdbd-dev-release-${{ env.ENVIRONMENT }}-${{ env.DAEMON_BEFORE }}-ubuntu-24.04-v1
+      - name: Restore the daemon built for DAEMON_AFTER
+        id: cache-after
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/lastdbd-after
+          key: lastdbd-dev-release-${{ env.ENVIRONMENT }}-${{ env.DAEMON_AFTER }}-ubuntu-24.04-v1
+      - name: Build the DAEMON_AFTER daemon in CI
+        if: ${{ steps.cache-after.outputs.cache-hit != 'true' }}
+        env:
+          CARGO_BUILD_JOBS: '3'
+          CARGO_TERM_COLOR: never
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/daemon-after"
+          FOLDDB_BUILD_VERSION_OVERRIDE="bench-$DAEMON_AFTER" CARGO_TARGET_DIR="$RUNNER_TEMP/lastdb-target-after" \
+            cargo build --locked --profile dev-release -p lastdb_node --bin lastdbd
+          mkdir -p "$RUNNER_TEMP/lastdbd-after"
+          cp "$RUNNER_TEMP/lastdb-target-after/dev-release/lastdbd" "$RUNNER_TEMP/lastdbd-after/lastdbd"
+          rm -rf "$RUNNER_TEMP/lastdb-target-after"
+      - name: Save the DAEMON_AFTER daemon
+        if: ${{ steps.cache-after.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/lastdbd-after
+          key: lastdbd-dev-release-${{ env.ENVIRONMENT }}-${{ env.DAEMON_AFTER }}-ubuntu-24.04-v1
+      - name: Build the actual CLI artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd app
+          bun install --frozen-lockfile
+          bun run build
+          mkdir "$RUNNER_TEMP/fkanban-cli"
+          cp dist/kanban "$RUNNER_TEMP/fkanban-cli/kanban"
+          cd "$RUNNER_TEMP"
+          sha256sum fkanban-cli/kanban lastdbd-before/lastdbd lastdbd-after/lastdbd | tee binaries.sha256
+          printf '\n```text\n%s\n```\nDaemon cache: before=%s after=%s.\n' "$(cat binaries.sha256)" \
+            "${{ steps.cache-before.outputs.cache-hit || 'false' }}" "${{ steps.cache-after.outputs.cache-hit || 'false' }}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the actual CLI on both daemons
+        id: compat
+        run: >-
+          python3 app/scripts/lastdb-compat-check.py
+          --cli "$RUNNER_TEMP/fkanban-cli/kanban" --app-source "$GITHUB_WORKSPACE/app" --app-revision "$APP_REVISION"
+          --daemon-before "$RUNNER_TEMP/lastdbd-before/lastdbd" --daemon-before-revision "$DAEMON_BEFORE"
+          --daemon-after "$RUNNER_TEMP/lastdbd-after/lastdbd" --daemon-after-revision "$DAEMON_AFTER"
+          --cards 1000 --output "$RUNNER_TEMP/fkanban-lastdb-compat"
+      - name: Check retained output for key material
+        if: ${{ always() && steps.compat.outcome != 'skipped' }}
+        id: audit
+        run: python3 app/scripts/lastdb-compat-check.py --audit-only --output "$RUNNER_TEMP/fkanban-lastdb-compat"
+      - name: Retain raw results, daemon logs, and source identities
+        if: ${{ always() && steps.audit.outcome == 'success' }}
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: fkanban-lastdb-compat-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fkanban-lastdb-compat/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify the artifact identity, expiry, and checksum
+        if: ${{ always() && steps.upload.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          ARTIFACT_SHA256: ${{ steps.upload.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/compat-artifact.json"
+          test "$(jq -r .expired "$RUNNER_TEMP/compat-artifact.json")" = false
+          test "$(jq -r .size_in_bytes "$RUNNER_TEMP/compat-artifact.json")" -gt 0
+          expires="$(jq -r .expires_at "$RUNNER_TEMP/compat-artifact.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/compat-artifact.zip"
+          printf '%s  %s\n' "${ARTIFACT_SHA256#sha256:}" "$RUNNER_TEMP/compat-artifact.zip" | sha256sum --check
+          unzip -t "$RUNNER_TEMP/compat-artifact.zip" > /dev/null
+          printf '\nArtifact: %s\nSHA-256: %s\nExpires: %s\nSource revision: %s\n' \
+            "$ARTIFACT_URL" "$ARTIFACT_SHA256" "$expires" "$APP_REVISION" >> "$GITHUB_STEP_SUMMARY"
+  benchmark-complete:
+    if: ${{ always() }}
+    needs: [compat]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the compatibility check and a verified artifact
+        env:
+          RESULT: ${{ needs.compat.result }}
+        run: test "$RESULT" = success

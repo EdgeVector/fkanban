@@ -83,6 +83,12 @@ bun run typecheck      # tsc --noEmit
 CI runs the same checks (`.lastgit/ci.sh`) plus a `ci-required` umbrella and
 CodeQL (~1 min, `--frozen-lockfile` — keep `bun.lock` in sync).
 
+F-Kanban checks its own LastDB compatibility in CI (Tom, 2026-10-30).
+`.github/workflows/lastdb-compat.yml` builds the two pinned daemons
+(`DAEMON_BEFORE`, `DAEMON_AFTER`) and runs `scripts/lastdb-compat-check.py`
+with the real CLI on generated homes. Update a pin when its LastDB PR changes.
+Do not run that script or a LastDB build on a local machine.
+
 ## Card worktrees — start WARM (APFS CoW target/)
 
 Create card worktrees in a Rust repo (fold, fold_db_node, …) with the
