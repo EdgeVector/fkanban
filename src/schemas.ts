@@ -16,8 +16,6 @@ export type SchemaDefinition = {
   // Card, Board, and Milestone use Hash primary keys. Flow events use HashRange.
   schema_type: "Hash" | "HashRange";
   key: { hash_field: string; range_field?: string };
-  /** The schema owns its record values. Canonical fields reuse only their definitions. */
-  independent_fields?: boolean;
   alternate_keys?: Record<string, {
     hash_field?: string;
     hash_literal?: string;

@@ -52,7 +52,7 @@ import {
   type NodeVersion as SdkNodeVersion,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
-import { KANBAN_APP_LABEL, MIN_LASTDB_API_VERSION, ownsValues } from "./lastdb-version.ts";
+import { KANBAN_APP_LABEL, MIN_LASTDB_API_VERSION } from "./lastdb-version.ts";
 
 import { isMalformedQuery, recordNodeRejection } from "./diagnostics.ts";
 
@@ -134,7 +134,6 @@ export type AppSchemaDeclaration = {
   schema: string;
   canonical: string;
   identityHash?: string;
-  independentFields?: boolean;
   /** The node reports `reuse` or `register`. The installed schema owns its values. */
   resolution: string;
   decision?: string;
@@ -1243,12 +1242,8 @@ export function newNodeClient(opts: {
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
       const schemaName = typeof b.schema === "string" ? b.schema : "";
       const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
-      // A node at API 13 or later may omit the key: it owns every schema.
-      // Ask for the API version only then, so today's replies cost no extra call.
-      const independentFields = ownsValues(b.independent_fields,
-        b.independent_fields === undefined ? (await dataClient().version()).apiVersion : 0);
-      if(local.independent_fields&&(!independentFields||!identityHash||!/^[a-f0-9]{64}$/.test(identityHash)
-        ||b.app_id!==appId||b.schema_name!==`${appId}/${local.name}`))throw new FkanbanError({code:"owned_schema_receipt_invalid",message:"The declaration did not confirm the exact owned app schema."});
+      if(!identityHash||!/^[a-f0-9]{64}$/.test(identityHash)
+        ||b.app_id!==appId||b.schema_name!==`${appId}/${local.name}`)throw new FkanbanError({code:"owned_schema_receipt_invalid",message:"The declaration did not confirm the exact owned app schema."});
       const resolution = typeof b.resolution === "string" ? b.resolution : "";
       const auditEventId = typeof b.audit_event_id === "string" ? b.audit_event_id : undefined;
       const explicitBindRejected = b.bind_eligible === false;
@@ -1263,7 +1258,7 @@ export function newNodeClient(opts: {
       return {
         app_id: typeof b.app_id === "string" ? b.app_id : appId,
         schema: schemaName,
-        canonical, identityHash, independentFields,
+        canonical, identityHash,
         resolution,
         decision: typeof b.decision === "string" ? b.decision : undefined,
         auditEventId,

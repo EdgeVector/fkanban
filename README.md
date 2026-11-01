@@ -43,10 +43,10 @@ The rules for an existing home are in
 Schema setup has one supported path: `kanban init` calls Mini's
 `POST /api/apps/declare-schema`. Mini resolves the definition through Schema
 Service, loads the local owned schema, and returns the identity that fkanban
-may persist. The receipt must confirm independent values. Each schema owns its
-record values; no declaration reads values from another schema. There is no
-fkanban-side Schema Service script and no Mini local-mint fallback. A changed
-definition identity stops init and leaves the config unchanged.
+may persist. Init requires LastDB API 13 or later, where each schema owns its
+record values. There is no fkanban-side Schema Service script and no Mini
+local-mint fallback. A changed definition identity stops init and leaves the
+config unchanged.
 
 ## Prerequisites
 
@@ -182,7 +182,7 @@ kanban list
 (Haven't installed the shim? Every `kanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
-Init requires a LastDB release with compound named keys and schema-owned values.
+Init requires LastDB API 13 or later with compound named keys. Each schema owns its values.
 Init does not convert existing data or change an accepted schema address.
 Mini resolves or registers each declaration with Schema Service.
 The `--schema-service-url` value is diagnostic because Mini owns that call.

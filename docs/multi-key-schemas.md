@@ -1,6 +1,6 @@
 # F-Kanban multi-key schemas
 
-New installations declare independent record values. Canonical fields still reuse their definitions.
+Each schema owns its record values. Canonical fields reuse only their definitions.
 Named keys belong to the source record schema. A mutation updates the record and its keys in one native request.
 
 Card uses board and milestone keys. Each range contains the column, the padded position, and the slug.
@@ -43,6 +43,7 @@ Repeated setup keeps their saved runtime addresses, definition identities, and f
 An unknown or ambiguous app schema stops init. Init leaves it unchanged.
 
 Init refuses a node without the `compound_alternate_keys_v1` and `independent_hash_range_v1` capabilities.
+Init also refuses a node older than LastDB API 13 before it declares a schema.
 
 ## Wire format
 
