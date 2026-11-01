@@ -4,6 +4,7 @@ import type { Config } from "./config.ts";
 import { MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
 import { OWNER_APP_ID, type SchemaDefinition } from "./schemas.ts";
 import { HISTORICAL_SCHEMAS } from "./legacy-schemas.ts";
+import { OWNED_HOME_API_VERSION, ownedHome } from "./lastdb-version.ts";
 
 type InstalledSchema = {
   name: string;
@@ -97,9 +98,10 @@ export async function syncOwnedModel(
   canonicalVocabulary: boolean,
 ): Promise<Config> {
   const version = await node.rawCall("GET", "/api/version");
-  const capabilities = (
-    version.json as { capabilities?: Record<string, boolean> }
-  )?.capabilities;
+  const { api_version: apiVersion, capabilities } = (version.json ?? {}) as {
+    api_version?: unknown;
+    capabilities?: Record<string, boolean>;
+  };
   if (
     version.status !== 200 ||
     !capabilities?.compound_alternate_keys_v1 ||
@@ -109,6 +111,13 @@ export async function syncOwnedModel(
       code: "multi_key_upgrade_required",
       message:
         "This node needs compound alternate keys and independent HashRange schemas.",
+    });
+  }
+  // Every schema on an API 13+ node owns its values. Check once, before any declaration.
+  if (typeof apiVersion !== "number" || !ownedHome(apiVersion)) {
+    throw new FkanbanError({
+      code: "owned_schema_receipt_invalid",
+      message: `This node is older than LastDB API ${OWNED_HOME_API_VERSION}. It cannot confirm schema-owned values.`,
     });
   }
   const response = await node.rawCall("GET", "/api/schemas");
@@ -202,7 +211,6 @@ export async function syncOwnedModel(
         entry.schema,
       );
       if (
-        !declaration.independentFields ||
         !declaration.identityHash ||
         !/^[a-f0-9]{64}$/.test(declaration.identityHash) ||
         declaration.app_id !== OWNER_APP_ID ||
@@ -212,7 +220,7 @@ export async function syncOwnedModel(
         throw new FkanbanError({
           code: "owned_schema_receipt_invalid",
           message:
-            "The declaration did not confirm independent values and a definition identity.",
+            "The declaration did not confirm the exact app schema and a definition identity.",
         });
       }
       return {

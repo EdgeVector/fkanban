@@ -17,7 +17,6 @@ export function requireMultiKey(cfg: { storageModel?: string }): void {
 export function ownedSchemas() {
   return [...UNIQUE_SCHEMAS, ...EXTRA_SCHEMAS].map((entry) => {
     const schema = structuredClone(entry.schema.schema);
-    schema.independent_fields = true;
     const ordered = (hash: string, state: string): NonNullable<SchemaDefinition["alternate_keys"]>[string] => ({
       hash_field: hash, missing: "reject", range_separator: "#", range_parts: [
         { field: state }, { field: "position", format: { padded_text: { width: 8 } } }, { field: "slug" },
