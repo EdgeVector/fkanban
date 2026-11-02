@@ -794,7 +794,7 @@ Flags:
   which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
 Usage:
-  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp|registry-upgrade] [--json] [--check]
+  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp|kanban-registry-upgrade] [--json] [--check]
 
 Without a target, prints the running CLI entrypoint, package version, source
 root, Bun runtime, and current working directory. This never contacts the board
@@ -1141,7 +1141,7 @@ function whichReport(): WhichReport {
   // about the same tree. Asking `pathWithinAnyRegistry` a second time here is
   // what let the two halves disagree: under the compiled artifact this report
   // printed `in_registry: false` while its own `bun_path` line, three lines
-  // down, resolved into `~/.registry/apps/fkanban/versions/<oid>/dist/kanban`.
+  // down, resolved into `~/.local/share/lastdb-apps/kanban/versions/<oid>/dist/kanban`.
   //
   // Containment (`in_registry`) is still reported separately from
   // `build_status`, because it is satisfied forever by any version directory
@@ -1659,10 +1659,10 @@ async function dispatch(
       }
       const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp", "kanban-registry-upgrade"]);
       if (!allowed.has(name)) {
-        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp | registry-upgrade`);
+        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp | kanban-registry-upgrade`);
         return 2;
       }
-      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp|registry-upgrade]");
+      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp|kanban-registry-upgrade]");
       if (extra !== undefined) return extra;
       const execPath = resolveCommandPath(name);
       if (!execPath) {
