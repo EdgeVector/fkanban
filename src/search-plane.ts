@@ -1,7 +1,7 @@
 /**
  * Shared semantic search plane client for fkanban (schema-scoped vectors).
  *
- * Resolution: LastSeek → LASTDB_SEARCH_SEMANTIC_MODULE → host-track semantic
+ * Resolution: LastSeek → LASTDB_SEARCH_SEMANTIC_MODULE → registry semantic
  * → semantic CLI.
  *
  * LastSeek (`lastdb:///lastseek`) is the Rust successor to the TypeScript
@@ -30,7 +30,7 @@ export type SearchPlaneHit = {
 function resolveSemanticModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_SEMANTIC_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
-  const c = `${process.env.HOME ?? ""}/.host-track/apps/search/current/src/semantic.ts`;
+  const c = `${process.env.HOME ?? ""}/.local/share/lastdb-apps/search/current/source/src/semantic.ts`;
   if (existsSync(c)) return c;
   return null;
 }

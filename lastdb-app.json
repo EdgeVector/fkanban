@@ -39,6 +39,10 @@
       {
         "source": "bin/registry-fkanban-mcp",
         "command": "fkanban-mcp"
+      },
+      {
+        "source": "bin/kanban-registry-upgrade",
+        "command": "kanban-registry-upgrade"
       }
     ],
     "probe": [
