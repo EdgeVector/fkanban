@@ -1,0 +1,56 @@
+{
+  "app_id": "kanban",
+  "version": "0.1.0",
+  "source": "https://github.com/EdgeVector/fkanban.git",
+  "metadata": {
+    "display_name": "kanban",
+    "description": "kanban \u2014 a kanban board over fold_db. Cards move through columns; everything persists in folddb.",
+    "homepage_url": "https://github.com/EdgeVector/fkanban"
+  },
+  "run": {
+    "runtime": "bun",
+    "entrypoint": "src/cli.ts"
+  },
+  "schemas": [],
+  "install": {
+    "prepare": [
+      {
+        "argv": [
+          "bun",
+          "install",
+          "--frozen-lockfile"
+        ],
+        "timeout_s": 300
+      }
+    ],
+    "links": [
+      {
+        "source": "bin/registry-kanban",
+        "command": "kanban"
+      },
+      {
+        "source": "bin/registry-fkanban",
+        "command": "fkanban"
+      },
+      {
+        "source": "bin/registry-kanban-mcp",
+        "command": "kanban-mcp"
+      },
+      {
+        "source": "bin/registry-fkanban-mcp",
+        "command": "fkanban-mcp"
+      }
+    ],
+    "probe": [
+      {
+        "argv": [
+          "./bin/registry-kanban",
+          "--help"
+        ],
+        "timeout_s": 30
+      }
+    ],
+    "post_install": [],
+    "requires": []
+  }
+}
