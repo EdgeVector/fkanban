@@ -40,7 +40,6 @@ function resolveSearchHome(searchHome?: string): string {
   if (process.env.SEARCH_HOME?.trim()) return process.env.SEARCH_HOME.trim();
   const home =
     process.env.LASTDB_HOME?.trim() ||
-    process.env.FOLDDB_HOME?.trim() ||
     `${process.env.HOME ?? ""}/.lastdb`;
   return resolve(home, "apps/search");
 }

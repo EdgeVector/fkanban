@@ -2784,7 +2784,7 @@ export function milestoneQueryFieldsLookSparse(fields: Record<string, unknown> |
 function markBodyOmitted(cards: Card[]): Card[] {
   for (const card of cards) {
     card[BODY_OMITTED] = true;
-    // Drop any body atom that leaked through a partial projection or a
+    // Drop any body value that leaked through a partial projection or a
     // test double that ignores `fields`. BODY_OMITTED means "unread" —
     // a non-empty body would skip hydrate (body.length > 0) and make
     // isRegistryCard(isBodyOmitted ? "" : body) see a lie.
@@ -3406,15 +3406,8 @@ export async function findCardsWithFields(
  *
  * Deliberately narrow to save bytes and time: measured on the live primary
  * 2026-07-31, the wide proof read cost ~236ms and a 6-field read ~120ms.
- *
- * It is NOT narrow to dodge a projection drop, though it said so until
- * 2026-08-06. The rule this docstring used to assert — a row is returned only
- * when EVERY projected field has an atom — is `any_missing`, which
- * `test/fake-node.ts` marks superseded and which
- * `scripts/probe-card-projection-sparse.ts` measured to be FALSE on Card: a
- * live row carrying 5 of 23 atoms is returned by the full 23-field point read.
- * The gate is HASH-ELSE-LEAD, and for Card the hash field is `slug`, which
- * every card read projects. Widening a Card read costs latency, not recall.
+ * It is not narrow to dodge a projection drop: a record is one value, so a
+ * wider Card read costs latency, not recall.
  */
 export const PROOF_CARD_FIELDS = ["slug", "board", "column", "milestone", "tags", "body"];
 

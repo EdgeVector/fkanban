@@ -19,7 +19,7 @@
 // LastgitCiStatus_hashrange_v2 were the #1 wall-time bucket on the primary
 // (~3.3k calls / 40m, avg ~580ms). Root cause was not "list" — it was every
 // `kanban show` / MCP show always joining CI, projecting `log_excerpt` (a fat
-// atom show never renders), and re-hitting the node for the same status_key
+// field value show never renders), and re-hitting the node for the same status_key
 // when agents re-show the same card. Defaults below keep the join but drop
 // the unused excerpt and process-cache light snapshots briefly.
 
@@ -231,8 +231,8 @@ export type PipelineAttachResult = {
 /**
  * Fields `show` / move-gates need. `log_excerpt` is deliberately omitted:
  * `formatPipelineStatusLines` only prints state+context+repo@oid, and the
- * excerpt atom is the expensive part of LastgitCiStatus (multi-KB, often the
- * only cold load on an otherwise warm tip).
+ * excerpt is the expensive field of LastgitCiStatus (multi-KB, often the
+ * only cold load on an otherwise warm record).
  */
 const CI_FIELDS_LIGHT = [
   "status_key",

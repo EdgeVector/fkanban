@@ -118,7 +118,6 @@ function legacyNativeHitToAppSearchHit(hit: unknown): AppSearchHit | null {
     },
     fields: typeof h.fields === "object" && h.fields !== null ? h.fields as AppSearchHit["fields"] : {},
     metadata: h.metadata,
-    author_pub_key: typeof h.author_pub_key === "string" ? h.author_pub_key : "",
     schema_name: typeof h.schema_name === "string" ? h.schema_name : "",
     schema_display_name: typeof h.schema_display_name === "string" ? h.schema_display_name : "",
     score: typeof h.score === "number" ? h.score : 0,

@@ -23,7 +23,7 @@ import {
 } from "../record.ts";
 import {
   headKeyId,
-  type HeadAtom,
+  type HeadWindow,
   type HeadCard,
 } from "../column-window.ts";
 import {
@@ -176,11 +176,11 @@ function cardFromHead(board: string, column: string, card: HeadCard): Card {
   return out;
 }
 
-function cardsFromHeads(board: string, columns: readonly string[], heads: ReadonlyMap<string, HeadAtom>): Card[] {
+function cardsFromHeads(board: string, columns: readonly string[], heads: ReadonlyMap<string, HeadWindow>): Card[] {
   const out: Card[] = [];
   for (const column of columns) {
-    const atom = heads.get(headKeyId(board, column));
-    for (const card of atom?.cards ?? []) out.push(cardFromHead(board, column, card));
+    const head = heads.get(headKeyId(board, column));
+    for (const card of head?.cards ?? []) out.push(cardFromHead(board, column, card));
   }
   return out;
 }
