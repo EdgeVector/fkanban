@@ -10,13 +10,13 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import {
-  expectedHostTrackRoot,
-  pathWithinAnyHostTrack,
+  expectedRegistryRoot,
+  pathWithinAnyRegistry,
   realpathOrSelf,
   resolveRunningBuild,
   shortBuild,
   type RunningBuild,
-} from "./host_track.ts";
+} from "./app_install.ts";
 
 import pkg from "../package.json" with { type: "json" };
 import { FkanbanError, groomOpsLabel, type Verbose } from "./client.ts";
@@ -794,16 +794,16 @@ Flags:
   which: withFooter(`fkanban which — print CLI provenance or show the PATH shim that will run
 
 Usage:
-  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp|host-track-refresh|kanban-host-track-refresh] [--json] [--check]
+  fkanban which [kanban|fkanban|kanban-mcp|fkanban-mcp|registry-upgrade] [--json] [--check]
 
 Without a target, prints the running CLI entrypoint, package version, source
 root, Bun runtime, and current working directory. This never contacts the board
-node, so it is safe for host-track and pickup preflight diagnostics.
+node, so it is safe for registry and pickup preflight diagnostics.
 
 With a target, prints the resolved executable path. With --json, also reports
-the realpath and whether it lives under the expected host-track checkout.
+the realpath and whether it lives under the expected registry checkout.
 With --check, exits nonzero when the running CLI or resolved target is not
-host-track managed.
+registry managed.
 
 Example:
   fkanban which
@@ -1120,8 +1120,8 @@ type WhichReport = {
   executable_path: string;
   source_path: string;
   source_root: string;
-  expected_host_track: string;
-  in_host_track: boolean;
+  expected_registry: string;
+  in_registry: boolean;
   build_status: RunningBuild["status"];
   build: string | null;
   current_build: string | null;
@@ -1138,20 +1138,20 @@ function whichReport(): WhichReport {
 
   // ONE resolution answers both questions this report asks — "is this install
   // managed" and "is it the current build" — because they are the same question
-  // about the same tree. Asking `pathWithinAnyHostTrack` a second time here is
+  // about the same tree. Asking `pathWithinAnyRegistry` a second time here is
   // what let the two halves disagree: under the compiled artifact this report
-  // printed `in_host_track: false` while its own `bun_path` line, three lines
-  // down, resolved into `~/.host-track/apps/fkanban/versions/<oid>/dist/kanban`.
+  // printed `in_registry: false` while its own `bun_path` line, three lines
+  // down, resolved into `~/.registry/apps/fkanban/versions/<oid>/dist/kanban`.
   //
-  // Containment (`in_host_track`) is still reported separately from
+  // Containment (`in_registry`) is still reported separately from
   // `build_status`, because it is satisfied forever by any version directory
   // that was ever installed and so cannot tell the current build from a
   // superseded one — that is the field that catches a long-lived `kanban mcp`
-  // still serving the version directory it was spawned on. See src/host_track.ts.
+  // still serving the version directory it was spawned on. See src/app_install.ts.
   const running = resolveRunningBuild(sourceRoot);
-  const inHostTrack = running.installRoot !== null;
-  const expectedHostTrack = running.installRoot ?? expectedHostTrackRoot();
-  const issues = inHostTrack ? [] : [`fkanban is not running from ${expectedHostTrack}`];
+  const inRegistry = running.installRoot !== null;
+  const expectedRegistry = running.installRoot ?? expectedRegistryRoot();
+  const issues = inRegistry ? [] : [`fkanban is not running from ${expectedRegistry}`];
   if (running.status === "superseded") {
     issues.push(
       `running build ${shortBuild(running.build, running.runningRoot)} is superseded — ` +
@@ -1168,8 +1168,8 @@ function whichReport(): WhichReport {
     // The resolved install tree, which under the compiled artifact is NOT
     // `source_path` (that one stays honest about the embedded module URL).
     source_root: running.runningRoot,
-    expected_host_track: expectedHostTrack,
-    in_host_track: inHostTrack,
+    expected_registry: expectedRegistry,
+    in_registry: inRegistry,
     build_status: running.status,
     build: running.build,
     current_build: running.currentBuild,
@@ -1187,8 +1187,8 @@ function formatWhichReport(report: WhichReport): string {
     `executable_path: ${report.executable_path}`,
     `source_path: ${report.source_path}`,
     `source_root: ${report.source_root}`,
-    `expected_host_track: ${report.expected_host_track}`,
-    `in_host_track: ${report.in_host_track}`,
+    `expected_registry: ${report.expected_registry}`,
+    `in_registry: ${report.in_registry}`,
     `build_status: ${report.build_status}`,
     `build: ${report.build ?? "(n/a)"}`,
     `current_build: ${report.current_build ?? "(n/a)"}`,
@@ -1654,15 +1654,15 @@ async function dispatch(
         console.log(values.json ? JSON.stringify(report) : formatWhichReport(report));
         // `--check` fails on any recorded issue, not just containment: a
         // superseded build is exactly the condition a scripted check wants to
-        // catch, and it satisfies `in_host_track` by construction.
+        // catch, and it satisfies `in_registry` by construction.
         return values.check && report.issues.length > 0 ? 1 : 0;
       }
-      const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp", "host-track-refresh", "kanban-host-track-refresh"]);
+      const allowed = new Set(["kanban", "fkanban", "kanban-mcp", "fkanban-mcp", "kanban-registry-upgrade"]);
       if (!allowed.has(name)) {
-        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp | host-track-refresh | kanban-host-track-refresh`);
+        console.error(`kanban: Unknown which target "${name}". Try: kanban | fkanban | kanban-mcp | fkanban-mcp | registry-upgrade`);
         return 2;
       }
-      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp|host-track-refresh|kanban-host-track-refresh]");
+      const extra = rejectExtraPositionals(positionals, 2, "which [kanban|fkanban|kanban-mcp|fkanban-mcp|registry-upgrade]");
       if (extra !== undefined) return extra;
       const execPath = resolveCommandPath(name);
       if (!execPath) {
@@ -1670,22 +1670,22 @@ async function dispatch(
         return 1;
       }
       const realPath = safeRealpath(execPath);
-      const match = pathWithinAnyHostTrack(realPath);
-      const hostTrack = match.ok ? match.root : expectedHostTrackRoot();
-      const underHostTrack = match.ok;
+      const match = pathWithinAnyRegistry(realPath);
+      const registry = match.ok ? match.root : expectedRegistryRoot();
+      const underRegistry = match.ok;
       if (values.json) {
         console.log(JSON.stringify({
           command: name,
           exec_path: execPath,
           real_path: realPath,
-          host_track: hostTrack,
-          under_host_track: underHostTrack,
-          issues: underHostTrack ? [] : [`${name} does not resolve under ${hostTrack}`],
+          registry: registry,
+          under_registry: underRegistry,
+          issues: underRegistry ? [] : [`${name} does not resolve under ${registry}`],
         }));
       } else {
         console.log(execPath);
       }
-      return values.check && !underHostTrack ? 1 : 0;
+      return values.check && !underRegistry ? 1 : 0;
     }
 
     case "add": {

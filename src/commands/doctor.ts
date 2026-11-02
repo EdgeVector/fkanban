@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
 import { DOCTOR_OPS_LABEL, FkanbanError, newNodeClient, type Verbose } from "../client.ts";
 import { resolveSocketPath, tryReadConfig } from "../config.ts";
-import { isOnDisk, resolveRunningBuild, shortBuild } from "../host_track.ts";
+import { isOnDisk, resolveRunningBuild, shortBuild } from "../app_install.ts";
 import { readRecentRejections, rejectionsPath } from "../diagnostics.ts";
 import { mcpAddCommand, mcpEntrypointPath } from "../mcp/register.ts";
 import { OWNER_APP_ID, type SchemaDefinition } from "../schemas.ts";
@@ -182,7 +182,7 @@ function reportMcpEntrypoint(
 // Under the compiled artifact this returns the module's EMBEDDED path
 // (`/$bunfs/root/kanban`), which is not a directory on disk. That is expected
 // and handled: `resolveRunningBuild` falls back to the executable whenever the
-// path it is handed does not exist. See src/host_track.ts.
+// path it is handed does not exist. See src/app_install.ts.
 export function runningSourceRoot(): string {
   return fileURLToPath(import.meta.url).replace(/\/src\/commands\/doctor\.ts$/, "");
 }
@@ -219,11 +219,11 @@ export function reportRunningBuild(
       // A worktree or fresh clone. There is no `current` to be behind; saying
       // "stale" here would be false, and saying "✓ current" would be a claim
       // nothing was checked against.
-      info("running build", `${running.runningRoot} (not a host-track install — nothing to compare)`);
+      info("running build", `${running.runningRoot} (not a registry install — nothing to compare)`);
       return;
 
     case "indeterminate":
-      // Under a host-track root, but `current` did not resolve. Unknown must
+      // Under a registry root, but `current` did not resolve. Unknown must
       // fail toward "look at this", never toward "you're up to date".
       info(
         name,
@@ -284,7 +284,7 @@ export function resolveKanbanShim(): { name: "kanban" | "fkanban"; path: string 
  *
  * `isOnDisk` is the discriminator, not `existsSync` — both `existsSync` and
  * `statSync` SUCCEED on embedded paths, so either would be a no-op that looks
- * like a guard (see the measurement in src/host_track.ts).
+ * like a guard (see the measurement in src/app_install.ts).
  *
  */
 export function shimInstallHint(repoRoot: string, execPath: string = process.execPath): string {

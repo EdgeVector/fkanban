@@ -48,7 +48,7 @@
 
 import { fileURLToPath } from "node:url";
 import { resolveKanbanShim } from "../commands/doctor.ts";
-import { isOnDisk, resolveRunningBuild } from "../host_track.ts";
+import { isOnDisk, resolveRunningBuild } from "../app_install.ts";
 
 // This file lives at <repoRoot>/src/mcp/register.ts — when there is a repo. The
 // caller must treat the result as a candidate, not a fact: see `moduleRepoRoot`
@@ -62,7 +62,7 @@ function moduleRepoRoot(): string {
  * The path to REGISTER for a compiled executable — which is not always the path
  * it is running from.
  *
- * `process.execPath` is fully resolved: symlinks and all. Under a host-track
+ * `process.execPath` is fully resolved: symlinks and all. Under a registry
  * install that means `<root>/versions/<oid>/dist/kanban`, never the
  * `<root>/current/dist/kanban` symlink the user actually invoked. Registering
  * the resolved form would pin the MCP server to one version directory and
@@ -106,7 +106,7 @@ type Registration = {
 /**
  * Resolve all four answers together, once, from one branch decision.
  *
- * The discriminator is `isOnDisk` from src/host_track.ts — deliberately the
+ * The discriminator is `isOnDisk` from src/app_install.ts — deliberately the
  * same predicate that module uses to identify the running tree, not a copy.
  * NOT `existsSync`, and not `statSync`: measured 2026-08-06, both SUCCEED for a
  * module inside a compiled binary's embedded filesystem (it stats clean, with
