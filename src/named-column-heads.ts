@@ -3,9 +3,9 @@ import { isTombstoned, WRITE_PROBE_SLUG } from "./record.ts";
 import type { NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
 import { keyRows } from "./multi-key.ts";
-import { capComplete, headCardFrom, headKeyId, type HeadAtom, type HeadKey } from "./column-window.ts";
+import { capComplete, headCardFrom, headKeyId, type HeadWindow, type HeadKey } from "./column-window.ts";
 
-export async function namedColumnHeads(node: NodeClient, cfg: Config, keys: readonly HeadKey[]): Promise<Map<string, HeadAtom>> {
+export async function namedColumnHeads(node: NodeClient, cfg: Config, keys: readonly HeadKey[]): Promise<Map<string, HeadWindow>> {
   const fields = ["slug", "title", "column", "position", "assignee", "tags", "deps", "kind", "milestone", "created_at"];
   const entries = await Promise.all(keys.map(async (key) => {
     const rows = await keyRows(node, cfg.schemaHashes.card!, "by_board", { HashRangePrefix: { hash: key.board, prefix: `${key.column}#` } }, fields);

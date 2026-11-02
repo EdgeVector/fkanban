@@ -76,26 +76,24 @@ ensure_board() {
 }
 
 # Resolve the socket the CLI will actually dial. Mirrors resolveSocketPath() in
-# src/config.ts: FOLDDB_SOCKET_PATH, then LASTDB_HOME/FOLDDB_HOME, then the
-# config field, then a probe of the default homes (~/.lastdb first). Kept in
+# src/config.ts: FOLDDB_SOCKET_PATH, then LASTDB_HOME, then the
+# config field, then ~/.lastdb. Kept in
 # lockstep with that function -- if the precedence there changes, change it here.
 resolve_socket_path() {
   local cfg_file cfg_sock
   [ -n "${FOLDDB_SOCKET_PATH:-}" ] && { printf '%s' "$FOLDDB_SOCKET_PATH"; return 0; }
-  local home_override="${LASTDB_HOME:-${FOLDDB_HOME:-}}"
+  local home_override="${LASTDB_HOME:-}"
   [ -n "$home_override" ] && { printf '%s/data/folddb.sock' "$home_override"; return 0; }
   cfg_file="${KANBAN_CONFIG:-${FKANBAN_CONFIG:-$HOME/.fkanban/config.json}}"
   if [ -r "$cfg_file" ]; then
     cfg_sock=$(jq -r '.nodeSocketPath // empty' "$cfg_file" 2>/dev/null)
     [ -n "$cfg_sock" ] && { printf '%s' "$cfg_sock"; return 0; }
   fi
-  [ -S "$HOME/.lastdb/data/folddb.sock" ] && { printf '%s' "$HOME/.lastdb/data/folddb.sock"; return 0; }
-  [ -S "$HOME/.folddb/data/folddb.sock" ] && { printf '%s' "$HOME/.folddb/data/folddb.sock"; return 0; }
   printf '%s' "$HOME/.lastdb/data/folddb.sock"
 }
 
-# Compare by realpath: ~/.folddb is a compat path that may symlink to ~/.lastdb,
-# so a string compare would miss the primary reached via the legacy name.
+# Compare by realpath: a symlink to ~/.lastdb would otherwise defeat a string
+# compare.
 canonical_path() {
   local p="$1"
   if command -v realpath >/dev/null 2>&1; then realpath "$p" 2>/dev/null || printf '%s' "$p"
@@ -103,12 +101,9 @@ canonical_path() {
 }
 
 is_primary_socket() {
-  local sock target
+  local sock
   sock=$(canonical_path "$1")
-  for target in "$HOME/.lastdb/data/folddb.sock" "$HOME/.folddb/data/folddb.sock"; do
-    [ "$sock" = "$(canonical_path "$target")" ] && return 0
-  done
-  return 1
+  [ "$sock" = "$(canonical_path "$HOME/.lastdb/data/folddb.sock")" ]
 }
 
 # Preflight

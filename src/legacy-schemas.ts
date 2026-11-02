@@ -595,46 +595,4 @@ export const HISTORICAL_SCHEMAS: Array<{
       },
     },
   },
-  {
-    key: "kanban_list_head",
-    schema: {
-      name: "ColumnHeadAtom",
-      owner_app_id: "fkanban",
-      descriptive_name: "ColumnHeadAtom_exact_key_v1",
-      purpose_statement:
-        "One exact key stores at most twenty short titles for one kanban column",
-      schema_type: "HashRange",
-      key: {
-        hash_field: "klh_h",
-        range_field: "klh_r",
-      },
-      fields: ["klh_h", "klh_r", "klh_page"],
-      field_types: {
-        klh_h: "String",
-        klh_r: "String",
-        klh_page: "String",
-      },
-      field_descriptions: {
-        klh_h: "hash that names one column on one kanban board",
-        klh_r: "range marker for the single head atom of that column",
-        klh_page:
-          "json text of at most twenty short card titles for that column",
-      },
-      field_classifications: {},
-      field_data_classifications: {
-        klh_h: {
-          sensitivity_level: 0,
-          data_domain: "general",
-        },
-        klh_r: {
-          sensitivity_level: 0,
-          data_domain: "general",
-        },
-        klh_page: {
-          sensitivity_level: 0,
-          data_domain: "general",
-        },
-      },
-    },
-  },
 ];

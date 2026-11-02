@@ -28,7 +28,7 @@ export type Config = {
   schemaIdentities?: Record<string,string>;
   // Optional override for the node's Unix-domain control socket, used for
   // owner-session attestation against an app-isolation node. When absent the
-  // path is derived from LASTDB_HOME / FOLDDB_HOME (see `resolveSocketPath`).
+  // path is derived from LASTDB_HOME, else ~/.lastdb (see `resolveSocketPath`).
   nodeSocketPath?: string;
   // The source config path is not serialized.
   configPath?: string;
@@ -41,38 +41,19 @@ export type Config = {
 
 const SOCKET_FILE_NAME = "folddb.sock";
 
-// Resolve the node data-home when no explicit socket/home override is set.
-// The FoldDB→LastDB rebrand (node v0.15.1+) moved the brew/CLI node's data home
-// from `~/.folddb` to `~/.lastdb`, while the legacy desktop app still uses
-// `~/.folddb`. Prefer whichever default home has a LIVE control socket on disk
-// (that's the node actually running), `~/.lastdb` first; fall back to directory
-// existence, `~/.lastdb` first, so a pre-launch machine still points somewhere
-// real. Mirrors fbrain's `resolveDefaultNodeHome` so all three CLIs derive the
-// same root on a mixed-version machine.
-function resolveDefaultNodeHome(base: string): string {
-  const lastdb = join(base, ".lastdb");
-  const folddb = join(base, ".folddb");
-  if (existsSync(join(lastdb, "data", SOCKET_FILE_NAME))) return lastdb;
-  if (existsSync(join(folddb, "data", SOCKET_FILE_NAME))) return folddb;
-  if (existsSync(lastdb)) return lastdb;
-  return folddb;
-}
-
 // The node's app-isolation control socket lives under its data dir — for a
-// socket-only local node this IS the transport, not a fallback. The primary
-// local brain uses ~/.lastdb/data (a v0.15.1+ brew/CLI node) or ~/.folddb/data
-// (the legacy desktop app); an ephemeral dev node sets LASTDB_HOME or
-// FOLDDB_HOME to a temp dir. `FOLDDB_SOCKET_PATH` overrides everything; then the
-// LASTDB_HOME/FOLDDB_HOME override; then the config field; then a probe for the
-// live default home.
+// socket-only local node this IS the transport, not a fallback. The node home
+// is LASTDB_HOME when it is set, else ~/.lastdb (the node's own rule); an
+// ephemeral dev node sets LASTDB_HOME to a temp dir. `FOLDDB_SOCKET_PATH`
+// overrides everything; then the LASTDB_HOME override; then the config field;
+// then ~/.lastdb.
 export function resolveSocketPath(cfg?: { nodeSocketPath?: string }): string {
   const envOverride = process.env.FOLDDB_SOCKET_PATH;
   if (envOverride && envOverride.length > 0) return envOverride;
-  const homeOverride = process.env.LASTDB_HOME ?? process.env.FOLDDB_HOME;
+  const homeOverride = process.env.LASTDB_HOME;
   if (homeOverride && homeOverride.length > 0) return join(homeOverride, "data", SOCKET_FILE_NAME);
   if (cfg?.nodeSocketPath && cfg.nodeSocketPath.length > 0) return cfg.nodeSocketPath;
-  const home = resolveDefaultNodeHome(homedir());
-  return join(home, "data", SOCKET_FILE_NAME);
+  return join(homedir(), ".lastdb", "data", SOCKET_FILE_NAME);
 }
 
 export function defaultConfigPath(): string {

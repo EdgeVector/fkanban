@@ -119,7 +119,6 @@ export type AppSearchHit = {
   key_value: KeyValue;
   fields: RowFields;
   metadata?: unknown;
-  author_pub_key: string;
   schema_name: string;
   schema_display_name: string;
   score: number;
@@ -452,7 +451,7 @@ export type NodeClient = {
     rangeKey?: string | null;
   }>): Promise<void>;
   /**
-   * Page live record identities without hydrating field atoms.
+   * Page live record identities without reading field values.
    *
    * Optional only so narrow test doubles that never enumerate a schema do not
    * all need a dead method. Production clients always implement it, and every
@@ -700,8 +699,7 @@ export function newNodeClient(opts: {
       hint:
         "The control socket lives at <node data-dir>/folddb.sock. Point fkanban at it with " +
         "`--node-socket-path <path>` or `FOLDDB_SOCKET_PATH=<path>` and re-run `kanban init` " +
-        "(by default fkanban looks under $FOLDDB_HOME/data, which only matches a node started " +
-        "with --data-dir $FOLDDB_HOME/data). Alternatively, drive the node via the desktop app " +
+        "(by default fkanban looks under $LASTDB_HOME/data, else ~/.lastdb/data). Alternatively, drive the node via the desktop app " +
         "or a browser paired with `folddb ui`.",
     });
   };
@@ -712,19 +710,11 @@ export function newNodeClient(opts: {
     //
     // It must distinguish REAL board work from DIAGNOSTIC traffic, because
     // `lastdb ops` aggregates per label and those two populations have wildly
-    // different shapes. Measured on the live primary 2026-08-04: a real board
-    // write (`add`/`mark`/`move`) costs ~200-350ms with `molecule_gate` ~0,
-    // while doctor's write-probe — which creates and then IMMEDIATELY deletes
-    // one slug — pays ~2.2s of `molecule_gate` on the delete, because a delete
-    // issued inside the slot's ~2.2s deferred-put window blocks until that put
-    // fires. (Updates to the same slot do not; the penalty is delete-specific,
-    // and a >=2s gap removes it entirely.)
-    //
-    // Pooled under one label, ~10 probe writes made `client=kanban` mutation
-    // averages read as "95% of every board write is the molecule gate". Two
-    // chief-engineer runs took that as the board's write-path frontier. It was
-    // the probe measuring its own cleanup. Keeping the labels separate is what
-    // stops that misreading from being re-derivable.
+    // different shapes: doctor's write-probe creates and then IMMEDIATELY
+    // deletes one slug, so its writes measure its own cleanup, not board work.
+    // Pooled under one label, the probe writes once made `client=kanban`
+    // mutation averages look like the board's write-path frontier. Keeping the
+    // labels separate stops that misreading.
     const h: Record<string, string> = {
       "X-User-Hash": userHash,
       "X-LastDB-Client": opsLabel,
@@ -1135,7 +1125,7 @@ export function newNodeClient(opts: {
     if (status !== 200) throw mapNodeError(status,body,"/api/schemas");
     const catalog = body as Record<string,unknown>;
     if (!Array.isArray(catalog.schemas)) throw new FkanbanError({code:"schema_catalog_invalid",message:"Cannot confirm the local schema format before declaration."});
-    if (catalog.schemas.some((item) => item && typeof item === "object" && item.owner_app_id === "fkanban" && Array.isArray(item.fields) && item.fields.some((field:unknown) => ["slug","board","klh_h"].includes(String(field))))) {
+    if (catalog.schemas.some((item) => item && typeof item === "object" && item.owner_app_id === "fkanban" && Array.isArray(item.fields) && item.fields.some((field:unknown) => ["slug","board"].includes(String(field))))) {
       throw new FkanbanError({code:"canonical_migration_required",message:"This home uses legacy work fields. An explicit data migration is required before canonical schema publication."});
     }
   })();
@@ -1372,9 +1362,8 @@ export function newNodeClient(opts: {
           if(res.status!==200)throw mapNodeError(res.status,res.json ?? res.body,"/api/query");
           if(Buffer.byteLength(res.body)>8388608)throw new FkanbanError({code:"guarded_read_budget",message:"Raw key evidence exceeds8MiB."});
           const body=res.json as Record<string,unknown> | null;
-          if(!body || body.ok!==true || !Array.isArray(body.results) || body.has_more!==false || (body.next_cursor!==undefined && body.next_cursor!==null) ||
-            Object.entries(body).some(([k,v])=> /skip|dangling|missing_atom|unresolved/i.test(k) && v!==0)) {
-            throw new FkanbanError({code:"guarded_read_incomplete",message:"Raw key evidence is malformed, skipped, or incomplete. Missing truth is unavailable."});
+          if(!body || body.ok!==true || !Array.isArray(body.results) || body.has_more!==false || (body.next_cursor!==undefined && body.next_cursor!==null)) {
+            throw new FkanbanError({code:"guarded_read_incomplete",message:"Raw key evidence is malformed or incomplete. Missing truth is unavailable."});
           }
           if ((body.returned_count!==undefined && body.returned_count!==body.results.length) ||
             (body.total_count!==undefined && body.total_count!==null && body.total_count!==body.results.length)) {
@@ -1492,7 +1481,6 @@ function appSearchHitsFromSdkSearch(result: SdkSearchResult): AppSearchHit[] {
     key_value: hit.keyValue ?? renderedKeyFallback(fieldString(hit.fields, "slug") ?? hit.key),
     fields: hit.fields,
     metadata: hit.metadata,
-    author_pub_key: hit.authorPubKey ?? "",
     schema_name: hit.schemaName,
     schema_display_name: hit.schemaDisplayName ?? "",
     score: hit.score ?? 0,

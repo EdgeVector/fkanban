@@ -14,7 +14,7 @@ export type HeadCard = {
   milestone: string;
   created_at: string;
 };
-export type HeadAtom = { cards: HeadCard[]; partial: boolean };
+export type HeadWindow = { cards: HeadCard[]; partial: boolean };
 export type HeadKey = { board: string; column: string };
 
 export function headKeyId(board: string, column: string): string {
@@ -34,7 +34,7 @@ function positionRank(position: string): number {
   return Number.isFinite(number) ? number : Number.MAX_SAFE_INTEGER;
 }
 
-export function capComplete(cards: readonly HeadCard[], column: string): HeadAtom {
+export function capComplete(cards: readonly HeadCard[], column: string): HeadWindow {
   const sorted = [...cards].sort((a, b) => {
     const position = positionRank(a.position) - positionRank(b.position);
     return position !== 0 ? position : a.created_at.localeCompare(b.created_at);

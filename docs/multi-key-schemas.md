@@ -35,8 +35,8 @@ This check does not write data or request an old payload repair.
 This release does not convert a home in place. It has no conversion command.
 `kanban init` declares the owned schemas on a home with no F-Kanban schemas.
 
-A home can already hold the five historical layouts as owned schemas:
-BoardCards, MilestoneCards, BoardMilestones, CardListIndex, and ColumnHeadAtom.
+A home can already hold the four historical layouts as owned schemas:
+BoardCards, MilestoneCards, BoardMilestones, and CardListIndex.
 Init keeps each one as a separate owned schema. Their records can differ from the current source records. They do not become alternate keys.
 Init checks each installed historical definition exactly. A different definition stops init and leaves the config unchanged.
 Repeated setup keeps their saved runtime addresses, definition identities, and field aliases.
