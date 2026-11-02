@@ -1,4 +1,4 @@
-// A row needs a key plus a tip and atom for each projected field. Reserve
+// A row is planned as its key plus two keys for each projected field. Reserve
 // half the native 10,000-key budget, plus one row for continuation probes.
 const PLANNED_KEY_BUDGET = 5000;
 export const MAX_QUERY_PAGE_SIZE = 128;

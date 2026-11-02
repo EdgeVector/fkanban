@@ -67,7 +67,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   const before = existing ? [] : await probe.listSchemas();
   const canonicalVocabulary = existing ? Boolean(existing.schemaFieldAliases)
-    : !before.some(schema => schema.owner_app_id === OWNER_APP_ID && schema.fields.some(field => ["slug", "board", "klh_h"].includes(field)));
+    : !before.some(schema => schema.owner_app_id === OWNER_APP_ID && schema.fields.some(field => ["slug", "board"].includes(field)));
   const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: opts.verbose, socketPath,
     schemaFieldAliases: existing?.schemaFieldAliases, canonicalVocabulary });
   print("[2/3] declare schema-owned records and named keys");

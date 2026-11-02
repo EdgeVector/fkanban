@@ -487,33 +487,6 @@
         "sensitivity_level": 0,
         "data_domain": "general"
       }
-    },
-    "work_column_head_scope_key": {
-      "description": "the work board and column selector for one column head",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_column_head_marker": {
-      "description": "the fixed range marker of a work column head",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
-    },
-    "work_column_head_summary_json": {
-      "description": "a JSON-encoded head page of at most twenty short card titles in one work board column",
-      "field_type": "String",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "general"
-      }
     }
   },
   "schemas": {
@@ -654,11 +627,6 @@
       "key": "work_card_summary_bucket_key",
       "payload_json": "work_card_summary_list_json",
       "updated_at": "work_card_summary_list_updated_at"
-    },
-    "ColumnHeadAtom_exact_key_v1": {
-      "klh_h": "work_column_head_scope_key",
-      "klh_r": "work_column_head_marker",
-      "klh_page": "work_column_head_summary_json"
     }
   }
 }
