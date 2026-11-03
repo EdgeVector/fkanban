@@ -30,7 +30,6 @@ import type { SchemaDefinition } from "./schemas.ts";
 // unreachable, not that TCP takes over.
 
 import { existsSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
 
 import {
   CapabilityDeniedError,
@@ -461,10 +460,9 @@ export type NodeClient = {
   queryAll(opts: { schemaHash: string; fields: string[]; filter?: QueryFilter; rawKeyEvidence?: boolean }): Promise<QueryResponse>;
   search?(query: string, opts?: AppSearchOptions): Promise<AppSearchHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
-  // Which transport local node requests take RIGHT NOW: `socket` when an owner
-  // socket was threaded in and the file currently exists (the socket carries
-  // board data-plane routes and the schema/identity checks doctor needs;
-  // `folddb-full.sock` carries every node route). Local nodes are socket-only —
+  // Which transport local node requests take RIGHT NOW: `socket` when the owner
+  // socket (`<home>/data/folddb.sock`) was threaded in and the file currently
+  // exists; that one socket carries every node route. Local nodes are socket-only —
   // the loopback TCP control plane was retired — so when no socket file is
   // present this returns `unavailable`: requests have no live transport and
   // will fail, NOT silently fall back to TCP. `socketPath` echoes the path
@@ -492,8 +490,7 @@ export type AttestationOutcome =
   | { ok: false; socketPath: string; socketExists: boolean; reason: string };
 
 // Mint a one-time pairing code over the node's Unix-domain control socket and
-// exchange it for an owner-session token. `folddb-full.sock` can serve the
-// exchange over UDS too; narrower sockets keep the historical TCP exchange.
+// exchange it for an owner-session token over the same owner socket.
 //
 // Returns a structured outcome: `{ ok: true, token }` on success, or
 // `{ ok: false, ... }` on ANY failure (socket missing, mint or exchange
@@ -558,11 +555,10 @@ export async function attestOwnerSessionDetailed(
 
   // Exchange the code for a session token OVER THE SAME UDS control socket the
   // mint used. The loopback TCP listener is retired (fold `fold-retire-tcp-listener`),
-  // so the old `isFullSurfaceSocket`-gated TCP fallback for narrower sockets could
-  // only ever dead-end on connect and hang (~5s x SOCKET_CONNECT_RETRY_MAX, ~20-30s)
-  // before "proceeding unattested" — the dominant source of per-invocation CLI
-  // slowness. The node serves this route on the control socket regardless of
-  // surface (verified against the primary `folddb.sock`), so always use the socket.
+  // so a TCP exchange could only ever dead-end on connect and hang
+  // (~5s x SOCKET_CONNECT_RETRY_MAX, ~20-30s) before "proceeding unattested" —
+  // the dominant source of per-invocation CLI slowness. The node serves this
+  // route on the owner socket (verified against the primary `folddb.sock`).
   try {
     const exchangeRes = await fetch("http://localhost/api/session/browser-pair", {
       method: "POST",
@@ -1168,6 +1164,20 @@ export function newNodeClient(opts: {
       const scope = (schemas ?? []).filter((s) => typeof s === "string" && s.length > 0);
       const reqBody = scope.length > 0 ? { schemas: scope } : undefined;
       const { status, body } = await callJson("/api/schemas/load", "POST", reqBody);
+      // A format 10 node serves this route only on its retired second socket,
+      // so its owner socket answers 404. Say what is needed instead of a bare 404.
+      if (status === 404) {
+        throw new FkanbanError({
+          code: "schema_load_unavailable",
+          message:
+            "This LastDB node does not serve POST /api/schemas/load on its owner socket " +
+            `${socketPath ?? "(folddb.sock)"}.`,
+          hint:
+            "Upgrade the node to home format 11 (EdgeVector/lastdb PR 1158), which serves " +
+            "schema load on folddb.sock, or make sure the schemas are already loaded.",
+          cause: body,
+        });
+      }
       if (status !== 200) throw mapNodeError(status, body, "/api/schemas/load");
       const b = body as Record<string, unknown>;
       const failed = Array.isArray(b.failed_schemas) ? (b.failed_schemas as string[]) : [];
@@ -1585,63 +1595,6 @@ function isConnectError(err: unknown): boolean {
   );
 }
 
-// Routes served by the node's owner data socket (`folddb.sock`). Older nodes
-// may expose a sibling full-surface socket (`folddb-full.sock`) for the whole
-// HTTP app; current nodes collapsed that surface into canonical `folddb.sock`.
-// Keeping this allowlist method-aware prevents non-canonical narrower sockets
-// from receiving owner/control routes they cannot serve, while still letting
-// doctor prove schema + identity without retired TCP :9001.
-const SOCKET_OWNER_ROUTES = [
-  { method: "POST", path: "/api/query" },
-  { method: "POST", path: "/api/mutation" },
-  { method: "GET", path: "/api/list" },
-  { method: "GET", path: "/api/schemas" },
-  // Prefix match: GET /api/schema/{hash} for membership key-layout doctor checks.
-  { method: "GET", path: "/api/schema" },
-  { method: "GET", path: "/api/system/auto-identity" },
-] as const;
-
-const CANONICAL_NODE_SOCKET_BASENAME = "folddb.sock";
-const LEGACY_FULL_SURFACE_SOCKET_BASENAME = "folddb-full.sock";
-
-function isFullSurfaceSocket(socketPath: string): boolean {
-  return basename(socketPath) === LEGACY_FULL_SURFACE_SOCKET_BASENAME;
-}
-
-function legacyFullSurfaceSocketPath(socketPath: string): string {
-  return join(dirname(socketPath), LEGACY_FULL_SURFACE_SOCKET_BASENAME);
-}
-
-function isCollapsedFullSurfaceSocket(socketPath: string): boolean {
-  return (
-    basename(socketPath) === CANONICAL_NODE_SOCKET_BASENAME &&
-    !existsSync(legacyFullSurfaceSocketPath(socketPath))
-  );
-}
-
-function socketServesEveryNodeRoute(socketPath: string): boolean {
-  return isFullSurfaceSocket(socketPath) || isCollapsedFullSurfaceSocket(socketPath);
-}
-
-function routePathname(path: string): string {
-  const q = path.indexOf("?");
-  return q === -1 ? path : path.slice(0, q);
-}
-
-function isSocketOwnerRoute(method: string, path: string): boolean {
-  const pathname = routePathname(path);
-  return SOCKET_OWNER_ROUTES.some((r) => {
-    if (r.method !== method) return false;
-    // Exact match, or nested under a declared prefix (GET /api/schema/{hash}).
-    return pathname === r.path || pathname.startsWith(`${r.path}/`);
-  });
-}
-
-function isSocketRoute(method: string, path: string, socketPath: string): boolean {
-  if (socketServesEveryNodeRoute(socketPath)) return true;
-  return isSocketOwnerRoute(method, path);
-}
-
 // A LOCAL node is reached only over its Unix socket — the loopback TCP listener
 // is retired (fold `fold-retire-tcp-listener`), so there is no TCP fallback.
 export function isLoopbackNodeUrl(url: string): boolean {
@@ -1831,19 +1784,6 @@ export async function pingNode(opts: {
   }
 }
 
-// The socket a given route must use under socket-only, computed regardless of
-// whether the selected file exists (a down node simply fails the connect, which
-// the catch maps to a node-not-running diagnostic instead of dialing :9001). A
-// configured legacy full-surface socket carries every route. A canonical
-// `folddb.sock` carries the whole app when no `folddb-full.sock` sibling exists
-// (current fold nodes); when the sibling exists (older nodes), non-data-plane
-// setup routes keep using it for back-compat.
-function routeSocketPathFor(method: string, path: string, socketPath: string): string {
-  if (socketServesEveryNodeRoute(socketPath)) return socketPath;
-  if (isSocketOwnerRoute(method, path)) return socketPath;
-  return legacyFullSurfaceSocketPath(socketPath);
-}
-
 // Exported for the deadline tests only; product callers go through the clients.
 export async function verboseFetch(opts: {
   baseUrl: string;
@@ -1855,11 +1795,11 @@ export async function verboseFetch(opts: {
   headers: Record<string, string>;
   timeoutMs?: number;
   maxResponseBytes?: number;
-  // The node's Unix-domain socket. When set AND the service is `node` AND the
-  // route is served by that socket AND the socket file exists, the request goes
-  // over UDS (socket-first) with a single automatic fallback to TCP `baseUrl` if
-  // the socket connect fails. `folddb.sock` is deliberately allowlisted; the
-  // full surface socket (`folddb-full.sock`) may carry every node route. NEVER
+  // The node's Unix-domain owner socket (`<home>/data/folddb.sock`), which
+  // carries every node route. When set AND the service is `node` AND the socket
+  // file exists, the request goes over UDS (socket-first); a loopback node is
+  // socket-only, and only a remote node keeps a single automatic fallback to
+  // TCP `baseUrl` if the socket connect fails. NEVER
   // consulted for `service: schema` — the schema service is the remote HTTPS
   // Lambda, which has no local socket.
   socketPath?: string;
@@ -1876,14 +1816,12 @@ export async function verboseFetch(opts: {
         : JSON.stringify(opts.body);
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
 
-  // Socket-first selection. `folddb.sock` carries board data-plane requests plus
-  // the schema and auto-identity reads doctor needs. `folddb-full.sock` carries
-  // the whole node HTTP app, so it uses UDS for every node route. Beyond the
-  // route predicate the usual guards apply: only `service: node`, only when a
+  // Socket-first selection. The one owner socket (`folddb.sock`) carries every
+  // node route. The usual guards apply: only `service: node`, only when a
   // socketPath was threaded in and the file exists (a node without a socket, or
   // the schema service, transparently uses TCP). Bun's UDS fetch keeps the URL
   // as `http://localhost<path>` and routes the connection over `{ unix }`.
-  // A LOCAL (loopback) node is socket-only: pick the route's socket
+  // A LOCAL (loopback) node is socket-only: use the owner socket
   // UNCONDITIONALLY and never dial the retired loopback TCP port — a connect
   // failure is mapped to a node-not-running diagnostic, not a :9001 error.
   const socketOnly =
@@ -1891,18 +1829,15 @@ export async function verboseFetch(opts: {
     isLoopbackNodeUrl(opts.baseUrl) &&
     opts.socketPath !== undefined &&
     opts.socketPath.length > 0;
-  const socketOnlyPath = socketOnly
-    ? routeSocketPathFor(opts.method, opts.path, opts.socketPath as string)
-    : null;
+  const socketOnlyPath = socketOnly ? (opts.socketPath as string) : null;
   // Legacy socket-first WITH a TCP fallback, retained only for a NON-loopback
-  // (remote) node that exposes a local socket file for an allowlisted route.
+  // (remote) node that exposes a local socket file.
   const useSocket =
     !socketOnly &&
     opts.service === "node" &&
     opts.socketPath !== undefined &&
     opts.socketPath.length > 0 &&
-    existsSync(opts.socketPath) &&
-    isSocketRoute(opts.method, opts.path, opts.socketPath);
+    existsSync(opts.socketPath);
   const errorSocketPath = socketOnly
     ? (socketOnlyPath as string)
     : useSocket
