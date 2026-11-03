@@ -3,7 +3,6 @@ import { syncOwnedModel } from "../owned-schema-init.ts";
 import { requireMultiKey } from "../multi-key.ts";
 import { newNodeClient, FkanbanError, type NodeClient, type Verbose } from "../client.ts";
 import { existsSync, readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
 import { fkanbanInvocation, mcpAddCommand } from "../mcp/register.ts";
 import { OWNER_APP_ID, DEFAULT_BOARD_SLUG, DEFAULT_COLUMNS } from "../schemas.ts";
 import { CONFIG_VERSION, defaultConfigPath, resolveSocketPath, tryReadConfig,
@@ -55,16 +54,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   print(`[1/3] read node identity at ${socketPath}`);
   const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe",
     verbose: opts.verbose, warn: print, socketPath });
-  let identity: Awaited<ReturnType<NodeClient["autoIdentity"]>>;
-  try { identity = await probe.autoIdentity(); }
-  catch (error) { throw freshSetupSocketError(error, socketPath, "/api/system/auto-identity") ?? error; }
+  const identity = await probe.autoIdentity();
   let userHash: string;
   const bootstrapped = !identity.provisioned;
   if (identity.provisioned) userHash = identity.userHash;
-  else {
-    try { userHash = (await probe.bootstrap(opts.bootstrapName ?? "fkanban")).userHash; }
-    catch (error) { throw freshSetupSocketError(error, socketPath, "/api/setup/bootstrap") ?? error; }
-  }
+  else userHash = (await probe.bootstrap(opts.bootstrapName ?? "fkanban")).userHash;
   const before = existing ? [] : await probe.listSchemas();
   const canonicalVocabulary = existing ? Boolean(existing.schemaFieldAliases)
     : !before.some(schema => schema.owner_app_id === OWNER_APP_ID && schema.fields.some(field => ["slug", "board"].includes(field)));
@@ -102,27 +96,6 @@ export function assertSafePrimaryConfigRepoint(args: {
     hint:
       "Use KANBAN_CONFIG or FKANBAN_CONFIG to write an alternate config for " +
       "a separate node init, or re-run against the configured primary socket.",
-  });
-}
-
-function freshSetupSocketError(err: unknown, socketPath: string, route: string): FkanbanError | null {
-  if (!(err instanceof FkanbanError) || err.code !== "service_unreachable") return null;
-  const fullSocketPath = basename(socketPath) === "folddb-full.sock"
-    ? socketPath
-    : join(dirname(socketPath), "folddb-full.sock");
-  if (basename(socketPath) === "folddb.sock" && !existsSync(fullSocketPath)) return null;
-  if (existsSync(fullSocketPath)) return null;
-  return new FkanbanError({
-    code: "full_surface_socket_unavailable",
-    message:
-      `Cannot complete first-time fkanban setup over ${socketPath}: ${route} needs the ` +
-      `node's full-surface owner socket, but ${fullSocketPath} does not exist.`,
-    hint:
-      "This node appears to expose only the narrow data/attestation socket. Use a node build " +
-      "or startup mode that creates <data>/folddb-full.sock for setup writes, then re-run " +
-      "`kanban init --node-socket-path <data>/folddb.sock`. Existing provisioned nodes can " +
-      "still be used over the narrow socket; fresh bootstrap/schema registration needs the full surface.",
-    cause: err,
   });
 }
 
