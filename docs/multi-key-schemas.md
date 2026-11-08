@@ -1,4 +1,4 @@
-# F-Kanban multi-key schemas
+# Kanban multi-key schemas
 
 Each schema owns its record values. Canonical fields reuse only their definitions.
 Named keys belong to the source record schema. A mutation updates the record and its keys in one native request.

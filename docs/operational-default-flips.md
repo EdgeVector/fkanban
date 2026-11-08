@@ -1,6 +1,6 @@
 # Operational Default Flips
 
-F-Kanban defaults that change pickup eligibility, write guards, routing
+Kanban defaults that change pickup eligibility, write guards, routing
 classification, or the visible board frontier are operational events. Treat
 them as agent-impacting config changes even when the code change is small.
 
@@ -14,7 +14,7 @@ Use this shape, filling in the promoted build and expected fallout:
 
 ```bash
 situations notice \
-  --title "F-Kanban enforceLivePrMilestone default enabled" \
+  --title "Kanban enforceLivePrMilestone default enabled" \
   --kind config \
   --system fkanban \
   --system last-stack-board \

@@ -186,8 +186,7 @@ function toolResult(
 // `fkanban_list` on a real board (160+ cards, each with its full `body`) dumps
 // ~160K tokens and evicts the caller's working context. Default to a sane cap
 // (DEFAULT_SEARCH_LIMIT) reusing the existing `capFlat`, with an explicit
-// opt-out, and ALWAYS report `total`/`truncated` so the cap is never silent
-// (mirrors `fbrain_get`'s `bodyTruncated`/`bodyTotalChars` precedent).
+// opt-out, and ALWAYS report `total`/`truncated` so the cap is never silent.
 //
 // `limit`: undefined → default cap; an explicit value caps to it; `0` (like
 // `all`) returns the complete set. `all` short-circuits to the complete set.
@@ -212,7 +211,7 @@ function capCards<T extends Card>(
 // body to triage a board — they need to see WHICH cards exist and a hint of
 // each. So by default we ship a short, single-lined `body` PREVIEW plus a
 // `bodyTruncated` flag, and point the agent at `fkanban_show <slug>` for the
-// full body (mirrors fbrain_search's snippet vs fbrain_get's full record).
+// full body.
 // `full_body:true` opts back into the complete body per card for the rare agent
 // that genuinely needs it inline. The single-card `fkanban_show` is unchanged
 // (always full body). The CLI `list --json`/`search --json` are also unchanged
@@ -1005,7 +1004,7 @@ export function createFkanbanMcpServer(
         kind: z.enum(CARD_KINDS).optional().describe("pr drives to a merged PR; non-pr kinds are context/grouping cards and are never picked up."),
         block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional().describe("Intentional hold (NOT dependency-blocked, which is derived from deps)."),
         block_reason: z.string().optional().describe("Why, when block_status != none."),
-        north_star: z.string().optional().describe("fbrain North Star slug this card advances."),
+        north_star: z.string().optional().describe("brain North Star slug this card advances."),
         milestone: z.string().optional().describe("fkanban Milestone slug this card advances."),
         pr_url: z.string().optional().describe("PR driving this card, when in flight."),
         branch: z.string().optional().describe("Worktree/feature branch."),
@@ -1128,7 +1127,7 @@ export function createFkanbanMcpServer(
         kind: z.enum(CARD_KINDS).optional().describe("pr drives to a merged PR; non-pr kinds are never picked up."),
         block_status: z.enum(["none", "needs_human", "design_first", "deferred"]).optional(),
         block_reason: z.string().optional(),
-        north_star: z.string().optional().describe("fbrain North Star slug this card advances."),
+        north_star: z.string().optional().describe("brain North Star slug this card advances."),
         milestone: z.string().optional().describe("fkanban Milestone slug this card advances."),
         pr_url: z.string().optional(),
         branch: z.string().optional(),
