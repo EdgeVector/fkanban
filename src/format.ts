@@ -45,8 +45,8 @@ export interface DepResult {
    * default/todo card to backlog, because default/todo is the pickup claim
    * lane and a card with an unfinished dep is not claimable there.
    *
-   * The demote is deliberate and pinned (test/add-update-board.test.ts), but it
-   * was invisible: the result type could not express a column change, so
+   * The demote is deliberate, but it was invisible: the result type could not
+   * express a column change, so
    * neither the CLI line nor the MCP payload mentioned that the card had just
    * left the pickup lane. An operator who ran `dep add` saw only the edge.
    */

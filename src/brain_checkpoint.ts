@@ -35,22 +35,11 @@ function defaultCheckpointWarn(msg: string): void {
   process.stderr.write(`fkanban: warning: ${msg}\n`);
 }
 
-let testClient: BrainCheckpointClient | null = null;
-
-export function setBrainCheckpointClientForTest(client: BrainCheckpointClient | null): () => void {
-  const previous = testClient;
-  testClient = client;
-  return () => {
-    testClient = previous;
-  };
-}
-
 function shouldSkipWithoutClient(): boolean {
-  return process.env.NODE_ENV === "test" || process.env.FKANBAN_DISABLE_BRAIN_CHECKPOINTS === "1";
+  return process.env.FKANBAN_DISABLE_BRAIN_CHECKPOINTS === "1";
 }
 
 function brainClient(): BrainCheckpointClient | null {
-  if (testClient) return testClient;
   if (shouldSkipWithoutClient()) return null;
   return fbrainCliClient;
 }
@@ -85,16 +74,6 @@ function brainBin(): string {
   // None on PATH: spawn the current name so the error names what is missing.
   resolvedBrainBin = BRAIN_BIN_CANDIDATES[0];
   return resolvedBrainBin;
-}
-
-/** Test seam — forget a memoized resolution so a case can vary PATH. */
-export function resetBrainBinForTest(): void {
-  resolvedBrainBin = null;
-}
-
-/** Test seam — the resolved binary name, without spawning it. */
-export function brainBinForTest(): string {
-  return brainBin();
 }
 
 function runFbrain(args: string[], input?: string): Promise<string> {

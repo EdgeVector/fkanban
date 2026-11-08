@@ -190,14 +190,8 @@ export async function checkSituationFence(
   card: Card,
   preflight: SituationPreflight = fsituationsPreflight,
 ): Promise<SituationFenceResult> {
-  // The default spawner reads the host's live Situations. Under `bun test` a
-  // card that names a real repo must not depend on them, so the repo-level
-  // actions run there only with an injected preflight.
-  const repoLevel = preflight !== fsituationsPreflight || process.env.NODE_ENV !== "test";
   const repoActions: readonly string[] = REPO_FENCE_ACTIONS;
-  const actions = inferSituationPreflightActions(card).filter(
-    (action) => repoLevel || !repoActions.includes(action),
-  );
+  const actions = inferSituationPreflightActions(card);
   if (actions.length === 0) {
     return { allowed: true, reason: "no Situation preflight action inferred", suggestion: "", details: [] };
   }

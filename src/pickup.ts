@@ -516,8 +516,7 @@ export async function buildPickupStatusReportWithSituations(
   // means "the card is malformed", not "we never looked".
   //
   // These two fan-outs are ISSUED TOGETHER, and that is the whole point.
-  // Measured on the live primary 2026-08-03
-  // (`probe-client-overhead-vs-node-time.ts`, `probe-where-the-194ms-goes.ts`):
+  // Measured on the live primary 2026-08-03:
   // a Card point read costs the node **1.9ms** and the caller **~197ms**, and a
   // bare `fetch` over the same socket costs the same ~190ms — so ~99% of a
   // kanban read is per-request latency this process does not control. It also

@@ -2066,7 +2066,7 @@ function mapSdkDataError(
   //
   //   - `patchBoardListIndex` retries a losing `all_boards` patch 4 times.
   //     Dead, so the FIRST conflict threw. Measured on an isolated node
-  //     2026-08-03 with `scripts/kanban-stress.sh`: a 4-way concurrent
+  //     2026-08-03: a 4-way concurrent
   //     `board create` burst lost 3 of 4 boards. A board missing from
   //     `all_boards` makes every card on it invisible to `kanban list` while
   //     `show <slug>` still works.
