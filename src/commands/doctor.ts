@@ -69,7 +69,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<boolean> {
     return false;
   }
   const node = newNodeClient({ baseUrl: cfg.nodeUrl, schemaFieldAliases: cfg.schemaFieldAliases,
-    userHash: cfg.userHash, verbose: opts.verbose, socketPath: resolveSocketPath(cfg),
+    verbose: opts.verbose, socketPath: resolveSocketPath(cfg),
     opsLabel: DOCTOR_OPS_LABEL, skipApiVersionGate: true });
   const transport = node.nodeTransport();
   info("node transport", transport.transport === "socket" ? transport.socketPath : "socket unavailable");

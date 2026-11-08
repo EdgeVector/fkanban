@@ -45,15 +45,12 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   if (existing) requireMultiKey(existing);
   assertSafePrimaryConfigRepoint({ existing, requestedNodeSocketPath: opts.nodeSocketPath, configPath,
     hasExplicitConfigPath: opts.configPath !== undefined || Boolean(process.env.KANBAN_CONFIG || process.env.FKANBAN_CONFIG) });
-  const staleUrls = new Set(["http://127.0.0.1:9001", "http://localhost:9001"]);
-  const priorUrl = existing?.nodeUrl;
-  const nodeUrl = opts.nodeUrl ?? (priorUrl && !staleUrls.has(priorUrl) ? priorUrl : DEFAULT_NODE_URL);
+  const nodeUrl = opts.nodeUrl ?? existing?.nodeUrl ?? DEFAULT_NODE_URL;
   const schemaServiceUrl = opts.schemaServiceUrl ?? existing?.schemaServiceUrl ?? DEFAULT_SCHEMA_SERVICE_URL;
   const nodeSocketPath = opts.nodeSocketPath ?? existing?.nodeSocketPath;
   const socketPath = resolveSocketPath({ nodeSocketPath });
   print(`[1/3] read node identity at ${socketPath}`);
-  const probe = newNodeClient({ baseUrl: nodeUrl, userHash: existing?.userHash ?? "init-probe",
-    verbose: opts.verbose, warn: print, socketPath });
+  const probe = newNodeClient({ baseUrl: nodeUrl, verbose: opts.verbose, warn: print, socketPath });
   const identity = await probe.autoIdentity();
   let userHash: string;
   const bootstrapped = !identity.provisioned;
@@ -62,7 +59,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const before = existing ? [] : await probe.listSchemas();
   const canonicalVocabulary = existing ? Boolean(existing.schemaFieldAliases)
     : !before.some(schema => schema.owner_app_id === OWNER_APP_ID && schema.fields.some(field => ["slug", "board"].includes(field)));
-  const node = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: opts.verbose, socketPath,
+  const node = newNodeClient({ baseUrl: nodeUrl, verbose: opts.verbose, socketPath,
     schemaFieldAliases: existing?.schemaFieldAliases, canonicalVocabulary });
   print("[2/3] declare schema-owned records and named keys");
   const config = await syncOwnedModel(node, { configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl,

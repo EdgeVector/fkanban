@@ -5,17 +5,14 @@ import { encodeFieldRequest, decodeFieldReply, localSchemaMetadata, type FieldAl
 import type { SchemaDefinition } from "./schemas.ts";
 // Typed HTTP wrappers for the LastDB node.
 //
-// Every node endpoint sends X-User-Hash (missing → 401 MISSING_USER_CONTEXT).
 // Writes go in as NodeOwner (no capability token) — fine for a local /
 // ephemeral node with app_identity enforcement off. All errors flow through
 // a single mapper so each failure mode maps to one actionable message.
 //
-// Local nodes are socket-only: the loopback `:9001` TCP control plane was
-// retired (fold `fold-retire-tcp-listener`), so every node route — data plane,
-// schema/identity reads, and owner-session attestation — travels over the
-// node's Unix-domain control socket. The `nodeUrl` is now just a loopback
-// identity string in error/diagnostic text; there is no live TCP transport to
-// fall back to.
+// Local nodes are socket-only. Every node route — data plane, schema/identity
+// reads, and owner-session attestation — travels over the node's Unix-domain
+// control socket. The `nodeUrl` is a loopback identity string in
+// error/diagnostic text.
 //
 // Owner-session attestation (app-isolation default-on, fold#739): when the
 // node enforces app-isolation, owner-authority verbs (schema load, control
@@ -387,7 +384,6 @@ export type SchemaDetail = {
 
 export type NodeClient = {
   baseUrl: string;
-  userHash: string;
   autoIdentity(): Promise<
     | { provisioned: true; userHash: string }
     | { provisioned: false; reason: string }
@@ -591,7 +587,6 @@ export function newNodeClient(opts: {
   schemaFieldAliases?: FieldAliasProfiles;
   canonicalVocabulary?: boolean;
   baseUrl: string;
-  userHash: string;
   verbose?: Verbose;
   // A non-verbose, always-visible warning sink. When attestation is skipped
   // because the derived control socket doesn't exist, the client emits one line
@@ -619,7 +614,6 @@ export function newNodeClient(opts: {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
   const warn = opts.warn ?? noopWarn;
-  const userHash = opts.userHash;
   const timeoutMs = opts.timeoutMs;
   const socketPath = opts.socketPath;
   const opsLabel = opts.opsLabel ?? DEFAULT_OPS_LABEL;
@@ -712,7 +706,6 @@ export function newNodeClient(opts: {
     // mutation averages look like the board's write-path frontier. Keeping the
     // labels separate stops that misreading.
     const h: Record<string, string> = {
-      "X-User-Hash": userHash,
       "X-LastDB-Client": opsLabel,
     };
     if (sessionToken !== null) h["X-Folddb-Session"] = sessionToken;
@@ -1122,7 +1115,6 @@ export function newNodeClient(opts: {
 
   return {
     baseUrl: url,
-    userHash,
     nodeVersion() {
       return dataClient().version();
     },
@@ -1130,7 +1122,13 @@ export function newNodeClient(opts: {
       const { status, body } = await callJson("/api/system/auto-identity", "GET");
       if (status === 200) {
         const uh = body && typeof body === "object" ? (body as Record<string, unknown>).user_hash : undefined;
-        return { provisioned: true, userHash: typeof uh === "string" ? uh : userHash };
+        if (typeof uh !== "string" || uh.length === 0) {
+          throw new FkanbanError({
+            code: "bootstrap_no_user_hash",
+            message: "The node is provisioned but did not return a user_hash.",
+          });
+        }
+        return { provisioned: true, userHash: uh };
       }
       if (status === 503) {
         return { provisioned: false, reason: bodyError(body) ?? "node_not_provisioned" };
@@ -1800,8 +1798,7 @@ export async function verboseFetch(opts: {
   // the schema service, transparently uses TCP). Bun's UDS fetch keeps the URL
   // as `http://localhost<path>` and routes the connection over `{ unix }`.
   // A LOCAL (loopback) node is socket-only: use the owner socket
-  // UNCONDITIONALLY and never dial the retired loopback TCP port — a connect
-  // failure is mapped to a node-not-running diagnostic, not a :9001 error.
+  // unconditionally. A connect failure is mapped to a node-not-running diagnostic.
   const socketOnly =
     opts.service === "node" &&
     isLoopbackNodeUrl(opts.baseUrl) &&
@@ -2006,9 +2003,8 @@ function connectionError(
   path?: string,
 ): FkanbanError {
   const which = service === "node" ? "node" : "schema service";
-  // A local node is socket-only (the loopback TCP listener is retired), so name
-  // the socket — not :9001 — when one was configured; only a remote/non-socket
-  // target reports the base URL.
+  // A local node is socket-only, so name the socket when one was configured.
+  // A remote or non-socket target reports the base URL.
   const where = socketPath ? `over its Unix socket ${socketPath}` : `at ${baseUrl}`;
   const route = method && path ? ` during ${method} ${path}` : "";
   const routeKind = path === "/api/mutation" ? "write" : path === "/api/query" ? "read" : "request";
@@ -2118,13 +2114,6 @@ function mapSdkDataError(
 function mapNodeError(status: number, body: unknown, path: string): FkanbanError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
-  if (status === 401 && (errCode === "MISSING_USER_CONTEXT" || msg?.includes("Authentication"))) {
-    return new FkanbanError({
-      code: "missing_user_context",
-      message: `Node rejected ${path}: missing X-User-Hash.`,
-      hint: "Re-run `kanban init` so the config's userHash is regenerated.",
-    });
-  }
   if (status === 503 && errCode === "node_not_provisioned") {
     return new FkanbanError({
       code: "node_not_provisioned",

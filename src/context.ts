@@ -16,7 +16,6 @@ export function loadCtx(
   requireMultiKey(cfg);
   const node = newNodeClient({
     baseUrl: cfg.nodeUrl, schemaFieldAliases:cfg.schemaFieldAliases,
-    userHash: cfg.userHash,
     verbose: opts.verbose,
     socketPath: resolveSocketPath(cfg),
     // Omitted for ordinary commands, so they keep the plain board label.
