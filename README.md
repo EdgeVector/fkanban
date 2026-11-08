@@ -6,8 +6,7 @@ Schema Service-backed app-schema declaration for its private-visibility record
 shapes.
 
 Development source of truth is GitHub `EdgeVector/fkanban`: PRs, the
-`ci-required` check and auto-merge run there. See `.lastgit/README.md` for the
-gate and the host-track artifact path.
+`ci-required` check and auto-merge run there. The gate script is `.lastgit/ci.sh`.
 
 Schemas, registered under the `fkanban/*` app namespace (so they never collide
 with `fbrain/*` or any other app on a shared daemon):
@@ -119,37 +118,6 @@ PATH, it links the shims anyway but tells you so (and prints the exact
 — so it's fully local and reversible, nothing is published to
 a registry, and the `rm …` line it prints removes all four shims. Without the shim, run the
 CLI as `bun run src/cli.ts <cmd>` from inside the repo; the two are equivalent.
-
-For long-lived agent machines, use the host-track refresh helper instead of
-pointing PATH at a workspace checkout:
-
-```bash
-bin/host-track-refresh
-kanban which --json
-kanban which --check
-```
-
-**Preferred install (Kind B local-safe, host-track apps.json):**
-
-```text
-~/.host-track/apps/fkanban/current → versions/<oid>
-~/.local/bin/{kanban,fkanban,…}    → …/current/bin/…
-```
-
-Upgrade with `last-stack-safe-upgrade-cli fkanban` (or `host-track refresh
-fkanban` when wired). `which --check` accepts both that layout and the legacy
-checkout `~/.host-track/fkanban` (still used by `bin/host-track-refresh` on
-older machines). Override with `FKANBAN_HOST_TRACK_DIR`.
-
-Host-track registers this repo under the app ids `kanban` and `fkanban`
-(same install root). Use `host-track status kanban` for the registered app
-status, and `fkanban which --json` or `~/.host-track/stamps/fkanban.json` to
-inspect the live install.
-
-When promoting a host-track build or config that flips an operational default
-such as an `enforce*` guard, post a temporary Situations notice before the
-promotion. See [Operational Default Flips](docs/operational-default-flips.md)
-for the notice convention.
 
 ## Quick start
 
