@@ -72,7 +72,7 @@ const FENCED_REPO = "EdgeVector/fold";
  * The fence used to ask only the two fold_db_node actions, so a Situation
  * scoped to a repo with `blocked_actions: [claim-card, pickup]` never reached
  * pickup. Live 2026-09-25 21:14Z: `pc-gaming-pause-fold-work-until-20260925t2200z`
- * blocked both for EdgeVector/fold, `fsituations preflight --action claim-card
+ * blocked both for EdgeVector/fold, `situations preflight --action claim-card
  * --repo EdgeVector/fold` answered BLOCKED, and `pickup explain` still said
  * `situation-fence — allowed`; a Loom worker claimed a fold card inside the pause.
  */
@@ -125,12 +125,7 @@ function situationAllowsCardAction(result: SituationPreflightResponse, card: Car
 }
 
 function commandCandidates(): string[][] {
-  const args = ["preflight"];
-  const explicit = process.env.FKANBAN_FSITUATIONS_BIN;
-  const out: string[][] = explicit ? [[explicit, ...args]] : [["fsituations", ...args]];
-  const checkout = process.env.FKANBAN_FSITUATIONS_CHECKOUT ?? "/Users/tomtang/code/edgevector/fsituations";
-  out.push(["bun", "--cwd", checkout, "src/cli.ts", ...args]);
-  return out;
+  return [["situations", "preflight"]];
 }
 
 async function runJsonCommand(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -157,18 +152,18 @@ export function clearSituationPreflightMemo(): void {
   preflightMemo.clear();
 }
 
-export async function fsituationsPreflight(opts: { action: string; repo: string }): Promise<SituationPreflightResponse> {
+export async function situationsPreflight(opts: { action: string; repo: string }): Promise<SituationPreflightResponse> {
   const key = `${opts.action}\u0000${opts.repo}`;
   const now = Date.now();
   const hit = preflightMemo.get(key);
   if (hit && now - hit.at < PREFLIGHT_TTL_MS) return hit.result;
-  const result = fsituationsPreflightUncached(opts);
+  const result = situationsPreflightUncached(opts);
   preflightMemo.set(key, { at: now, result });
   result.catch(() => preflightMemo.delete(key));
   return result;
 }
 
-async function fsituationsPreflightUncached(opts: { action: string; repo: string }): Promise<SituationPreflightResponse> {
+async function situationsPreflightUncached(opts: { action: string; repo: string }): Promise<SituationPreflightResponse> {
   const suffix = ["--action", opts.action, "--repo", opts.repo];
   const errors: string[] = [];
   for (const base of commandCandidates()) {
@@ -188,7 +183,7 @@ async function fsituationsPreflightUncached(opts: { action: string; repo: string
 
 export async function checkSituationFence(
   card: Card,
-  preflight: SituationPreflight = fsituationsPreflight,
+  preflight: SituationPreflight = situationsPreflight,
 ): Promise<SituationFenceResult> {
   const repoActions: readonly string[] = REPO_FENCE_ACTIONS;
   const actions = inferSituationPreflightActions(card);
@@ -220,7 +215,7 @@ export async function checkSituationFence(
         allowed: false,
         reason: `blocked by active Situation ${slug}`,
         suggestion: "Do not pick up this card until the Situation allows it or the card is re-scoped.",
-        details: [`fsituations preflight ${action} --repo ${repo.repo} returned BLOCKED`, `action: ${action}`],
+        details: [`situations preflight ${action} --repo ${repo.repo} returned BLOCKED`, `action: ${action}`],
         situationSlug: slug,
         action,
       };
@@ -230,8 +225,8 @@ export async function checkSituationFence(
   } catch (err) {
     return {
       allowed: false,
-      reason: "fsituations preflight failed",
-      suggestion: "Fix fsituations preflight before moving this card into doing.",
+      reason: "situations preflight failed",
+      suggestion: "Fix situations preflight before moving this card into doing.",
       details: [err instanceof Error ? err.message : String(err)],
       action: actions.join(","),
     };

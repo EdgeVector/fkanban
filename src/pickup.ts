@@ -663,9 +663,8 @@ export async function buildPickupStatusReportWithSituations(
 
   const fences = new Map<string, SituationFenceResult>();
   // BOUNDED, and this is the run that made the bound load-bearing. Each fence
-  // call is not a node read — it is `Bun.spawn` of the fsituations CLI, once per
-  // inferred action, and on a PATH miss it retries as `bun --cwd <checkout>
-  // src/cli.ts`, i.e. a second TypeScript CLI started from source. A bare
+  // call is not a node read — it is `Bun.spawn` of the situations CLI, once per
+  // inferred action. A bare
   // `Promise.all` over the ready set therefore started one process per ready
   // card at once. That was latent only because the fence never fired; the
   // hydrate above is what turns it on, so leaving it unbounded would ship a
