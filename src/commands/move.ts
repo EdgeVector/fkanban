@@ -34,7 +34,7 @@ import {
   type Card,
 } from "../record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "../situations.ts";
-import { assertLifecycleMoveAllowed } from "../pipeline_status.ts";
+import { assertLifecycleMoveAllowed } from "../lifecycle_gate.ts";
 import { planDoingClaim } from "../doing-claim.ts";
 import { requireMultiKey } from "../multi-key.ts";
 import { activatePlannedMilestoneForDoing, type MilestoneActivationOutcome } from "../milestone_activation.ts";
@@ -507,10 +507,9 @@ export async function moveCmd(opts: MoveOptions): Promise<MoveResult> {
   });
   await assertSituationPreflightAllowed(updated, opts.situationPreflight);
   await assertDepUnblocked(opts.node, opts.cfg, updated, opts.force);
-  // Opt-in LastgitCiStatus gate: only cards with Requires-Status / Requires-Deploy
-  // headers are checked when moving into the board's terminal column.
+  // Opt-in lifecycle gate: cards with Requires-Status / Requires-Deploy
+  // headers need a later positive PROOF line before the terminal column.
   await assertLifecycleMoveAllowed({
-    node: opts.node,
     card: updated,
     targetColumn: opts.column,
     terminalColumn: terminalColumn(columns),

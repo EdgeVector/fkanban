@@ -40,7 +40,6 @@ export async function pickupWorkPolicyResult(opts: {
   }
   const card = await requireCard(opts.node, opts.cfg, slug);
   const pr_liveness = await probeCardPrLiveness(card, {
-    node: opts.node,
     probe: opts.probe,
   });
   const { action, stale_pr_url } = pickupWorkPolicyFromLiveness(pr_liveness);

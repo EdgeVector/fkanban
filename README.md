@@ -189,7 +189,7 @@ The `--schema-service-url` value is diagnostic because Mini owns that call.
 Schema synchronization has one executable transport: F-Kanban's node client
 calls Mini's `POST /api/apps/declare-schema` (normally through `kanban init`).
 F-Kanban must not call Schema Service, use the legacy owner-declare route,
-accept `local_mint`, or copy rows as part of a field expansion. The LastGit CI gate runs
+accept `local_mint`, or copy rows as part of a field expansion. The ci-required gate runs
 `bun run check:schema-sync-boundary` and rejects those bypasses. An incompatible
 key-layout migration is a separately designed and reviewed operation; it is
 never inferred from schema synchronization.

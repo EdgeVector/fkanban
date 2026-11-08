@@ -123,7 +123,7 @@ fi
 # card move take tens of seconds, and it inflates this harness's own latency
 # numbers with contention it created itself. Measured 2026-07-31: an orphaned
 # copy at BURST=10 drove live kanban writes to a 26.4s average (p95 72.8s) while
-# lastgit issued zero mutations -- kanban barriering against itself.
+# other clients issued zero mutations -- kanban barriering against itself.
 #
 # Point KSTRESS at an isolated node instead (LASTDB_HOME=/tmp/... or
 # FOLDDB_SOCKET_PATH=...), the way sop-lastdb-safe-upgrade boots a probe node.

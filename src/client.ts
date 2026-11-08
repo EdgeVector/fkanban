@@ -834,7 +834,7 @@ export function newNodeClient(opts: {
    * every product read fkanban makes) lands on the offset-paged fallback and
    * still comes back advertising a cursor. Handing that cursor back re-serves
    * the SAME page with the SAME cursor, forever. Verified against the live
-   * primary on `LastgitCiStatus` `HashKey(last-stack)` (1251 rows): page 1
+   * primary on a hash-key read of 1251 rows: page 1
    * returns 1000 rows + cursor C; sending C returns byte-identical rows and
    * cursor C again. A cursor-preferring loop therefore never terminates — it
    * runs to whatever row cap it has, ~1000 requests per logical read.
@@ -1624,10 +1624,9 @@ export type PingReport = {
    * | `lastdb`              | 109   | 10.7s | 1m21s   |
    * | `peer:curl`           | 138   | 6.1s  | 1m31s   |
    * | `lastdb-memory-guard` | 56    | 8.4s  | 1m23s   |
-   * | `lastgit`             | 36    | 6.4s  | 1m20s   |
    *
-   * 339 status calls, 45 minutes of node service time — against `lastgit query`
-   * at 4ms over 173,614 calls. The cost scales with the store (it was 332ms in
+   * Hundreds of status calls and tens of minutes of node service time, against
+   * ordinary keyed reads at a few milliseconds. The cost scales with the store (it was 332ms in
    * the 2026-08-05 measurement, when the store was 7.32 GiB; it is 24.45 GiB
    * now), so a HEALTHY node routinely takes longer than a caller's deadline.
    *
