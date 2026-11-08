@@ -82,7 +82,7 @@ export const CARD_FIELDS = [
   "created_by",
   "updated_at",
   "db",
-  // Structured pickup-decision + reconcile fields (see fbrain design
+  // Structured pickup-decision + reconcile fields (design
   // `fkanban-card-structured-fields`). Promote signals a fresh agent needs
   // to decide "what do I pick up?" out of body prose into real fields, so
   // every routine reads them the same way. `priority` is intentionally

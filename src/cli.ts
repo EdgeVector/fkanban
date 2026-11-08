@@ -267,7 +267,7 @@ Structured fields (auto-derived from the body/tags when omitted):
                         (non-pr kinds are context/grouping cards, never picked up)
   --block-status <s>    none|needs_human|design_first|deferred (intentional holds)
   --block-reason <text> why, when --block-status is set
-  --north-star <slug>   fbrain North Star this card advances
+  --north-star <slug>   brain North Star this card advances
   --milestone <slug>    fkanban Milestone this card advances
   --pr-url <url>        the PR driving this card (when in flight)
   --branch <name>       worktree/feature branch
@@ -358,7 +358,7 @@ Options (at least one required):
   --kind <k>            pr|registry|tracker|umbrella|meta|program|capstone|validation
   --block-status <s>    none|needs_human|design_first|deferred
   --block-reason <text> why, when --block-status is set
-  --north-star <slug>   fbrain North Star this card advances
+  --north-star <slug>   brain North Star this card advances
   --milestone <slug>    fkanban Milestone this card advances
   --pr-url <url>        the PR driving this card (when in flight)
   --branch <name>       worktree/feature branch

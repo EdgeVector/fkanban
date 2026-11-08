@@ -9,7 +9,7 @@ Development source of truth is GitHub `EdgeVector/fkanban`: PRs, the
 `ci-required` check and auto-merge run there. The gate script is `.lastgit/ci.sh`.
 
 Schemas, registered under the `fkanban/*` app namespace (so they never collide
-with `fbrain/*` or any other app on a shared daemon):
+with `brain/*` or any other app on a shared daemon):
 
 - **`fkanban/Card`** — primary record by `slug` (includes body)
 - **`fkanban/Board`** — board metadata by `slug`
@@ -636,9 +636,8 @@ its schemas, but registration with Schema Service is still mandatory.
 ## Design notes
 
 - **NodeOwner writes.** Mutations go in without a capability token — correct
-  for a local / ephemeral node with `APP_IDENTITY_ENFORCE` off. Under
-  enforcement the app would need a consent handshake (see `fbrain`'s
-  `capability.ts`); that's intentionally out of scope here.
+  for a local / ephemeral node with `APP_IDENTITY_ENFORCE` off. A consent
+  handshake under enforcement is out of scope here.
 - **Delete.** `rm` deletes the card (hard erase; no trash / undo). To preserve
   dependency resolution, card deletion refuses while live dependents still
   point at the card; `board rm --force` has the same guard for cards outside

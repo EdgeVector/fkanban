@@ -55,7 +55,7 @@ export type Card = {
 
   first_doing_at: string;
   // ── Structured pickup-decision + reconcile fields ───────────────────────
-  // (fbrain design `fkanban-card-structured-fields`). Stored as plain String
+  // (design `fkanban-card-structured-fields`). Stored as plain String
   // schema fields; enum-valued ones (kind/block_status) are normalized on use
   // via normalizeKind/normalizeBlockStatus so a stale/legacy value never throws.
   // All default to "" for pre-migration cards (rowToCard).
@@ -65,7 +65,7 @@ export type Card = {
   kind: string; // CardKind: pr|registry|tracker|umbrella|meta|program|capstone|validation
   block_status: string; // BlockStatus: none|needs_human|design_first|deferred
   block_reason: string; // free-text why, when block_status != none
-  north_star: string; // fbrain North Star slug this advances
+  north_star: string; // brain North Star slug this advances
   milestone?: string; // fkanban Milestone slug this card advances
   pr_url: string; // PR driving this card, when in flight
   branch: string; // worktree/feature branch
@@ -914,7 +914,7 @@ export async function stampCardForWrite(
 }
 
 // ── Structured card fields: enums, normalizers, eligibility, backfill ───────
-// (fbrain design `fkanban-card-structured-fields`.) These promote the signals a
+// (design `fkanban-card-structured-fields`.) These promote the signals a
 // fresh agent needs to decide "what do I pick up?" out of body prose into real
 // fields. Enum fields are stored as plain strings and normalized on use so a
 // stale/legacy/empty value degrades to the safe default instead of throwing.
