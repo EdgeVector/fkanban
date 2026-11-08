@@ -90,11 +90,10 @@ bun run src/cli.ts ping      # liveness check: ONE status read, no board read
 bun run src/cli.ts list      # smoke read (board data-plane round-trip)
 ```
 
-The CLI needs a running LastDB/FoldDB node. Tom's primary brain is reached over
-the configured Unix socket, not the retired TCP `:9001` endpoint. Dogfood by
+The CLI needs a running LastDB node. Tom's primary brain is reached over
+the configured Unix socket. Dogfood by
 reading/writing **through the CLI/MCP**; NEVER `kill`/reset/`brew restart` the
-primary node or wipe its data. A `doctor`/`init` TCP `:9001` failure can be stale
-control-plane behavior, not an outage. For destructive/migration tests spin up an
+primary node or wipe its data. For destructive/migration tests spin up an
 ephemeral node with its own socket / isolated data dir:
 
 ```bash
