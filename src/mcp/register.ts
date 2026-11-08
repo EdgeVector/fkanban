@@ -25,11 +25,10 @@
 //
 //   fileURLToPath(import.meta.url).replace(/\/src\/mcp\/register\.ts$/, "")
 //
-// which is correct for a source install and meaningless for the artifact that
-// actually ships. `scripts/build-artifact.sh` has produced `bun build
-// --compile` executables since 2026-07-22; inside one, every module URL
-// resolves into the executable's embedded filesystem, the regex does not
-// match, and the root becomes `/$bunfs/root/kanban` — a path in no filesystem.
+// which is correct for a source install and meaningless inside a compiled
+// executable. Every module URL then resolves into the executable's embedded
+// filesystem, the regex does not match, and the root becomes
+// `/$bunfs/root/kanban` — a path in no filesystem.
 // Measured 2026-08-06 on the shipped shape, with no shim on PATH:
 //
 //   claude mcp add fkanban -- bun /$bunfs/root/kanban/src/mcp/main.ts

@@ -39,4 +39,3 @@ The exact snapshot contract adds all 23 field guards for its finite operations.
 See [the guarded Card contract](guarded-card-contract.md).
 
 CI supplies the build and operational evidence. The primary stays outside source and CI work.
-The artifact receipt identifies the compiled programs and source; it does not prove a live request.

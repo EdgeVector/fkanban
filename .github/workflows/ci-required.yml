@@ -2,8 +2,9 @@
 # Brain: decision-2026-09-29-retire-lastgit-all-repos-to-github.
 #
 # `ci-required` is the branch-protection check. It needs `gate`, which runs
-# .lastgit/ci.sh (shell syntax, schema-sync boundary, typecheck, artifact
-# build + smoke). The tests were deleted (Tom, 2026-10-09).
+# .lastgit/ci.sh (shell syntax, schema-sync boundary, typecheck, and a
+# bundle compile of the CLI and MCP entrypoints). The tests were deleted
+# (Tom, 2026-10-09).
 # `registry-commit` runs on a push to main after the gate is green.
 name: ci-required
 

@@ -2,8 +2,6 @@
 
 The factory uses an exact canonical Card snapshot for each finite write.
 The public `guarded-contract --json` command returns the contract before config or node access.
-The installed artifact keeps `dist/guarded-contract.json` beside the CLI and MCP programs.
-That receipt binds the source commit, source file hashes, contract hash, and both program hashes.
 
 `guarded-snapshot SLUG --json` returns the exact UTF-8 JSON bytes with a final newline.
 The envelope has `version: 1`, `schema_hash`, and `fields` with all 23 stored Card fields.
@@ -82,5 +80,3 @@ Duplicate, foreign, sparse, malformed, unresolved, inconsistent-count, or incomp
 The reader does not deduplicate keys, infer rendered keys, fall back, or turn a failed read into missing truth.
 
 The CI app comparison checks competing guarded writes through the actual app code.
-The artifact receipt remains a source and program identity check.
-It does not replace the required operational latency and cutover evidence.
