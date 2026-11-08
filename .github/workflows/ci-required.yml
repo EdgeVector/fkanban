@@ -1,15 +1,10 @@
 # Gate of record for EdgeVector/fkanban (GitHub, since 2026-09-30).
-# Brain: decision-2026-09-29-retire-lastgit-all-repos-to-github,
-#        sop-github-artifact-app-migration.
+# Brain: decision-2026-09-29-retire-lastgit-all-repos-to-github.
 #
 # `ci-required` is the branch-protection check. It needs `gate`, which runs
 # .lastgit/ci.sh (shell syntax, schema-sync boundary, typecheck, artifact
-# build + smoke). The tests were deleted (Tom, 2026-10-09). `publish` runs on a
-# push to main only, after the gate is green, and uploads the app registry
-# artifact `ht-artifact-<sha>`. `app registry refresh kanban` on the Mac pulls it
-# (last-stack-github-artifact-pull), re-checks every digest, and promotes the
-# stable channel. This replaces the Forge CI publish job and the LastGit
-# artifact-release watcher.
+# build + smoke). The tests were deleted (Tom, 2026-10-09).
+# `registry-commit` runs on a push to main after the gate is green.
 name: ci-required
 
 on:
