@@ -1,4 +1,4 @@
-// PR/CR liveness for pickup work-policy.
+// PR liveness for pickup work-policy.
 //
 // A non-empty `pr_url` is not always in-flight work. Closed-unmerged is a
 // terminal state for that review artifact: reconcile can never complete, and
@@ -6,21 +6,11 @@
 // the locator (open / merged / closed-unmerged / unknown / none) so pickup
 // explain and work-policy can choose WORK vs reconcile vs closeout.
 
-import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
-import { type NodeClient } from "./client.ts";
-import {
-  fetchChangeRequestRow,
-  lastgitRepoSlug,
-  parseCrId,
-} from "./pipeline_status.ts";
 import { type Card } from "./record.ts";
 
 export const PR_LIVENESS_TIMEOUT_MS = 1500;
 
-export type PrVenue = "github" | "forgejo" | "lastgit" | "unknown";
+export type PrVenue = "github" | "unknown";
 export type PrLivenessState = "none" | "open" | "merged" | "closed-unmerged" | "unknown";
 export type WorkPolicyAction = "work" | "reconcile" | "closeout";
 
@@ -29,8 +19,6 @@ export type ParsedPrUrl = {
   owner: string;
   repo: string;
   number: string;
-  crId: string;
-  lastgitSlug: string;
   origin: string;
 };
 
@@ -56,24 +44,17 @@ const EMPTY_PARSED: ParsedPrUrl = {
   owner: "",
   repo: "",
   number: "",
-  crId: "",
-  lastgitSlug: "",
   origin: "",
 };
+
+function githubHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "github.com" || h === "www.github.com" || h.endsWith(".github.com");
+}
 
 export function parsePrUrl(prUrl: string): ParsedPrUrl {
   const t = prUrl.trim();
   if (!t) return { ...EMPTY_PARSED };
-
-  const lastgit = t.match(/^lastgit:\/\/\/?([^/]+)\/cr\/([^/?#]+)/i);
-  if (lastgit?.[1] && lastgit[2]) {
-    return {
-      ...EMPTY_PARSED,
-      venue: "lastgit",
-      lastgitSlug: lastgit[1],
-      crId: lastgit[2],
-    };
-  }
 
   const github = t.match(/^(https?:\/\/)?(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i);
   if (github?.[2] && github[3] && github[4]) {
@@ -87,32 +68,16 @@ export function parsePrUrl(prUrl: string): ParsedPrUrl {
     };
   }
 
-  const forge = t.match(/^(https?:\/\/[^/]+)\/([^/]+)\/([^/]+)\/pulls?\/(\d+)/i);
-  if (forge?.[1] && forge[2] && forge[3] && forge[4]) {
-    const host = forge[1].replace(/^https?:\/\//i, "").toLowerCase();
-    if (host === "github.com" || host.endsWith(".github.com")) {
-      return {
-        ...EMPTY_PARSED,
-        venue: "github",
-        owner: forge[2],
-        repo: forge[3].replace(/\.git$/i, ""),
-        number: forge[4],
-        origin: "https://github.com",
-      };
-    }
+  const pulls = t.match(/^(https?:\/\/([^/]+))\/([^/]+)\/([^/]+)\/pulls?\/(\d+)/i);
+  if (pulls?.[2] && pulls[3] && pulls[4] && pulls[5] && githubHost(pulls[2])) {
     return {
       ...EMPTY_PARSED,
-      venue: "forgejo",
-      owner: forge[2],
-      repo: forge[3].replace(/\.git$/i, ""),
-      number: forge[4],
-      origin: forge[1],
+      venue: "github",
+      owner: pulls[3],
+      repo: pulls[4].replace(/\.git$/i, ""),
+      number: pulls[5],
+      origin: "https://github.com",
     };
-  }
-
-  const cr = t.match(/\b(cr-[A-Za-z0-9_-]+)\b/);
-  if (cr?.[1] && /^lastgit:\/\//i.test(t)) {
-    return { ...EMPTY_PARSED, venue: "lastgit", crId: cr[1] };
   }
 
   return { ...EMPTY_PARSED, venue: "unknown" };
@@ -138,13 +103,13 @@ export function livenessNote(state: PrLivenessState, venue: PrVenue): string {
     case "none":
       return "no pr_url; fresh WORK";
     case "open":
-      return "PR/CR is open; reconcile (not pickup WORK)";
+      return "PR is open; reconcile (not pickup WORK)";
     case "merged":
-      return "PR/CR is merged; close out the card";
+      return "PR is merged; close out the card";
     case "closed-unmerged":
-      return "PR/CR is closed and unmerged; treat as no PR (fresh WORK)";
+      return "PR is closed and unmerged; treat as no PR (fresh WORK)";
     case "unknown":
-      return `PR/CR liveness unknown (${venue}); fail-closed reconcile`;
+      return `PR liveness unknown (${venue}); fail-closed reconcile`;
   }
 }
 
@@ -234,50 +199,10 @@ async function httpGetJson(url: string, timeoutMs: number): Promise<{ status: nu
   }
 }
 
-function lastStackForgeApiBin(): string {
-  const root = process.env.LAST_STACK_ROOT?.trim() || join(homedir(), ".last-stack");
-  return join(root, "bin", "last-stack-forge-api");
-}
-
-function forgeApiFallback(owner: string, repo: string, number: string): PrProbeResult | null {
-  const bin = lastStackForgeApiBin();
-  try {
-    const proc = spawnSync(bin, [`repos/${owner}/${repo}/pulls/${number}`], {
-      encoding: "utf8",
-      timeout: PR_LIVENESS_TIMEOUT_MS,
-    });
-    if (proc.status !== 0) {
-      const err = `${proc.stderr || proc.stdout || `exit ${proc.status}`}`.trim();
-      if (/404|not found/i.test(err)) return { found: false, open: false, merged: false };
-      return null;
-    }
-    const parsed = JSON.parse(proc.stdout) as unknown;
-    return probeFromHttpBody(parsed);
-  } catch {
-    return null;
-  }
-}
-
 export async function defaultPrLivenessProbe(
   parsed: ParsedPrUrl,
   _prUrl: string,
-  opts?: { node?: NodeClient; cardRepo?: string },
 ): Promise<PrProbeResult> {
-  if (parsed.venue === "lastgit") {
-    const node = opts?.node;
-    if (!node) return { found: false, open: false, merged: false, error: "no lastgit node" };
-    const slug = parsed.lastgitSlug || lastgitRepoSlug(opts?.cardRepo ?? "");
-    const crId = parsed.crId || parseCrId(_prUrl);
-    if (!slug || !crId) {
-      return { found: false, open: false, merged: false, error: "unresolved lastgit CR" };
-    }
-    const row = await fetchChangeRequestRow(node, slug, crId);
-    if (!row) return { found: false, open: false, merged: false };
-    const state = row.state.toLowerCase();
-    const merged = state === "merged" || row.merge_oid.length > 0;
-    return { found: true, open: !merged && state === "open", merged };
-  }
-
   if (parsed.venue === "github" && parsed.owner && parsed.repo && parsed.number) {
     const url = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`;
     try {
@@ -297,41 +222,23 @@ export async function defaultPrLivenessProbe(
     }
   }
 
-  if (parsed.venue === "forgejo" && parsed.origin && parsed.owner && parsed.repo && parsed.number) {
-    const url = `${parsed.origin}/api/v1/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`;
-    try {
-      const { status, body } = await httpGetJson(url, PR_LIVENESS_TIMEOUT_MS);
-      if (status === 404) return { found: false, open: false, merged: false };
-      if (status >= 200 && status < 300) return probeFromHttpBody(body);
-    } catch {
-      // Fall through to last-stack-forge-api (auth'd local forge).
-    }
-    const fallback = forgeApiFallback(parsed.owner, parsed.repo, parsed.number);
-    if (fallback) return fallback;
-    return { found: false, open: false, merged: false, error: "forgejo PR unread" };
-  }
-
   return { found: false, open: false, merged: false, error: "unrecognized pr_url" };
 }
 
 export async function probePrLiveness(
   prUrl: string,
-  opts?: { node?: NodeClient; cardRepo?: string; probe?: PrLivenessProbe },
+  opts?: { probe?: PrLivenessProbe },
 ): Promise<PrLiveness> {
   const trimmed = prUrl.trim();
   if (!trimmed) return classifyPrProbe("", "unknown", null);
   const parsed = parsePrUrl(trimmed);
-  const crId = parsed.crId || parseCrId(trimmed);
-  const resolved: ParsedPrUrl = crId && parsed.venue === "unknown"
-    ? { ...parsed, venue: "lastgit", crId }
-    : { ...parsed, crId: parsed.crId || crId };
   try {
     const probe = opts?.probe
-      ? await opts.probe(resolved, trimmed)
-      : await defaultPrLivenessProbe(resolved, trimmed, { node: opts?.node, cardRepo: opts?.cardRepo });
-    return classifyPrProbe(trimmed, resolved.venue, probe);
+      ? await opts.probe(parsed, trimmed)
+      : await defaultPrLivenessProbe(parsed, trimmed);
+    return classifyPrProbe(trimmed, parsed.venue, probe);
   } catch (err) {
-    return classifyPrProbe(trimmed, resolved.venue, {
+    return classifyPrProbe(trimmed, parsed.venue, {
       found: false,
       open: false,
       merged: false,
@@ -341,15 +248,10 @@ export async function probePrLiveness(
 }
 
 export async function probeCardPrLiveness(
-  card: Pick<Card, "pr_url" | "repo" | "body">,
-  opts?: { node?: NodeClient; probe?: PrLivenessProbe },
+  card: Pick<Card, "pr_url">,
+  opts?: { probe?: PrLivenessProbe },
 ): Promise<PrLiveness> {
-  const prUrl = card.pr_url.trim();
-  return probePrLiveness(prUrl, {
-    node: opts?.node,
-    cardRepo: card.repo,
-    probe: opts?.probe,
-  });
+  return probePrLiveness(card.pr_url.trim(), { probe: opts?.probe });
 }
 
 /** Pickup WORK vs reconcile vs closeout from a liveness verdict. */

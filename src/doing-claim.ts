@@ -84,7 +84,7 @@ export function planDoingClaim(input: {
     kind: "refuse",
     message:
       "move_into_doing_requires_claim: bare `move … doing` is not a claim. " +
-      "Pass --assignee <id> / --worker <id>, set LASTGIT_ACTOR or AUTOMATION_ID " +
+      "Pass --assignee <id> / --worker <id>, or set AUTOMATION_ID " +
       "(with DRIVEN_BY=routine), or use `pickup claim --worker <id>`. " +
       "To force an unclaimed doing column (not recommended), pass --allow-unclaimed.",
   };

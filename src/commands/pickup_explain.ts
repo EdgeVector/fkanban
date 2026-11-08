@@ -295,7 +295,6 @@ export async function pickupExplainResult(opts: {
     }
   }
   const prLiveness = await probeCardPrLiveness(card, {
-    node: opts.node,
     probe: opts.prLivenessProbe,
   });
   const prLivenessBySlug = new Map([[card.slug, prLiveness]]);

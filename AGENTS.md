@@ -82,21 +82,6 @@ bun run typecheck      # tsc --noEmit
 CI runs the same checks (`.lastgit/ci.sh`) plus a `ci-required` umbrella and
 CodeQL (~1 min, `--frozen-lockfile` — keep `bun.lock` in sync).
 
-## Card worktrees — start WARM (APFS CoW target/)
-
-Create card worktrees in a Rust repo (fold, fold_db_node, …) with the
-`bin/fkanban-worktree` helper instead of a bare `git worktree add` — it clones
-the parent's `target/` via APFS CoW so the first build is warm, not a 30-60 min
-cold compile. Mechanics/rationale: `fbrain get
-concepts-fkanban-card-worktree-warm-target-apfs-cow`.
-
-```bash
-bin/fkanban-worktree <repo-root> <worktree-dir> <branch> [base-ref]
-# e.g. fold card:
-bin/fkanban-worktree ~/code/edgevector/fold \
-  ~/.kanban/worktrees/<slug> kanban/<slug> origin/main
-```
-
 ## Run / dogfood
 
 ```bash
@@ -121,8 +106,7 @@ bun run src/cli.ts init --node-socket-path /tmp/fkanban-test.sock \
 
 This repo is homed on GitHub (`EdgeVector/fkanban`, since 2026-09-30). The gate
 of record is the `ci-required` check (`.github/workflows/ci-required.yml`,
-which runs the committed `.lastgit/ci.sh`). LastGit and Forgejo copies are
-frozen; do not push there.
+which runs the committed `.lastgit/ci.sh`).
 
 ```bash
 git push origin HEAD:refs/heads/<branch>

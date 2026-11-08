@@ -13,7 +13,7 @@ import {
 } from "./record.ts";
 import { assertSituationPreflightAllowed, type SituationPreflight } from "./situations.ts";
 import { doingPeerFencesCandidate, PICKUP_V2_PEER_FIELDS } from "./pickup_v2.ts";
-import { assertLifecycleMoveAllowed } from "./pipeline_status.ts";
+import { assertLifecycleMoveAllowed } from "./lifecycle_gate.ts";
 import {
   boundSnapshot, captureSnapshot, GUARDED_CONTRACT, GUARDED_CONTRACT_SHA256,
   guardError, rawEqual, serializeSnapshot, sha256, snapshotByteSha, snapshotCard, validateRawFields,
@@ -41,7 +41,7 @@ async function gates(opts: Context, next: Card, terminal: string, admission: Car
     milestoneState: milestone?.state ?? "", enforceLivePrMilestone: opts.cfg.enforceLivePrMilestone === true,
   });
   await assertSituationPreflightAllowed(next, opts.situationPreflight);
-  await assertLifecycleMoveAllowed({ node: opts.node, card: next, targetColumn: next.column, terminalColumn: terminal, force: false });
+  await assertLifecycleMoveAllowed({ card: next, targetColumn: next.column, terminalColumn: terminal, force: false });
 }
 function unheld(snapshot: GuardSnapshot, owner: string | undefined): Card {
   if (owner === undefined || snapshot.fields.assignee !== owner) guardError("owner_conflict", "The exact expected assignee is required.");

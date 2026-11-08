@@ -619,7 +619,7 @@ export async function buildPickupStatusReportWithSituations(
     );
     if (needLiveness.length > 0) {
       const probed = await mapWithConcurrency(needLiveness, (card) =>
-        probeCardPrLiveness(card, { node: depsContext.node }),
+        probeCardPrLiveness(card),
       );
       for (let i = 0; i < needLiveness.length; i++) {
         const card = needLiveness[i];

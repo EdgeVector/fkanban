@@ -126,7 +126,7 @@ export function resolveCreatedBy(
   explicit?: string,
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const direct = [explicit, env.FKANBAN_CREATED_BY, env.LASTGIT_ACTOR]
+  const direct = [explicit, env.FKANBAN_CREATED_BY]
     .map(normalizeCreatedBy)
     .find(Boolean);
   if (direct) return direct;
@@ -610,10 +610,8 @@ export function applyDerivedHeader(card: Card, result: HeaderDerivationResult): 
 // File-overlap alone misses work that touches the same product/source region
 // after an agent expands scope. Keep a schema-free coordination hint in tags:
 // `area:<tool>-<command>` (for example `area:fbrain-list`) is derived from
-// explicit Area:/Pickup Area: body lines, a fixed allowlist of real CLI/MCP
-// command names in card specs (`fbrain list`, `fbrain_list`), and
-// narrowly-known feature-area phrases that otherwise don't look like commands
-// (`forge CI`, `.forgejo/workflows/*`).
+// explicit Area:/Pickup Area: body lines and a fixed allowlist of real CLI/MCP
+// command names in card specs (`fbrain list`, `fbrain_list`).
 // When a ready todo card shares a pickup area with another unblocked active card
 // in the same repo, put the new card on a reversible needs_human hold so pickup
 // serializes or re-grooms it.
@@ -634,17 +632,6 @@ export const PICKUP_AREA_PEER_FIELDS = [
   "block_status",
 ] as const;
 const PICKUP_AREA_PEER_BODY_FIELDS = [...PICKUP_AREA_PEER_FIELDS, "body"] as const;
-const FEATURE_AREA_PATTERNS: Array<{ area: string; pattern: RegExp }> = [
-  // Path references only. The former prose patterns ("forge ci", "forge
-  // required checks") matched the standard venue boilerplate every well-formed
-  // Forgejo-repo card carries ("CI gate: `Forge CI / ci-required`"), minting
-  // area:forge-ci on cards that merely ship THROUGH forge CI rather than cards
-  // ABOUT it — the dominant source of false pickup-area needs_human holds.
-  // Cards genuinely about CI infrastructure reference .forgejo/workflows paths
-  // or declare an explicit `Area: forge-ci` line, both of which still match.
-  { area: "forge-ci", pattern: /(?:^|[`"'([{\s])\.forgejo\/workflows(?:\/[A-Za-z0-9._/-]+)?/gim },
-];
-
 // Real command names only — NOT "any following word". A prose match on
 // "fbrain got indexed" or the mandatory "Follow the fkanban-agent skill"
 // boilerplate must not mint an area tag. Keep in sync with src/cli.ts
@@ -772,11 +759,6 @@ export function pickupAreaTagsForCard(card: Pick<Card, "title" | "body" | "tags"
       const cmd = (m[2] ?? "").toLowerCase();
       const allowlist = tool === "fbrain" ? FBRAIN_COMMANDS : FKANBAN_COMMANDS;
       if (allowlist.has(cmd)) add(`${tool}-${cmd}`);
-    }
-
-    for (const { area, pattern } of FEATURE_AREA_PATTERNS) {
-      if (pattern.test(text)) add(area);
-      pattern.lastIndex = 0;
     }
   }
 
@@ -2131,11 +2113,11 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
     const branch = parseBodyHeader(card.body, "Branch");
     if (branch) out.branch = branch;
   }
-  // pr_url: body `PR:` / `CR:` (and lastgit://… fallback). Agents often write
+  // pr_url: a `PR:` http(s) URL or pull/pulls fragment. Agents often write
   // only the body header on handoff; without this backfill, board-closeout
   // treats the card as no-PR and rolls WIP back to todo.
   if (!card.pr_url) {
-    const pr = extractPrUrlFromBody(card.body, card.repo);
+    const pr = extractPrUrlFromBody(card.body);
     if (pr) out.pr_url = pr;
   }
   if (!card.db) {
@@ -2146,36 +2128,14 @@ export function deriveStructuredFields(card: Card): Partial<Card> {
 }
 
 /**
- * Resolve a PR/CR locator from card body prose for structured-field backfill.
- * Prefers line headers `PR:` / `CR:`, then a bare `lastgit://…/cr/…` URL, then
- * a bare `cr-…` id combined with the card's repo slug.
+ * Resolve a PR locator from card body prose for structured-field backfill.
+ * Keeps a `PR:` http(s) URL or a pull/pulls path fragment.
  */
-export function extractPrUrlFromBody(body: string, repo = ""): string {
-  for (const name of ["PR", "CR"] as const) {
-    const raw = parseBodyHeader(body, name).trim();
-    if (!raw) continue;
-    if (/^(https?:\/\/|lastgit:\/\/)/i.test(raw)) return raw;
-    // Bare lastgit CR id — synthesize locator when repo is known.
-    const cr = raw.match(/\b(cr-[A-Za-z0-9_-]+)\b/)?.[1];
-    if (cr) {
-      const slug = repo.includes("/") ? repo.split("/").pop()! : repo.trim();
-      if (slug) return `lastgit://${slug}/cr/${cr}`;
-      return cr;
-    }
-    // Forge/GitHub path fragments already look like URLs after first-token parse.
-    if (/pulls?\/\d+/i.test(raw) || /\/pull\/\d+/i.test(raw)) return raw;
-  }
-  // Unfenced lastgit CR URL anywhere in the body (handoff notes).
-  let inFence = false;
-  for (const line of body.split("\n")) {
-    if (/^[ \t]*```/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    const m = line.match(/\blastgit:\/\/[^\s)>\]]+/i);
-    if (m?.[0]) return m[0].replace(/[.,;]+$/, "");
-  }
+export function extractPrUrlFromBody(body: string): string {
+  const raw = parseBodyHeader(body, "PR").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/pulls?\/\d+/i.test(raw) || /\/pull\/\d+/i.test(raw)) return raw;
   return "";
 }
 
@@ -2231,9 +2191,9 @@ export function repairStructuredFieldsFromBody(
     const branch = parseBodyHeader(card.body, "Branch");
     if (branch) card.branch = branch;
   }
-  const prUrlKept = Boolean(card.pr_url) && headerUnchanged((b) => extractPrUrlFromBody(b, card.repo));
+  const prUrlKept = Boolean(card.pr_url) && headerUnchanged((b) => extractPrUrlFromBody(b));
   if (!explicit.prUrl && !prUrlKept) {
-    const pr = extractPrUrlFromBody(card.body, card.repo);
+    const pr = extractPrUrlFromBody(card.body);
     if (pr) card.pr_url = pr;
   }
   if (!explicit.surfaces) {
@@ -2399,7 +2359,7 @@ export function forcedGuardWaiverWarning(slug: string, gate: string, verdict: st
  *
  * `--force` is one global waiver over independent guards: in `move` alone it
  * disables the live-PR milestone gate, the default/todo pickup-readiness gate,
- * the lifecycle CI gate and this one. The gates do not share a subject, so
+ * the lifecycle gate and this one. The gates do not share a subject, so
  * clearing one is not evidence about the others — but the error messages
  * recommend the flag per-gate. `assertLivePrMilestone`'s hint still offers
  * `--force` for an intentional Unassigned/Operational exception (after

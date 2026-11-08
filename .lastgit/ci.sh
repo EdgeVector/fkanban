@@ -10,7 +10,7 @@ echo "== shell syntax =="
 for f in .lastgit/*.sh bin/*; do
   [ -f "$f" ] || continue
   case "$f" in
-    *.sh|bin/fkanban|bin/fkanban-mcp|bin/kanban|bin/kanban-mcp|bin/fkanban-worktree)
+    *.sh|bin/fkanban|bin/fkanban-mcp|bin/kanban|bin/kanban-mcp)
       echo "bash -n $f"
       bash -n "$f"
       ;;

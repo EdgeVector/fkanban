@@ -392,7 +392,7 @@ Options:
 Claim note: bare \`move … doing\` is not a full claim by itself. Prefer
 \`pickup claim --worker <id>\`, which CAS-claims and stamps assignee. A hand
 move into doing stamps assignee from --assignee/--worker or from
-LASTGIT_ACTOR / AUTOMATION_ID (DRIVEN_BY=routine) so closeout cannot treat
+AUTOMATION_ID (DRIVEN_BY=routine) so closeout cannot treat
 the card as an empty zombie. Pass --allow-unclaimed only when you mean it.
 
 Example:
