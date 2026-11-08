@@ -47,7 +47,6 @@ commands-only:
 fbrain get projects-fkanban             # orientation, architecture, history,
                                         #   CLI/MCP-only form-factor (no GUI — settled)
 fbrain get concepts-fkanban-cli-gotchas # worktree node_modules, --body replaces,
-                                        #   tag-encoded deps, historical delete-tag filter,
                                         #   schemas published once out-of-band
 fbrain ask "<question about kanban>"
 ```

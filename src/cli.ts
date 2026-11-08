@@ -64,7 +64,6 @@ import {
 import { hygieneOrphanBunCmd } from "./commands/hygiene.ts";
 import { depAddCmd, depRmCmd } from "./commands/dep.ts";
 import { tagAddCmd, tagRmCmd } from "./commands/tag.ts";
-import { migrateAreaTagsCmd, migrateLegacyColumnsCmd } from "./commands/migrate.ts";
 import { normalizePriority, PRIORITY_TIERS, writeBodyHeader, type PriorityTier } from "./record.ts";
 import { doctor, runDoctorStructured } from "./commands/doctor.ts";
 import { pingCommand } from "./commands/ping.ts";
@@ -79,8 +78,6 @@ import {
   formatBoardCreate,
   formatBoardRm,
   formatRank,
-  formatMigrateAreaTags,
-  formatMigrateLegacyColumns,
   formatMilestoneAdd,
   formatMilestoneState,
   formatError,
@@ -148,8 +145,6 @@ Commands:
   milestone detail <slug> show outcome, cards by column, proof, and warnings (read-only)
   milestone groom      report actionable milestone health warnings
   milestone gap-report deterministic gap map (in-flight / promote / empty)
-  migrate area-tags    one-time: re-derive pickup area:* tags across active cards (--dry-run)
-  migrate legacy-columns one-time: move cards off columns the board no longer defines (--dry-run)
   ping                 one cheap liveness request to the node (--json)
   doctor               health-check the local setup (--json)
   which                print CLI provenance or a resolved kanban/fkanban executable path (--json)
@@ -432,9 +427,8 @@ Options:
 Unlike \`add --tags a,b,c\` (which REPLACES the whole tag list), \`tag add\`/
 \`tag rm\` edit one tag at a time without disturbing the rest. Adding a tag the
 card already carries is a no-op; removing one it lacks warns but succeeds.
-Reserved tags (\`dep:<slug>\` legacy dependency tags, the historical
-\`__fkanban_deleted__\` tag) are rejected — use \`dep\`/\`rm\`. Dependency
-edges live in the separate deps field.
+The \`done_at:\` completion stamp is rejected. Dependency edges live in the
+separate deps field.
 
 Example:
   fkanban tag add ship-login p1
@@ -683,43 +677,6 @@ Options:
 Examples:
   fkanban board create sprint --title "Sprint 1"
   fkanban board rm sprint`),
-
-  migrate: withFooter(`fkanban migrate — one-time board data migrations
-
-Usage:
-  fkanban migrate area-tags [--dry-run] [--json]
-  fkanban migrate legacy-columns [--dry-run] [--json] [--slug S]...
-
-Subcommands:
-  legacy-columns       move every card sitting on a column the board no longer
-                       defines onto the fixed set (backlog | todo | doing |
-                       done). Columns became fixed on 2026-07-16 and the write
-                       path has rejected anything else since; cards written
-                       before that keep their old value and are iterated by no
-                       board view, so \`list\` cannot see them while
-                       \`show <slug>\` renders them fine. Maps \`review\` →
-                       \`doing\` (an open PR is in-flight work, not a completed
-                       one) and REPORTS anything it has no mapping for rather
-                       than guessing. Each primary update also changes its named column key.
-
-  area-tags            re-derive the pickup \`area:*\` tags on every active
-                       (non-done, non-tombstoned) card and rewrite only the
-                       cards whose derived set changed. Clears stale boilerplate
-                       tags (\`area:fkanban-agent\`, \`area:fbrain-got\`, …) minted
-                       by the pre-#130 prose-scraping bug on cards that were
-                       never re-written since. Re-derives TAGS only — never
-                       touches column, assignee, or an intentional block hold.
-
-Flags:
-  --dry-run            report the per-card deltas without writing anything
-  --slug S             (legacy-columns) limit to one or more card slugs
-  --json               machine-readable report
-
-Example:
-  fkanban migrate area-tags --dry-run        # preview
-  fkanban migrate area-tags                  # apply
-  fkanban migrate legacy-columns --dry-run   # preview the column repair
-  fkanban migrate legacy-columns             # apply`),
 
   groom: withFooter(`fkanban groom — board reports and explicit changes
 
@@ -1104,9 +1061,6 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   // board's subcommands read title/columns/body (create) and force (rm).
   // --json-array is the legacy bare-array escape for board list.
   board: new Set(["title", "columns", "body", "force", "json-array"]),
-  // migrate's one-time subcommands take --dry-run to preview without writing.
-  // legacy-columns also takes repeatable --slug to migrate a named card at a time.
-  migrate: new Set(["dry-run", "slug"]),
   groom: new Set(["apply", "dry-run", "board", "cutoff-hours", "max"]),
   hygiene: new Set(["apply", "dry-run", "min-age-hours", "pileup-threshold"]),
   pickup: new Set(["claim-v2", "guard-snapshot", "snapshot-sha256", "only-card", "board", "worker", "prefer-repo", "exclude-repo", "max-doing", "dry-run"]),
@@ -1247,7 +1201,6 @@ async function main(argv: string[]): Promise<number> {
         db: { type: "string" },
         title: { type: "string" },
         board: { type: "string" },
-        slug: { type: "string", multiple: true },
         column: { type: "string" },
         tag: { type: "string" },
         assignee: { type: "string" },
@@ -2006,7 +1959,7 @@ async function dispatch(
           console.log(formatTag(res, values.json as boolean | undefined));
           return 0;
         } catch (err) {
-          // A reserved tag (dep:<slug> / tombstone) is a bad-input error, not a
+          // A reserved completion stamp is a bad-input error, not a
           // node failure: report it LOUDLY with the exit-2 contract (matching
           // `dep_cycle`), and as a clean envelope under --json — never a half write.
           if (err instanceof FkanbanError && err.code === "reserved_tag") {
@@ -2027,39 +1980,6 @@ async function dispatch(
         console.log(formatTag(res, values.json as boolean | undefined));
         return 0;
       }
-      return 2;
-    }
-
-    case "migrate": {
-      const sub = positionals[1];
-      if (sub === "area-tags") {
-        const extra = rejectExtraPositionals(positionals, 2, "migrate area-tags");
-        if (extra !== undefined) return extra;
-        const ctx = loadCtx({ verbose });
-        const res = await migrateAreaTagsCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          dryRun: values["dry-run"] as boolean | undefined,
-        });
-        console.log(formatMigrateAreaTags(res, values.json as boolean | undefined));
-        return 0;
-      }
-      if (sub === "legacy-columns") {
-        const extra = rejectExtraPositionals(positionals, 2, "migrate legacy-columns");
-        if (extra !== undefined) return extra;
-        const ctx = loadCtx({ verbose });
-        const res = await migrateLegacyColumnsCmd({
-          cfg: ctx.cfg,
-          node: ctx.node,
-          dryRun: values["dry-run"] as boolean | undefined,
-          slugs: values.slug as string[] | undefined,
-        });
-        console.log(formatMigrateLegacyColumns(res, values.json as boolean | undefined));
-        return 0;
-      }
-      console.error(
-        `kanban: Unknown migrate subcommand "${sub ?? ""}". Try: migrate area-tags, migrate legacy-columns`,
-      );
       return 2;
     }
 

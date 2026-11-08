@@ -53,13 +53,13 @@ async function snapshot(opts: ParityCheckOptions): Promise<Snapshot> {
     ]);
     return { board, cards, milestones };
   }, PARTITION_READ_CONCURRENCY);
-  const boardCards = parts.flatMap(part => part.cards);
-  const boardMilestones = parts.flatMap(part => part.milestones);
+  const cardsOnBoard = parts.flatMap(part => part.cards);
+  const milestonesOnBoard = parts.flatMap(part => part.milestones);
   const scopedAll = opts.board ? allCards.filter(row => row.fields.board === opts.board) : allCards;
-  const cardKeys = [...scopedAll, ...boardCards].map(row => row.key.hash!);
+  const cardKeys = [...scopedAll, ...cardsOnBoard].map(row => row.key.hash!);
   const cards = await primaryRecords(opts.node, cardSchema, cardKeys, cardFields);
   const milestoneKeys = [...new Set([
-    ...boardMilestones.map(row => row.key.hash!),
+    ...milestonesOnBoard.map(row => row.key.hash!),
     ...[...cards.values()].map(row => row.fields.milestone)
       .filter((slug): slug is string => typeof slug === "string" && !!slug),
   ])];
@@ -122,8 +122,8 @@ async function snapshot(opts: ParityCheckOptions): Promise<Snapshot> {
     }
   };
   compare("Card", "all", expectedAll, scopedAll);
-  compare("Card", "by_board", expectedBoard, boardCards);
-  compare("Milestone", "by_board", expectedMilestoneBoard, boardMilestones);
+  compare("Card", "by_board", expectedBoard, cardsOnBoard);
+  compare("Milestone", "by_board", expectedMilestoneBoard, milestonesOnBoard);
   compare("Card", "by_milestone", expectedMilestone, milestoneParts.flat().filter(row => !opts.board || row.fields.board === opts.board));
   return { issues, partitions: 2 + 2 * boardNames.length + milestoneKeys.length, records: cards.size + milestones.size };
 }

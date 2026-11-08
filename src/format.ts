@@ -65,20 +65,8 @@ export interface TagResult {
 export interface RmResult {
   slug: string;
   /**
-   * VESTIGIAL — always `[]`, and structurally cannot be anything else.
-   *
-   * This described a `rm` that tombstoned the card and reported whose deps it
-   * had just left dangling. Since #149 (`e92d4a4`) `rmCmd` REFUSES that delete:
-   * it scans live cards first and throws `card_has_dependents`, so there is no
-   * surviving path on which an orphan is created and therefore none on which
-   * this can be non-empty.
-   *
-   * The comment here outlived the change and kept asserting a behaviour that
-   * had been deleted — "surfaced as a stderr warning by the CLI", of a warning
-   * (`orphanedDependentsWarning`) no caller invokes any more. Kept as a field
-   * because it is public `--json` / MCP output; retiring it is a compat break
-   * and wants its own card, with `orphanedDependentsWarning` and the non-empty
-   * branch of `formatRm`'s unit test, which now cover nothing reachable.
+   * Always `[]`. `rm` refuses the delete when live dependents exist, so this
+   * public `--json` and MCP field stays empty.
    */
   orphanedDependents: string[];
 }
@@ -144,7 +132,7 @@ export interface BoardCreateResult {
 
 export interface BoardRmResult {
   slug: string;
-  // Slugs of live cards tombstoned as part of a forced board removal.
+  // Slugs of live cards removed as part of a forced board removal.
   deletedCards: string[];
 }
 
@@ -158,23 +146,6 @@ export interface RankResult {
   mode?: "hard" | "priority";
 
   skipped?: { slug: string; reason: string }[];
-}
-
-export interface MigrateAreaTagsResult {
-  scanned: number;
-  changed: number;
-  skippedDone: number;
-  dryRun: boolean;
-  cards: { slug: string; board: string; column: string; removed: string[]; added: string[] }[];
-}
-
-export interface MigrateLegacyColumnsResult {
-  scanned: number;
-  offColumn: number;
-  changed: number;
-  unmapped: number;
-  dryRun: boolean;
-  cards: { slug: string; board: string; from: string; to: string | null; reason?: string }[];
 }
 
 function emit(res: unknown, human: string, json: boolean | undefined): string {
@@ -301,34 +272,3 @@ export function formatRank(res: RankResult, json?: boolean): string {
   return emit(res, human, json);
 }
 
-export function formatMigrateAreaTags(res: MigrateAreaTagsResult, json?: boolean): string {
-  if (json) return JSON.stringify(res);
-  const verb = res.dryRun ? "would re-derive" : "re-derived";
-  const lines = res.cards.map((c) => {
-    const rm = c.removed.length ? ` -[${c.removed.join(", ")}]` : "";
-    const add = c.added.length ? ` +[${c.added.join(", ")}]` : "";
-    return `  ${c.slug} (${c.board}/${c.column})${rm}${add}`;
-  });
-  const head =
-    `${verb} pickup area tags: ${res.changed} of ${res.scanned} active cards changed ` +
-    `(${res.skippedDone} done/terminal skipped)${res.dryRun ? " — DRY RUN, no writes" : ""}`;
-  return res.cards.length ? `${head}\n${lines.join("\n")}` : head;
-}
-
-export function formatMigrateLegacyColumns(
-  res: MigrateLegacyColumnsResult,
-  json?: boolean,
-): string {
-  if (json) return JSON.stringify(res);
-  const verb = res.dryRun ? "would move" : "moved";
-  const lines = res.cards.map((c) =>
-    c.to === null
-      ? `  ${c.slug} (${c.board}) ${c.from} → SKIPPED (${c.reason ?? "unmapped"})`
-      : `  ${c.slug} (${c.board}) ${c.from} → ${c.to}`,
-  );
-  const head =
-    `${verb} off-column cards: ${res.dryRun ? res.offColumn - res.unmapped : res.changed} of ` +
-    `${res.offColumn} off-column card(s), ${res.unmapped} unmapped` +
-    `${res.dryRun ? " — DRY RUN, no writes" : ""}`;
-  return res.cards.length ? `${head}\n${lines.join("\n")}` : head;
-}

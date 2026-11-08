@@ -1,7 +1,7 @@
 import { guardedCardUpdate } from "./guarded-card-update.ts";
 import { keyRows, requireMultiKey } from "./multi-key.ts";
 // Domain helpers: turn fold_db query rows into typed Card / Board records,
-// list + find by slug, soft-delete (tombstone), slug + column validation.
+// list + find by slug, and slug + column validation.
 
 import { FkanbanError, type CasExpectation, type NodeClient, type QueryFilter, type QueryRow } from "./client.ts";
 import { mapWithConcurrency, POINT_READ_CONCURRENCY, PARTITION_READ_CONCURRENCY } from "./concurrency.ts";
@@ -38,9 +38,7 @@ export type Card = {
   assignee: string;
   tags: string[];
   // Slugs of cards this card depends on (it is "blocked" until each reaches the
-  // final column of its own board). Canonical storage is the Card schema's
-  // `deps` array field; legacy `dep:<slug>` tags are read only as a migration
-  // fallback and are stripped on the next write.
+  // final column of its own board). Storage is the Card schema's `deps` field.
   deps: string[];
   // Repo-relative path globs or bare subsystem names this card expects to
   // touch. Used by `overlap` as an advisory file-surface claim.
@@ -111,11 +109,6 @@ export function isMilestoneState(value: string): value is MilestoneState {
   return (MILESTONE_STATES as readonly string[]).includes(value);
 }
 
-// Legacy soft-delete sentinel. Current `rm` uses the node's native delete
-// mutation, so new tombstoned records are filtered before fkanban sees them.
-// Keep this backstop so records deleted by older fkanban builds stay hidden.
-export const TOMBSTONE_TAG = "__fkanban_deleted__";
-
 // The reserved slug a write probe uses. Namespaced + obviously-throwaway so it
 // never collides with a real card, and hidden from reads even if best-effort
 // cleanup is shed by a busy node.
@@ -151,32 +144,15 @@ export function resolveCreatedBy(
   return user ? `user:${user}` : UNKNOWN_CREATED_BY;
 }
 
-export function isTombstoned(tags: string[]): boolean {
-  return tags.includes(TOMBSTONE_TAG);
-}
-
 function isHiddenCard(card: Card): boolean {
-  return card.slug === WRITE_PROBE_SLUG || isTombstoned(card.tags);
+  return card.slug === WRITE_PROBE_SLUG;
 }
 
-// Legacy dependency tag prefix. Dependency edges are now canonically stored in
-// the Card schema's `deps` field. Keep the prefix reader so old rows are
-// migrated in memory, but never write `dep:<slug>` tags for dependency edges.
-export const DEP_TAG_PREFIX = "dep:";
 export const DONE_AT_TAG_PREFIX = "done_at:";
 // Like `done_at`, carried as a tag rather than a schema field so no LastDB
-// schema rekey is needed. `rowToCard`/`cardFromBoardCardFields` lift it into
-// `Card.first_doing_at` and strip it from `tags`, so it never reaches a
-// caller as a visible tag.
+// schema rekey is needed. `rowToCard` lifts it into `Card.first_doing_at`
+// and strips it from `tags`, so it never reaches a caller as a visible tag.
 export const FIRST_DOING_AT_TAG_PREFIX = "first_doing_at:";
-
-export function isDepTag(tag: string): boolean {
-  return tag.startsWith(DEP_TAG_PREFIX);
-}
-
-export function depTag(slug: string): string {
-  return `${DEP_TAG_PREFIX}${slug}`;
-}
 
 export function isDoneAtTag(tag: string): boolean {
   return tag.startsWith(DONE_AT_TAG_PREFIX);
@@ -202,7 +178,7 @@ export function firstDoingAtFromTags(tags: readonly string[]): string {
 // Clean a tag list: trim, drop blanks, dedupe (order-stable). The label
 // counterpart of normalizeDeps — used by the incremental `tag add`/`tag rm`
 // editors so adding a present tag is idempotent and a blank/duplicate arg is a
-// no-op. Reserved tags (dep:<slug>, the tombstone) are filtered out elsewhere.
+// no-op. The completion stamp is filtered out elsewhere.
 export function normalizeTags(tags: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -235,13 +211,6 @@ export function missingDepError(dep: string): FkanbanError {
     message: `Dependency card "${dep}" does not exist.`,
     hint: "Create the dependency card first, or depend on the existing card slug that proves the prerequisite.",
   });
-}
-
-// Legacy formatter for older result envelopes that reported dependent cards on
-// delete. Current `rm` refuses before tombstoning when live dependents exist, so
-// normal callers should see a `card_has_dependents` error instead of this text.
-export function orphanedDependentsWarning(slug: string, dependents: string[]): string {
-  return `  warning: ${dependents.length} card(s) still depend on "${slug}": ${dependents.join(", ")} — their dependency is now dangling.`;
 }
 
 // The message + hint emitted when the dependency soft-block refuses a card.
@@ -990,7 +959,7 @@ export function isMetaCardKind(kind: string): kind is MetaCardKind {
 
 // Empty/unknown kind → "pr" (the default flow). Backfill sets "registry"
 // explicitly for fbrain-record cards; until then isPickupEligible also guards
-// with isRegistryCard as a belt-and-suspenders for un-migrated cards.
+// with isRegistryCard as a belt-and-suspenders for older cards.
 export function normalizeKind(s: string): CardKind {
   return isCardKind(s) ? s : "pr";
 }
@@ -1085,8 +1054,7 @@ export function claimHoldReason(card: Pick<Card, "block_status" | "body">): stri
   return bodyDeclaredHumanGate(card.body ?? "") ?? bodyDeclaredValidateOnly(card.body ?? "");
 }
 
-// Read a `Name: value` header from a card body, used to backfill the structured
-// fields from the legacy body-header convention. All callers (repo/base/
+// Read a `Name: value` header from a card body. All callers (repo/base/
 // north_star) carry SINGLE-TOKEN values (an owner/name, a branch, a slug), so
 // capture the first non-whitespace run after the colon — never the rest of the
 // line. This is deliberately strict: some card bodies run the headers together
@@ -2112,7 +2080,7 @@ export function isPickupEligible(card: Card): boolean {
   );
 }
 
-// Backfill the structured fields for a card from its legacy body/tags, WITHOUT
+// Backfill the structured fields for a card from its body and tags, WITHOUT
 // overwriting a value already set. Reuses the #91 derivation (body `Repo:`/
 // `Base:` headers, then the tag→repo map) plus the `North Star:` line and the
 // registry-card classifier. Returns a partial of only the fields it filled, so
@@ -2224,7 +2192,7 @@ export type StructuredFieldRepairOptions = {
 };
 
 // Write-time body→field repair. `deriveStructuredFields` is intentionally
-// conservative for read-time legacy backfill and never overwrites an existing
+// conservative for read-time backfill and never overwrites an existing
 // value; this mutating helper is used only on explicit card writes, where a
 // clear body header is the operator's current source of truth unless the same
 // write passed the matching structured CLI flag.
@@ -2674,10 +2642,6 @@ export function rowToCard(row: QueryRow): Card {
   const body = stringField(f, "body");
   const structuredSurfaces = normalizeSurfaces(arrayStringField(f, "surfaces"));
   const allTags = arrayStringField(f, "tags");
-  const legacyTagDeps = allTags
-    .filter(isDepTag)
-    .map((t) => t.slice(DEP_TAG_PREFIX.length))
-    .filter((s) => s.length > 0);
   const deps = arrayStringField(f, "deps");
   const slug = stringField(f, "slug");
   const doneAt =
@@ -2693,9 +2657,8 @@ export function rowToCard(row: QueryRow): Card {
     column: stringField(f, "column"),
     position: stringField(f, "position"),
     assignee: stringField(f, "assignee"),
-    // Legacy dep tags are migrated into `deps`; everything else stays.
-    tags: allTags.filter((t) => !isDepTag(t) && !isDoneAtTag(t) && !isFirstDoingAtTag(t)),
-    deps: normalizeDeps([...deps, ...legacyTagDeps], slug),
+    tags: allTags.filter((t) => !isDoneAtTag(t) && !isFirstDoingAtTag(t)),
+    deps: normalizeDeps(deps, slug),
     surfaces: structuredSurfaces.length > 0 ? structuredSurfaces : parseBodyListHeader(body, "Surfaces"),
     created_at: stringField(f, "created_at"),
     created_by:
@@ -2886,7 +2849,7 @@ export async function readAllCardRecords(
 }
 
 // Shared body of the three card list paths below: query the card schema for the
-// given field subset, map rows to Cards, and drop legacy tag-tombstoned cards.
+// given field subset, map rows to Cards, and drop the write-probe slug.
 // Native deletes are hidden by the node before this point.
 // Report the source that actually answered this read.
 export type CardListServedBy = "named-card-keys" | "card-point-read";
@@ -3079,7 +3042,7 @@ export async function listCardSearchSurfaces(
   return bySlug;
 }
 
-export async function listBoardCardsWithBodies(
+export async function listScopedCardsWithBodies(
   node: NodeClient,
   cfg: Config,
   opts: BoardListOpt = {},
@@ -3088,7 +3051,7 @@ export async function listBoardCardsWithBodies(
   if (cards.length === 0) return cards;
   if (!cards.some(isBodyOmitted)) return cards;
 
-  // `listCardBodies`, not `listCardsWithBodies`: it projects two fields instead
+  // `listCardBodies` projects two fields instead
   // of the full card, so it is cheaper. Under HASH-ELSE-LEAD on Card (gate =
   // `slug`) both widths return the same live set when `slug` is projected; the
   // older "wide is strictly narrower" claim was the superseded `any_missing`
@@ -3224,7 +3187,7 @@ export async function listCardsByFilter(
 export async function listBoards(node: NodeClient, cfg: Config): Promise<Board[]> {
   requireMultiKey(cfg);
   return (await keyRows(node, schemaHashFor("board", cfg), "all", { HashKey: "all" }, fieldsFor("board")))
-    .map(rowToBoard).filter(board => !isTombstoned(board.columns) && board.slug.length > 0);
+    .map(rowToBoard).filter(board => board.slug.length > 0);
 }
 
 // Fields sufficient to resolve dependency status / card existence — everything
@@ -3346,7 +3309,7 @@ export async function listCardsForDisplay(
 }
 
 /** A failed decorative read names its board without discarding the main board view. */
-export async function listOtherBoardCardsForFooter(
+export async function listOtherCardsForFooter(
   node: NodeClient, cfg: Config, viewedBoard: string, boards: Array<{ slug: string }>,
 ): Promise<{ cards: Card[]; unreadable: string[] }> {
   requireMultiKey(cfg);
@@ -3401,7 +3364,7 @@ export async function findCardsWithFields(
  * Fields a milestone proof-card verdict actually reads: `body` for the
  * `PROOF: PASS` / `DONE-WHEN` evidence, `column`+`board` for terminality,
  * `milestone` for the link-mismatch warning, and `slug`+`tags` because
- * `isHiddenCard` needs them (drop `tags` and a tombstoned card reads as a live
+ * `isHiddenCard` needs `slug` (the write-probe slug must not read as a live
  * proof card).
  *
  * Deliberately narrow to save bytes and time: measured on the live primary
@@ -3442,7 +3405,7 @@ export async function hydrateCardBodies(node: NodeClient, cfg: Config, cards: Ca
 }
 
 // Resolve a card by slug, throwing the canonical `card_not_found` error when
-// it doesn't exist (or is tombstoned). Shared by the card-editing commands
+// it doesn't exist. Shared by the card-editing commands
 // (move, rm, tag, dep, show) so the message stays identical in one place —
 // the card mirror of `requireBoard`.
 export async function requireCard(node: NodeClient, cfg: Config, slug: string): Promise<Card> {
@@ -3461,7 +3424,7 @@ export async function findBoard(node: NodeClient, cfg: Config, slug: string): Pr
     filter: { HashKey: slug },
   });
   const board = res.results.map(rowToBoard).find((b) => b.slug === slug);
-  return board !== undefined && !isTombstoned(board.columns) && board.slug.length > 0
+  return board !== undefined && board.slug.length > 0
     ? board
     : null;
 }
@@ -3504,7 +3467,7 @@ export async function ensureBoardRecord(node: NodeClient, cfg: Config, slug: str
   const board = await findBoard(node, cfg, slug);
   if (board) return board;
   const references = await keyRows(node, schemaHashFor("card", cfg), "by_board", { HashKey: slug }, ["slug", "tags"]);
-  if (!references.some(row => row.key.hash !== WRITE_PROBE_SLUG && !isTombstoned(arrayStringField(row.fields, "tags")))) {
+  if (!references.some(row => row.key.hash !== WRITE_PROBE_SLUG)) {
     throw new FkanbanError({ code: "board_not_found", message: "Board " + JSON.stringify(slug) + " does not exist.",
       hint: boardCreateHint(slug) });
   }
@@ -3523,7 +3486,7 @@ export function cardToFields(c: Card): Record<string, unknown> {
     position: c.position,
     assignee: c.assignee,
     tags: [
-      ...c.tags.filter((t) => !isDepTag(t) && !isDoneAtTag(t) && !isFirstDoingAtTag(t)),
+      ...c.tags.filter((t) => !isDoneAtTag(t) && !isFirstDoingAtTag(t)),
       ...(c.done_at ? [doneAtTag(c.done_at)] : []),
       ...(c.first_doing_at ? [firstDoingAtTag(c.first_doing_at)] : []),
     ],
@@ -3904,7 +3867,7 @@ function parsePosition(p: string): number {
 //   2. a `p0`..`p3` tag (the structured channel `add --priority` writes to),
 //   3. else DEFAULT_PRIORITY.
 // P0 = most urgent … P3 = least. Storing priority as a TAG (not a new schema
-// field) keeps it republish-free, exactly like deps and the delete tombstone.
+// field) keeps it republish-free, exactly like deps.
 export const PRIORITY_TIERS = ["P0", "P1", "P2", "P3"] as const;
 export type PriorityTier = (typeof PRIORITY_TIERS)[number];
 

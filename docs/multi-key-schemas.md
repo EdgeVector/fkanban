@@ -16,7 +16,7 @@ Ordinary CLI and MCP requests require a config with the multi-key storage model.
 Board create writes one Board record. Board removal reads the named board key and removes Card records in bounded batches.
 The default-board and external-dependency guards remain. A remaining Card record prevents removal of the Board record.
 Card body reads collect primary keys first. Each batch contains at most 16 bodies.
-Already loaded bodies stay unchanged. Soft-deleted records do not enter the result.
+Already loaded bodies stay unchanged. The write-probe slug does not enter the result.
 Milestone body pages contain at most 16 records. The page size does not reduce the overall record limit.
 The normal request path no longer uses the old membership schemas, payload copies, list rollups, or repair queues.
 Fresh setup declares Card, Board, Milestone, and flow-event records only.
@@ -29,21 +29,6 @@ It reports stable differences separately from concurrent changes.
 An incomplete request fails the command. An unknown board also fails.
 The report names its addressed scope. It does not claim a count of unaddressed database data.
 This check does not write data or request an old payload repair.
-
-## Existing installations
-
-This release does not convert a home in place. It has no conversion command.
-`kanban init` declares the owned schemas on a home with no F-Kanban schemas.
-
-A home can already hold the four historical layouts as owned schemas:
-BoardCards, MilestoneCards, BoardMilestones, and CardListIndex.
-Init keeps each one as a separate owned schema. Their records can differ from the current source records. They do not become alternate keys.
-Init checks each installed historical definition exactly. A different definition stops init and leaves the config unchanged.
-Repeated setup keeps their saved runtime addresses, definition identities, and field aliases.
-An unknown or ambiguous app schema stops init. Init leaves it unchanged.
-
-Init refuses a node without the `compound_alternate_keys_v1` and `independent_hash_range_v1` capabilities.
-Init also refuses a node older than LastDB API 13 before it declares a schema.
 
 ## Wire format
 

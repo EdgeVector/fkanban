@@ -12,7 +12,6 @@ import {
   rowToCard,
   BODY_OMITTED,
   WRITE_PROBE_SLUG,
-  isTombstoned,
   findBoard,
   listBoards,
   listCardsForDisplay,
@@ -73,7 +72,7 @@ export async function boardCreateCmd(opts: {
 }
 
 // A board enriched with its live-card count. `cardCount` is the number of
-// non-tombstoned cards on the board; it is `null` when the (low-frequency) count
+// live cards on the board; it is `null` when the (low-frequency) count
 // key read failed — `board list` still
 // renders the boards in that case, just without counts. The field is additive,
 // so existing `Board[]` `--json` consumers keep working.
@@ -164,13 +163,13 @@ export async function boardRmCmd(opts: {
   if (!opts.force && occupants.length) throw new FkanbanError({ code: "board_not_empty",
     message: "The board still contains " + occupants.length + " Card records.",
     hint: "Move or remove those cards first, or use --force." });
-  const live = occupants.filter(card => card.slug !== WRITE_PROBE_SLUG && !isTombstoned(card.tags));
+  const live = occupants.filter(card => card.slug !== WRITE_PROBE_SLUG);
   if (occupants.length) {
     const deleting = new Set(live.map(card => card.slug));
     const all = await keyRows(opts.node, schemaHashFor("card", opts.cfg), "all", { HashKey: "all" },
       ["slug", "deps", "tags"]);
     const externalDependents = all.filter(row => !deleting.has(row.key.hash!)
-      && row.key.hash !== WRITE_PROBE_SLUG && !isTombstoned(Array.isArray(row.fields.tags) ? row.fields.tags : [])
+      && row.key.hash !== WRITE_PROBE_SLUG
       && Array.isArray(row.fields.deps) && row.fields.deps.some(dep => typeof dep === "string" && deleting.has(dep)))
       .map(row => row.key.hash!);
     if (externalDependents.length) throw new FkanbanError({ code: "board_cards_have_dependents",

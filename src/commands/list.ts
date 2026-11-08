@@ -192,7 +192,7 @@ function cardsFromHeads(board: string, columns: readonly string[], heads: Readon
 // node read) so it's unit-testable and `list.ts`'s only node read stays the
 // existing one. Returns "" (no footer) when no OTHER board has a live card —
 // a dev on a single board sees nothing. `cards` must already be the live
-// (non-tombstoned) set, as `listCards` returns. `viewedBoard` is the board
+// live set, as `listCards` returns. `viewedBoard` is the board
 // being rendered; its own cards are excluded. The other-board count is an
 // unfiltered live-card count (it ignores any --tag/--column/--assignee that
 // narrow the CURRENT view) — "these other boards have cards" is the useful
@@ -202,7 +202,7 @@ function cardsFromHeads(board: string, columns: readonly string[], heads: Readon
 // has no cards" and "this board could not be read" are different facts and the
 // footer is the only place the second one would ever surface. Omitting them
 // would make an unreadable board indistinguishable from an empty one — the
-// failure mode `listOtherBoardCardsForFooter` exists to avoid.
+// failure mode `listOtherCardsForFooter` exists to avoid.
 export function otherBoardsFooter(
   cards: Card[],
   viewedBoard: string,

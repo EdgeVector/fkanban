@@ -103,8 +103,7 @@ export const OFF_COLUMN_HEADING = "OFF-COLUMN";
  * data-repair signal and must be LOUD, never swallowed.
  *
  * Read surfaces do not rewrite the column — that would make `list` disagree
- * with `show`. Repair belongs to `migrate legacy-columns`, which fixes the Card
- * record itself.
+ * with `show`. Repair the Card record with `kanban move <slug> <column>`.
  */
 export function offColumnCards<T extends Card>(board: Board, cards: T[]): T[] {
   const valid = new Set(resolveColumns(board.columns));
@@ -208,7 +207,7 @@ function renderOffColumnSection(
   if (off.length === 0) return;
   lines.push(paint(color, "yellow", `${OFF_COLUMN_HEADING}  ${paint(color, "dim", `(${off.length})`)}`));
   lines.push(
-    paint(color, "dim", `  not a kanban column (${resolveColumns(board.columns).join(" | ")}) — repair: fkanban migrate legacy-columns`),
+    paint(color, "dim", `  not a kanban column (${resolveColumns(board.columns).join(" | ")}) — repair: kanban move <slug> <column>`),
   );
   const hidden = cap > 0 && off.length > cap ? off.length - cap : 0;
   for (const c of hidden === 0 ? off : off.slice(0, cap)) {

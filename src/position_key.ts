@@ -31,7 +31,7 @@ export const POSITION_SEGMENT_WIDTH = 8;
  * The `1e3` row is the one worth staring at: the numeric path did not fail
  * loudly there, it returned a plausible DIFFERENT position. Both `board_cards_heal`
  * and `milestone_indexes_heal` compare a rebuilt address or position against the
- * fat record's (`boardCardSk(r.column, r.position, r.slug) === truthSk`;
+ * fat record's (rebuilt range key equals the stored key;
  * `String(row.position) === String(truth.position)`) and write the parsed value
  * back, so a value that parses to something else is how a correct membership row
  * gets reported stale and then "repaired" into a wrong rank.
@@ -45,7 +45,7 @@ export const POSITION_SEGMENT_WIDTH = 8;
  * recoverable here and not a parse bug: padding is not injective over such
  * inputs, so the key format itself cannot represent them distinctly. Callers
  * that need to know go through the rebuild check — a position that survives
- * `boardCardSk(column, position, slug) === sk` is exact, and that comparison is
+ * a rebuilt range key that equals `sk` is exact, and that comparison is
  * what heal already gates on.
  *
  * An all-zero segment is the position `0`, not the empty string.

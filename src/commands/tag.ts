@@ -8,10 +8,8 @@ import { FkanbanError, type NodeClient } from "../client.ts";
 import { type Config } from "../config.ts";
 import {
   isDoneAtTag,
-  isDepTag,
   normalizeTags,
   requireCard,
-  TOMBSTONE_TAG,
   writeCardPatch,
 } from "../record.ts";
 import type { TagResult } from "../format.ts";
@@ -20,30 +18,13 @@ function sameTags(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((tag, i) => tag === b[i]);
 }
 
-// Reject the reserved tags users must not author by hand: legacy `dep:<slug>`
-// tags are migrated into the canonical `deps` field (use `dep add`/`dep rm`),
-// and the soft-delete tombstone is internal (use `rm`). Letting them through
-// `tag add` would forge a dependency / delete a card via a label.
+// Reject the completion stamp. Move the card to set it.
 function rejectReservedTag(tag: string): void {
-  if (isDepTag(tag)) {
-    throw new FkanbanError({
-      code: "reserved_tag",
-      message: `"${tag}" is a reserved dependency tag.`,
-      hint: "Use `fkanban dep add`/`dep rm` to edit dependency edges.",
-    });
-  }
   if (isDoneAtTag(tag)) {
     throw new FkanbanError({
       code: "reserved_tag",
       message: `"${tag}" is a reserved completion timestamp tag.`,
       hint: "Move the card to the board's final column to set done_at.",
-    });
-  }
-  if (tag === TOMBSTONE_TAG) {
-    throw new FkanbanError({
-      code: "reserved_tag",
-      message: `"${tag}" is a reserved internal tag.`,
-      hint: "Use `fkanban rm` to delete a card.",
     });
   }
 }
@@ -76,7 +57,7 @@ export async function tagRmCmd(opts: {
   const card = await requireCard(opts.node, opts.cfg, opts.slug);
   // Removing a tag the card doesn't carry is a no-op (matches how `dep rm`'s
   // mirror — `rm` of a missing edge — is non-fatal), but warn so a typo isn't
-  // silently swallowed. Never let the tombstone slip out via a tag edit.
+  // silently swallowed.
   const drop = new Set(incoming);
   const absent = incoming.filter((t) => !card.tags.includes(t));
   if (absent.length > 0) {

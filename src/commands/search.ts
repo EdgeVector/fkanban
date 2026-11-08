@@ -90,40 +90,6 @@ function appSearchCardSlugs(results: AppSearchHit[], cardSchemaHash: string): st
   return out;
 }
 
-function nativeIndexPath(query: string): string {
-  const params = new URLSearchParams({
-    q: query,
-    include_internal: "true",
-  });
-  return `/api/native-index/search?${params.toString()}`;
-}
-
-function legacyNativeCardSlugs(json: unknown, cardSchemaHash: string): string[] {
-  if (typeof json !== "object" || json === null) return [];
-  const results = (json as Record<string, unknown>).results;
-  if (!Array.isArray(results)) return [];
-  return appSearchCardSlugs(results.map(legacyNativeHitToAppSearchHit).filter((h): h is AppSearchHit => h !== null), cardSchemaHash);
-}
-
-function legacyNativeHitToAppSearchHit(hit: unknown): AppSearchHit | null {
-  if (typeof hit !== "object" || hit === null) return null;
-  const h = hit as Record<string, unknown>;
-  const keyValue = h.key_value;
-  if (typeof keyValue !== "object" || keyValue === null) return null;
-  const key = keyValue as Record<string, unknown>;
-  return {
-    key_value: {
-      hash: typeof key.hash === "string" ? key.hash : null,
-      range: typeof key.range === "string" ? key.range : null,
-    },
-    fields: typeof h.fields === "object" && h.fields !== null ? h.fields as AppSearchHit["fields"] : {},
-    metadata: h.metadata,
-    schema_name: typeof h.schema_name === "string" ? h.schema_name : "",
-    schema_display_name: typeof h.schema_display_name === "string" ? h.schema_display_name : "",
-    score: typeof h.score === "number" ? h.score : 0,
-  };
-}
-
 async function nativeIndexCandidateSlugs(
   opts: SearchOptions,
   plane: "semantic" | "keyword" = "semantic",
@@ -135,8 +101,8 @@ async function nativeIndexCandidateSlugs(
   // `add`. If LastSeek returns ANY other Card hit, the old code returned
   // those slugs and never asked the socket `/api/app/search` — so a newly
   // created card was unreachable in the exact degraded path the fallback
-  // exists to serve. Mini has no native index either; skipping the plane
-  // here just stops a stale semantic set from pretending to be recall.
+  // exists to serve. Skipping the plane here stops a stale semantic set
+  // from pretending to be recall.
   if (plane === "semantic") {
     // Primary: the first-party semantic plane (shared with brain).
     //
@@ -180,19 +146,11 @@ async function nativeIndexCandidateSlugs(
     }
   }
 
-  if (opts.node.search) {
-    const hits = await opts.node.search(opts.query, { k: NATIVE_INDEX_RESULT_CAP });
-    return {
-      slugs: appSearchCardSlugs(hits, cardHash),
-      saturated: hits.length >= NATIVE_INDEX_RESULT_CAP,
-    };
-  }
-  const res = await opts.node.rawCall("GET", nativeIndexPath(opts.query));
-  if (res.status !== 200) return null;
-  const slugs = legacyNativeCardSlugs(res.json, cardHash);
+  if (!opts.node.search) return null;
+  const hits = await opts.node.search(opts.query, { k: NATIVE_INDEX_RESULT_CAP });
   return {
-    slugs,
-    saturated: slugs.length >= NATIVE_INDEX_RESULT_CAP,
+    slugs: appSearchCardSlugs(hits, cardHash),
+    saturated: hits.length >= NATIVE_INDEX_RESULT_CAP,
   };
 }
 
@@ -403,7 +361,7 @@ async function indexedSearchCards(
   return {
     cards: matches,
     allCards: statusCards,
-    fallbackReason: native?.saturated ? "native-index returned its cap" : undefined,
+    fallbackReason: native?.saturated ? "search returned its cap" : undefined,
   };
 }
 

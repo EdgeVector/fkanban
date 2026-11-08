@@ -1349,7 +1349,7 @@ export function createFkanbanMcpServer(
     {
       title: "Add tags",
       description:
-        "Add one or more tags to a card WITHOUT replacing its existing tags (the incremental counterpart to `fkanban_add`'s `tags`, which replaces the whole list). Adding a tag the card already carries is a no-op. Reserved tags (`dep:<slug>` legacy dependency tags, the historical `__fkanban_deleted__` tag) are rejected — use `fkanban_dep_add`/`fkanban_rm` for those. Dependency edges live in the separate `deps` field, not in tags.",
+        "Add one or more tags to a card WITHOUT replacing its existing tags (the incremental counterpart to `fkanban_add`'s `tags`, which replaces the whole list). Adding a tag the card already carries is a no-op. The `done_at:` completion stamp is rejected — move the card to the board's final column. Dependency edges live in the separate `deps` field, not in tags.",
       annotations: { title: "Add tags", idempotentHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         slug: z.string().optional().describe("The card to tag."),
@@ -1549,7 +1549,7 @@ export function createFkanbanMcpServer(
                 .number()
                 .nullable()
                 .describe(
-                  "Live (non-tombstoned) card count for this board, or null if the count scan couldn't run (node shed the scan under load).",
+                  "Live card count for this board, or null if the count read could not run.",
                 ),
             }),
           )

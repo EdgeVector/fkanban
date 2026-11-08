@@ -9,7 +9,7 @@
 //      bare array — against an envelope, `jq length` returns the KEY COUNT and
 //      silently degrades).
 //   3. This file now owns the structural answer: `{items, total, truncated}`
-//      matching `milestone list` / MCP. Consumers of `jq 'length'` must migrate
+//      matching `milestone list` / MCP. Consumers of `jq 'length'` must switch
 //      first (or use `--json-array`). See card kanban-json-envelope-total-truncated.
 //
 // Envelope is the default. `--json-array` restores the bare array and, when the

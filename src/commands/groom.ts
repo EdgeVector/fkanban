@@ -5,7 +5,7 @@ import {
   deriveStructuredFields,
   listBoards,
   TERMINAL_COLUMN,
-  listBoardCardsWithBodies,
+  listScopedCardsWithBodies,
   nowIso,
   sortCards,
   updateCardRecord,
@@ -216,7 +216,7 @@ export async function groomBodyClobberScanResult(opts: GroomStructuredRoutingOpt
   report: BodyClobberScanReport;
 }> {
   const boards = await listBoards(opts.node, opts.cfg);
-  const cards = sortCards(await listBoardCardsWithBodies(opts.node, opts.cfg, { boards }));
+  const cards = sortCards(await listScopedCardsWithBodies(opts.node, opts.cfg, { boards }));
   const hits: BodyClobberScanHit[] = [];
   for (const card of cards) {
     if (!bodyLooksLikeKnownClobber(card.body)) continue;
@@ -248,7 +248,7 @@ export async function groomStructuredRoutingResult(opts: GroomStructuredRoutingO
   report: StructuredRoutingReport;
 }> {
   const boards = await listBoards(opts.node, opts.cfg);
-  const cards = await listBoardCardsWithBodies(opts.node, opts.cfg, { boards });
+  const cards = await listScopedCardsWithBodies(opts.node, opts.cfg, { boards });
   const active = sortCards(cards.filter((c) => c.column !== TERMINAL_COLUMN));
 
   const repairs: StructuredRoutingRepair[] = [];
@@ -296,7 +296,7 @@ export async function groomStaleBlockersResult(opts: GroomStaleBlockersOptions):
   // called 238 of 245 live cards hollow and would have demoted the entire
   // pickup lane. One admin scan per sweep is the correct cost here.
   const boards = await listBoards(opts.node, opts.cfg);
-  const cards = await listBoardCardsWithBodies(opts.node, opts.cfg, { boards });
+  const cards = await listScopedCardsWithBodies(opts.node, opts.cfg, { boards });
   const active = sortCards(cards.filter((c) => c.column !== TERMINAL_COLUMN));
 
   const cardResults = [];
