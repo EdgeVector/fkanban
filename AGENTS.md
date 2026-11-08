@@ -44,11 +44,11 @@ Ask the brain for anything project-specific — it's consolidated; this doc stay
 commands-only:
 
 ```bash
-fbrain get projects-fkanban             # orientation, architecture, history,
-                                        #   CLI/MCP-only form-factor (no GUI — settled)
-fbrain get concepts-fkanban-cli-gotchas # worktree node_modules, --body replaces,
-                                        #   schemas published once out-of-band
-fbrain ask "<question about kanban>"
+brain get projects-fkanban             # orientation, architecture, history,
+                                       #   CLI/MCP-only form-factor (no GUI — settled)
+brain get concepts-fkanban-cli-gotchas # worktree node_modules, --body replaces,
+                                       #   schemas published once out-of-band
+brain ask "<question about kanban>"
 ```
 
 ## Self-improvement papercuts
@@ -56,13 +56,13 @@ fbrain ask "<question about kanban>"
 Follow Tom's standing preference:
 
 ```bash
-fbrain get preference-always-file-papercuts-for-self-improvement
+brain get preference-always-file-papercuts-for-self-improvement
 ```
 
 When a tool, workflow, runbook, connector, repo setup, CLI, CI, LastDB path, or
 agent instruction creates avoidable friction while working on kanban, record it
 instead of letting it vanish in chat. Put durable evidence and rationale in
-F-Brain, and create or update a matching F-Kanban card when the issue is
+Brain, and create or update a matching kanban card when the issue is
 actionable. Prefer dedupe/update over duplicate records. Do this
 opportunistically, unless filing it would materially derail urgent user work.
 

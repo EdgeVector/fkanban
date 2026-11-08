@@ -1,8 +1,7 @@
 // Durable completion checkpoints for cards entering a board's terminal column.
 //
-// F-Kanban is the live execution queue; F-Brain owns the durable program/North
-// Star history. When a card becomes done, record the completion in Brain before
-// the ephemeral card can later be pruned from the board.
+// When a card becomes done, record the completion in Brain before the card
+// can later be pruned from the board.
 
 import { spawn } from "node:child_process";
 
@@ -41,19 +40,11 @@ function shouldSkipWithoutClient(): boolean {
 
 function brainClient(): BrainCheckpointClient | null {
   if (shouldSkipWithoutClient()) return null;
-  return fbrainCliClient;
+  return brainCliClient;
 }
 
-/**
- * The brain CLI is installed as `brain`; `fbrain` was the old name and is gone
- * from `~/.local/bin`. Spawning the dead name failed with ENOENT, which this
- * module catches and downgrades to a warning — so every completion checkpoint
- * was silently skipped while `kanban move <slug> done` still reported success.
- *
- * Resolved once per process, newest name first, with an env escape hatch. The
- * verb/flag contract is identical across the two names, so only the binary moves.
- */
-const BRAIN_BIN_CANDIDATES = ["brain", "fbrain"] as const;
+/** Resolved once per process. `FKANBAN_BRAIN_BIN` overrides the `brain` CLI. */
+const BRAIN_BIN_CANDIDATES = ["brain"] as const;
 let resolvedBrainBin: string | null = null;
 
 function brainBin(): string {
@@ -76,7 +67,7 @@ function brainBin(): string {
   return resolvedBrainBin;
 }
 
-function runFbrain(args: string[], input?: string): Promise<string> {
+function runBrain(args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const bin = brainBin();
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -104,9 +95,9 @@ function runFbrain(args: string[], input?: string): Promise<string> {
   });
 }
 
-const fbrainCliClient: BrainCheckpointClient = {
+const brainCliClient: BrainCheckpointClient = {
   async get(slug) {
-    const out = await runFbrain(["get", slug, "--json"]);
+    const out = await runBrain(["get", slug, "--json"]);
     const parsed = JSON.parse(out) as { error?: string; slug?: string; type?: string; body?: string };
     if (parsed.error) return null;
     if (!parsed.slug) return null;
@@ -122,12 +113,12 @@ const fbrainCliClient: BrainCheckpointClient = {
       "---",
       record.body,
     ].join("\n");
-    await runFbrain(["put", record.slug, "--type", record.type], frontmatter);
+    await runBrain(["put", record.slug, "--type", record.type], frontmatter);
   },
   async append(slug, chunk, type) {
     const args = ["append", slug];
     if (type) args.push("--type", type);
-    await runFbrain(args, chunk);
+    await runBrain(args, chunk);
   },
 };
 
@@ -254,7 +245,7 @@ export async function checkpointCardCompletion(opts: {
   card: Card;
   boardColumns: readonly string[];
   reason: "done-transition" | "delete-backstop";
-  // Surface for a best-effort skip (F-Brain unconfigured/unreachable). Defaults
+  // Surface for a best-effort skip (Brain unconfigured or unreachable). Defaults
   // to a one-line stderr warning. The card write must never be gated on this.
   warn?: (msg: string) => void;
 }): Promise<
@@ -270,10 +261,8 @@ export async function checkpointCardCompletion(opts: {
   if (!client) return { action: "skipped", reason: "brain checkpoints disabled in this process" };
 
   // The completion checkpoint is a durable-history nicety, not a correctness
-  // gate for the board write. F-Brain may be unconfigured (no
-  // ~/.fbrain/config.json on a fresh machine / CI / isolated $HOME) or the node
-  // may be unreachable; either way the spawned `fbrain` CLI rejects with a raw
-  // dependency error. Degrade gracefully: warn and skip so the caller still
+  // gate for the board write. Brain may be unconfigured or the node may be
+  // unreachable. Degrade gracefully: warn and skip so the caller still
   // performs its column write instead of hard-failing with a stack error.
   try {
     const ownerSlug = await resolveOwnerSlug(client, opts.card);
@@ -301,7 +290,7 @@ export async function checkpointCardCompletion(opts: {
     const message = err instanceof Error ? err.message : String(err);
     const firstLine = message.split("\n")[0]!.trim();
     (opts.warn ?? defaultCheckpointWarn)(
-      `F-Brain completion checkpoint skipped for \`${opts.card.slug}\` (${firstLine}); card write still applied.`,
+      `Brain completion checkpoint skipped for \`${opts.card.slug}\` (${firstLine}); card write still applied.`,
     );
     return { action: "skipped", reason: `brain unavailable: ${firstLine}` };
   }
