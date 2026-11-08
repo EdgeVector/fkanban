@@ -539,20 +539,20 @@ export async function milestoneReconcileResult(opts: {
   }
   // The empty-milestone warning needs other completed cards from the same board.
   // Read that key only when no implementation child exists.
-  const [statuses, boardCards, proofCardSparse] = await Promise.all([
+  const [statuses, cardsOnBoard, proofCardSparse] = await Promise.all([
     listDependencyStatusesForCards(opts.node, opts.cfg, children),
     children.some(card => card.slug !== milestone.proof_card)
       ? Promise.resolve([]) : listCardsOnBoard(opts.node, opts.cfg, milestone.board),
     milestone.proof_card && !proofCard ? cardExists(opts.node, opts.cfg, milestone.proof_card) : Promise.resolve(false),
   ]);
   const result = milestoneReconcileFromSnapshot(milestone, children, statuses, proofCard,
-    proofCardSparse, northStarOnlyDoneCards(milestone, boardCards));
+    proofCardSparse, northStarOnlyDoneCards(milestone, cardsOnBoard));
   return { ...result, boards, text: renderMilestoneReconcile(result) };
 }
 
 export function milestoneReconcileFromSnapshot(
   milestone: Milestone,
-  boardCards: Card[],
+  cardsOnBoard: Card[],
   statuses: Card[],
   proofCard: Card | null,
   // The proof card exists (key-only read found it) but the wide read that
@@ -567,7 +567,7 @@ export function milestoneReconcileFromSnapshot(
 
   nsOnlyDone: Card[] = [],
 ): MilestoneReconcileResult {
-  const children = boardCards.filter((card) => card.milestone === milestone.slug);
+  const children = cardsOnBoard.filter((card) => card.milestone === milestone.slug);
   const childStatuses = children.map((card): MilestoneChildStatus => {
     const dep = depStatus(card, statuses);
     return { slug: card.slug, title: card.title, column: card.column, blocked: dep.blocked, blockedBy: dep.blockedBy };
@@ -704,7 +704,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
 
 
 
-  const boardCardsPending = mapWithConcurrency(
+  const cardsOnBoardPending = mapWithConcurrency(
     boardSlugs,
     async (slug): Promise<[string, Card[]]> =>
       [slug, await listCardsOnBoard(opts.node, opts.cfg, slug)],
@@ -726,8 +726,8 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   // the milestone list alone, so they have no reason to queue behind board
   // membership. Left sequential, the board read would simply be added to the
   // command's critical path.
-  const boardCards = new Map<string, Card[]>(await boardCardsPending);
-  const knownCards = [...boardCards.values()].flat();
+  const cardsOnBoard = new Map<string, Card[]>(await cardsOnBoardPending);
+  const knownCards = [...cardsOnBoard.values()].flat();
   milestones = await includePointReadableReferencedMilestones(
     opts.node,
     opts.cfg,
@@ -750,7 +750,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
   );
 
   const childLists = milestones.map((milestone) =>
-    (boardCards.get(milestone.board) ?? []).filter((card) => card.milestone === milestone.slug));
+    (cardsOnBoard.get(milestone.board) ?? []).filter((card) => card.milestone === milestone.slug));
   const cards = childLists.flat();
   // Every board card is already in hand, so a dep edge pointing at a same-board
   // card costs no point read.
@@ -781,7 +781,7 @@ async function milestonePortfolioSnapshot(opts: { cfg: Config; node: NodeClient;
         statuses,
         proofs.get(milestone.proof_card) ?? null,
         sparseProofs.has(milestone.proof_card),
-        northStarOnlyDoneCards(milestone, boardCards.get(milestone.board) ?? []),
+        northStarOnlyDoneCards(milestone, cardsOnBoard.get(milestone.board) ?? []),
       )),
   };
 }
@@ -1023,10 +1023,10 @@ function legalizeGapEntry(milestone: Milestone, entry: MilestoneGapEntry): Miles
  * returned. The proof card is excluded for the same reason it is excluded from
  * the `pr_*` tally. Pure and exported for unit tests.
  */
-export function northStarOnlyDoneCards(milestone: Milestone, boardCards: Card[]): Card[] {
+export function northStarOnlyDoneCards(milestone: Milestone, cardsOnBoard: Card[]): Card[] {
   const northStar = String(milestone.north_star ?? "").trim();
   if (!northStar) return [];
-  return boardCards.filter((card) =>
+  return cardsOnBoard.filter((card) =>
     card.board === milestone.board
     && card.slug !== milestone.proof_card
     && String(card.north_star ?? "").trim() === northStar
@@ -1038,11 +1038,11 @@ export function northStarOnlyDoneCards(milestone: Milestone, boardCards: Card[])
 
 export function classifyMilestoneGap(
   milestone: Milestone,
-  boardCards: Card[],
+  cardsOnBoard: Card[],
   childStatuses: MilestoneChildStatus[],
   proof: { slug: string; terminal: boolean; passingEvidence: boolean } | null,
 ): MilestoneGapEntry {
-  const bySlug = new Map(boardCards.map((card) => [card.slug, card]));
+  const bySlug = new Map(cardsOnBoard.map((card) => [card.slug, card]));
   const prChildren = childStatuses.filter((child) => {
     if (child.slug === milestone.proof_card) return false;
     const card = bySlug.get(child.slug);
@@ -1078,7 +1078,7 @@ export function classifyMilestoneGap(
   const pr_live = pr_todo + pr_doing + pr_backlog;
   const has_proof_card = Boolean(milestone.proof_card);
   const proof_passing = Boolean(proof?.passingEvidence && (proof.terminal || milestone.proof_status === "passing"));
-  const ns_only_done = northStarOnlyDoneCards(milestone, boardCards).map((card) => card.slug);
+  const ns_only_done = northStarOnlyDoneCards(milestone, cardsOnBoard).map((card) => card.slug);
 
   const base = {
     slug: milestone.slug,
@@ -1208,7 +1208,7 @@ export function classifyMilestoneGap(
 
 export function buildMilestoneGapReport(
   reconciled: MilestoneReconcileResult[],
-  boardCards: Card[],
+  cardsOnBoard: Card[],
   opts?: { board?: string },
 ): MilestoneGapReport {
   const emptyCounts = (): Record<MilestoneGapStatus, number> => ({
@@ -1239,7 +1239,7 @@ export function buildMilestoneGapReport(
   for (const result of reconciled) {
     const entry = classifyMilestoneGap(
       result.milestone,
-      boardCards.filter((c) => c.board === result.milestone.board),
+      cardsOnBoard.filter((c) => c.board === result.milestone.board),
       result.children,
       result.proof,
     );

@@ -43,8 +43,7 @@ The rules for an existing home are in
 Schema setup has one supported path: `kanban init` calls Mini's
 `POST /api/apps/declare-schema`. Mini resolves the definition through Schema
 Service, loads the local owned schema, and returns the identity that fkanban
-may persist. Init requires LastDB API 13 or later, where each schema owns its
-record values. There is no fkanban-side Schema Service script and no Mini
+may persist. Each schema owns its record values. There is no fkanban-side Schema Service script and no Mini
 local-mint fallback. A changed definition identity stops init and leaves the
 config unchanged.
 
@@ -182,7 +181,7 @@ kanban list
 (Haven't installed the shim? Every `kanban <cmd>` below works as
 `bun run src/cli.ts <cmd>` run from the repo directory.)
 
-Init requires LastDB API 13 or later with compound named keys. Each schema owns its values.
+Init declares owned schemas with compound named keys. Each schema owns its values.
 Init does not convert existing data or change an accepted schema address.
 Mini resolves or registers each declaration with Schema Service.
 The `--schema-service-url` value is diagnostic because Mini owns that call.
@@ -255,7 +254,6 @@ DONE  (0)
 | `kanban milestone portfolio` | show milestone North Star, lifecycle, proof, ready frontier, blocker, and warning count (`--board --json`) |
 | `kanban milestone detail <slug>` | show the outcome, proof, warnings, and child cards grouped by fixed columns (`--json`) |
 | `kanban milestone groom` | report actionable driver, proof, frontier, lifecycle, and relationship warnings (`--board --json`) |
-| `kanban migrate area-tags` | one-time cleanup of stale generated `area:*` tags (`--dry-run --json`) |
 | `kanban ping` | liveness probe: one cheap node status read, no board read (`--json`) |
 | `kanban doctor` | health-check config + node + schemas + a query round-trip |
 | `kanban mcp` | start an MCP server over stdio |
@@ -496,7 +494,7 @@ dep, it is treated as satisfied by default and does not block pickup. A parked
 human prerequisite that should block downstream implementation should remain a
 concrete `pr` dependency until it reaches the parking board's terminal column.
 
-Deleting/tombstoning a card with live dependents is refused (the policy landed
+Deleting a card with live dependents is refused (the policy landed
 in PR #149) so dependency edges cannot silently turn into missing slugs.
 
 ```bash
@@ -510,12 +508,10 @@ kanban dep rm  ui docs      # …or drop one
 kanban add ui --deps "" --replace-deps  # explicitly clear all deps
 ```
 
-Edges are stored in the Card schema's canonical `deps` array field. They are
+Edges are stored in the Card schema's `deps` array field. They are
 not part of the body and they are not user tags, so an agent cannot accidentally
-erase or forge a dependency while editing prose or labels. Historical
-`dep:<slug>` tags are still read as a compatibility fallback, but new writes
-strip them and persist edges only in `deps`. Mini local declaration expands the
-existing `fkanban/Card` schema to add `deps`; no data migration is required.
+erase or forge a dependency while editing prose or labels. Mini local declaration expands the
+existing `fkanban/Card` schema to add `deps`.
 
 `add --deps` and `dep add` require every dependency slug to resolve to an
 existing live card before writing. Generic card updates preserve existing deps
@@ -569,9 +565,8 @@ not in the new set. `tag add`/`tag rm` edit a card's labels **incrementally**,
 so a groomer can add `p1` without first reading and re-sending every existing
 tag (the same distinction `dep add`/`dep rm` have to `add --deps`). Adding a tag
 the card already carries is a no-op; removing one it lacks warns but succeeds.
-Reserved tags (`dep:<slug>` legacy dependency tags, the historical
-`__fkanban_deleted__` tag) are rejected — use `dep add`/`dep rm` and `rm` for
-those. Dependency edges live in the card's separate `deps` field, not in tags.
+The `done_at:` completion stamp is rejected. Dependency edges live in the
+card's separate `deps` field, not in tags.
 
 ## Priority
 
@@ -679,8 +674,7 @@ its schemas, but registration with Schema Service is still mandatory.
 - **Delete.** `rm` deletes the card (hard erase; no trash / undo). To preserve
   dependency resolution, card deletion refuses while live dependents still
   point at the card; `board rm --force` has the same guard for cards outside
-  the board being removed. Read paths still hide the historical
-  `__fkanban_deleted__` tag written by older kanban builds.
+  the board being removed.
 - **Append-with-gaps positions.** New cards land at `maxPosition + 10` so a
   card can later be inserted between two others.
 - **Priority is a signal over `position`.** A card's priority (`Priority:` header

@@ -146,7 +146,7 @@ function baseForPickup(card: Card): string {
  * `stale-metadata` verdict. It only fires on cards that DO carry structured
  * repo+base, so including it would mean hydrating the whole active board to
  * refine an advisory grooming hint — and `groom` already reads real bodies
- * (`listBoardCardsWithBodies`) to produce that same finding.
+ * (`listScopedCardsWithBodies`) to produce that same finding.
  */
 export function pickupClassificationNeedsBody(card: Card): boolean {
   if (!isBodyOmitted(card)) return false;

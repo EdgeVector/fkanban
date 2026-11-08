@@ -17,11 +17,3 @@ function parseMinApiVersion(value: unknown): number {
 
 // Who is asking, for the NodeTooOldError message (`kanban 0.1.0 needs …`).
 export const KANBAN_APP_LABEL = `kanban ${pkg.version}`;
-
-// LastDB API 13 (lastdb #803) is the first node on which every schema owns its
-// record values. Init checks this once per node, before it declares a schema.
-export const OWNED_HOME_API_VERSION = 13;
-
-/** Whether a node at this API version guarantees schema-owned values. */
-export const ownedHome = (apiVersion: number): boolean =>
-  apiVersion >= OWNED_HOME_API_VERSION;

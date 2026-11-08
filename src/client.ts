@@ -1026,12 +1026,6 @@ export function newNodeClient(opts: {
   // `updateRecords` needs it because the vendored SDK carries no batch verb,
   // and the object cannot reference itself from inside its own literal.
   const rawCallImpl = async (method: string, path: string, body?: unknown, maxResponseBytes?: number): Promise<RawResponse> => {
-    const sdkSearch = sdkSearchFromNativeIndexPath(method, path);
-    if (sdkSearch !== null) {
-      const hits = await appSearch(sdkSearch.query, { k: sdkSearch.k });
-      const json = nativeIndexJsonFromAppSearchHits(hits);
-      return { status: 200, headers: new Headers(), body: JSON.stringify(json), json };
-    }
     await ensureAttested();
     const doFetch = async () =>
       verboseFetch({
@@ -1469,21 +1463,6 @@ function queryRowFromSdk(row: SdkQueryResult["rows"][number]): QueryRow {
 
 function renderedKeyFallback(rendered: string): KeyValue {
   return { hash: rendered.length > 0 ? rendered : null, range: null };
-}
-
-function sdkSearchFromNativeIndexPath(method: string, path: string): { query: string; k: number } | null {
-  if (method !== "GET" || !path.startsWith("/api/native-index/search")) return null;
-  const url = new URL(path, "http://localhost");
-  const query = url.searchParams.get("q") ?? "";
-  if (query.length === 0) return null;
-  return { query, k: 50 };
-}
-
-function nativeIndexJsonFromAppSearchHits(hits: AppSearchHit[]): unknown {
-  return {
-    ok: true,
-    results: hits,
-  };
 }
 
 function appSearchHitsFromSdkSearch(result: SdkSearchResult): AppSearchHit[] {
