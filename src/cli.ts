@@ -178,7 +178,7 @@ function withFooter(body: string): string {
 
 // Per-command usage. `fkanban <cmd> --help` (or `-h`) prints the matching
 // entry instead of the global TOP_HELP firehose. Every command listed in
-// TOP_HELP must have an entry here (a unit test enforces they can't drift).
+// TOP_HELP must have an entry here.
 export const COMMAND_HELP: Record<string, string> = {
   "create-only-contract": withFooter(`fkanban create-only-contract — immutable atomic creation contract
 

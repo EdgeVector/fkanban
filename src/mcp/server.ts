@@ -77,9 +77,8 @@ export const FKANBAN_MCP_VERSION = "0.1.0";
 // the MCP instructions blurb below and the `readOnlyHint` on each tool. Keeping
 // these lists here (rather than a hand-written "15 tools … the rest write."
 // sentence) means the count and the split are DERIVED, so they can't silently
-// rot when a tool is added or removed. A test asserts these names equal the
-// tools actually registered on the server, and that every read tool carries
-// `readOnlyHint:true` while every write tool does not.
+// rot when a tool is added or removed. Every read tool carries
+// `readOnlyHint:true`. Every write tool does not.
 export const FKANBAN_READ_TOOLS = [
   "fkanban_guarded_contract",
   "fkanban_guarded_snapshot",
@@ -1651,8 +1650,7 @@ export function createFkanbanMcpServer(
       try {
         // The server's OWN config, not whatever is on disk. `fkanban_ping` was
         // the one tool here that re-read the config file, so a server pointed
-        // at a specific node could probe a different one — and a unit test
-        // could not stop it reaching the real primary. See `PingOptions.cfg`.
+        // at a specific node could probe a different one. See `PingOptions.cfg`.
         const report = await runPingStructured({ cfg: cfg ?? undefined });
         const line = report.ok
           ? `✓ node ok in ${report.latency_ms}ms`

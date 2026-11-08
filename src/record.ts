@@ -2372,11 +2372,8 @@ export function forcedGuardWaiverWarning(slug: string, gate: string, verdict: st
  * immediately rendered the same card `🔒 blocked` in `doing`. Two guards
  * waived, one asked for, neither reported.
  *
- * This project already treats that overload as a hazard — `kanban-stress-script`
- * has a dedicated test forbidding `--force` in the stress harness precisely
- * because it would also disable `assertBodyReplaceSafe` and this gate. The
- * hazard was banned in the harness and recommended in the error message; this
- * closes that gap from the other side.
+ * `--force` also disables `assertBodyReplaceSafe` and this gate. The error
+ * message recommends the flag, and the waiver is no longer silent.
  *
  * The waiver still waives — agents and operators depend on it, and a blocked
  * card in `doing` is a legitimate thing to ask for. It just stops being invisible.
@@ -2390,11 +2387,8 @@ export function forcedGuardWaiverWarning(slug: string, gate: string, verdict: st
  * and last, found on 2026-08-04 only because the source scan that certified the
  * other six neither read its file nor matched its bail shape.
  *
- * Do NOT re-enumerate that list in prose. Three passages across `src/` and
- * `test/` used to end it with "and the Situations preflight", which has never
- * taken a `force` parameter — the enumeration had been copied between files
- * often enough that no copy was checkable. It is derived from the source and
- * asserted in `forced-guard-waivers-are-voiced.test.ts` now.
+ * Do NOT re-enumerate that list in prose. Situations preflight has never
+ * taken a `force` parameter. The set of voiced waivers is the source itself.
  *
  * ## Two constraints the shape here exists to honor
  *

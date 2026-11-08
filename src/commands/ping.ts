@@ -22,13 +22,8 @@ export type PingOptions = {
    * disk through `tryReadConfig` and probed whatever node THAT file named. Two
    * consequences, and the second is why this parameter exists:
    *
-   *   - a server explicitly pointed at one node could ping a different one, and
-   *   - the tool could not be exercised hermetically, so
-   *     `mcp-read-tools-do-not-mutate.test.ts` — a unit test — issued a real
-   *     status request to Tom's primary brain on every run. `/api/status` is
-   *     ~176 KB, 98% of it the node's telemetry ring, and the test's 5s budget
-   *     was then a bet on the shared primary's latency. It lost on 2026-08-02
-   *     (5001ms) and failed a merge gate that had nothing to do with ping.
+   *   - a server explicitly pointed at one node could ping a different one.
+   *     `/api/status` is ~176 KB, 98% of it the node's telemetry ring.
    *
    * `configPath` still wins nothing over this: an explicit config is the most
    * specific thing a caller can supply, so it short-circuits the disk read.

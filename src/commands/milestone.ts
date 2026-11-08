@@ -1021,7 +1021,7 @@ function legalizeGapEntry(milestone: Milestone, entry: MilestoneGapEntry): Miles
  * done Kind:pr with a matching `north_star` and an EMPTY `milestone`. Cards
  * linked to a DIFFERENT milestone are that milestone's business and are not
  * returned. The proof card is excluded for the same reason it is excluded from
- * the `pr_*` tally. Pure and exported for unit tests.
+ * the `pr_*` tally.
  */
 export function northStarOnlyDoneCards(milestone: Milestone, cardsOnBoard: Card[]): Card[] {
   const northStar = String(milestone.north_star ?? "").trim();
