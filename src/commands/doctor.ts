@@ -271,25 +271,16 @@ export function resolveKanbanShim(): { name: "kanban" | "fkanban"; path: string 
  * How does a dev with no `kanban` on PATH get one? The remedy printed on the
  * one line whose entire job is to answer that.
  *
- * From a source checkout: this repo's one-line installer, made copy-pasteable
- * from any cwd (the `cd …` is what lets `bun run install-cli` resolve this
- * repo's script).
- *
- * From the compiled artifact there is no repo and no installer script on disk.
- * This module's URL is embedded, the regex below does not match, and the hint
- * used to read `(cd "/$bunfs/root/kanban" && bun run install-cli)` — an
- * impossible command, offered as the fix for the very thing it cannot fix. The
- * binary needs no installer to be useful: it IS the CLI, so the honest remedy
- * is to link it onto PATH.
+ * A source checkout installs through the app registry. A compiled binary has
+ * no checkout, so the hint links that binary onto PATH.
  *
  * `isOnDisk` is the discriminator, not `existsSync` — both `existsSync` and
  * `statSync` SUCCEED on embedded paths, so either would be a no-op that looks
  * like a guard (see the measurement in src/app_install.ts).
- *
  */
 export function shimInstallHint(repoRoot: string, execPath: string = process.execPath): string {
   return isOnDisk(repoRoot)
-    ? `(cd "${repoRoot}" && bun run install-cli)`
+    ? "lastdb app install kanban"
     : `ln -s "${execPath}" ~/.local/bin/kanban`;
 }
 

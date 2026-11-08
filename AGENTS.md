@@ -72,7 +72,7 @@ Do not write back a preview or a record whose body was omitted.
 ## Build / typecheck
 
 The tests are deleted (Tom, 2026-10-09). The gate runs the schema-sync boundary
-check, typecheck, the artifact build, and the artifact smoke.
+check, typecheck, and a bundle compile of the CLI and MCP entrypoints.
 
 ```bash
 bun install            # worktrees start with NO node_modules — do this FIRST
